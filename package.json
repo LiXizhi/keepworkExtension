@@ -3,7 +3,12 @@
   "displayName": "Keepwork",
   "description": "Clone projects from Keepwork and open files in Keepwork browser",
   "version": "0.0.1",
-  "publisher": "keepwork",
+  "publisher": "Xizhi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://git.keepwork.com/keepwork/keepworkExtension"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
