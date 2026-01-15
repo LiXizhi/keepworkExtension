@@ -1,0 +1,47 @@
+{
+  "name": "keepwork",
+  "displayName": "Keepwork",
+  "description": "Clone projects from Keepwork and open files in Keepwork browser",
+  "version": "0.0.1",
+  "publisher": "keepwork",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "keepwork.cloneRepository",
+        "title": "Keepwork: Clone Repository"
+      },
+      {
+        "command": "keepwork.openInKeepwork",
+        "title": "Open in Keepwork"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "keepwork.openInKeepwork",
+          "when": "resourceScheme == file",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}
