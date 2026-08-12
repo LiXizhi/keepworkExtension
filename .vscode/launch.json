@@ -25,6 +25,15 @@
       ]
     },
     {
+      "name": "Keepwork MCP (HTTP :8089)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/out/cli.js",
+      "args": ["--root", "C:/lxzsrc"],
+      "console": "integratedTerminal",
+      "preLaunchTask": "npm: compile"
+    },
+    {
       "name": "Build VSIX",
       "type": "node",
       "request": "launch",

@@ -1,0 +1,144 @@
+import * as vscode from 'vscode';
+import { readToken } from '../core/config';
+import { ensureDaemon, fetchAdminHistory, fetchAdminStatus, probeHealth, stopDaemon } from './daemon';
+import { formatPanelPayload } from './statusBar';
+
+export function openMcpPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
+    const panel = vscode.window.createWebviewPanel(
+        'keepworkMcp',
+        'Keepwork MCP',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true, retainContextWhenHidden: true },
+    );
+
+    panel.webview.html = panelHtml();
+
+    const push = async () => {
+        const health = await probeHealth();
+        const status = health.ok ? await fetchAdminStatus() : null;
+        const history = health.ok ? await fetchAdminHistory() : null;
+        void panel.webview.postMessage({ type: 'update', payload: formatPanelPayload(status, history, health.ok) });
+    };
+
+    const timer = setInterval(() => { void push(); }, 2000);
+    void push();
+
+    panel.onDidDispose(() => clearInterval(timer), null, context.subscriptions);
+
+    panel.webview.onDidReceiveMessage(async (msg) => {
+        if (msg?.type === 'start') {
+            const result = await ensureDaemon(context);
+            if (!result.ok) vscode.window.showErrorMessage(`Keepwork MCP: ${result.error || 'failed to start'}`);
+            await push();
+        }
+        if (msg?.type === 'stop') {
+            const ok = await stopDaemon();
+            if (!ok) vscode.window.showWarningMessage('Keepwork MCP: stop failed (is the daemon running?)');
+            await new Promise(r => setTimeout(r, 400));
+            await push();
+        }
+        if (msg?.type === 'copyToken') {
+            const token = readToken();
+            if (!token) {
+                vscode.window.showWarningMessage('No pairing token yet. Start the MCP server first.');
+                return;
+            }
+            await vscode.env.clipboard.writeText(token);
+            vscode.window.showInformationMessage('Keepwork MCP token copied');
+        }
+        if (msg?.type === 'refresh') await push();
+    }, undefined, context.subscriptions);
+
+    return panel;
+}
+
+function panelHtml(): string {
+    return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<style>
+:root { color-scheme: light dark; }
+body { font-family: var(--vscode-font-family, ui-sans-serif, system-ui); padding: 16px; color: var(--vscode-foreground); }
+h1 { font-size: 16px; margin: 0 0 12px; }
+h2 { font-size: 13px; margin: 20px 0 8px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 0; padding: 6px 12px; cursor: pointer; }
+button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+.meta { font-size: 12px; line-height: 1.6; opacity: .9; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--vscode-widget-border, #444); vertical-align: top; }
+.ok { color: var(--vscode-testing-iconPassed, #3c3); }
+.fail { color: var(--vscode-testing-iconFailed, #c33); }
+code { font-size: 11px; }
+.empty { opacity: .6; }
+</style>
+</head>
+<body>
+<h1>Keepwork local MCP</h1>
+<div class="row">
+  <button id="start">Start</button>
+  <button id="stop" class="secondary">Stop</button>
+  <button id="copy" class="secondary">Copy token</button>
+  <button id="refresh" class="secondary">Refresh</button>
+</div>
+<div class="meta" id="meta">Loading…</div>
+<h2>Clients</h2>
+<div id="clients"></div>
+<h2>History</h2>
+<div id="history"></div>
+<script>
+const vscode = acquireVsCodeApi();
+document.getElementById('start').onclick = () => vscode.postMessage({ type: 'start' });
+document.getElementById('stop').onclick = () => vscode.postMessage({ type: 'stop' });
+document.getElementById('copy').onclick = () => vscode.postMessage({ type: 'copyToken' });
+document.getElementById('refresh').onclick = () => vscode.postMessage({ type: 'refresh' });
+
+function esc(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function short(id) { return (id || '').slice(0, 8) || '—'; }
+
+window.addEventListener('message', (event) => {
+  const { type, payload } = event.data || {};
+  if (type !== 'update') return;
+  const st = payload.status;
+  const meta = document.getElementById('meta');
+  if (!payload.healthOk) {
+    meta.innerHTML = 'Daemon is <b>not running</b>. Click Start, or run <code>npm start</code> in keepworkExtension.';
+  } else if (!st) {
+    meta.innerHTML = 'Daemon is up but admin API failed (check pairing token in ~/.keepwork-mcp/token).';
+  } else {
+    meta.innerHTML = [
+      'Status: <b>running</b>',
+      'URL: <code>' + esc(payload.baseUrl) + '/mcp</code>',
+      'pid: ' + esc(st.pid),
+      'port: ' + esc(st.port),
+      'root: <code>' + esc(st.workspaceRoot) + '</code>',
+      'uptime: ' + Math.round((st.uptimeMs || 0) / 1000) + 's',
+    ].join('<br>');
+  }
+  const clients = (st && st.clients) || [];
+  const ch = document.getElementById('clients');
+  if (!clients.length) {
+    ch.innerHTML = '<p class="empty">No connected AIChat sessions.</p>';
+  } else {
+    ch.innerHTML = '<table><thead><tr><th>Session</th><th>Origin</th><th>Connected</th><th>Last seen</th><th>Calls</th></tr></thead><tbody>'
+      + clients.map(c => '<tr><td><code>' + esc(short(c.sessionId)) + '</code></td><td>' + esc(c.origin || '—') + '</td><td>' + esc(c.connectedAt) + '</td><td>' + esc(c.lastSeenAt) + '</td><td>' + esc(c.callCount) + '</td></tr>').join('')
+      + '</tbody></table>';
+  }
+  const hist = payload.history || [];
+  const hh = document.getElementById('history');
+  if (!hist.length) {
+    hh.innerHTML = '<p class="empty">No tool calls yet.</p>';
+  } else {
+    hh.innerHTML = '<table><thead><tr><th>Time</th><th>Client</th><th>Tool</th><th>Summary</th><th>Result</th><th>ms</th></tr></thead><tbody>'
+      + hist.map(h => '<tr><td>' + esc(h.time) + '</td><td><code>' + esc(short(h.sessionId)) + '</code></td><td>' + esc(h.tool) + '</td><td>' + esc(h.summary) + '</td><td class="' + (h.ok ? 'ok' : 'fail') + '">' + (h.ok ? 'ok' : esc(h.error || 'fail')) + '</td><td>' + esc(h.durationMs) + '</td></tr>').join('')
+      + '</tbody></table>';
+  }
+});
+</script>
+</body>
+</html>`;
+}

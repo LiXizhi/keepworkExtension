@@ -1,22 +1,28 @@
 {
   "name": "keepwork",
   "displayName": "Keepwork",
-  "description": "Clone projects from Keepwork and open files in Keepwork browser",
-  "version": "0.0.1",
+  "description": "Clone Keepwork repos, open files on keepwork.com, and run a local MCP daemon for AIChat terminal/grep",
+  "version": "0.1.0",
   "publisher": "Xizhi",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://git.keepwork.com/keepwork/keepworkExtension"
+    "url": "https://github.com/LiXizhi/keepworkExtension.git"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.85.0",
+    "node": ">=18.14.1"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
+  "bin": {
+    "keepwork-mcp": "./out/cli.js"
+  },
   "contributes": {
     "commands": [
       {
@@ -26,6 +32,22 @@
       {
         "command": "keepwork.openInKeepwork",
         "title": "Open in Keepwork"
+      },
+      {
+        "command": "keepwork.showMcpServer",
+        "title": "Keepwork: Show MCP Server"
+      },
+      {
+        "command": "keepwork.startMcpServer",
+        "title": "Keepwork: Start MCP Server"
+      },
+      {
+        "command": "keepwork.stopMcpServer",
+        "title": "Keepwork: Stop MCP Server"
+      },
+      {
+        "command": "keepwork.copyMcpToken",
+        "title": "Keepwork: Copy MCP Token"
       }
     ],
     "menus": {
@@ -36,17 +58,43 @@
           "group": "navigation"
         }
       ]
+    },
+    "configuration": {
+      "title": "Keepwork",
+      "properties": {
+        "keepwork.mcp.enableHttp": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start or attach to the Keepwork MCP daemon on 127.0.0.1 when the extension activates."
+        },
+        "keepwork.mcp.port": {
+          "type": "number",
+          "default": 8089,
+          "description": "Loopback port for the Keepwork MCP HTTP daemon."
+        },
+        "keepwork.mcp.workspaceRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Workspace root for run_terminal and grep_files. Empty uses the first VS Code folder, or KEEPWORK_MCP_ROOT / ~/.keepwork-mcp/config.json."
+        }
+      }
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "start": "node out/cli.js",
+    "mcp": "node out/cli.js --stdio",
     "package": "vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
     "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
   }
 }
