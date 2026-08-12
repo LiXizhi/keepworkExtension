@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolvePort, SERVER_NAME } from './core/config';
+import { resolvePort, resolveRequireAuth, SERVER_NAME } from './core/config';
 import { resolveWorkspaceRoot } from './core/paths';
 import { startHttpServer } from './mcp/http';
 import { startStdioServer } from './mcp/stdio';
@@ -12,17 +12,23 @@ async function main(): Promise<void> {
     const rootFlag = args.findIndex(a => a === '--root');
     const root = rootFlag >= 0 ? args[rootFlag + 1] : undefined;
 
+    const requireAuthFlag = args.includes('--require-auth');
+    const requireAuth = requireAuthFlag ? true : resolveRequireAuth();
+
     if (stdio) {
         await startStdioServer({ root, port });
         return;
     }
 
     try {
-        const handle = await startHttpServer({ port, root });
+        const handle = await startHttpServer({ port, root, requireAuth });
         console.error(`${SERVER_NAME} listening on http://127.0.0.1:${handle.port}/mcp`);
         console.error(`workspace root: ${resolveWorkspaceRoot(root)}`);
-        console.error(`token: ${handle.token}`);
-        console.error(`token file: ~/.keepwork-mcp/token`);
+        console.error(`auth: ${handle.requireAuth ? 'token required' : 'open (no token)'}`);
+        if (handle.requireAuth) {
+            console.error(`token: ${handle.token}`);
+            console.error(`token file: ~/.keepwork-mcp/token`);
+        }
     } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === 'EADDRINUSE') {

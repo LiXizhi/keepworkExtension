@@ -8,6 +8,7 @@ export async function startStdioServer(opts?: { root?: string; port?: number }):
         root: resolveWorkspaceRoot(opts?.root),
         port: resolvePort(opts?.port),
         startedAt: new Date().toISOString(),
+        requireAuth: false,
     });
     const transport = new StdioServerTransport();
     await server.connect(transport);

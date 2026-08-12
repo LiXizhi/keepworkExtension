@@ -27,6 +27,8 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 | `grep_files` | Search file contents under the root |
 | `mcp_status` | Report root, port, pid, ripgrep |
 
+`GET /health` includes `workspaceRoot` so AIChat can map a bound local folder (browser only knows the folder name) onto a cwd relative to that root.
+
 ## Run the MCP daemon
 
 ### Option A — VS Code / Cursor
@@ -43,7 +45,7 @@ npm start
 
 Optional flags: `--port 8089` `--root C:\lxzsrc`. `--stdio` speaks MCP over stdin/stdout for Cursor.
 
-Pairing token is written to `~/.keepwork-mcp/token`. In AIChat, click the **MCP** composer pill and paste it (or run **Keepwork: Copy MCP Token**).
+Pairing token is **off by default**. AIChat connects to `:8089` with no paste step. To require a token: VS Code setting `keepwork.mcp.requireAuth`, env `KEEPWORK_MCP_REQUIRE_AUTH=1`, CLI `--require-auth`, or `"requireAuth": true` in `~/.keepwork-mcp/config.json`. Then paste `~/.keepwork-mcp/token` from the Craft menu **令牌** action.
 
 Workspace root (first match wins): `--root` / `KEEPWORK_MCP_ROOT` / VS Code `keepwork.mcp.workspaceRoot` / `~/.keepwork-mcp/config.json` / process cwd.
 
@@ -57,8 +59,7 @@ Example `~/.keepwork-mcp/config.json`:
 
 1. Start the daemon (Option A or B).
 2. Open [https://keepwork.com/chat](https://keepwork.com/chat) (or local `AIChat.html`).
-3. Click **MCP 令牌** / **本地 MCP**, paste the token.
-4. Multiple AIChat tabs can share the same daemon (one MCP session each).
+3. Click the **Craft** pill → **Keepwork（内置）**. Multiple AIChat tabs share the daemon. Add extra loopback MCP URLs from **＋ 添加 MCP 服务器**.
 
 ### Cursor stdio
 
@@ -77,7 +78,7 @@ Example `~/.keepwork-mcp/config.json`:
 ## Security
 
 - Binds **127.0.0.1 only**. Do not expose port 8089 on the LAN.
-- MCP and admin APIs require the pairing token.
+- MCP and admin APIs are **open on loopback by default**. Set `keepwork.mcp.requireAuth` to require `~/.keepwork-mcp/token`.
 - Commands cannot leave the workspace root. A small deny-list blocks `format`, `shutdown`, `rm -rf /`, etc.
 - AIChat confirms every `run_terminal` call in the UI.
 

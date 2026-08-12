@@ -11,6 +11,7 @@ export interface ServerRuntime {
     root: string;
     port: number;
     startedAt: string;
+    requireAuth: boolean;
 }
 
 function textResult(text: string, isError = false) {
@@ -74,6 +75,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
                 `- workspaceRoot: ${runtime.root}`,
                 `- startedAt: ${runtime.startedAt}`,
                 `- ripgrep: ${rg ? 'yes' : 'no (Node walker fallback)'}`,
+                `- requireAuth: ${runtime.requireAuth ? 'yes' : 'no'}`,
                 '',
                 'Tools: run_terminal, grep_files, mcp_status',
             ].join('\n');
@@ -84,10 +86,10 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'run_terminal',
         {
-            description: 'Run a shell command on the user\'s local disk under the MCP workspace root. cwd is relative to that root. Requires user confirmation in AIChat.',
+            description: 'Run a shell command on the user\'s local disk. cwd is relative to the MCP workspace root (see mcp_status). AIChat fills cwd from the bound local folder when omitted. Requires user confirmation in AIChat.',
             inputSchema: z.object({
                 command: z.string().describe('Shell command to run'),
-                cwd: z.string().optional().describe('Working directory relative to the workspace root'),
+                cwd: z.string().optional().describe('Working directory relative to the MCP workspace root, e.g. LiXizhiDocs or LiXizhiDocs/_wiki. Omit to use the AIChat-bound local folder.'),
                 timeoutMs: z.number().optional().describe('Timeout in milliseconds (default 30000, max 120000)'),
             }),
         },
@@ -109,7 +111,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
             description: 'Search file contents under the MCP workspace root. Prefer this over shelling out to grep. pattern is a regex.',
             inputSchema: z.object({
                 pattern: z.string().describe('Regular expression to search for'),
-                path: z.string().optional().describe('Directory or file relative to the workspace root'),
+                path: z.string().optional().describe('Directory or file relative to the MCP workspace root. Omit to search the AIChat-bound local folder.'),
                 glob: z.string().optional().describe('Optional glob filter, e.g. **/*.ts'),
                 maxMatches: z.number().optional().describe('Maximum matches to return (default 50, max 200)'),
             }),

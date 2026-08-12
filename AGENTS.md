@@ -1,0 +1,108 @@
+# AGENTS.md — Keepwork Extension (`keepwork-mcp`)
+
+Instructions for AI agents working **in this repository**. Product overview:
+[README.md](README.md).
+
+## What this repo is
+
+- **VS Code / Cursor extension** (`keepwork`) plus a **singleton local MCP daemon**
+- **Path**: `c:/lxzsrc/keepworkExtension` (GitHub `LiXizhi/keepworkExtension`)
+- **Job**: (1) clone Keepwork git repos and open files on keepwork.com;
+  (2) expose `run_terminal` / `grep_files` / `mcp_status` so the **AIChat website**
+  (`https://keepwork.com/chat`) can drive the user's local disk — something the
+  browser cannot do on its own.
+
+The HTTP MCP listener is **not** inside the extension host. It is a detached
+`node out/cli.js` process on **`http://127.0.0.1:8089`**. Many VS Code windows
+spawn-or-attach; many AIChat tabs share one daemon (one MCP session each).
+
+## Non-negotiable rules
+
+1. **Bind loopback only** (`127.0.0.1`). Never listen on `0.0.0.0` or expose port 8089 on the LAN.
+2. **Pairing token is optional (default off).** `/mcp` and `/admin/*` are open on loopback unless `keepwork.mcp.requireAuth` / `KEEPWORK_MCP_REQUIRE_AUTH=1` / `--require-auth`. When auth is on, do not log or commit `~/.keepwork-mcp/token`.
+3. **Path confinement**: `run_terminal` cwd and `grep_files` paths must stay under the workspace root (`src/core/paths.ts`). Reject `..` and symlink escapes.
+4. **Do not weaken the deny-list** in `src/core/terminal.ts` without an explicit user request. AIChat must keep confirming every `run_terminal` call.
+5. **One daemon**: if `listen` throws `EADDRINUSE`, attach — do not start a second HTTP server. Closing a VS Code window must **not** kill the daemon.
+6. Keep CommonJS (`"module": "commonjs"`) so the VS Code extension still loads. Do not convert the package to ESM-only.
+7. AIChat is a **no-build ES module app** — do not bundle `@modelcontextprotocol/sdk` into it. The browser client is a thin Streamable HTTP client in `js/local_mcp.js`.
+
+## Layout (where to edit)
+
+| Path | Role |
+|------|------|
+| `src/core/paths.ts` | Workspace root + confine paths |
+| `src/core/config.ts` | Port, token, `~/.keepwork-mcp/` instance file |
+| `src/core/terminal.ts` | Shell spawn, timeout, output cap, deny-list, per-session queue |
+| `src/core/grep.ts` | `rg` if present, else Node walk |
+| `src/core/keepwork.ts` | Keepwork URL → git clone URL / open-in-browser URL |
+| `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`) |
+| `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
+| `src/mcp/sessions.ts` | Connected clients + in-memory call history |
+| `src/mcp/stdio.ts` | stdio transport for Cursor (does not take 8089) |
+| `src/cli.ts` | `node out/cli.js` (`--stdio`, `--port`, `--root`) |
+| `src/extension.ts` | VS Code commands + activate spawn-or-attach |
+| `src/vscode/daemon.ts` | Health probe, detached spawn, admin fetch |
+| `src/vscode/statusBar.ts` | Status bar text / tooltip |
+| `src/vscode/mcpPanel.ts` | Click panel: clients + history |
+
+AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/AIChat/js/local_mcp.js`.
+
+## MCP surface
+
+| Tool | Notes |
+|------|--------|
+| `run_terminal` | `command`, optional `cwd` / `timeoutMs`; serialized per session; global cap 4 |
+| `grep_files` | `pattern` (regex), optional `path` / `glob` / `maxMatches`; read-only |
+| `mcp_status` | Root, port, pid, whether `rg` is on PATH |
+
+HTTP:
+
+- `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`)
+- `POST/GET/DELETE /mcp` — Streamable HTTP; Bearer token only if `requireAuth`
+- `GET /admin/status`, `GET /admin/history`, `POST /admin/stop` — token, loopback
+
+Settings: `keepwork.mcp.enableHttp` / `keepwork.mcp.port` / `keepwork.mcp.workspaceRoot` / `keepwork.mcp.requireAuth` (default false).
+
+Root resolution (first match): `--root` / `KEEPWORK_MCP_ROOT` / VS Code setting / `~/.keepwork-mcp/config.json` / cwd.
+
+## Common workflows
+
+```bash
+cd c:/lxzsrc/keepworkExtension
+npm install
+npm run compile
+npm start                          # HTTP daemon :8089
+npm run mcp                        # stdio MCP for Cursor
+```
+
+F5 **Run Extension** in this folder: on `onStartupFinished` the extension probes `:8089` and spawns the CLI if free. Status bar **Keepwork MCP** → click for clients/history.
+
+Cursor stdio (does not replace the HTTP daemon AIChat needs):
+
+```json
+{
+  "mcpServers": {
+    "keepwork": {
+      "command": "node",
+      "args": ["c:/lxzsrc/keepworkExtension/out/cli.js", "--stdio"],
+      "env": { "KEEPWORK_MCP_ROOT": "C:/lxzsrc" }
+    }
+  }
+}
+```
+
+## Related trees (outside this repo)
+
+| Path | Use |
+|------|-----|
+| `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/AIChat/js/local_mcp.js` | Browser MCP client + composer pill |
+| `c:/lxzsrc/maisi/.../AIChat/docs/local-mcp.md` | How to pair the token |
+| `c:/lxzsrc/ParacraftMaker` | Sibling Maker MCP (stdio + Agent Bridge `:18300`, not this port) |
+
+## When changing behavior
+
+- New MCP tool → `src/mcp/server.ts` + AIChat `LOCAL_MCP_NAMES` / chip labels in `chat_render.js` + README + this file.
+- Security / CORS / PNA / token → `src/mcp/http.ts` only; keep origin allowlist tight (`keepwork.com`, localhost).
+- Terminal policy → `src/core/terminal.ts` (deny-list, timeout, output cap) and keep AIChat confirm in `chat_agents.js` (`local-mcp-terminal-confirm`).
+- Singleton / status bar → `src/vscode/daemon.ts` + `statusBar.ts` + `mcpPanel.ts`; do not move the HTTP listener into the extension host.
+- Keepwork clone/open URL rules → `src/core/keepwork.ts` (VS Code commands only in v1; not MCP tools).

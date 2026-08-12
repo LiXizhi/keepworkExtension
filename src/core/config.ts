@@ -17,6 +17,8 @@ export const MAX_TIMEOUT_MS = 120_000;
 export interface McpConfigFile {
     workspaceRoot?: string;
     port?: number;
+    /** When true, /mcp and /admin require the pairing token. Default false. */
+    requireAuth?: boolean;
 }
 
 export interface InstanceInfo {
@@ -56,6 +58,17 @@ export function readConfigFile(): McpConfigFile {
     } catch {
         return {};
     }
+}
+
+/** Default is open (no token) so AIChat can connect without a pairing step. */
+export function resolveRequireAuth(override?: boolean): boolean {
+    if (typeof override === 'boolean') return override;
+    const env = String(process.env.KEEPWORK_MCP_REQUIRE_AUTH || '').trim();
+    if (env === '1' || /^(true|yes|on)$/i.test(env)) return true;
+    if (env === '0' || /^(false|no|off)$/i.test(env)) return false;
+    const file = readConfigFile().requireAuth;
+    if (typeof file === 'boolean') return file;
+    return false;
 }
 
 export function resolvePort(override?: number): number {

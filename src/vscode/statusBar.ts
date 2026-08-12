@@ -52,6 +52,7 @@ export async function refreshStatusBar(item: vscode.StatusBarItem): Promise<void
         `- pid: ${status?.pid ?? health.pid ?? '?'}`,
         `- root: \`${status?.workspaceRoot || '?'}\``,
         `- clients: ${clients.length}`,
+        `- auth: ${health.requireAuth ? 'token required' : 'open'}`,
         '',
     ];
     if (clients.length) {
@@ -69,7 +70,7 @@ export async function refreshStatusBar(item: vscode.StatusBarItem): Promise<void
             lines.push(`- ${mark} \`${h.tool}\` ${h.summary.slice(0, 60)} · ${h.durationMs}ms`);
         }
     }
-    if (!readToken()) {
+    if (health.requireAuth && !readToken()) {
         lines.push('', '_Token file missing: ~/.keepwork-mcp/token_');
     }
     md.appendMarkdown(lines.join('\n'));

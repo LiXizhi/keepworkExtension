@@ -11,6 +11,8 @@ export interface HealthInfo {
     port?: number;
     pid?: number;
     clients?: number;
+    requireAuth?: boolean;
+    workspaceRoot?: string;
     error?: string;
     stranger?: boolean;
 }
@@ -155,7 +157,10 @@ export async function ensureDaemon(context: vscode.ExtensionContext): Promise<He
     fs.mkdirSync(home, { recursive: true });
     const logPath = path.join(home, 'daemon.log');
     const logFd = fs.openSync(logPath, 'a');
-    const child = spawn(nodePath, [cli, '--port', String(configuredPort()), '--root', configuredRoot(context)], {
+    const requireAuth = vscode.workspace.getConfiguration('keepwork.mcp').get<boolean>('requireAuth', false);
+    const args = [cli, '--port', String(configuredPort()), '--root', configuredRoot(context)];
+    if (requireAuth) args.push('--require-auth');
+    const child = spawn(nodePath, args, {
         detached: true,
         stdio: ['ignore', logFd, logFd],
         windowsHide: true,
@@ -164,6 +169,7 @@ export async function ensureDaemon(context: vscode.ExtensionContext): Promise<He
             ...process.env,
             KEEPWORK_MCP_ROOT: configuredRoot(context),
             KEEPWORK_MCP_PORT: String(configuredPort()),
+            KEEPWORK_MCP_REQUIRE_AUTH: requireAuth ? '1' : '0',
         },
     });
     child.unref();

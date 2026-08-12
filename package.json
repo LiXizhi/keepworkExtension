@@ -76,6 +76,11 @@
           "type": "string",
           "default": "",
           "description": "Workspace root for run_terminal and grep_files. Empty uses the first VS Code folder, or KEEPWORK_MCP_ROOT / ~/.keepwork-mcp/config.json."
+        },
+        "keepwork.mcp.requireAuth": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require the pairing token (~/.keepwork-mcp/token) for /mcp and /admin. Default off so AIChat can connect without a pairing step."
         }
       }
     }

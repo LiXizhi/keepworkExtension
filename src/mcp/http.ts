@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
     BIND_HOST, SERVER_NAME, SERVER_VERSION, writeInstance, clearInstance, readOrCreateToken,
+    resolveRequireAuth,
 } from '../core/config';
 import { resolveWorkspaceRoot } from '../core/paths';
 import { requestContext } from './context';
@@ -16,6 +17,7 @@ import {
 export interface HttpServerHandle {
     port: number;
     token: string;
+    requireAuth: boolean;
     close(): Promise<void>;
 }
 
@@ -86,8 +88,9 @@ code{background:#f4f4f5;padding:.1em .35em;border-radius:4px}
 <li>workspace root: <code>${escapeHtml(runtime.root)}</code></li>
 <li>pid: ${process.pid}</li>
 <li>clients: ${sessionCount()}</li>
+<li>auth: ${runtime.requireAuth ? 'token required' : 'open (no token)'}</li>
 </ul>
-<p>AIChat at keepwork.com/chat can connect after you paste the pairing token from <code>~/.keepwork-mcp/token</code>.</p>
+<p>AIChat at keepwork.com/chat connects automatically when auth is open. To require a pairing token, set <code>keepwork.mcp.requireAuth</code> or <code>KEEPWORK_MCP_REQUIRE_AUTH=1</code>.</p>
 </body></html>`;
 }
 
@@ -95,17 +98,20 @@ function escapeHtml(s: string): string {
     return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
 
-export async function startHttpServer(opts?: { port?: number; root?: string }): Promise<HttpServerHandle> {
+export async function startHttpServer(opts?: { port?: number; root?: string; requireAuth?: boolean }): Promise<HttpServerHandle> {
     const port = opts?.port && opts.port > 0 ? opts.port : 8089;
+    const authRequired = resolveRequireAuth(opts?.requireAuth);
     const runtime: ServerRuntime = {
         root: resolveWorkspaceRoot(opts?.root),
         port,
         startedAt: new Date().toISOString(),
+        requireAuth: authRequired,
     };
     const token = readOrCreateToken();
     const transports = new Map<string, StreamableHTTPServerTransport>();
 
-    const requireToken = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
+    const assertAuth = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
+        if (!authRequired) return true;
         if (extractToken(req, url) === token) return true;
         sendJson(res, 401, { error: 'unauthorized', hint: 'Pass Authorization: Bearer <token> from ~/.keepwork-mcp/token' });
         return false;
@@ -131,6 +137,8 @@ export async function startHttpServer(opts?: { port?: number; root?: string }): 
                     port,
                     pid: process.pid,
                     clients: sessionCount(),
+                    requireAuth: authRequired,
+                    workspaceRoot: runtime.root,
                 });
                 return;
             }
@@ -142,7 +150,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string }): 
             }
 
             if (pathname === '/admin/status' && req.method === 'GET') {
-                if (!requireToken(req, url, res)) return;
+                if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, {
                     ok: true,
                     name: SERVER_NAME,
@@ -152,19 +160,20 @@ export async function startHttpServer(opts?: { port?: number; root?: string }): 
                     uptimeMs: Date.now() - Date.parse(runtime.startedAt),
                     startedAt: runtime.startedAt,
                     workspaceRoot: runtime.root,
+                    requireAuth: authRequired,
                     clients: listSessions(),
                 });
                 return;
             }
 
             if (pathname === '/admin/history' && req.method === 'GET') {
-                if (!requireToken(req, url, res)) return;
+                if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, { ok: true, history: listHistory() });
                 return;
             }
 
             if (pathname === '/admin/stop' && req.method === 'POST') {
-                if (!requireToken(req, url, res)) return;
+                if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, { ok: true, stopping: true });
                 setTimeout(() => {
                     server.close();
@@ -175,7 +184,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string }): 
             }
 
             if (pathname === '/mcp') {
-                if (!requireToken(req, url, res)) return;
+                if (!assertAuth(req, url, res)) return;
                 const sessionId = String(req.headers['mcp-session-id'] || '');
                 const origin = String(req.headers.origin || '');
                 const userAgent = String(req.headers['user-agent'] || '');
@@ -266,5 +275,5 @@ export async function startHttpServer(opts?: { port?: number; root?: string }): 
     process.on('SIGINT', () => { void close().then(() => process.exit(0)); });
     process.on('SIGTERM', () => { void close().then(() => process.exit(0)); });
 
-    return { port, token, close };
+    return { port, token, requireAuth: authRequired, close };
 }
