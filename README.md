@@ -27,7 +27,7 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 | `grep_files` | Search file contents under the root |
 | `mcp_status` | Report root, port, pid, ripgrep |
 
-`GET /health` includes `workspaceRoot` so AIChat can map a bound local folder (browser only knows the folder name) onto a cwd relative to that root.
+`GET /health` includes `workspaceRoot` (default `~/.keepwork-mcp/workspace` for cloud workspace slots). `GET /exists?path=` checks that a typed local absolute path exists. `run_terminal` accepts that absolute path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`.
 
 ## Run the MCP daemon
 

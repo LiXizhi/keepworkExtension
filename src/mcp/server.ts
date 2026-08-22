@@ -86,10 +86,10 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'run_terminal',
         {
-            description: 'Run a shell command on the user\'s local disk. cwd is relative to the MCP workspace root (see mcp_status). AIChat fills cwd from the bound local folder when omitted. Requires user confirmation in AIChat.',
+            description: 'Run a shell command on the user\'s local disk. cwd may be an absolute disk path (local folder) or relative to the MCP workspace root (cloud workspaces). AIChat fills cwd from the bound folder when omitted. Requires user confirmation in AIChat.',
             inputSchema: z.object({
                 command: z.string().describe('Shell command to run'),
-                cwd: z.string().optional().describe('Working directory relative to the MCP workspace root, e.g. LiXizhiDocs or LiXizhiDocs/_wiki. Omit to use the AIChat-bound local folder.'),
+                cwd: z.string().optional().describe('Working directory: absolute path of a local disk folder (e.g. C:\\\\lxzsrc or ~/myfolder), or a path relative to the MCP workspace root. Omit to use the AIChat-bound folder.'),
                 timeoutMs: z.number().optional().describe('Timeout in milliseconds (default 30000, max 120000)'),
             }),
         },
@@ -108,10 +108,10 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'grep_files',
         {
-            description: 'Search file contents under the MCP workspace root. Prefer this over shelling out to grep. pattern is a regex.',
+            description: 'Search file contents. path may be an absolute disk folder or relative to the MCP workspace root. Prefer this over shelling out to grep. pattern is a regex.',
             inputSchema: z.object({
                 pattern: z.string().describe('Regular expression to search for'),
-                path: z.string().optional().describe('Directory or file relative to the MCP workspace root. Omit to search the AIChat-bound local folder.'),
+                path: z.string().optional().describe('Directory or file: absolute local disk path, or relative to the MCP workspace root. Omit to search the AIChat-bound folder.'),
                 glob: z.string().optional().describe('Optional glob filter, e.g. **/*.ts'),
                 maxMatches: z.number().optional().describe('Maximum matches to return (default 50, max 200)'),
             }),

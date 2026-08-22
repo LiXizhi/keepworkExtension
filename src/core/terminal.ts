@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { DEFAULT_TIMEOUT_MS, GLOBAL_TERMINAL_CAP, MAX_TIMEOUT_MS, OUTPUT_CHAR_CAP } from './config';
-import { confinePath, PathEscapeError } from './paths';
+import { PathEscapeError, resolveWorkdir } from './paths';
 
 export interface TerminalResult {
     ok: boolean;
@@ -86,7 +86,7 @@ export async function runTerminal(opts: {
     assertAllowedCommand(command);
     let cwd: string;
     try {
-        cwd = confinePath(opts.root, opts.cwd || '.');
+        cwd = resolveWorkdir(opts.root, opts.cwd || '.');
     } catch (err) {
         if (err instanceof PathEscapeError) throw err;
         throw new Error(`Invalid cwd: ${opts.cwd}`);

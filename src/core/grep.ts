@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { confinePath, relativeToRoot } from './paths';
+import { relativeToRoot, resolveWorkdir } from './paths';
 import { OUTPUT_CHAR_CAP } from './config';
 
 export interface GrepHit {
@@ -176,7 +176,7 @@ export async function grepFiles(opts: {
 }): Promise<GrepResult> {
     const pattern = String(opts.pattern || '');
     if (!pattern) throw new Error('pattern is required');
-    const searchPath = confinePath(opts.root, opts.path || '.');
+    const searchPath = resolveWorkdir(opts.root, opts.path || '.');
     let maxMatches = Number(opts.maxMatches);
     if (!Number.isFinite(maxMatches) || maxMatches <= 0) maxMatches = 50;
     maxMatches = Math.min(200, Math.max(1, Math.floor(maxMatches)));

@@ -20,7 +20,7 @@ spawn-or-attach; many AIChat tabs share one daemon (one MCP session each).
 
 1. **Bind loopback only** (`127.0.0.1`). Never listen on `0.0.0.0` or expose port 8089 on the LAN.
 2. **Pairing token is optional (default off).** `/mcp` and `/admin/*` are open on loopback unless `keepwork.mcp.requireAuth` / `KEEPWORK_MCP_REQUIRE_AUTH=1` / `--require-auth`. When auth is on, do not log or commit `~/.keepwork-mcp/token`.
-3. **Path confinement**: `run_terminal` cwd and `grep_files` paths must stay under the workspace root (`src/core/paths.ts`). Reject `..` and symlink escapes.
+3. **Path confinement**: relative `run_terminal` cwd and `grep_files` paths must stay under the workspace root (`src/core/paths.ts`). Reject `..` and symlink escapes. Absolute disk paths (`C:\foo`, `/foo`, `~/foo`) are allowed when the directory exists — AIChat uses these for a bound local folder.
 4. **Do not weaken the deny-list** in `src/core/terminal.ts` without an explicit user request. AIChat must keep confirming every `run_terminal` call.
 5. **One daemon**: if `listen` throws `EADDRINUSE`, attach — do not start a second HTTP server. Closing a VS Code window must **not** kill the daemon.
 6. Keep CommonJS (`"module": "commonjs"`) so the VS Code extension still loads. Do not convert the package to ESM-only.
@@ -58,6 +58,7 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 HTTP:
 
 - `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`)
+- `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory
 - `POST/GET/DELETE /mcp` — Streamable HTTP; Bearer token only if `requireAuth`
 - `GET /admin/status`, `GET /admin/history`, `POST /admin/stop` — token, loopback
 
