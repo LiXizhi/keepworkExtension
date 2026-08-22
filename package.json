@@ -2,7 +2,7 @@
   "name": "keepwork",
   "displayName": "Keepwork",
   "description": "Clone Keepwork repos, open files on keepwork.com, and run a local MCP daemon for AIChat terminal/grep",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "Xizhi",
   "license": "MIT",
   "repository": {
@@ -86,12 +86,13 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "vscode:prepublish": "npm run compile:only",
+    "compile:only": "tsc -p ./",
+    "compile": "npm version patch --no-git-tag-version && npm run compile:only",
     "watch": "tsc -watch -p ./",
     "start": "node out/cli.js",
     "mcp": "node out/cli.js --stdio",
-    "package": "vsce package"
+    "package": "npm run compile && npx --yes @vscode/vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
