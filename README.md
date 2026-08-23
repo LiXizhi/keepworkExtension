@@ -26,6 +26,8 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 | `run_terminal` | Run a shell command under the workspace root (AIChat asks you to confirm) |
 | `grep_files` | Search file contents under the root |
 | `mcp_status` | Report root, port, pid, ripgrep |
+| `web_search` | Search the public web from this machine; returns minified JSON (`title` / `url` / `snippet`) |
+| `fetch_url` | Fetch one public http(s) page and extract text as minified JSON (HTML never leaves the daemon) |
 
 `GET /health` includes `workspaceRoot` (default `~/.keepwork-mcp/workspace` for cloud workspace slots). `GET /exists?path=` checks that a typed local absolute path exists. `run_terminal` accepts that absolute path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`.
 
@@ -81,6 +83,7 @@ Example `~/.keepwork-mcp/config.json`:
 - MCP and admin APIs are **open on loopback by default**. Set `keepwork.mcp.requireAuth` to require `~/.keepwork-mcp/token`.
 - Commands cannot leave the workspace root. A small deny-list blocks `format`, `shutdown`, `rm -rf /`, etc.
 - AIChat confirms every `run_terminal` call in the UI.
+- `web_search` / `fetch_url` only allow public http(s). Localhost, private IPs, and metadata hosts are blocked. HTML is parsed on this machine; the model receives minified JSON only.
 
 ## Requirements
 

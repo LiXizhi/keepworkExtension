@@ -4,6 +4,7 @@ import { SERVER_NAME, SERVER_VERSION } from '../core/config';
 import { hasRipgrep, grepFiles, formatGrepResult } from '../core/grep';
 import { resolveWorkspaceRoot } from '../core/paths';
 import { enqueueSession, formatTerminalResult, runTerminal } from '../core/terminal';
+import { fetchUrl, webSearch } from '../core/web';
 import { currentRequest } from './context';
 import { recordCall, summarizeArgs } from './sessions';
 
@@ -35,7 +36,10 @@ function wrap<T extends Record<string, unknown>>(
         } catch (err) {
             ok = false;
             error = err instanceof Error ? err.message : String(err);
-            return textResult(`Failed: ${error}`, true);
+            const fallback = (tool === 'web_search' || tool === 'fetch_url')
+                ? JSON.stringify({ error: 'network', detail: error.slice(0, 80) })
+                : `Failed: ${error}`;
+            return textResult(fallback, true);
         } finally {
             if (ctx.sessionId) {
                 recordCall({
@@ -77,7 +81,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
                 `- ripgrep: ${rg ? 'yes' : 'no (Node walker fallback)'}`,
                 `- requireAuth: ${runtime.requireAuth ? 'yes' : 'no'}`,
                 '',
-                'Tools: run_terminal, grep_files, mcp_status',
+                'Tools: run_terminal, grep_files, mcp_status, web_search, fetch_url',
             ].join('\n');
             return textResult(text);
         }),
@@ -125,6 +129,44 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
                 root: resolveWorkspaceRoot(runtime.root),
             });
             return textResult(formatGrepResult(result), !result.ok);
+        }),
+    );
+
+    server.registerTool(
+        'web_search',
+        {
+            description: 'Search the public web from this machine (no API key). HTML is parsed locally; the result is minified JSON: {"engine","query","results":[{"title","url","snippet"}]}. Use for current events, then fetch_url on 1-3 promising links. Do not curl HTML via run_terminal.',
+            inputSchema: z.object({
+                query: z.string().describe('Search query'),
+                count: z.number().optional().describe('Max results (default 8, max 12)'),
+            }),
+        },
+        wrap('web_search', async (args) => {
+            const ctx = currentRequest();
+            const result = await enqueueSession(ctx.sessionId, () => webSearch(
+                String(args.query || ''),
+                typeof args.count === 'number' ? args.count : undefined,
+            ));
+            return textResult(JSON.stringify(result), 'error' in result);
+        }),
+    );
+
+    server.registerTool(
+        'fetch_url',
+        {
+            description: 'Fetch one public http(s) URL from this machine and extract readable text. Returns minified JSON: {"url","finalUrl","title","text","truncated"}. Never returns HTML. Private/localhost URLs are blocked.',
+            inputSchema: z.object({
+                url: z.string().describe('Public http(s) URL to fetch'),
+                maxChars: z.number().optional().describe('Max extracted text characters (default 8000, max 16000)'),
+            }),
+        },
+        wrap('fetch_url', async (args) => {
+            const ctx = currentRequest();
+            const result = await enqueueSession(ctx.sessionId, () => fetchUrl(
+                String(args.url || ''),
+                typeof args.maxChars === 'number' ? args.maxChars : undefined,
+            ));
+            return textResult(JSON.stringify(result), 'error' in result);
         }),
     );
 

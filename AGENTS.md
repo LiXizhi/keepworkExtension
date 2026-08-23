@@ -8,7 +8,7 @@ Instructions for AI agents working **in this repository**. Product overview:
 - **VS Code / Cursor extension** (`keepwork`) plus a **singleton local MCP daemon**
 - **Path**: `c:/lxzsrc/keepworkExtension` (GitHub `LiXizhi/keepworkExtension`)
 - **Job**: (1) clone Keepwork git repos and open files on keepwork.com;
-  (2) expose `run_terminal` / `grep_files` / `mcp_status` so the **AIChat website**
+  (2) expose `run_terminal` / `grep_files` / `mcp_status` / `web_search` / `fetch_url` so the **AIChat website**
   (`https://keepwork.com/chat`) can drive the user's local disk — something the
   browser cannot do on its own.
 
@@ -34,8 +34,9 @@ spawn-or-attach; many AIChat tabs share one daemon (one MCP session each).
 | `src/core/config.ts` | Port, token, `~/.keepwork-mcp/` instance file |
 | `src/core/terminal.ts` | Shell spawn, timeout, output cap, deny-list, per-session queue |
 | `src/core/grep.ts` | `rg` if present, else Node walk |
+| `src/core/web.ts` | Public http(s) fetch, SSRF checks, search-engine HTML parsers, compact JSON |
 | `src/core/keepwork.ts` | Keepwork URL → git clone URL / open-in-browser URL |
-| `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`) |
+| `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
 | `src/mcp/sessions.ts` | Connected clients + in-memory call history |
 | `src/mcp/stdio.ts` | stdio transport for Cursor (does not take 8089) |
@@ -54,6 +55,8 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 | `run_terminal` | `command`, optional `cwd` / `timeoutMs`; serialized per session; global cap 4 |
 | `grep_files` | `pattern` (regex), optional `path` / `glob` / `maxMatches`; read-only |
 | `mcp_status` | Root, port, pid, whether `rg` is on PATH |
+| `web_search` | `query`, optional `count`; Bing → DDG → Baidu HTML; minified JSON results; no confirm |
+| `fetch_url` | `url`, optional `maxChars`; extract text; SSRF-blocked private/localhost; minified JSON |
 
 HTTP:
 
@@ -75,6 +78,18 @@ npm run compile
 npm start                          # HTTP daemon :8089
 npm run mcp                        # stdio MCP for Cursor
 ```
+
+### Debug the HTTP MCP server without the extension
+
+Run the VS Code task **Keepwork MCP: Dev Server (8089)**, or start the same workflow from a terminal:
+
+```bash
+npm run dev:server
+```
+
+This compiles TypeScript in watch mode and runs `out/cli.js` on `127.0.0.1:8089`. After every successful source rebuild, it restarts the MCP daemon automatically; compilation failures leave the last working daemon running. On startup it stops an existing daemon only when `/health` identifies it as `keepwork-mcp`, so it will not replace an unrelated service using port 8089. Stop the task with Ctrl+C.
+
+Use `http://127.0.0.1:8089/health` to verify the listener and `http://127.0.0.1:8089/admin/status` to inspect the PID, workspace root, clients, and auth state. This workflow is for debugging the MCP HTTP server and AIChat integration without publishing the extension, pressing F5, or reloading an Extension Development Host.
 
 F5 **Run Extension** in this folder: on `onStartupFinished` the extension probes `:8089` and spawns the CLI if free. Status bar **Keepwork MCP** → click for clients/history.
 
@@ -102,7 +117,7 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 
 ## When changing behavior
 
-- New MCP tool → `src/mcp/server.ts` + AIChat `LOCAL_MCP_NAMES` / chip labels in `chat_render.js` + README + this file.
+- New MCP tool → `src/mcp/server.ts` + AIChat `KEEPWORK_TOOL_NAMES` / chip labels in `chat_render.js` + README + this file.
 - Security / CORS / PNA / token → `src/mcp/http.ts` only; keep origin allowlist tight (`keepwork.com`, localhost).
 - Terminal policy → `src/core/terminal.ts` (deny-list, timeout, output cap) and keep AIChat confirm in `chat_agents.js` (`local-mcp-terminal-confirm`).
 - Singleton / status bar → `src/vscode/daemon.ts` + `statusBar.ts` + `mcpPanel.ts`; do not move the HTTP listener into the extension host.

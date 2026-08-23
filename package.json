@@ -90,6 +90,7 @@
     "compile:only": "tsc -p ./",
     "compile": "npm version patch --no-git-tag-version && npm run compile:only",
     "watch": "tsc -watch -p ./",
+    "dev:server": "node scripts/dev-server.js",
     "start": "node out/cli.js",
     "mcp": "node out/cli.js --stdio",
     "package": "npm run compile && npx --yes @vscode/vsce package"
