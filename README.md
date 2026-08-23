@@ -27,7 +27,7 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 | `grep_files` | Search file contents under the root |
 | `mcp_status` | Report root, port, pid, ripgrep |
 | `web_search` | Search the public web from this machine; returns minified JSON (`title` / `url` / `snippet`) |
-| `fetch_url` | Fetch one public http(s) page and extract text as minified JSON (HTML never leaves the daemon) |
+| `fetch_url` | Fetch one public http(s) page, render HTML in local Edge/Chrome when possible, extract structured text as minified JSON |
 
 `GET /health` includes `workspaceRoot` (default `~/.keepwork-mcp/workspace` for cloud workspace slots). `GET /exists?path=` checks that a typed local absolute path exists. `run_terminal` accepts that absolute path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`.
 

@@ -1,5 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { dumpDom } from './headless';
+import { extractTitle, htmlToStructuredText } from './html_text';
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024;
@@ -180,22 +182,6 @@ function stripTags(html: string): string {
 
 function collapseWs(s: string): string {
     return String(s || '').replace(/\s+/g, ' ').trim();
-}
-
-function extractTitle(html: string): string {
-    const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    return m ? collapseWs(decodeEntities(stripTags(m[1]))) : '';
-}
-
-function htmlToText(html: string): string {
-    const cleaned = String(html || '')
-        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-        .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-        .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
-        .replace(/<(nav|footer|header|aside|form)[\s\S]*?<\/\1>/gi, ' ')
-        .replace(/<!--[\s\S]*?-->/g, ' ');
-    return collapseWs(decodeEntities(stripTags(cleaned)));
 }
 
 function decodeBody(buf: Buffer, contentType: string): string {
@@ -498,8 +484,10 @@ export async function fetchUrl(url: string, maxChars?: number): Promise<FetchPag
         let title = '';
         let text = '';
         if (kind === 'html') {
-            title = extractTitle(doc.body);
-            text = htmlToText(doc.body);
+            const rendered = await dumpDom(doc.finalUrl);
+            const html = rendered || doc.body;
+            title = extractTitle(html) || extractTitle(doc.body);
+            text = htmlToStructuredText(html);
         } else if (kind === 'json') {
             title = '';
             text = collapseWs(doc.body);

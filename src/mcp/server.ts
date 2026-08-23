@@ -154,7 +154,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'fetch_url',
         {
-            description: 'Fetch one public http(s) URL from this machine and extract readable text. Returns minified JSON: {"url","finalUrl","title","text","truncated"}. Never returns HTML. Private/localhost URLs are blocked.',
+            description: 'Fetch one public http(s) URL from this machine. HTML is rendered in local Edge/Chrome when available, then converted to structured text (headings/lists). Returns minified JSON: {"url","finalUrl","title","text","truncated"}. Never returns HTML. Private/localhost URLs are blocked.',
             inputSchema: z.object({
                 url: z.string().describe('Public http(s) URL to fetch'),
                 maxChars: z.number().optional().describe('Max extracted text characters (default 8000, max 16000)'),

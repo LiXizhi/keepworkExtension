@@ -35,6 +35,8 @@ spawn-or-attach; many AIChat tabs share one daemon (one MCP session each).
 | `src/core/terminal.ts` | Shell spawn, timeout, output cap, deny-list, per-session queue |
 | `src/core/grep.ts` | `rg` if present, else Node walk |
 | `src/core/web.ts` | Public http(s) fetch, SSRF checks, search-engine HTML parsers, compact JSON |
+| `src/core/headless.ts` | System Edge/Chrome `--dump-dom` for `fetch_url` |
+| `src/core/html_text.ts` | Structured HTML → text (headings/lists; never markup) |
 | `src/core/keepwork.ts` | Keepwork URL → git clone URL / open-in-browser URL |
 | `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
@@ -56,7 +58,7 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 | `grep_files` | `pattern` (regex), optional `path` / `glob` / `maxMatches`; read-only |
 | `mcp_status` | Root, port, pid, whether `rg` is on PATH |
 | `web_search` | `query`, optional `count`; Bing → DDG → Baidu HTML; minified JSON results; no confirm |
-| `fetch_url` | `url`, optional `maxChars`; extract text; SSRF-blocked private/localhost; minified JSON |
+| `fetch_url` | `url`, optional `maxChars`; Edge/Chrome dump-dom then structured text; static HTML fallback; SSRF; minified JSON |
 
 HTTP:
 
