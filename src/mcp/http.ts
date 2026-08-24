@@ -13,7 +13,7 @@ import {
     listHistory, listSessions, pruneIdleSessions, removeSession, sessionCount,
     setSessionCloser, upsertSession, touchSession,
 } from './sessions';
-import { liveClientCount, tryHandleParacraft } from '../core/paracraftClients';
+import { liveClientCount, startParacraftWatch, stopParacraftWatch, tryHandleParacraft } from '../core/paracraftClients';
 
 export interface HttpServerHandle {
     port: number;
@@ -288,9 +288,11 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
         startedAt: runtime.startedAt,
         name: SERVER_NAME,
     });
+    startParacraftWatch();
 
     const close = async () => {
         clearInterval(pruneTimer);
+        stopParacraftWatch();
         for (const t of transports.values()) {
             try { await t.close(); } catch { /* ignore */ }
         }

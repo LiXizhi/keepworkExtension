@@ -76,11 +76,14 @@ HTTP:
 - `GET /admin/status`, `GET /admin/history?offset=&limit=`, `POST /admin/stop` — token, loopback
   (`/admin/history` returns one newest-first page, default `limit=20`, max 50; includes `total` / `hasMore`)
 - Paracraft CLI hub (plain HTTP, not MCP):
-  - `POST /paracraft/register` — desktop client identity (open on loopback)
-  - `POST /paracraft/:id/jobs/poll` — long-poll jobs (`waitMs`)
+  - Hub **awakens** desktop Paracraft: while the daemon is up it scans `127.0.0.1:8099-8115` and pings `/ajax/paracraft_cli?action=health`. Desktop **registers once on start**; if that succeeds it long-polls jobs (and heartbeats) while the hub stays up. If register fails it does **not** poll `:8089` until NPL inbound or the next start.
+  - `POST /paracraft/register` — start probe + identity (open on loopback). Body may include `nplPort`.
+  - If `nplPort` pings (`GET http://127.0.0.1:<nplPort>/ajax/paracraft_cli?action=health`), register returns `useNpl: true` and the hub dispatches to that NPL HTTP port instead of long-poll.
+  - `POST /paracraft/:id/jobs/poll` — long-poll jobs (`waitMs`, max 10s) only for clients without a live NPL port. Empty + `useNpl` when the NPL port is live. Hub pings NPL health every 10s; poll-only clients drop if they stop polling for 10s.
   - `POST /paracraft/:id/jobs/:jobId/result` — job result
-  - `GET /paracraft/clients` — live desktop clients (Bearer if `requireAuth`)
-  - `POST /paracraft/:id/:action` — enqueue `health` / `world_status` / `run_command` / `screenshot` / `open_world`
+  - `GET /paracraft/clients` — live desktop clients (Bearer if `requireAuth`); includes `nplPort` only when ping succeeded, plus `connectedAt` (first register, not reset on heartbeat)
+  - `GET /paracraft/:id/timeline` — last screenshots + non-`health` action summaries (capped; no ping spam)
+  - `POST /paracraft/:id/:action` — `health` / `world_status` / `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`
 
 Settings: `keepwork.mcp.enableHttp` / `keepwork.mcp.port` / `keepwork.mcp.workspaceRoot` / `keepwork.mcp.requireAuth` (default false).
 

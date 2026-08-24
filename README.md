@@ -31,7 +31,7 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 
 `GET /health` includes `workspaceRoot` so AIChat can map cloud workspace slots onto a cwd relative to that root. It also reports `paracraftClients` when desktop Paracraft processes have registered. `GET /exists?path=` checks that a typed local absolute path exists; `run_terminal` accepts that path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`.
 
-**Paracraft CLI hub** (`/paracraft/*`, same loopback server): desktop clients register and long-poll jobs; AIChat `ParacraftTool.html` lists clients and dispatches `run_command` / `screenshot` / `open_world`. Client register/poll stay open on loopback. List/dispatch use the pairing token only when `requireAuth` is on.
+**Paracraft CLI hub** (`/paracraft/*`, same loopback server): desktop Paracraft registers on start. If Keepwork MCP is up, the client long-polls jobs (and heartbeats) until the hub goes down. The daemon also scans loopback NPL HTTP (`8099-8115` `/ajax/paracraft_cli`) so a client that started while the daemon was down can still be found. If a client reports an NPL HTTP `nplPort` and the hub can ping it, dispatch goes to that port and skips long-poll. AIChat `ParacraftTool.html` lists clients and dispatches `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`. Client register/poll stay open on loopback. List/dispatch use the pairing token only when `requireAuth` is on.
 
 Default **workspace root** (confinement parent) is `~/.keepwork-mcp/workspace`. AIChat uses a slot under it:
 
