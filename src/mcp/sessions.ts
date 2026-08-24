@@ -67,6 +67,8 @@ export function summarizeArgs(tool: string, args: unknown): string {
     const obj = args && typeof args === 'object' ? args as Record<string, unknown> : {};
     if (tool === 'run_terminal') return String(obj.command || '').slice(0, 200);
     if (tool === 'grep_files') return String(obj.pattern || '').slice(0, 200);
+    if (tool === 'web_search') return String(obj.query || '').slice(0, 200);
+    if (tool === 'fetch_url') return String(obj.url || '').slice(0, 200);
     try {
         return JSON.stringify(args).slice(0, 200);
     } catch {

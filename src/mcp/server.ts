@@ -5,6 +5,7 @@ import { hasRipgrep, grepFiles, formatGrepResult } from '../core/grep';
 import { resolveWorkspaceRoot } from '../core/paths';
 import { enqueueSession, formatTerminalResult, runTerminal } from '../core/terminal';
 import { vscodeTerminalBridgeLive } from '../core/vscodeBridge';
+import { fetchUrl, webSearch } from '../core/web';
 import { currentRequest } from './context';
 import { recordCall, summarizeArgs } from './sessions';
 
@@ -36,7 +37,10 @@ function wrap<T extends Record<string, unknown>>(
         } catch (err) {
             ok = false;
             error = err instanceof Error ? err.message : String(err);
-            return textResult(`Failed: ${error}`, true);
+            const fallback = (tool === 'web_search' || tool === 'fetch_url')
+                ? JSON.stringify({ error: 'network', detail: error.slice(0, 80) })
+                : `Failed: ${error}`;
+            return textResult(fallback, true);
         } finally {
             if (ctx.sessionId) {
                 recordCall({
@@ -79,7 +83,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
                 `- ripgrep: ${rg ? 'yes' : 'no (Node walker fallback)'}`,
                 `- requireAuth: ${runtime.requireAuth ? 'yes' : 'no'}`,
                 '',
-                'Tools: run_terminal, grep_files, mcp_status',
+                'Tools: run_terminal, grep_files, mcp_status, web_search, fetch_url',
             ].join('\n');
             return textResult(text);
         }),
@@ -88,10 +92,10 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'run_terminal',
         {
-            description: 'Run a shell command on the user\'s local disk. When VS Code / Cursor is open, the command runs in the reused Keepwork integrated terminal (bottom panel). cwd is relative to the MCP workspace root (see mcp_status), a per-user folder by default.',
+            description: 'Run a shell command on the user\'s local disk. cwd may be an absolute disk path (local folder) or relative to the MCP workspace root (cloud workspaces). AIChat fills cwd from the bound folder when omitted and requires user confirmation. When VS Code / Cursor is open, the command uses the Keepwork integrated terminal.',
             inputSchema: z.object({
                 command: z.string().describe('Shell command to run'),
-                cwd: z.string().optional().describe('Working directory relative to the MCP workspace root, e.g. LiXizhiDocs or LiXizhiDocs/_wiki. Omit to use the AIChat-bound local folder.'),
+                cwd: z.string().optional().describe('Working directory: absolute path of a local disk folder (e.g. C:\\\\lxzsrc or ~/myfolder), or a path relative to the MCP workspace root. Omit to use the AIChat-bound folder.'),
                 timeoutMs: z.number().optional().describe('Timeout in milliseconds (default 30000, max 120000)'),
             }),
         },
@@ -110,10 +114,10 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'grep_files',
         {
-            description: 'Search file contents under the MCP workspace root. Prefer this over shelling out to grep. pattern is a regex.',
+            description: 'Search file contents. path may be an absolute disk folder or relative to the MCP workspace root. Prefer this over shelling out to grep. pattern is a regex.',
             inputSchema: z.object({
                 pattern: z.string().describe('Regular expression to search for'),
-                path: z.string().optional().describe('Directory or file relative to the MCP workspace root. Omit to search the AIChat-bound local folder.'),
+                path: z.string().optional().describe('Directory or file: absolute local disk path, or relative to the MCP workspace root. Omit to search the AIChat-bound folder.'),
                 glob: z.string().optional().describe('Optional glob filter, e.g. **/*.ts'),
                 maxMatches: z.number().optional().describe('Maximum matches to return (default 50, max 200)'),
             }),
@@ -127,6 +131,44 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
                 root: resolveWorkspaceRoot(runtime.root),
             });
             return textResult(formatGrepResult(result), !result.ok);
+        }),
+    );
+
+    server.registerTool(
+        'web_search',
+        {
+            description: 'Search the public web from this machine (no API key). HTML is parsed locally; the result is minified JSON: {"engine","query","results":[{"title","url","snippet"}]}. Use for current events, then fetch_url on 1-3 promising links. Do not curl HTML via run_terminal.',
+            inputSchema: z.object({
+                query: z.string().describe('Search query'),
+                count: z.number().optional().describe('Max results (default 8, max 12)'),
+            }),
+        },
+        wrap('web_search', async (args) => {
+            const ctx = currentRequest();
+            const result = await enqueueSession(ctx.sessionId, () => webSearch(
+                String(args.query || ''),
+                typeof args.count === 'number' ? args.count : undefined,
+            ));
+            return textResult(JSON.stringify(result), 'error' in result);
+        }),
+    );
+
+    server.registerTool(
+        'fetch_url',
+        {
+            description: 'Fetch one public http(s) URL from this machine. HTML is rendered in local Edge/Chrome when available, then converted to structured text (headings/lists). Returns minified JSON: {"url","finalUrl","title","text","truncated"}. Never returns HTML. Private/localhost URLs are blocked.',
+            inputSchema: z.object({
+                url: z.string().describe('Public http(s) URL to fetch'),
+                maxChars: z.number().optional().describe('Max extracted text characters (default 8000, max 16000)'),
+            }),
+        },
+        wrap('fetch_url', async (args) => {
+            const ctx = currentRequest();
+            const result = await enqueueSession(ctx.sessionId, () => fetchUrl(
+                String(args.url || ''),
+                typeof args.maxChars === 'number' ? args.maxChars : undefined,
+            ));
+            return textResult(JSON.stringify(result), 'error' in result);
         }),
     );
 

@@ -6,7 +6,7 @@ import {
     BIND_HOST, HISTORY_PAGE_DEFAULT, SERVER_NAME, SERVER_VERSION, writeInstance, clearInstance, readOrCreateToken,
     resolveRequireAuth,
 } from '../core/config';
-import { resolveWorkspaceRoot } from '../core/paths';
+import { inspectDiskPath, resolveWorkspaceRoot } from '../core/paths';
 import { requestContext } from './context';
 import { createMcpServer, ServerRuntime } from './server';
 import {
@@ -142,6 +142,17 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     requireAuth: authRequired,
                     workspaceRoot: runtime.root,
                 });
+                return;
+            }
+
+            if (pathname === '/exists' && req.method === 'GET') {
+                const raw = String(url.searchParams.get('path') || '').trim();
+                if (!raw) {
+                    sendJson(res, 400, { ok: false, error: 'path is required' });
+                    return;
+                }
+                const info = inspectDiskPath(raw);
+                sendJson(res, 200, { ok: true, ...info });
                 return;
             }
 

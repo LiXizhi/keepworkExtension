@@ -25,6 +25,17 @@
       "problemMatcher": [],
       "label": "npm: package (VSIX for publish)",
       "group": "build"
+    },
+    {
+      "type": "npm",
+      "script": "dev:server",
+      "problemMatcher": "$tsc-watch",
+      "label": "Keepwork MCP: Dev Server (8089)",
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
     }
   ]
 }

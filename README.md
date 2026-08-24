@@ -26,8 +26,10 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 | `run_terminal` | Run a shell command under the workspace root (AIChat asks you to confirm) |
 | `grep_files` | Search file contents under the root |
 | `mcp_status` | Report root, port, pid, ripgrep |
+| `web_search` | Search the public web from this machine; returns minified JSON (`title` / `url` / `snippet`) |
+| `fetch_url` | Fetch one public http(s) page, render HTML in local Edge/Chrome when possible, extract structured text as minified JSON |
 
-`GET /health` includes `workspaceRoot` so AIChat can map a bound local folder (browser only knows the folder name) onto a cwd relative to that root. It also reports `paracraftClients` when desktop Paracraft processes have registered.
+`GET /health` includes `workspaceRoot` so AIChat can map cloud workspace slots onto a cwd relative to that root. It also reports `paracraftClients` when desktop Paracraft processes have registered. `GET /exists?path=` checks that a typed local absolute path exists; `run_terminal` accepts that path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`.
 
 **Paracraft CLI hub** (`/paracraft/*`, same loopback server): desktop clients register and long-poll jobs; AIChat `ParacraftTool.html` lists clients and dispatches `run_command` / `screenshot` / `open_world`. Client register/poll stay open on loopback. List/dispatch use the pairing token only when `requireAuth` is on.
 
@@ -96,6 +98,7 @@ Example `~/.keepwork-mcp/config.json`:
 - MCP and admin APIs are **open on loopback by default**. Set `keepwork.mcp.requireAuth` to require `~/.keepwork-mcp/token`.
 - Commands cannot leave the workspace root. A small deny-list blocks `format`, `shutdown`, `rm -rf /`, etc.
 - AIChat confirms every `run_terminal` call in the UI.
+- `web_search` / `fetch_url` only allow public http(s). Localhost, private IPs, and metadata hosts are blocked. HTML is parsed on this machine; the model receives minified JSON only.
 
 ## Requirements
 
