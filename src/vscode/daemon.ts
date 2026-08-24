@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
-import { DEFAULT_PORT, SERVER_NAME, mcpHomeDir, readToken, resolvePort } from '../core/config';
+import { DEFAULT_WORKSPACE_SLOT, SERVER_NAME, mcpHomeDir, readToken, resolvePort } from '../core/config';
+import { resolveWorkspaceRoot } from '../core/paths';
 
 export interface HealthInfo {
     ok: boolean;
@@ -36,18 +37,24 @@ export interface AdminStatus {
     }>;
 }
 
+export interface HistoryRow {
+    time: string;
+    sessionId: string;
+    origin: string;
+    tool: string;
+    summary: string;
+    ok: boolean;
+    error?: string;
+    durationMs: number;
+}
+
 export interface HistoryPayload {
     ok: boolean;
-    history?: Array<{
-        time: string;
-        sessionId: string;
-        origin: string;
-        tool: string;
-        summary: string;
-        ok: boolean;
-        error?: string;
-        durationMs: number;
-    }>;
+    history?: HistoryRow[];
+    total?: number;
+    offset?: number;
+    limit?: number;
+    hasMore?: boolean;
 }
 
 function configuredPort(): number {
@@ -63,12 +70,15 @@ export function mcpEnabled(): boolean {
     return vscode.workspace.getConfiguration('keepwork.mcp').get<boolean>('enableHttp', true);
 }
 
-export function configuredRoot(context: vscode.ExtensionContext): string {
+export function configuredRoot(_context?: vscode.ExtensionContext): string {
     const cfg = vscode.workspace.getConfiguration('keepwork.mcp').get<string>('workspaceRoot') || '';
-    if (cfg.trim()) return cfg.trim();
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (folder) return folder;
-    return context.extensionPath;
+    if (cfg.trim()) {
+        const abs = path.resolve(cfg.trim());
+        fs.mkdirSync(abs, { recursive: true });
+        fs.mkdirSync(path.join(abs, DEFAULT_WORKSPACE_SLOT), { recursive: true });
+        return abs;
+    }
+    return resolveWorkspaceRoot();
 }
 
 export async function probeHealth(): Promise<HealthInfo> {
@@ -105,9 +115,13 @@ export async function fetchAdminStatus(): Promise<AdminStatus | null> {
     }
 }
 
-export async function fetchAdminHistory(): Promise<HistoryPayload | null> {
+export async function fetchAdminHistory(opts?: { offset?: number; limit?: number }): Promise<HistoryPayload | null> {
     try {
-        const res = await adminFetch('/admin/history');
+        const params = new URLSearchParams();
+        if (opts?.offset != null) params.set('offset', String(Math.max(0, opts.offset)));
+        if (opts?.limit != null) params.set('limit', String(opts.limit));
+        const q = params.toString();
+        const res = await adminFetch(`/admin/history${q ? `?${q}` : ''}`);
         if (!res.ok) return null;
         return await res.json() as HistoryPayload;
     } catch {
@@ -137,9 +151,16 @@ function findNode(): Promise<string> {
 
 export async function ensureDaemon(context: vscode.ExtensionContext): Promise<HealthInfo> {
     if (!mcpEnabled()) return { ok: false, error: 'disabled' };
+    const wanted = configuredRoot(context);
     const health = await probeHealth();
-    if (health.ok) return health;
-    if (health.stranger) return health;
+    if (health.ok) {
+        const current = String(health.workspaceRoot || '').trim();
+        if (!current || path.resolve(current) === path.resolve(wanted)) return health;
+        await stopDaemon();
+        await new Promise(r => setTimeout(r, 400));
+    } else if (health.stranger) {
+        return health;
+    }
 
     const cli = path.join(context.extensionPath, 'out', 'cli.js');
     if (!fs.existsSync(cli)) {

@@ -1,7 +1,6 @@
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
-import { readConfigFile } from './config';
+import { defaultUserWorkspace, DEFAULT_WORKSPACE_SLOT, readConfigFile } from './config';
 
 export class PathEscapeError extends Error {
     constructor(message: string) {
@@ -15,19 +14,28 @@ export function resolveWorkspaceRoot(override?: string): string {
         override,
         process.env.KEEPWORK_MCP_ROOT,
         readConfigFile().workspaceRoot,
-        process.cwd(),
-        os.homedir(),
+        defaultUserWorkspace(),
     ];
     for (const raw of candidates) {
         const value = String(raw || '').trim();
         if (!value) continue;
+        const resolved = path.resolve(value);
         try {
-            return fs.realpathSync.native(path.resolve(value));
+            fs.mkdirSync(resolved, { recursive: true });
+            fs.mkdirSync(path.join(resolved, DEFAULT_WORKSPACE_SLOT), { recursive: true });
         } catch {
-            return path.resolve(value);
+            /* still return the path */
+        }
+        try {
+            return fs.realpathSync.native(resolved);
+        } catch {
+            return resolved;
         }
     }
-    return path.resolve(os.homedir());
+    const fallback = path.resolve(defaultUserWorkspace());
+    fs.mkdirSync(fallback, { recursive: true });
+    fs.mkdirSync(path.join(fallback, DEFAULT_WORKSPACE_SLOT), { recursive: true });
+    return fallback;
 }
 
 function realOrResolve(p: string): string {

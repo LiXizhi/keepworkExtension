@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { DEFAULT_TIMEOUT_MS, GLOBAL_TERMINAL_CAP, MAX_TIMEOUT_MS, OUTPUT_CHAR_CAP } from './config';
 import { confinePath, PathEscapeError } from './paths';
+import { tryRunInVscodeTerminal } from './vscodeBridge';
 
 export interface TerminalResult {
     ok: boolean;
@@ -12,6 +14,7 @@ export interface TerminalResult {
     stderr: string;
     timedOut: boolean;
     truncated: boolean;
+    via?: 'vscode-terminal' | 'spawn';
 }
 
 const DENY_PATTERNS: RegExp[] = [
@@ -91,11 +94,27 @@ export async function runTerminal(opts: {
         if (err instanceof PathEscapeError) throw err;
         throw new Error(`Invalid cwd: ${opts.cwd}`);
     }
+    try {
+        if (!existsSync(cwd)) mkdirSync(cwd, { recursive: true });
+        else if (!statSync(cwd).isDirectory()) throw new Error(`cwd is not a directory: ${cwd}`);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.startsWith('cwd is not')) throw err;
+        throw new Error(`Working directory missing and could not be created (${cwd}): ${msg}`);
+    }
     let timeoutMs = Number(opts.timeoutMs);
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) timeoutMs = DEFAULT_TIMEOUT_MS;
     timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(1000, timeoutMs));
 
-    return withGlobalSlot(() => new Promise<TerminalResult>((resolve) => {
+    return withGlobalSlot(async () => {
+        const viaVscode = await tryRunInVscodeTerminal({ command, cwd, timeoutMs });
+        if (viaVscode) return viaVscode;
+        return runSpawn(command, cwd, timeoutMs);
+    });
+}
+
+function runSpawn(command: string, cwd: string, timeoutMs: number): Promise<TerminalResult> {
+    return new Promise((resolve) => {
         const child = spawn(command, {
             cwd,
             shell: true,
@@ -147,21 +166,26 @@ export async function runTerminal(opts: {
                 stderr,
                 timedOut,
                 truncated,
+                via: 'spawn',
             });
         };
 
         child.on('error', (err) => {
-            stderr += String(err.message || err);
+            const msg = String(err.message || err);
+            stderr += /ENOENT/i.test(msg)
+                ? `${msg}\n(working directory must exist: ${cwd})`
+                : msg;
             finish(1, null);
         });
         child.on('close', (code, signal) => finish(code, signal));
-    }));
+    });
 }
 
 export function formatTerminalResult(result: TerminalResult): string {
     const lines = [
         `cwd: ${result.cwd}`,
         `exit: ${result.timedOut ? 'timeout' : result.exitCode}`,
+        result.via ? `via: ${result.via}` : '',
         result.truncated ? 'output: truncated' : '',
         result.stdout ? `--- stdout ---\n${result.stdout}` : '--- stdout ---\n(empty)',
         result.stderr ? `--- stderr ---\n${result.stderr}` : '',

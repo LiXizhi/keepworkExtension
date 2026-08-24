@@ -1,4 +1,4 @@
-import { HISTORY_MAX, IDLE_SESSION_MS } from '../core/config';
+import { HISTORY_MAX, HISTORY_PAGE_DEFAULT, HISTORY_PAGE_MAX, IDLE_SESSION_MS } from '../core/config';
 
 export interface ClientSession {
     sessionId: string;
@@ -94,8 +94,35 @@ export function recordCall(row: Omit<HistoryRow, 'time'> & { time?: string }): v
     while (history.length > HISTORY_MAX) history.shift();
 }
 
-export function listHistory(): HistoryRow[] {
-    return [...history].reverse();
+export interface HistoryPage {
+    history: HistoryRow[];
+    total: number;
+    offset: number;
+    limit: number;
+    hasMore: boolean;
+}
+
+/** Newest-first page. Does not copy the full ring buffer. */
+export function listHistory(offset = 0, limit = HISTORY_PAGE_DEFAULT): HistoryPage {
+    const total = history.length;
+    const off = Math.max(0, Math.min(Math.floor(Number(offset) || 0), total));
+    const raw = Number(limit);
+    const lim = Math.max(1, Math.min(
+        Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : HISTORY_PAGE_DEFAULT,
+        HISTORY_PAGE_MAX,
+    ));
+    const items: HistoryRow[] = [];
+    const newest = total - 1 - off;
+    for (let i = 0; i < lim && newest - i >= 0; i++) {
+        items.push(history[newest - i]);
+    }
+    return {
+        history: items,
+        total,
+        offset: off,
+        limit: lim,
+        hasMore: off + items.length < total,
+    };
 }
 
 export function pruneIdleSessions(): string[] {

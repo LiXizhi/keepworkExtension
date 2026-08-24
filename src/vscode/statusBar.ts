@@ -40,7 +40,7 @@ export async function refreshStatusBar(item: vscode.StatusBarItem): Promise<void
     }
 
     const status = await fetchAdminStatus();
-    const history = await fetchAdminHistory();
+    const history = await fetchAdminHistory({ offset: 0, limit: 6 });
     const clients = status?.clients || [];
     item.text = clients.length ? `$(server) Keepwork MCP · ${clients.length}` : '$(server) Keepwork MCP';
     item.backgroundColor = undefined;
@@ -51,6 +51,7 @@ export async function refreshStatusBar(item: vscode.StatusBarItem): Promise<void
         `- URL: \`${mcpBaseUrl()}/mcp\``,
         `- pid: ${status?.pid ?? health.pid ?? '?'}`,
         `- root: \`${status?.workspaceRoot || '?'}\``,
+        `- terminal: VS Code Keepwork panel (reused)`,
         `- clients: ${clients.length}`,
         `- auth: ${health.requireAuth ? 'token required' : 'open'}`,
         '',
@@ -77,6 +78,21 @@ export async function refreshStatusBar(item: vscode.StatusBarItem): Promise<void
     item.tooltip = md;
 }
 
-export function formatPanelPayload(status: AdminStatus | null, history: HistoryPayload | null, healthOk: boolean) {
-    return { status, history: history?.history || [], healthOk, baseUrl: mcpBaseUrl() };
+export function formatPanelPayload(
+    status: AdminStatus | null,
+    history: HistoryPayload | null,
+    healthOk: boolean,
+    workspaceRoot = '',
+) {
+    return {
+        status,
+        history: history?.history || [],
+        historyTotal: history?.total ?? (history?.history || []).length,
+        historyOffset: history?.offset ?? 0,
+        historyLimit: history?.limit ?? (history?.history || []).length,
+        historyHasMore: !!history?.hasMore,
+        healthOk,
+        baseUrl: mcpBaseUrl(),
+        workspaceRoot: workspaceRoot || status?.workspaceRoot || '',
+    };
 }

@@ -4,6 +4,7 @@ import { SERVER_NAME, SERVER_VERSION } from '../core/config';
 import { hasRipgrep, grepFiles, formatGrepResult } from '../core/grep';
 import { resolveWorkspaceRoot } from '../core/paths';
 import { enqueueSession, formatTerminalResult, runTerminal } from '../core/terminal';
+import { vscodeTerminalBridgeLive } from '../core/vscodeBridge';
 import { currentRequest } from './context';
 import { recordCall, summarizeArgs } from './sessions';
 
@@ -73,6 +74,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
                 `- port: ${runtime.port}`,
                 `- pid: ${process.pid}`,
                 `- workspaceRoot: ${runtime.root}`,
+                `- terminal: ${vscodeTerminalBridgeLive() ? 'vscode (Keepwork panel)' : 'spawn'}`,
                 `- startedAt: ${runtime.startedAt}`,
                 `- ripgrep: ${rg ? 'yes' : 'no (Node walker fallback)'}`,
                 `- requireAuth: ${runtime.requireAuth ? 'yes' : 'no'}`,
@@ -86,7 +88,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'run_terminal',
         {
-            description: 'Run a shell command on the user\'s local disk. cwd is relative to the MCP workspace root (see mcp_status). AIChat fills cwd from the bound local folder when omitted. Requires user confirmation in AIChat.',
+            description: 'Run a shell command on the user\'s local disk. When VS Code / Cursor is open, the command runs in the reused Keepwork integrated terminal (bottom panel). cwd is relative to the MCP workspace root (see mcp_status), a per-user folder by default.',
             inputSchema: z.object({
                 command: z.string().describe('Shell command to run'),
                 cwd: z.string().optional().describe('Working directory relative to the MCP workspace root, e.g. LiXizhiDocs or LiXizhiDocs/_wiki. Omit to use the AIChat-bound local folder.'),

@@ -6,9 +6,11 @@ import { randomBytes } from 'node:crypto';
 export const DEFAULT_PORT = 8089;
 export const BIND_HOST = '127.0.0.1';
 export const SERVER_NAME = 'keepwork-mcp';
-export const SERVER_VERSION = '0.1.0';
+export const SERVER_VERSION = '0.1.1';
 export const IDLE_SESSION_MS = 30 * 60 * 1000;
-export const HISTORY_MAX = 100;
+export const HISTORY_MAX = 500;
+export const HISTORY_PAGE_DEFAULT = 20;
+export const HISTORY_PAGE_MAX = 50;
 export const GLOBAL_TERMINAL_CAP = 4;
 export const OUTPUT_CHAR_CAP = 24000;
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -32,10 +34,33 @@ export function mcpHomeDir(): string {
     return path.join(os.homedir(), '.keepwork-mcp');
 }
 
+/** Default MCP sandbox parent: ~/.keepwork-mcp/workspace */
+export function defaultUserWorkspace(): string {
+    return path.join(mcpHomeDir(), 'workspace');
+}
+
+/** Slot used when AIChat has no workspace selected. */
+export const DEFAULT_WORKSPACE_SLOT = 'default';
+
+export function defaultWorkspaceSlotDir(root?: string): string {
+    return path.join(root || defaultUserWorkspace(), DEFAULT_WORKSPACE_SLOT);
+}
+
 export function ensureMcpHome(): string {
     const dir = mcpHomeDir();
     fs.mkdirSync(dir, { recursive: true });
     return dir;
+}
+
+export function ensureUserWorkspace(dir?: string): string {
+    const target = path.resolve(String(dir || '').trim() || defaultUserWorkspace());
+    fs.mkdirSync(target, { recursive: true });
+    try {
+        fs.mkdirSync(path.join(target, DEFAULT_WORKSPACE_SLOT), { recursive: true });
+    } catch {
+        /* ignore */
+    }
+    return target;
 }
 
 export function configPath(): string {
@@ -57,6 +82,52 @@ export function readConfigFile(): McpConfigFile {
         return parsed && typeof parsed === 'object' ? parsed : {};
     } catch {
         return {};
+    }
+}
+
+export function writeConfigFile(partial: McpConfigFile): void {
+    ensureMcpHome();
+    const next = { ...readConfigFile(), ...partial };
+    fs.writeFileSync(configPath(), JSON.stringify(next, null, 2), 'utf8');
+}
+
+export interface TerminalBridgeInfo {
+    port: number;
+    pid: number;
+    token: string;
+}
+
+export function terminalBridgePath(): string {
+    return path.join(mcpHomeDir(), 'terminal-bridge.json');
+}
+
+export function readTerminalBridge(): TerminalBridgeInfo | null {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(terminalBridgePath(), 'utf8')) as TerminalBridgeInfo;
+        if (!parsed || typeof parsed.port !== 'number' || !parsed.token) return null;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+export function writeTerminalBridge(info: TerminalBridgeInfo): void {
+    ensureMcpHome();
+    fs.writeFileSync(terminalBridgePath(), JSON.stringify(info, null, 2), {
+        encoding: 'utf8',
+        mode: 0o600,
+    });
+}
+
+export function clearTerminalBridge(ownerPid?: number): void {
+    try {
+        if (ownerPid) {
+            const cur = readTerminalBridge();
+            if (cur && cur.pid !== ownerPid) return;
+        }
+        fs.unlinkSync(terminalBridgePath());
+    } catch {
+        /* ignore */
     }
 }
 

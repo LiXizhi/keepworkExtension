@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
-    BIND_HOST, SERVER_NAME, SERVER_VERSION, writeInstance, clearInstance, readOrCreateToken,
+    BIND_HOST, HISTORY_PAGE_DEFAULT, SERVER_NAME, SERVER_VERSION, writeInstance, clearInstance, readOrCreateToken,
     resolveRequireAuth,
 } from '../core/config';
 import { resolveWorkspaceRoot } from '../core/paths';
@@ -13,6 +13,7 @@ import {
     listHistory, listSessions, pruneIdleSessions, removeSession, sessionCount,
     setSessionCloser, upsertSession, touchSession,
 } from './sessions';
+import { liveClientCount, tryHandleParacraft } from '../core/paracraftClients';
 
 export interface HttpServerHandle {
     port: number;
@@ -137,6 +138,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     port,
                     pid: process.pid,
                     clients: sessionCount(),
+                    paracraftClients: liveClientCount(),
                     requireAuth: authRequired,
                     workspaceRoot: runtime.root,
                 });
@@ -168,7 +170,10 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
 
             if (pathname === '/admin/history' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
-                sendJson(res, 200, { ok: true, history: listHistory() });
+                const offset = Number(url.searchParams.get('offset') || 0);
+                const limitRaw = url.searchParams.get('limit');
+                const limit = limitRaw == null || limitRaw === '' ? HISTORY_PAGE_DEFAULT : Number(limitRaw);
+                sendJson(res, 200, { ok: true, ...listHistory(offset, limit) });
                 return;
             }
 
@@ -233,6 +238,17 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                 });
                 return;
             }
+
+            const handled = await tryHandleParacraft({
+                req,
+                res,
+                pathname,
+                method: req.method || 'GET',
+                readBody: () => readBody(req),
+                sendJson: (status, body) => sendJson(res, status, body),
+                assertAuth: () => assertAuth(req, url, res),
+            });
+            if (handled) return;
 
             sendJson(res, 404, { error: 'not found' });
         } catch (err) {

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import { readToken } from '../core/config';
-import { ensureDaemon, fetchAdminHistory, fetchAdminStatus, probeHealth, stopDaemon } from './daemon';
+import { HISTORY_PAGE_DEFAULT, readToken } from '../core/config';
+import { configuredRoot, ensureDaemon, fetchAdminHistory, fetchAdminStatus, probeHealth, stopDaemon } from './daemon';
 import { formatPanelPayload } from './statusBar';
 
 export function openMcpPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
@@ -12,12 +12,24 @@ export function openMcpPanel(context: vscode.ExtensionContext): vscode.WebviewPa
     );
 
     panel.webview.html = panelHtml();
+    let historyOffset = 0;
 
     const push = async () => {
         const health = await probeHealth();
         const status = health.ok ? await fetchAdminStatus() : null;
-        const history = health.ok ? await fetchAdminHistory() : null;
-        void panel.webview.postMessage({ type: 'update', payload: formatPanelPayload(status, history, health.ok) });
+        let history = health.ok
+            ? await fetchAdminHistory({ offset: historyOffset, limit: HISTORY_PAGE_DEFAULT })
+            : null;
+        const total = history?.total ?? 0;
+        if (history && total > 0 && historyOffset >= total) {
+            historyOffset = Math.max(0, Math.floor((total - 1) / HISTORY_PAGE_DEFAULT) * HISTORY_PAGE_DEFAULT);
+            history = await fetchAdminHistory({ offset: historyOffset, limit: HISTORY_PAGE_DEFAULT });
+        }
+        if (!health.ok) historyOffset = 0;
+        void panel.webview.postMessage({
+            type: 'update',
+            payload: formatPanelPayload(status, history, health.ok, configuredRoot(context)),
+        });
     };
 
     const timer = setInterval(() => { void push(); }, 2000);
@@ -47,6 +59,16 @@ export function openMcpPanel(context: vscode.ExtensionContext): vscode.WebviewPa
             vscode.window.showInformationMessage('Keepwork MCP token copied');
         }
         if (msg?.type === 'refresh') await push();
+        if (msg?.type === 'historyPage') {
+            historyOffset = Math.max(0, Math.floor(Number(msg.offset) || 0));
+            await push();
+        }
+        if (msg?.type === 'openWorkspace') await vscode.commands.executeCommand('keepwork.openMcpWorkspace');
+        if (msg?.type === 'changeWorkspace') {
+            await vscode.commands.executeCommand('keepwork.changeMcpWorkspace');
+            await push();
+        }
+        if (msg?.type === 'showTerminal') await vscode.commands.executeCommand('keepwork.showMcpTerminal');
     }, undefined, context.subscriptions);
 
     return panel;
@@ -73,6 +95,9 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--vsco
 .fail { color: var(--vscode-testing-iconFailed, #c33); }
 code { font-size: 11px; }
 .empty { opacity: .6; }
+.pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; }
+.pager span { opacity: .85; }
+button:disabled { opacity: .45; cursor: default; }
 </style>
 </head>
 <body>
@@ -81,6 +106,9 @@ code { font-size: 11px; }
   <button id="start">Start</button>
   <button id="stop" class="secondary">Stop</button>
   <button id="copy" class="secondary">Copy token</button>
+  <button id="openDir" class="secondary">Open directory</button>
+  <button id="changeDir" class="secondary">Change directory</button>
+  <button id="showTerm" class="secondary">Show terminal</button>
   <button id="refresh" class="secondary">Refresh</button>
 </div>
 <div class="meta" id="meta">Loading…</div>
@@ -93,6 +121,9 @@ const vscode = acquireVsCodeApi();
 document.getElementById('start').onclick = () => vscode.postMessage({ type: 'start' });
 document.getElementById('stop').onclick = () => vscode.postMessage({ type: 'stop' });
 document.getElementById('copy').onclick = () => vscode.postMessage({ type: 'copyToken' });
+document.getElementById('openDir').onclick = () => vscode.postMessage({ type: 'openWorkspace' });
+document.getElementById('changeDir').onclick = () => vscode.postMessage({ type: 'changeWorkspace' });
+document.getElementById('showTerm').onclick = () => vscode.postMessage({ type: 'showTerminal' });
 document.getElementById('refresh').onclick = () => vscode.postMessage({ type: 'refresh' });
 
 function esc(s) {
@@ -105,8 +136,10 @@ window.addEventListener('message', (event) => {
   if (type !== 'update') return;
   const st = payload.status;
   const meta = document.getElementById('meta');
+  const root = esc(payload.workspaceRoot || (st && st.workspaceRoot) || '');
   if (!payload.healthOk) {
-    meta.innerHTML = 'Daemon is <b>not running</b>. Click Start, or run <code>npm start</code> in keepworkExtension.';
+    meta.innerHTML = 'Daemon is <b>not running</b>. Click Start, or run <code>npm start</code> in keepworkExtension.'
+      + (root ? '<br>Working directory: <code>' + root + '</code>' : '');
   } else if (!st) {
     meta.innerHTML = 'Daemon is up but admin API failed (check pairing token in ~/.keepwork-mcp/token).';
   } else {
@@ -115,8 +148,9 @@ window.addEventListener('message', (event) => {
       'URL: <code>' + esc(payload.baseUrl) + '/mcp</code>',
       'pid: ' + esc(st.pid),
       'port: ' + esc(st.port),
-      'root: <code>' + esc(st.workspaceRoot) + '</code>',
+      'root: <code>' + esc(st.workspaceRoot || payload.workspaceRoot) + '</code>',
       'uptime: ' + Math.round((st.uptimeMs || 0) / 1000) + 's',
+      'terminal: VS Code <b>Keepwork</b> panel (reused). Show terminal opens it at the bottom.',
     ].join('<br>');
   }
   const clients = (st && st.clients) || [];
@@ -130,12 +164,31 @@ window.addEventListener('message', (event) => {
   }
   const hist = payload.history || [];
   const hh = document.getElementById('history');
-  if (!hist.length) {
+  const total = payload.historyTotal || 0;
+  const offset = payload.historyOffset || 0;
+  const limit = payload.historyLimit || 20;
+  const hasMore = !!payload.historyHasMore;
+  if (!total && !hist.length) {
     hh.innerHTML = '<p class="empty">No tool calls yet.</p>';
   } else {
-    hh.innerHTML = '<table><thead><tr><th>Time</th><th>Client</th><th>Tool</th><th>Summary</th><th>Result</th><th>ms</th></tr></thead><tbody>'
-      + hist.map(h => '<tr><td>' + esc(h.time) + '</td><td><code>' + esc(short(h.sessionId)) + '</code></td><td>' + esc(h.tool) + '</td><td>' + esc(h.summary) + '</td><td class="' + (h.ok ? 'ok' : 'fail') + '">' + (h.ok ? 'ok' : esc(h.error || 'fail')) + '</td><td>' + esc(h.durationMs) + '</td></tr>').join('')
-      + '</tbody></table>';
+    const from = hist.length ? offset + 1 : 0;
+    const to = offset + hist.length;
+    const prevOff = Math.max(0, offset - limit);
+    const nextOff = offset + limit;
+    hh.innerHTML = (hist.length
+      ? '<table><thead><tr><th>Time</th><th>Client</th><th>Tool</th><th>Summary</th><th>Result</th><th>ms</th></tr></thead><tbody>'
+        + hist.map(h => '<tr><td>' + esc(h.time) + '</td><td><code>' + esc(short(h.sessionId)) + '</code></td><td>' + esc(h.tool) + '</td><td>' + esc(h.summary) + '</td><td class="' + (h.ok ? 'ok' : 'fail') + '">' + (h.ok ? 'ok' : esc(h.error || 'fail')) + '</td><td>' + esc(h.durationMs) + '</td></tr>').join('')
+        + '</tbody></table>'
+      : '<p class="empty">No tool calls on this page.</p>')
+      + '<div class="pager">'
+      + '<button id="histPrev" class="secondary"' + (offset <= 0 ? ' disabled' : '') + '>Newer</button>'
+      + '<span>' + from + '–' + to + ' of ' + total + '</span>'
+      + '<button id="histNext" class="secondary"' + (hasMore ? '' : ' disabled') + '>Older</button>'
+      + '</div>';
+    const prev = document.getElementById('histPrev');
+    const next = document.getElementById('histNext');
+    if (prev && offset > 0) prev.onclick = () => vscode.postMessage({ type: 'historyPage', offset: prevOff });
+    if (next && hasMore) next.onclick = () => vscode.postMessage({ type: 'historyPage', offset: nextOff });
   }
 });
 </script>
