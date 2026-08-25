@@ -6,6 +6,7 @@ import {
     BIND_HOST, HISTORY_PAGE_DEFAULT, SERVER_NAME, SERVER_VERSION, writeInstance, clearInstance, readOrCreateToken,
     resolveRequireAuth,
 } from '../core/config';
+import { tryHandleFs } from '../core/fsServe';
 import { inspectDiskPath, resolveWorkspaceRoot } from '../core/paths';
 import { requestContext } from './context';
 import { createMcpServer, ServerRuntime } from './server';
@@ -155,6 +156,14 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                 sendJson(res, 200, { ok: true, ...info });
                 return;
             }
+
+            if (tryHandleFs({
+                pathname,
+                method: req.method || 'GET',
+                url,
+                res,
+                sendJson: (status, body) => sendJson(res, status, body),
+            })) return;
 
             if (pathname === '/' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

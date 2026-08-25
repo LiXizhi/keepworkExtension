@@ -46,6 +46,7 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 | `src/core/html_text.ts` | Structured HTML → text (headings/lists; never markup) |
 | `src/core/keepwork.ts` | Keepwork URL → git clone URL / open-in-browser URL |
 | `src/core/paracraftClients.ts` | Desktop Paracraft CLI registry + job queue (`/paracraft/*`) |
+| `src/core/fsServe.ts` | Loopback file overlay for web-paracraft (`/fs/list`, `/fs/file`) |
 | `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
 | `src/mcp/sessions.ts` | Connected clients + in-memory call history (paged list) |
@@ -72,6 +73,8 @@ HTTP:
 
 - `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`)
 - `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory
+- `GET /fs/list?root=&path=` — list overlay files under an absolute `root` + relative `path` (web-paracraft `searchroot`/`searchpath`; loopback, no token)
+- `GET /fs/file?root=&path=` — raw bytes of one confined file (`Cache-Control: no-store`)
 - `POST/GET/DELETE /mcp` — Streamable HTTP; Bearer token only if `requireAuth`
 - `GET /admin/status`, `GET /admin/history?offset=&limit=`, `POST /admin/stop` — token, loopback
   (`/admin/history` returns one newest-first page, default `limit=20`, max 50; includes `total` / `hasMore`)
@@ -135,12 +138,14 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 |------|-----|
 | `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/AIChat/js/local_mcp.js` | Browser MCP client + composer pill |
 | `c:/lxzsrc/maisi/.../AIChat/docs/local-mcp.md` | How to pair the token |
+| `c:/lxzsrc/webparacraft` | Local web-paracraft; `?searchroot=&searchpath=` overlays git files via `/fs/*` |
 | `c:/lxzsrc/ParacraftMaker` | Sibling Maker MCP (stdio + Agent Bridge `:18300`, not this port) |
 
 ## When changing behavior
 
 - New MCP tool → `src/mcp/server.ts` + AIChat `KEEPWORK_TOOL_NAMES` / chip labels in `chat_render.js` + README + this file.
 - Paracraft CLI hub → `src/core/paracraftClients.ts` + `/paracraft/*` in `src/mcp/http.ts`; keep register/poll open on loopback; never log screenshot base64.
+- Web-paracraft local script overlay → `src/core/fsServe.ts` (`/fs/list`, `/fs/file`); confine to the URL `root`; keep allow-list of text/script extensions.
 - Security / CORS / PNA / token → `src/mcp/http.ts` only; keep origin allowlist tight (`keepwork.com`, localhost).
 - Terminal policy → `src/core/terminal.ts` (deny-list, timeout, output cap) and keep AIChat confirm in `chat_agents.js` (`local-mcp-terminal-confirm`).
 - Singleton / status bar → `src/vscode/daemon.ts` + `statusBar.ts` + `mcpPanel.ts`; do not move the HTTP listener into the extension host. The VS Code terminal bridge (`src/vscode/terminalBridge.ts`) is a separate loopback helper.
