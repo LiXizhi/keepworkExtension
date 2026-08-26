@@ -1,4 +1,4 @@
-import { OUTPUT_CHAR_CAP, readTerminalBridge } from './config';
+import { OUTPUT_CHAR_CAP, readNotifyBridge, readTerminalBridge } from './config';
 import type { TerminalResult } from './terminal';
 
 /** Ask the VS Code extension to run a command in the integrated terminal. Null = no live editor. */
@@ -57,4 +57,38 @@ export async function tryRunInVscodeTerminal(opts: {
 
 export function vscodeTerminalBridgeLive(): boolean {
     return !!readTerminalBridge();
+}
+
+/** Ask the VS Code extension to show a calendar notification. Null/false = no live editor. */
+export async function tryShowVscodeNotification(opts: {
+    title: string;
+    body: string;
+    openUrl: string;
+}): Promise<boolean> {
+    const info = readNotifyBridge();
+    if (!info) return false;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+        const res = await fetch(`http://127.0.0.1:${info.port}/notify`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${info.token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                title: opts.title,
+                body: opts.body,
+                openUrl: opts.openUrl,
+            }),
+            signal: ctrl.signal,
+        });
+        if (!res.ok) return false;
+        const body = await res.json() as { ok?: boolean };
+        return body.ok !== false;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
 }

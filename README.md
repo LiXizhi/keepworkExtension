@@ -33,6 +33,8 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 
 **Paracraft CLI hub** (`/paracraft/*`, same loopback server): desktop Paracraft registers on start. If Keepwork MCP is up, the client long-polls jobs (and heartbeats) until the hub goes down. The daemon also scans loopback NPL HTTP (`8099-8115` `/ajax/paracraft_cli`) so a client that started while the daemon was down can still be found. If a client reports an NPL HTTP `nplPort` and the hub can ping it, dispatch goes to that port and skips long-poll. AIChat `ParacraftTool.html` lists clients and dispatches `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`. Client register/poll stay open on loopback. List/dispatch use the pairing token only when `requireAuth` is on.
 
+**Calendar reminders** (`/calendar/reminders`): AIChat’s personal calendar tool POSTs the next 7 days of reminders. The daemon stores `~/.keepwork-mcp/calendar-reminders.json` and fires timers. When this extension is active, a notification offers **打开日历**, which opens the `openUrl` (usually `https://keepwork.com/chat?tool=calendar` or a local `AIChat.html?tool=calendar`). Due reminders retry if VS Code was closed.
+
 Default **workspace root** (confinement parent) is `~/.keepwork-mcp/workspace`. AIChat uses a slot under it:
 
 - no workspace selected → `~/.keepwork-mcp/workspace/default`

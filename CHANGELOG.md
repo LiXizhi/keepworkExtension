@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Calendar reminder hub: `POST`/`GET /calendar/reminders` stores a 7-day set in `~/.keepwork-mcp/calendar-reminders.json`. The extension shows a VS Code notification with **打开日历**.
 - `web_search` and `fetch_url` MCP tools: Node fetch on the user's machine, parse HTML locally, return minified JSON (never raw markup). Bing → DuckDuckGo → Baidu fallback. SSRF blocks localhost / private IPs.
 - `fetch_url` renders HTML with system Edge/Chrome `--dump-dom` when present, then extracts structured text; falls back to static HTML extract.
 

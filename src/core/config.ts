@@ -131,6 +131,46 @@ export function clearTerminalBridge(ownerPid?: number): void {
     }
 }
 
+export interface NotifyBridgeInfo {
+    port: number;
+    pid: number;
+    token: string;
+}
+
+export function notifyBridgePath(): string {
+    return path.join(mcpHomeDir(), 'notify-bridge.json');
+}
+
+export function readNotifyBridge(): NotifyBridgeInfo | null {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(notifyBridgePath(), 'utf8')) as NotifyBridgeInfo;
+        if (!parsed || typeof parsed.port !== 'number' || !parsed.token) return null;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+export function writeNotifyBridge(info: NotifyBridgeInfo): void {
+    ensureMcpHome();
+    fs.writeFileSync(notifyBridgePath(), JSON.stringify(info, null, 2), {
+        encoding: 'utf8',
+        mode: 0o600,
+    });
+}
+
+export function clearNotifyBridge(ownerPid?: number): void {
+    try {
+        if (ownerPid) {
+            const cur = readNotifyBridge();
+            if (cur && cur.pid !== ownerPid) return;
+        }
+        fs.unlinkSync(notifyBridgePath());
+    } catch {
+        /* ignore */
+    }
+}
+
 /** Default is open (no token) so AIChat can connect without a pairing step. */
 export function resolveRequireAuth(override?: boolean): boolean {
     if (typeof override === 'boolean') return override;

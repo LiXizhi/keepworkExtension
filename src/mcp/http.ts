@@ -15,6 +15,7 @@ import {
     setSessionCloser, upsertSession, touchSession,
 } from './sessions';
 import { liveClientCount, startParacraftWatch, stopParacraftWatch, tryHandleParacraft } from '../core/paracraftClients';
+import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
 
 export interface HttpServerHandle {
     port: number;
@@ -157,13 +158,22 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                 return;
             }
 
-            if (tryHandleFs({
+            const handledFs = tryHandleFs({
                 pathname,
                 method: req.method || 'GET',
                 url,
                 res,
                 sendJson: (status, body) => sendJson(res, status, body),
-            })) return;
+            });
+            if (handledFs) return;
+
+            const handledCalendar = await tryHandleCalendar({
+                pathname,
+                method: req.method || 'GET',
+                readBody: () => readBody(req),
+                sendJson: (status, body) => sendJson(res, status, body),
+            });
+            if (handledCalendar) return;
 
             if (pathname === '/' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -298,10 +308,12 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
         name: SERVER_NAME,
     });
     startParacraftWatch();
+    startCalendarWatch();
 
     const close = async () => {
         clearInterval(pruneTimer);
         stopParacraftWatch();
+        stopCalendarWatch();
         for (const t of transports.values()) {
             try { await t.close(); } catch { /* ignore */ }
         }

@@ -40,12 +40,14 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 | `src/core/terminal.ts` | Shell spawn / VS Code terminal bridge, timeout, output cap, deny-list, per-session queue |
 | `src/core/vscodeBridge.ts` | Daemon client: POST to the extension terminal bridge |
 | `src/vscode/terminalBridge.ts` | Extension host: reuse Keepwork integrated terminal + `/run` loopback |
+| `src/vscode/notifyBridge.ts` | Extension host: calendar OS/VS Code notifications + open AIChat |
 | `src/core/grep.ts` | `rg` if present, else Node walk |
 | `src/core/web.ts` | Public http(s) fetch, SSRF checks, search-engine HTML parsers, compact JSON |
 | `src/core/headless.ts` | System Edge/Chrome `--dump-dom` for `fetch_url` |
 | `src/core/html_text.ts` | Structured HTML → text (headings/lists; never markup) |
 | `src/core/keepwork.ts` | Keepwork URL → git clone URL / open-in-browser URL |
 | `src/core/paracraftClients.ts` | Desktop Paracraft CLI registry + job queue (`/paracraft/*`) |
+| `src/core/calendarReminders.ts` | AIChat calendar 7-day reminders (`/calendar/reminders`) |
 | `src/core/fsServe.ts` | Loopback file overlay for web-paracraft (`/fs/list`, `/fs/file`) |
 | `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
@@ -87,6 +89,10 @@ HTTP:
   - `GET /paracraft/clients` — live desktop clients (Bearer if `requireAuth`); includes `nplPort` only when ping succeeded, plus `connectedAt` (first register, not reset on heartbeat)
   - `GET /paracraft/:id/timeline` — last screenshots + non-`health` action summaries (capped; no ping spam)
   - `POST /paracraft/:id/:action` — `health` / `world_status` / `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`
+- Calendar reminders (plain HTTP, loopback, same CORS as `/paracraft/register`):
+  - `POST /calendar/reminders` — replace the next 7-day reminder set `{ events: [{ id, title, start, remindAt, openUrl }], horizonDays }`
+  - `GET /calendar/reminders` — inspect the stored set
+  - Persist `~/.keepwork-mcp/calendar-reminders.json`. Daemon timers fire at `remindAt`; the extension notify bridge shows `showInformationMessage` with **打开日历** → `openExternal(openUrl)` (`http(s)` keepwork.com / localhost / 127.0.0.1 only). If VS Code is closed, due items retry every 15s until the bridge is up.
 
 Settings: `keepwork.mcp.enableHttp` / `keepwork.mcp.port` / `keepwork.mcp.workspaceRoot` / `keepwork.mcp.requireAuth` (default false).
 
