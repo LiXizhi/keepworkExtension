@@ -14,7 +14,8 @@ import {
     listHistory, listSessions, pruneIdleSessions, removeSession, sessionCount,
     setSessionCloser, upsertSession, touchSession,
 } from './sessions';
-import { liveClientCount, startParacraftWatch, stopParacraftWatch, tryHandleParacraft } from '../core/paracraftClients';
+import { liveClientCount, listWebserverRoots, setHubListenPort, startParacraftWatch, stopParacraftWatch, tryHandleParacraft, webserverBaseUrl } from '../core/paracraftClients';
+import { tryHandleWebserver } from '../core/webserverProxy';
 import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
 
 export interface HttpServerHandle {
@@ -62,13 +63,27 @@ function extractToken(req: http.IncomingMessage, url: URL): string {
     return String(url.searchParams.get('token') || '').trim();
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBodyBuffer(req: http.IncomingMessage): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
-        req.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-        req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        let size = 0;
+        req.on('data', (c) => {
+            const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+            size += buf.length;
+            if (size > 16_000_000) {
+                reject(new Error('request too large'));
+                req.destroy();
+                return;
+            }
+            chunks.push(buf);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
         req.on('error', reject);
     });
+}
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+    return readBodyBuffer(req).then((buf) => buf.toString('utf8'));
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -104,6 +119,7 @@ function escapeHtml(s: string): string {
 export async function startHttpServer(opts?: { port?: number; root?: string; requireAuth?: boolean }): Promise<HttpServerHandle> {
     const port = opts?.port && opts.port > 0 ? opts.port : 8089;
     const authRequired = resolveRequireAuth(opts?.requireAuth);
+    setHubListenPort(port);
     const runtime: ServerRuntime = {
         root: resolveWorkspaceRoot(opts?.root),
         port,
@@ -143,6 +159,8 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     paracraftClients: liveClientCount(),
                     requireAuth: authRequired,
                     workspaceRoot: runtime.root,
+                    webserverBase: webserverBaseUrl(),
+                    webservers: listWebserverRoots(),
                 });
                 return;
             }
@@ -279,6 +297,17 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                 assertAuth: () => assertAuth(req, url, res),
             });
             if (handled) return;
+
+            const handledWeb = await tryHandleWebserver({
+                req,
+                res,
+                pathname: url.pathname || '/',
+                method: req.method || 'GET',
+                url,
+                readBodyBuffer: () => readBodyBuffer(req),
+                sendJson: (status, body) => sendJson(res, status, body),
+            });
+            if (handledWeb) return;
 
             sendJson(res, 404, { error: 'not found' });
         } catch (err) {

@@ -3,9 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- WASM NPL code wiki front: `GET /health` reports `webserverBase`; `POST /paracraft/register` may return `webserverRoot`; `ALL /webserver/:instance/*` proxies into batched `http_request` jobs. See [docs/paracraft-cli.md](docs/paracraft-cli.md).
 - Calendar reminder hub: `POST`/`GET /calendar/reminders` stores a 7-day set in `~/.keepwork-mcp/calendar-reminders.json`. The extension shows a VS Code notification with **打开日历**.
 - `web_search` and `fetch_url` MCP tools: Node fetch on the user's machine, parse HTML locally, return minified JSON (never raw markup). Bing → DuckDuckGo → Baidu fallback. SSRF blocks localhost / private IPs.
 - `fetch_url` renders HTML with system Edge/Chrome `--dump-dom` when present, then extracts structured text; falls back to static HTML extract.
+- `/fs/file` always returns raw on-disk bytes (`application/octet-stream`, no charset). Do not assume UTF-8 for lua/html; some files are GBK or binary.
 
 ## [0.1.1] - 2026-08-13
 

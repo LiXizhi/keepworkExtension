@@ -10,6 +10,8 @@ const NPL_SCAN_TIMEOUT_MS = 600;
 const DISCOVER_MIN_MS = 2_000;
 const SCREENSHOT_FRESH_MS = 8_000;
 const JOB_WAIT_MS = 15_000;
+const HTTP_JOB_WAIT_MS = 20_000;
+const COALESCE_MS = 10;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = KEEP_ALIVE_MS;
 const MAX_HISTORY = 40;
@@ -31,6 +33,7 @@ export interface ParacraftIdentity {
     nplPort?: number | null;
     service?: string;
     version?: string;
+    webserver?: { instance?: string; root?: string } | string;
 }
 
 interface ScreenshotCache {
@@ -61,6 +64,8 @@ interface RegisteredClient extends ParacraftIdentity {
     nplFails: number;
     pendingKpProjectId?: string | number | null;
     pendingKpAt?: number;
+    webserverInstance?: string;
+    coalesceTimer?: ReturnType<typeof setTimeout> | null;
 }
 
 interface Job {
@@ -79,6 +84,90 @@ interface Poller {
 }
 
 const clients = new Map<string, RegisteredClient>();
+const webserverInstances = new Map<string, string>();
+let hubListenPort = 8089;
+
+export function setHubListenPort(port: number): void {
+    hubListenPort = port > 0 ? port : 8089;
+}
+
+export function webserverBaseUrl(): string {
+    return `http://127.0.0.1:${hubListenPort}/webserver`;
+}
+
+export function webserverRootUrl(instance: string): string {
+    return `${webserverBaseUrl()}/${instance}/`;
+}
+
+const WASM_INSTANCE_RE = /^webparacraft([1-9]\d*)$/;
+
+export function sanitizeWebserverInstance(raw: unknown, fallback = ''): string {
+    const fromRaw = String(raw || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32);
+    if (fromRaw) return fromRaw;
+    const fb = String(fallback || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
+    return fb || '';
+}
+
+function requestedWasmInstance(body: Partial<ParacraftIdentity>): string {
+    const spec = body.webserver;
+    let raw = '';
+    if (typeof spec === 'string') raw = spec;
+    else if (spec && typeof spec === 'object') raw = String(spec.instance || '');
+    const name = sanitizeWebserverInstance(raw);
+    return WASM_INSTANCE_RE.test(name) ? name : '';
+}
+
+function instanceTakenByOther(name: string, clientId: string): boolean {
+    const owner = webserverInstances.get(name);
+    return !!(owner && owner !== clientId && clients.has(owner));
+}
+
+function allocateWasmInstance(requested: string, clientId: string, prev?: string): string {
+    if (requested && !instanceTakenByOther(requested, clientId)) return requested;
+    if (prev && WASM_INSTANCE_RE.test(prev) && !instanceTakenByOther(prev, clientId)) return prev;
+    for (let n = 1; n < 10000; n++) {
+        const name = `webparacraft${n}`;
+        if (!instanceTakenByOther(name, clientId)) return name;
+    }
+    return `webparacraft${Date.now()}`;
+}
+
+export function getClientIdForWebserverInstance(instance: string): string | null {
+    const key = sanitizeWebserverInstance(instance);
+    if (!key) return null;
+    pruneStale();
+    const id = webserverInstances.get(key);
+    if (!id || !clients.has(id)) {
+        if (id) webserverInstances.delete(key);
+        return null;
+    }
+    return id;
+}
+
+export function listWebserverRoots(): Array<{ instance: string; root: string }> {
+    pruneStale();
+    const out: Array<{ instance: string; root: string }> = [];
+    for (const [instance, clientId] of webserverInstances) {
+        if (!clients.has(clientId)) continue;
+        out.push({ instance, root: webserverRootUrl(instance) });
+    }
+    out.sort((a, b) => a.instance.localeCompare(b.instance, undefined, { numeric: true }));
+    return out;
+}
+
+function parseWebserverInstance(body: Partial<ParacraftIdentity>, clientId: string, prev?: string): string {
+    const spec = body.webserver;
+    let raw = '';
+    if (typeof spec === 'string') raw = spec;
+    else if (spec && typeof spec === 'object') raw = String(spec.instance || '');
+    const explicit = sanitizeWebserverInstance(raw);
+    if (String(body.platform || '') === 'wasm') {
+        return allocateWasmInstance(requestedWasmInstance(body), clientId, prev);
+    }
+    if (explicit) return explicit;
+    if (prev) return prev;
+    return '';
+}
 
 function now(): number {
     return Date.now();
@@ -185,9 +274,17 @@ function dropClient(id: string, client: RegisteredClient): void {
         clearTimeout(client.poller.timer);
         client.poller.resolve([]);
     }
+    if (client.coalesceTimer) {
+        clearTimeout(client.coalesceTimer);
+        client.coalesceTimer = null;
+    }
     for (const job of client.jobs) {
         clearTimeout(job.timer);
         job.reject(new Error('client gone'));
+    }
+    if (client.webserverInstance) {
+        const mapped = webserverInstances.get(client.webserverInstance);
+        if (mapped === id) webserverInstances.delete(client.webserverInstance);
     }
     clients.delete(id);
 }
@@ -209,6 +306,7 @@ function pruneStale(): void {
     for (const [id, client] of clients) {
         if (client.nplPort && client.useNpl) continue;
         if (client.poller) continue;
+        if (client.jobs.length) continue;
         if (client.lastSeen < cutoff) dropClient(id, client);
     }
 }
@@ -314,18 +412,25 @@ function publicClient(c: RegisteredClient) {
         useNpl: c.useNpl === true,
         service: c.service,
         version: c.version,
+        webserver: c.webserverInstance
+            ? { instance: c.webserverInstance, root: webserverRootUrl(c.webserverInstance) }
+            : null,
     };
+}
+
+function isWasmClient(c: RegisteredClient): boolean {
+    return String(c.platform || '') === 'wasm';
 }
 
 export function liveClientCount(): number {
     pruneStale();
-    return clients.size;
+    return [...clients.values()].filter((c) => !isWasmClient(c)).length;
 }
 
 export async function listClients() {
     await discoverNplClients();
     pruneStale();
-    return [...clients.values()].map(publicClient);
+    return [...clients.values()].filter((c) => !isWasmClient(c)).map(publicClient);
 }
 
 export function unregisterClient(id: string): { ok: boolean } {
@@ -356,11 +461,24 @@ function applyOpenWorldIdentity(client: RegisteredClient, params: Record<string,
     }
 }
 
-export async function registerClient(body: Partial<ParacraftIdentity>, opts?: { skipNplPing?: boolean }): Promise<{ ok: boolean; clientId?: string; useNpl?: boolean; nplPort?: number | null; error?: string }> {
+export async function registerClient(body: Partial<ParacraftIdentity>, opts?: { skipNplPing?: boolean }): Promise<{ ok: boolean; clientId?: string; useNpl?: boolean; nplPort?: number | null; webserverRoot?: string | null; webserverInstance?: string | null; webserverBase?: string; error?: string }> {
     const clientId = String(body.clientId || '').trim();
     if (!clientId) return { ok: false, error: 'clientId required' };
     const prev = clients.get(clientId);
-    const nplPort = parseNplPort(body.nplPort) ?? parseNplPort(prev?.nplPort);
+    const platform = String(body.platform || prev?.platform || 'desktop');
+    const isWasm = platform === 'wasm';
+    const webserverInstance = parseWebserverInstance(body, clientId, prev?.webserverInstance);
+    if (webserverInstance && !isWasm) {
+        const owner = webserverInstances.get(webserverInstance);
+        if (owner && owner !== clientId && clients.has(owner)) {
+            return { ok: false, error: `webserver instance in use: ${webserverInstance}` };
+        }
+    }
+    if (prev?.webserverInstance && prev.webserverInstance !== webserverInstance) {
+        const mapped = webserverInstances.get(prev.webserverInstance);
+        if (mapped === clientId) webserverInstances.delete(prev.webserverInstance);
+    }
+    const nplPort = isWasm ? undefined : (parseNplPort(body.nplPort) ?? parseNplPort(prev?.nplPort));
     let pendingKpProjectId = prev?.pendingKpProjectId;
     let pendingKpAt = prev?.pendingKpAt;
     const pendingFresh = pendingKpProjectId != null && (now() - (pendingKpAt || 0)) < 45_000;
@@ -386,7 +504,7 @@ export async function registerClient(body: Partial<ParacraftIdentity>, opts?: { 
             : (kpChanged ? null : prev?.worldPath ?? null));
     const next: RegisteredClient = {
         clientId,
-        platform: String(body.platform || prev?.platform || 'desktop'),
+        platform,
         pid: typeof body.pid === 'number' ? body.pid : prev?.pid,
         worldEntered: body.worldEntered === true,
         worldName,
@@ -409,8 +527,10 @@ export async function registerClient(body: Partial<ParacraftIdentity>, opts?: { 
         nplFails: prev?.nplFails || 0,
         pendingKpProjectId,
         pendingKpAt,
+        webserverInstance: webserverInstance || undefined,
+        coalesceTimer: prev?.coalesceTimer || null,
     };
-    if (nplPort) {
+    if (nplPort && !isWasm) {
         const alive = opts?.skipNplPing ? true : await pingNpl(nplPort, next.pid);
         markNplPing(next, alive);
         if (alive && next.poller) {
@@ -420,8 +540,17 @@ export async function registerClient(body: Partial<ParacraftIdentity>, opts?: { 
         }
     }
     clients.set(clientId, next);
+    if (webserverInstance) webserverInstances.set(webserverInstance, clientId);
     startParacraftWatch();
-    return { ok: true, clientId, useNpl: next.useNpl, nplPort: next.useNpl ? nplPort ?? null : null };
+    return {
+        ok: true,
+        clientId,
+        useNpl: next.useNpl,
+        nplPort: next.useNpl ? nplPort ?? null : null,
+        webserverInstance: webserverInstance || null,
+        webserverRoot: webserverInstance ? webserverRootUrl(webserverInstance) : null,
+        webserverBase: webserverBaseUrl(),
+    };
 }
 
 function getLive(id: string): RegisteredClient | null {
@@ -436,6 +565,20 @@ function flushJobs(client: RegisteredClient): Array<{ jobId: string; request: Re
     if (!client.jobs.length) return [];
     const pending = client.jobs.splice(0, client.jobs.length);
     return pending.map((job) => ({ jobId: job.jobId, request: job.request }));
+}
+
+function flushToPoller(client: RegisteredClient): void {
+    if (client.coalesceTimer) {
+        clearTimeout(client.coalesceTimer);
+        client.coalesceTimer = null;
+    }
+    if (!client.poller) return;
+    const jobs = flushJobs(client);
+    if (!jobs.length) return;
+    const poller = client.poller;
+    client.poller = null;
+    clearTimeout(poller.timer);
+    poller.resolve(jobs);
 }
 
 export function pollJobs(id: string, waitMs: number): Promise<Array<{ jobId: string; request: Record<string, unknown> }>> {
@@ -454,7 +597,7 @@ export function pollJobs(id: string, waitMs: number): Promise<Array<{ jobId: str
     return new Promise((resolve) => {
         const timer = setTimeout(() => {
             if (client.poller && client.poller.resolve === resolve) client.poller = null;
-            resolve([]);
+            resolve(flushJobs(client));
         }, hold);
         client.poller = { resolve, timer };
     });
@@ -464,7 +607,6 @@ export function completeJob(id: string, jobId: string, result: unknown): { ok: b
     const client = getLive(id);
     if (!client) return { ok: false, error: 'unknown client' };
     const queued = client.jobs.find((j) => j.jobId === jobId);
-    // Job is usually already flushed to the client; waiters live on a side map.
     const waiter = jobWaiters.get(jobId);
     if (!waiter && !queued) return { ok: false, error: 'unknown job' };
     if (queued) {
@@ -474,11 +616,25 @@ export function completeJob(id: string, jobId: string, result: unknown): { ok: b
         clearTimeout(waiter.timer);
         jobWaiters.delete(jobId);
         const payload = (result && typeof result === 'object') ? result as Record<string, unknown> : { ok: true, result };
-        cacheScreenshot(client, payload);
-        recordEvent(client, waiter.action, (waiter.request.params && typeof waiter.request.params === 'object') ? waiter.request.params as Record<string, unknown> : {}, payload, payload.ok !== false);
+        if (waiter.action !== 'http_request') {
+            cacheScreenshot(client, payload);
+            recordEvent(client, waiter.action, (waiter.request.params && typeof waiter.request.params === 'object') ? waiter.request.params as Record<string, unknown> : {}, payload, payload.ok !== false);
+        }
         waiter.resolve(payload);
     }
     return { ok: true };
+}
+
+export function completeJobs(id: string, results: Array<{ jobId?: string; result?: unknown }>): { ok: boolean; error?: string; completed?: number } {
+    if (!getLive(id)) return { ok: false, error: 'unknown client' };
+    let completed = 0;
+    for (const item of results || []) {
+        const jobId = String(item?.jobId || '').trim();
+        if (!jobId) continue;
+        const done = completeJob(id, jobId, item.result ?? item);
+        if (done.ok) completed += 1;
+    }
+    return { ok: true, completed };
 }
 
 const jobWaiters = new Map<string, Job>();
@@ -571,22 +727,31 @@ function enqueue(client: RegisteredClient, action: string, params: Record<string
     return new Promise((resolve, reject) => {
         const jobId = randomUUID();
         const request = { v: 1, id: jobId, action, params };
+        const waitMs = action === 'http_request' ? HTTP_JOB_WAIT_MS : JOB_WAIT_MS;
         const timer = setTimeout(() => {
             jobWaiters.delete(jobId);
             client.jobs = client.jobs.filter((j) => j.jobId !== jobId);
             reject(new Error('paracraft job timeout'));
-        }, JOB_WAIT_MS);
+        }, waitMs);
         const job: Job = { jobId, action, request, createdAt: now(), resolve, reject, timer };
         jobWaiters.set(jobId, job);
+        client.jobs.push(job);
         if (client.poller) {
-            clearTimeout(client.poller.timer);
-            const poller = client.poller;
-            client.poller = null;
-            poller.resolve([{ jobId, request }]);
-        } else {
-            client.jobs.push(job);
+            if (action === 'http_request') {
+                if (!client.coalesceTimer) {
+                    client.coalesceTimer = setTimeout(() => flushToPoller(client), COALESCE_MS);
+                }
+            } else {
+                flushToPoller(client);
+            }
         }
     });
+}
+
+export function enqueueHttpRequest(id: string, params: Record<string, unknown>): Promise<unknown> {
+    const client = getLive(id);
+    if (!client) return Promise.reject(new Error('unknown client'));
+    return enqueue(client, 'http_request', params);
 }
 
 export async function dispatchAction(id: string, action: string, params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
@@ -695,6 +860,14 @@ export async function tryHandleParacraft(opts: {
         const jobs = await pollJobs(id, waitMs);
         const live = clients.get(id);
         sendJson(200, { ok: true, jobs, useNpl: live?.useNpl === true, nplPort: live?.useNpl ? live.nplPort ?? null : null });
+        return true;
+    }
+
+    const resultsMatch = pathname.match(/^\/paracraft\/([^/]+)\/jobs\/results$/);
+    if (resultsMatch && method === 'POST') {
+        const body = parseJson(await opts.readBody());
+        const raw = Array.isArray(body.results) ? body.results : (Array.isArray(body) ? body : []);
+        sendJson(200, completeJobs(decodeURIComponent(resultsMatch[1]), raw as Array<{ jobId?: string; result?: unknown }>));
         return true;
     }
 
