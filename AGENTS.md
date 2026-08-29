@@ -47,8 +47,9 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 | `src/core/html_text.ts` | Structured HTML → text (headings/lists; never markup) |
 | `src/core/keepwork.ts` | Keepwork URL → git clone URL / open-in-browser URL |
 | `src/core/paracraftClients.ts` | Desktop Paracraft CLI registry + job queue (`/paracraft/*`) |
+| `src/core/webserverProxy.ts` | WASM NPL code wiki front (`/webserver/:instance/*`) |
 | `src/core/calendarReminders.ts` | AIChat calendar 7-day reminders (`/calendar/reminders`) |
-| `src/core/fsServe.ts` | Loopback file overlay for web-paracraft (`/fs/list`, `/fs/file`) |
+| `src/core/fsServe.ts` | Loopback file overlay for web-paracraft (`/fs/file`) |
 | `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
 | `src/mcp/sessions.ts` | Connected clients + in-memory call history (paged list) |
@@ -73,20 +74,21 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 
 HTTP:
 
-- `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`)
+- `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`, `webserverBase`, `webservers` as `{ instance, root }[]`)
 - `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory
-- `GET /fs/list?root=&path=` — list overlay files under an absolute `root` + relative `path` (web-paracraft `searchroot`/`searchpath`; loopback, no token)
-- `GET /fs/file?root=&path=` — raw bytes of one confined file (`Cache-Control: no-store`)
+- `GET /fs/file?root=&path=` — one confined file as **raw on-disk bytes**. MIME from extension (Lua/NPL `text/plain`, html/js/css/png/jpg, unknown `.fxo` / `.o` as `application/octet-stream`). **Never** `charset=` (XHR would decode the body). Optional `?base64=true` returns JSON `{ ok, size, rel, type, base64 }` instead. Loopback, no token, `Cache-Control: no-store`
 - `POST/GET/DELETE /mcp` — Streamable HTTP; Bearer token only if `requireAuth`
 - `GET /admin/status`, `GET /admin/history?offset=&limit=`, `POST /admin/stop` — token, loopback
   (`/admin/history` returns one newest-first page, default `limit=20`, max 50; includes `total` / `hasMore`)
 - Paracraft CLI hub (plain HTTP, not MCP):
   - Hub **awakens** desktop Paracraft: while the daemon is up it scans `127.0.0.1:8099-8115` and pings `/ajax/paracraft_cli?action=health`. Desktop **registers once on start**; if that succeeds it long-polls jobs (and heartbeats) while the hub stays up. If register fails it does **not** poll `:8089` until NPL inbound or the next start.
-  - `POST /paracraft/register` — start probe + identity (open on loopback). Body may include `nplPort`.
+  - `POST /paracraft/register` — start probe + identity (open on loopback). Body may include `nplPort`. For WASM the hub assigns `webparacraft1`, `webparacraft2`, … and returns `webserverInstance` / `webserverRoot` / `webserverBase`.
   - If `nplPort` pings (`GET http://127.0.0.1:<nplPort>/ajax/paracraft_cli?action=health`), register returns `useNpl: true` and the hub dispatches to that NPL HTTP port instead of long-poll.
-  - `POST /paracraft/:id/jobs/poll` — long-poll jobs (`waitMs`, max 10s) only for clients without a live NPL port. Empty + `useNpl` when the NPL port is live. Hub pings NPL health every 10s; poll-only clients drop if they stop polling for 10s.
+  - `POST /paracraft/:id/jobs/poll` — long-poll jobs (`waitMs`, max 10s) only for clients without a live NPL port. Empty + `useNpl` when the NPL port is live. Hub pings NPL health every 10s; poll-only clients drop if they stop polling for 10s. HTTP wiki jobs are coalesced (~10ms) so parallel CSS/JS share one poll.
   - `POST /paracraft/:id/jobs/:jobId/result` — job result
-  - `GET /paracraft/clients` — live desktop clients (Bearer if `requireAuth`); includes `nplPort` only when ping succeeded, plus `connectedAt` (first register, not reset on heartbeat)
+  - `POST /paracraft/:id/jobs/results` — batch `{ results: [{ jobId, result }] }` (WASM wiki file bodies)
+  - `GET /paracraft/clients` — live **desktop** clients (Bearer if `requireAuth`); `platform=wasm` is omitted so ParacraftTool does not duplicate the web iframe
+  - `ALL /webserver/:instance/*` — loopback NPL code-wiki front for WASM. Keepwork queues `http_request` jobs; the WASM instance serves `.page` / ajax / static via ParaIO. Cookie `Keepwork-WebServer` routes root-absolute `/wp-includes` and `/ajax` back to that instance.
   - `GET /paracraft/:id/timeline` — last screenshots + non-`health` action summaries (capped; no ping spam)
   - `POST /paracraft/:id/:action` — `health` / `world_status` / `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`
 - Calendar reminders (plain HTTP, loopback, same CORS as `/paracraft/register`):
@@ -150,8 +152,9 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 ## When changing behavior
 
 - New MCP tool → `src/mcp/server.ts` + AIChat `KEEPWORK_TOOL_NAMES` / chip labels in `chat_render.js` + README + this file.
-- Paracraft CLI hub → `src/core/paracraftClients.ts` + `/paracraft/*` in `src/mcp/http.ts`; keep register/poll open on loopback; never log screenshot base64.
-- Web-paracraft local script overlay → `src/core/fsServe.ts` (`/fs/list`, `/fs/file`); confine to the URL `root`; keep allow-list of text/script extensions.
+- Paracraft CLI hub → `src/core/paracraftClients.ts` + `/paracraft/*` in `src/mcp/http.ts`; keep register/poll open on loopback; never log screenshot base64. Narrative: [docs/paracraft-cli.md](docs/paracraft-cli.md).
+- WASM NPL code wiki → `src/core/webserverProxy.ts` (`/webserver/:instance/*`); register `webserverRoot`; `GET /health` `webserverBase`. Same [docs/paracraft-cli.md](docs/paracraft-cli.md); engine: paraworld `docs/aries/paracraft-cli.md`.
+- Web-paracraft local script overlay → `src/core/fsServe.ts` (`/fs/file`); confine to the URL `root`; MIME from file extension (text vs binary; unknown as `application/octet-stream`); never append `charset=` — overlay uses `overrideMimeType(... charset=x-user-defined)` so bytes stay 1:1. Optional `?base64=true` JSON is supported but unused by the overlay.
 - Security / CORS / PNA / token → `src/mcp/http.ts` only; keep origin allowlist tight (`keepwork.com`, localhost).
 - Terminal policy → `src/core/terminal.ts` (deny-list, timeout, output cap) and keep AIChat confirm in `chat_agents.js` (`local-mcp-terminal-confirm`).
 - Singleton / status bar → `src/vscode/daemon.ts` + `statusBar.ts` + `mcpPanel.ts`; do not move the HTTP listener into the extension host. The VS Code terminal bridge (`src/vscode/terminalBridge.ts`) is a separate loopback helper.

@@ -3,33 +3,59 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import { PathEscapeError, confinePath, inspectDiskPath, isAbsDiskPath, relativeToRoot } from './paths';
 
-const SKIP_DIRS = new Set([
-    '.git', '.svn', '.hg', 'node_modules', 'dist', 'out', '.cursor',
-    '.vscode-test', 'bin', 'obj', '.next', 'coverage',
-]);
+const MAX_FILE_BYTES = 16_000_000;
 
-const ALLOWED_EXT = new Set([
-    '.lua', '.xml', '.html', '.htm', '.page', '.json', '.md', '.txt', '.csv',
-    '.mcml', '.js', '.npl', '.table', '.fx',
-]);
-
-const MAX_FILES = 4000;
-const MAX_FILE_BYTES = 2_000_000;
-
-export interface FsListResult {
-    ok: true;
-    root: string;
-    path: string;
-    files: string[];
-    truncated: boolean;
-}
+// MIME from extension so other clients can use /fs/file like a normal file URL
+// (img, html, lua in a tab). Never append charset=: that makes XHR decode the
+// body. Unspecified charset means display clients may assume utf-8; the body
+// is still the on-disk bytes.
+const MIME: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.tga': 'image/x-tga',
+    '.dds': 'image/vnd-ms.dds',
+    '.ogg': 'audio/ogg',
+    '.wav': 'audio/wav',
+    '.mp3': 'audio/mpeg',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.lua': 'text/plain',
+    '.npl': 'text/plain',
+    '.txt': 'text/plain',
+    '.md': 'text/markdown',
+    '.csv': 'text/csv',
+    '.xml': 'application/xml',
+    '.html': 'text/html',
+    '.htm': 'text/html',
+    '.page': 'text/html',
+    '.mcml': 'text/html',
+    '.js': 'text/javascript',
+    '.mjs': 'text/javascript',
+    '.css': 'text/css',
+    '.json': 'application/json',
+    '.wasm': 'application/wasm',
+    '.pdf': 'application/pdf',
+    '.table': 'text/plain',
+    '.fx': 'text/plain',
+};
 
 function normalizeRel(rel: string): string {
     return String(rel || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
-function extAllowed(filename: string): boolean {
-    return ALLOWED_EXT.has(path.extname(filename).toLowerCase());
+function contentTypeFor(filename: string): string {
+    return MIME[path.extname(filename).toLowerCase()] || 'application/octet-stream';
+}
+
+function wantsBase64(url: URL): boolean {
+    const v = String(url.searchParams.get('base64') || '').trim().toLowerCase();
+    return v === 'true' || v === '1';
 }
 
 function resolveRoot(raw: string): string {
@@ -48,70 +74,7 @@ function resolveUnderRoot(root: string, rel: string): string {
     return confinePath(root, norm);
 }
 
-function walkFiles(root: string, start: string, out: string[]): boolean {
-    let truncated = false;
-    const visit = (dir: string) => {
-        if (out.length >= MAX_FILES) {
-            truncated = true;
-            return;
-        }
-        let entries: fs.Dirent[] = [];
-        try {
-            entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-            return;
-        }
-        for (const ent of entries) {
-            if (out.length >= MAX_FILES) {
-                truncated = true;
-                return;
-            }
-            if (ent.name === '.' || ent.name === '..') continue;
-            const abs = path.join(dir, ent.name);
-            if (ent.isSymbolicLink()) continue;
-            if (ent.isDirectory()) {
-                if (SKIP_DIRS.has(ent.name)) continue;
-                visit(abs);
-                continue;
-            }
-            if (!ent.isFile()) continue;
-            if (!extAllowed(ent.name)) continue;
-            let stat: fs.Stats;
-            try { stat = fs.statSync(abs); } catch { continue; }
-            if (stat.size > MAX_FILE_BYTES) continue;
-            out.push(relativeToRoot(root, abs).replace(/\\/g, '/'));
-        }
-    };
-    visit(start);
-    return truncated;
-}
-
-export function listSearchFiles(rootRaw: string, relRaw: string): FsListResult {
-    const root = resolveRoot(rootRaw);
-    const rel = normalizeRel(relRaw);
-    const abs = resolveUnderRoot(root, rel);
-    let st: fs.Stats;
-    try {
-        st = fs.statSync(abs);
-    } catch {
-        throw new Error(`path not found: ${rel}`);
-    }
-    const files: string[] = [];
-    let truncated = false;
-    if (st.isFile()) {
-        if (!extAllowed(abs)) throw new Error(`file type not allowed: ${rel}`);
-        if (st.size > MAX_FILE_BYTES) throw new Error(`file too large: ${rel}`);
-        files.push(relativeToRoot(root, abs).replace(/\\/g, '/'));
-    } else if (st.isDirectory()) {
-        truncated = walkFiles(root, abs, files);
-    } else {
-        throw new Error(`path is not a file or directory: ${rel}`);
-    }
-    files.sort();
-    return { ok: true, root, path: rel, files, truncated };
-}
-
-export function readSearchFile(rootRaw: string, relRaw: string): { rel: string; body: Buffer } {
+export function readSearchFile(rootRaw: string, relRaw: string): { rel: string; type: string; body: Buffer } {
     const root = resolveRoot(rootRaw);
     const rel = normalizeRel(relRaw);
     const abs = resolveUnderRoot(root, rel);
@@ -121,10 +84,14 @@ export function readSearchFile(rootRaw: string, relRaw: string): { rel: string; 
     } catch {
         throw new Error(`file not found: ${rel}`);
     }
+    if (st.isDirectory()) throw new Error('path is a directory');
     if (!st.isFile()) throw new Error(`not a file: ${rel}`);
-    if (!extAllowed(abs)) throw new Error(`file type not allowed: ${rel}`);
     if (st.size > MAX_FILE_BYTES) throw new Error(`file too large: ${rel}`);
-    return { rel: relativeToRoot(root, abs).replace(/\\/g, '/'), body: fs.readFileSync(abs) };
+    return {
+        rel: relativeToRoot(root, abs).replace(/\\/g, '/'),
+        type: contentTypeFor(abs),
+        body: fs.readFileSync(abs),
+    };
 }
 
 export function tryHandleFs(opts: {
@@ -144,16 +111,23 @@ export function tryHandleFs(opts: {
     const rel = String(opts.url.searchParams.get('path') || '').trim();
 
     try {
-        if (opts.pathname === '/fs/list') {
-            opts.sendJson(200, listSearchFiles(root, rel));
-            return true;
-        }
         if (opts.pathname === '/fs/file') {
             const file = readSearchFile(root, rel);
+            if (wantsBase64(opts.url)) {
+                opts.sendJson(200, {
+                    ok: true,
+                    size: file.body.length,
+                    rel: file.rel,
+                    type: file.type,
+                    base64: file.body.toString('base64'),
+                });
+                return true;
+            }
             opts.res.writeHead(200, {
-                'Content-Type': 'application/octet-stream',
+                'Content-Type': file.type,
                 'Cache-Control': 'no-store',
                 'Content-Length': file.body.length,
+                'X-Content-Type-Options': 'nosniff',
                 'X-Search-Path': encodeURIComponent(file.rel),
             });
             opts.res.end(file.body);
@@ -164,7 +138,7 @@ export function tryHandleFs(opts: {
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const status = err instanceof PathEscapeError ? 400
-            : /required|must be|not a directory|not allowed|too large/.test(message) ? 400
+            : /required|must be|not a directory|not allowed|too large|path is a directory/.test(message) ? 400
                 : /not found/.test(message) ? 404
                     : 400;
         opts.sendJson(status, { ok: false, error: message });
