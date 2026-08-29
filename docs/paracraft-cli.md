@@ -1,6 +1,6 @@
-# Paracraft CLI hub + WASM NPL code wiki
+# Paracraft CLI hub + external WASM NPL code wiki
 
-The Keepwork MCP daemon on `http://127.0.0.1:8089` is more than MCP tools. It is also the **loopback hub** for desktop Paracraft and the **HTTP front** for the NPL code wiki inside web-paracraft (WASM).
+The Keepwork MCP daemon on `http://127.0.0.1:8089` is more than MCP tools. It is also the **loopback hub** for desktop Paracraft and an optional **external HTTP front** for a web-paracraft (WASM) NPL code wiki.
 
 Engine side (identity, `http_request`, `site_url`): `c:/lxzsrc/ParaEngine/paraworld` → `docs/aries/paracraft-cli.md`.  
 AIChat UI: `tools/Paracraft/ParacraftTool.html` + `docs/local-mcp.md`.
@@ -19,7 +19,7 @@ Public actions: `health`, `world_status`, `run_command`, `screenshot`, `open_wor
 
 ## WASM NPL code wiki
 
-Web-paracraft (typically `:8088`) cannot bind a TCP port, so it cannot run desktop’s `:8099` wiki. This daemon is the listener; the WASM iframe is the origin of every response (ParaIO + NPL `.page` / `ajax/console` / `ajax/debugger`).
+Web-paracraft (typically `:8088`) cannot bind a TCP port. Its embedded wiki does not require this daemon: a same-origin ServiceWorker/page RPC calls `paracraft-cli/http_request` directly in the owning WASM tab. This daemon is used only when an external browser or AIChat needs a standalone loopback URL. The WASM instance remains the origin of every response body (ParaIO + NPL `.page` / `ajax/console` / `ajax/debugger`).
 
 Saved NPL server root (`WebServer:site_url()` inside WASM):
 
@@ -27,14 +27,14 @@ Saved NPL server root (`WebServer:site_url()` inside WASM):
 
 Wiki paths on that root: `console`, `debugger`, `ajax/debugger`, `ajax/console`, `/wp-includes/…`.
 
-### Handshake
+### External gateway handshake
 
 1. WASM `GET /health`. Require `name === "keepwork-mcp"` and `webserverBase` (loopback origin, not a hardcoded 8089 if `keepwork.mcp.port` changed).
 2. `POST /paracraft/register` with `platform: "wasm"`. The hub **assigns** `webparacraft1`, `webparacraft2`, … (reclaims the client’s previous slug if still free). Response includes `webserverInstance` and `webserverRoot` (trailing slash). WASM must save both; it must not invent a date/hex slug. Duplicate live desktop instance names are still rejected. Hub mapping is in-memory: F11 / `/webserver` always re-registers. WASM retries register after a hub restart.
-3. WASM stores that string as `WebServer.site_host_url`. F11 / `/open npl://…` then open Keepwork wiki URLs **inside the WASM tab** (iframe docked to the right by default; 3D canvas shrinks so they do not overlap; URL copied to clipboard). Do not `window.open` — Chrome may suspend the host.
+3. WASM stores that string as `WebServer.site_host_url` for external access. The embedded popup translates the path to its own same-origin `__npl_webserver__` route instead of loading this HTTP URL.
 4. WASM: browser `fetch()` long-polls jobs (JS `KeepworkHub`, not NPL `GetUrl`). After wiki jobs, NPL handles files on the game thread; network stays off that thread. Idle `waitMs` may stay up to 10s.
 
-If `/health` fails, WASM must **not** claim the wiki started.
+If `/health` fails, the external gateway is unavailable, but the embedded wiki remains available.
 
 ### Proxy
 
@@ -56,9 +56,9 @@ Wiki bytes come from WASM, not `GET /fs/file`.
 | `src/core/webserverProxy.ts` | `/webserver/:instance/*` + cookie fallback |
 | `src/mcp/http.ts` | `GET /health` `webserverBase`; route wiki after `/paracraft/*` |
 
-## Try it
+## Try external access
 
 1. Restart Keepwork MCP so `/health` includes `webserverBase` (`npm run compile:only` then restart the daemon / F5 the extension).
-2. Open web-paracraft with Keepwork MCP running.
-3. F11 or `/webserver` in the iframe.
+2. Open web-paracraft; its embedded wiki works independently of Keepwork MCP.
+3. Run `/webserver -external` in the iframe to publish it to Keepwork.
 4. Open `http://127.0.0.1:8089/webserver/webparacraft1/console` (or the ParacraftTool **Code Wiki** button). `GET /health` lists live `webservers`.

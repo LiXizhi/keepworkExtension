@@ -88,7 +88,7 @@ HTTP:
   - `POST /paracraft/:id/jobs/:jobId/result` — job result
   - `POST /paracraft/:id/jobs/results` — batch `{ results: [{ jobId, result }] }` (WASM wiki file bodies)
   - `GET /paracraft/clients` — live **desktop** clients (Bearer if `requireAuth`); `platform=wasm` is omitted so ParacraftTool does not duplicate the web iframe
-  - `ALL /webserver/:instance/*` — loopback NPL code-wiki front for WASM. Keepwork queues `http_request` jobs; the WASM instance serves `.page` / ajax / static via ParaIO. Cookie `Keepwork-WebServer` routes root-absolute `/wp-includes` and `/ajax` back to that instance.
+  - `ALL /webserver/:instance/*` — optional external loopback NPL code-wiki front for WASM. The embedded WebParaCraft wiki uses a direct same-origin ServiceWorker/page RPC and does not require Keepwork MCP. For external access, Keepwork queues `http_request` jobs; the WASM instance serves `.page` / ajax / static via ParaIO. Cookie `Keepwork-WebServer` routes root-absolute `/wp-includes` and `/ajax` back to that instance.
   - `GET /paracraft/:id/timeline` — last screenshots + non-`health` action summaries (capped; no ping spam)
   - `POST /paracraft/:id/:action` — `health` / `world_status` / `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`
 - Calendar reminders (plain HTTP, loopback, same CORS as `/paracraft/register`):
@@ -153,7 +153,7 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 
 - New MCP tool → `src/mcp/server.ts` + AIChat `KEEPWORK_TOOL_NAMES` / chip labels in `chat_render.js` + README + this file.
 - Paracraft CLI hub → `src/core/paracraftClients.ts` + `/paracraft/*` in `src/mcp/http.ts`; keep register/poll open on loopback; never log screenshot base64. Narrative: [docs/paracraft-cli.md](docs/paracraft-cli.md).
-- WASM NPL code wiki → `src/core/webserverProxy.ts` (`/webserver/:instance/*`); register `webserverRoot`; `GET /health` `webserverBase`. Same [docs/paracraft-cli.md](docs/paracraft-cli.md); engine: paraworld `docs/aries/paracraft-cli.md`.
+- External WASM NPL code wiki gateway → `src/core/webserverProxy.ts` (`/webserver/:instance/*`); register `webserverRoot`; `GET /health` `webserverBase`. The embedded wiki bridge lives in webparacraft `ServiceWorker.js` + `src/emscripten.js`. Same [docs/paracraft-cli.md](docs/paracraft-cli.md); engine: paraworld `docs/aries/paracraft-cli.md`.
 - Web-paracraft local script overlay → `src/core/fsServe.ts` (`/fs/file`); confine to the URL `root`; MIME from file extension (text vs binary; unknown as `application/octet-stream`); never append `charset=` — overlay uses `overrideMimeType(... charset=x-user-defined)` so bytes stay 1:1. Optional `?base64=true` JSON is supported but unused by the overlay.
 - Security / CORS / PNA / token → `src/mcp/http.ts` only; keep origin allowlist tight (`keepwork.com`, localhost).
 - Terminal policy → `src/core/terminal.ts` (deny-list, timeout, output cap) and keep AIChat confirm in `chat_agents.js` (`local-mcp-terminal-confirm`).
