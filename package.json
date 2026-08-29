@@ -2,7 +2,7 @@
   "name": "keepwork",
   "displayName": "Keepwork",
   "description": "Clone Keepwork repos, open files on keepwork.com, and run a local MCP daemon for AIChat terminal/grep",
-  "version": "0.1.3",
+  "version": "0.1.8",
   "publisher": "Xizhi",
   "license": "MIT",
   "repository": {
