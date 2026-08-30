@@ -57,7 +57,7 @@ async function grepWithRg(opts: {
     maxMatches: number;
     root: string;
 }): Promise<GrepResult> {
-    const args = ['--json', '-n', '--max-count', String(opts.maxMatches), '--hidden', '--glob', '!node_modules/**', '--glob', '!.git/**'];
+    const args = ['--json', '-n', '--follow', '--max-count', String(opts.maxMatches), '--hidden', '--glob', '!node_modules/**', '--glob', '!.git/**'];
     if (opts.glob) args.push('--glob', opts.glob);
     args.push('--', opts.pattern, opts.searchPath);
     return new Promise((resolve) => {
@@ -118,6 +118,11 @@ function grepWithNode(opts: {
     }
     const globRe = globToRegExp(opts.glob || '');
     const hits: GrepHit[] = [];
+    const seen = new Set<string>();
+    const realKey = (p: string) => {
+        try { return fs.realpathSync.native(p); } catch { return path.resolve(p); }
+    };
+    seen.add(realKey(opts.searchPath));
     const walk = (dir: string) => {
         if (hits.length >= opts.maxMatches) return;
         let entries: fs.Dirent[] = [];
@@ -130,13 +135,17 @@ function grepWithNode(opts: {
             if (hits.length >= opts.maxMatches) return;
             if (ent.name === '.' || ent.name === '..') continue;
             const abs = path.join(dir, ent.name);
-            if (ent.isSymbolicLink()) continue;
-            if (ent.isDirectory()) {
+            let st: fs.Stats | null = null;
+            try { st = fs.statSync(abs); } catch { continue; }
+            if (st.isDirectory()) {
                 if (SKIP_DIRS.has(ent.name)) continue;
+                const key = realKey(abs);
+                if (seen.has(key)) continue;
+                seen.add(key);
                 walk(abs);
                 continue;
             }
-            if (!ent.isFile()) continue;
+            if (!st.isFile()) continue;
             const ext = path.extname(ent.name).toLowerCase();
             if (BINARY_EXT.has(ext)) continue;
             const rel = relativeToRoot(opts.root, abs);

@@ -90,6 +90,27 @@ export function confinePath(root: string, rel?: string): string {
 }
 
 /**
+ * Join `rel` under a verified directory `root` without resolving symlink
+ * targets. Rejects `..` so the *requested* path stays inside the folder the
+ * user typed. File I/O may still follow a link that lives in that folder
+ * (Chrome File System Access hides those entries).
+ */
+export function confineLexical(root: string, rel?: string): string {
+    const info = inspectDiskPath(root);
+    if (!info.exists || !info.isDirectory) {
+        throw new Error(`root is not a directory: ${root}`);
+    }
+    const base = info.resolved;
+    const norm = String(rel || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    if (!norm || norm === '.') return base;
+    const parts = norm.split('/').filter(Boolean);
+    if (parts.some((p) => p === '.' || p === '..')) {
+        throw new PathEscapeError(`Path escapes root: ${rel}`);
+    }
+    return path.join(base, ...parts);
+}
+
+/**
  * Working directory / grep path:
  * - absolute (`C:\foo`, `/foo`, `~/foo`) → that folder if it exists
  * - relative → confined to the MCP workspace root

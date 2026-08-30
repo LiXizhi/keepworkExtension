@@ -1,4 +1,6 @@
+import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { BIND_HOST, clearNotifyBridge, writeNotifyBridge } from '../core/config';
@@ -47,6 +49,28 @@ export function startNotifyBridge(): NotifyBridgeHandle {
             sendJson(res, 200, { ok: true });
             return;
         }
+        if (pathname === '/reveal' && req.method === 'POST') {
+            if (got !== token) {
+                sendJson(res, 401, { error: 'unauthorized' });
+                return;
+            }
+            try {
+                const raw = await readBody(req);
+                const body = raw ? JSON.parse(raw) as { path?: string } : {};
+                const abs = path.resolve(String(body.path || '').trim());
+                if (!path.isAbsolute(abs) || !fs.existsSync(abs)) {
+                    sendJson(res, 400, { error: 'path is not an existing absolute file' });
+                    return;
+                }
+                sendJson(res, 200, { ok: true });
+                void vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(abs));
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                sendJson(res, 503, { error: msg });
+            }
+            return;
+        }
+
         if (pathname !== '/notify' || req.method !== 'POST') {
             sendJson(res, 404, { error: 'not found' });
             return;

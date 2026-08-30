@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 export const DEFAULT_PORT = 8089;
 export const BIND_HOST = '127.0.0.1';
 export const SERVER_NAME = 'keepwork-mcp';
-export const SERVER_VERSION = '0.1.1';
+export const SERVER_VERSION = '0.1.2';
 export const IDLE_SESSION_MS = 30 * 60 * 1000;
 export const HISTORY_MAX = 500;
 export const HISTORY_PAGE_DEFAULT = 20;

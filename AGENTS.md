@@ -25,7 +25,7 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 
 1. **Bind loopback only** (`127.0.0.1`). Never listen on `0.0.0.0` or expose port 8089 on the LAN.
 2. **Pairing token is optional (default off).** `/mcp` and `/admin/*` are open on loopback unless `keepwork.mcp.requireAuth` / `KEEPWORK_MCP_REQUIRE_AUTH=1` / `--require-auth`. When auth is on, do not log or commit `~/.keepwork-mcp/token`.
-3. **Path confinement**: relative `run_terminal` cwd and `grep_files` paths must stay under the workspace root (`src/core/paths.ts`). Reject `..` and symlink escapes. Absolute disk paths (`C:\foo`, `/foo`, `~/foo`) are allowed when the directory exists — AIChat uses these for a bound local folder.
+3. **Path confinement**: relative `run_terminal` cwd and `grep_files` paths must stay under the workspace root (`src/core/paths.ts`). Reject `..` and symlink escapes. Absolute disk paths (`C:\foo`, `/foo`, `~/foo`) are allowed when the directory exists — AIChat uses these for a bound local folder. Workspace `/fs/list` `/fs/search` `/fs/file` `/fs/dir` (AIChat local disk) confine the *requested* relative path lexically (`confineLexical`); they include symlink/junction names and may follow a link that lives inside that verified root. `GET /fs/file` without `links=include` still uses realpath confinement for the web-paracraft overlay.
 4. **Do not weaken the deny-list** in `src/core/terminal.ts` without an explicit user request. AIChat must keep confirming every `run_terminal` call.
 5. **One daemon**: if `listen` throws `EADDRINUSE`, attach — do not start a second HTTP server. Closing a VS Code window must **not** kill the daemon.
 6. Keep CommonJS (`"module": "commonjs"`) so the VS Code extension still loads. Do not convert the package to ESM-only.
@@ -49,7 +49,7 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 | `src/core/paracraftClients.ts` | Desktop Paracraft CLI registry + job queue (`/paracraft/*`) |
 | `src/core/webserverProxy.ts` | WASM NPL code wiki front (`/webserver/:instance/*`) |
 | `src/core/calendarReminders.ts` | AIChat calendar 7-day reminders (`/calendar/reminders`) |
-| `src/core/fsServe.ts` | Loopback file overlay for web-paracraft (`/fs/file`) |
+| `src/core/fsServe.ts` | Loopback file overlay (`GET /fs/file`) + AIChat local-disk workspace (`/fs/list` `/fs/search` `/fs/stat` PUT/DELETE) |
 | `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
 | `src/mcp/sessions.ts` | Connected clients + in-memory call history (paged list) |
@@ -74,9 +74,16 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 
 HTTP:
 
-- `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`, `webserverBase`, `webservers` as `{ instance, root }[]`)
-- `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory
-- `GET /fs/file?root=&path=` — one confined file as **raw on-disk bytes**. MIME from extension (Lua/NPL `text/plain`, html/js/css/png/jpg, unknown `.fxo` / `.o` as `application/octet-stream`). **Never** `charset=` (XHR would decode the body). Optional `?base64=true` returns JSON `{ ok, size, rel, type, base64 }` instead. Loopback, no token, `Cache-Control: no-store`
+- `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`, `webserverBase`, `webservers` as `{ instance, root }[]`, `fsApi: "workspace"` when list/write/delete are available)
+- `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory (AIChat must verify a user-typed local workspace root before `/fs/*`)
+- `GET /fs/list?root=&path=&max=` — directory listing; includes symbolic links / junctions. `recursive=1` returns file paths (BFS, loop-aware, capped)
+- `GET /fs/search?root=&path=&q=&max=` — filename substring search (case-insensitive); includes symlink/junction names, skips `node_modules` / `.git`, loop-aware, scan cap 8000
+- `GET /fs/stat?root=&path=` — `{ exists, isFile, isDirectory, symlink, size }`
+- `GET /fs/file?root=&path=` — one confined file as **raw on-disk bytes**. MIME from extension (Lua/NPL `text/plain`, html/js/css/png/jpg, unknown `.fxo` / `.o` as `application/octet-stream`). **Never** `charset=` (XHR would decode the body). Optional `?base64=true` returns JSON `{ ok, size, rel, type, base64 }` instead. `links=include` uses lexical confine so a symlink inside the root is readable. Loopback, no token, `Cache-Control: no-store`
+- `PUT /fs/file?root=&path=` — write UTF-8/bytes under the verified root (creates parent dirs)
+- `DELETE /fs/file?root=&path=` — delete a file or symlink (not a directory)
+- `DELETE /fs/dir?root=&path=` — recursive directory delete
+- `POST /fs/reveal?root=&path=` — show the confined path in the OS file manager (`revealFileInOS` when the VS Code extension is up, else `explorer /select` / `open -R` / `xdg-open` dir). Optional `mode=open` opens the file with the default app; `mode=dir` opens the containing folder.
 - `POST/GET/DELETE /mcp` — Streamable HTTP; Bearer token only if `requireAuth`
 - `GET /admin/status`, `GET /admin/history?offset=&limit=`, `POST /admin/stop` — token, loopback
   (`/admin/history` returns one newest-first page, default `limit=20`, max 50; includes `total` / `hasMore`)
@@ -154,7 +161,8 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 - New MCP tool → `src/mcp/server.ts` + AIChat `KEEPWORK_TOOL_NAMES` / chip labels in `chat_render.js` + README + this file.
 - Paracraft CLI hub → `src/core/paracraftClients.ts` + `/paracraft/*` in `src/mcp/http.ts`; keep register/poll open on loopback; never log screenshot base64. Narrative: [docs/paracraft-cli.md](docs/paracraft-cli.md).
 - External WASM NPL code wiki gateway → `src/core/webserverProxy.ts` (`/webserver/:instance/*`); register `webserverRoot`; `GET /health` `webserverBase`. The embedded wiki bridge lives in webparacraft `ServiceWorker.js` + `src/emscripten.js`. Same [docs/paracraft-cli.md](docs/paracraft-cli.md); engine: paraworld `docs/aries/paracraft-cli.md`.
-- Web-paracraft local script overlay → `src/core/fsServe.ts` (`/fs/file`); confine to the URL `root`; MIME from file extension (text vs binary; unknown as `application/octet-stream`); never append `charset=` — overlay uses `overrideMimeType(... charset=x-user-defined)` so bytes stay 1:1. Optional `?base64=true` JSON is supported but unused by the overlay.
+- Web-paracraft local script overlay → `src/core/fsServe.ts` (`GET /fs/file`); confine to the URL `root` with realpath; MIME from file extension (text vs binary; unknown as `application/octet-stream`); never append `charset=` — overlay uses `overrideMimeType(... charset=x-user-defined)` so bytes stay 1:1. Optional `?base64=true` JSON is supported but unused by the overlay.
+- AIChat local-disk workspace → same `src/core/fsServe.ts` (`/fs/list` `/fs/search` `/fs/stat` `PUT/DELETE /fs/file` `DELETE /fs/dir`); verify `root` with `inspectDiskPath` / `GET /exists`; include symlink names; lexical confine + `links=include` on read.
 - Security / CORS / PNA / token → `src/mcp/http.ts` only; keep origin allowlist tight (`keepwork.com`, localhost).
 - Terminal policy → `src/core/terminal.ts` (deny-list, timeout, output cap) and keep AIChat confirm in `chat_agents.js` (`local-mcp-terminal-confirm`).
 - Singleton / status bar → `src/vscode/daemon.ts` + `statusBar.ts` + `mcpPanel.ts`; do not move the HTTP listener into the extension host. The VS Code terminal bridge (`src/vscode/terminalBridge.ts`) is a separate loopback helper.

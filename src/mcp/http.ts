@@ -6,7 +6,7 @@ import {
     BIND_HOST, HISTORY_PAGE_DEFAULT, SERVER_NAME, SERVER_VERSION, writeInstance, clearInstance, readOrCreateToken,
     resolveRequireAuth,
 } from '../core/config';
-import { tryHandleFs } from '../core/fsServe';
+import { FS_API, tryHandleFs } from '../core/fsServe';
 import { inspectDiskPath, resolveWorkspaceRoot } from '../core/paths';
 import { requestContext } from './context';
 import { createMcpServer, ServerRuntime } from './server';
@@ -48,7 +48,7 @@ function applyCors(req: http.IncomingMessage, res: http.ServerResponse): void {
     } else if (!origin) {
         res.setHeader('Access-Control-Allow-Origin', '*');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID');
     res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version');
     if (String(req.headers['access-control-request-private-network'] || '').toLowerCase() === 'true') {
@@ -161,6 +161,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     workspaceRoot: runtime.root,
                     webserverBase: webserverBaseUrl(),
                     webservers: listWebserverRoots(),
+                    fsApi: FS_API,
                 });
                 return;
             }
@@ -176,11 +177,12 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                 return;
             }
 
-            const handledFs = tryHandleFs({
+            const handledFs = await tryHandleFs({
                 pathname,
                 method: req.method || 'GET',
                 url,
                 res,
+                readBodyBuffer: () => readBodyBuffer(req),
                 sendJson: (status, body) => sendJson(res, status, body),
             });
             if (handledFs) return;

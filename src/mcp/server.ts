@@ -114,7 +114,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     server.registerTool(
         'grep_files',
         {
-            description: 'Search file contents. path may be an absolute disk folder or relative to the MCP workspace root. Prefer this over shelling out to grep. pattern is a regex.',
+            description: 'Search file contents. path may be an absolute disk folder or relative to the MCP workspace root. Follows symbolic links and Windows junctions (loop-aware). Prefer this over shelling out to grep. pattern is a regex.',
             inputSchema: z.object({
                 pattern: z.string().describe('Regular expression to search for'),
                 path: z.string().optional().describe('Directory or file: absolute local disk path, or relative to the MCP workspace root. Omit to search the AIChat-bound folder.'),

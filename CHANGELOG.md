@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Local-disk workspace file API: `GET /fs/list`, `GET /fs/search`, `GET /fs/stat`, `PUT /fs/file`, `DELETE /fs/file`, `DELETE /fs/dir`, `POST /fs/reveal` (`mode=reveal|open|dir`). Listings and filename search include symbolic links and Windows junctions. `grep_files` follows those links (rg `--follow`, Node walk is loop-aware). `GET /health` reports `fsApi: "workspace"`. AIChat verifies the user-typed absolute root with `GET /exists` before these calls.
 - WASM NPL code wiki front: `GET /health` reports `webserverBase`; `POST /paracraft/register` may return `webserverRoot`; `ALL /webserver/:instance/*` proxies into batched `http_request` jobs. See [docs/paracraft-cli.md](docs/paracraft-cli.md).
 - Calendar reminder hub: `POST`/`GET /calendar/reminders` stores a 7-day set in `~/.keepwork-mcp/calendar-reminders.json`. The extension shows a VS Code notification with **打开日历**.
 - `web_search` and `fetch_url` MCP tools: Node fetch on the user's machine, parse HTML locally, return minified JSON (never raw markup). Bing → DuckDuckGo → Baidu fallback. SSRF blocks localhost / private IPs.

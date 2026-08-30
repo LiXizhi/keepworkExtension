@@ -92,3 +92,29 @@ export async function tryShowVscodeNotification(opts: {
         clearTimeout(timer);
     }
 }
+
+/** Ask the VS Code extension to reveal a disk path in the OS file manager. */
+export async function tryRevealInVscode(abs: string): Promise<boolean> {
+    const info = readNotifyBridge();
+    if (!info) return false;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+        const res = await fetch(`http://127.0.0.1:${info.port}/reveal`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${info.token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ path: abs }),
+            signal: ctrl.signal,
+        });
+        if (!res.ok) return false;
+        const body = await res.json() as { ok?: boolean };
+        return body.ok !== false;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
+}
