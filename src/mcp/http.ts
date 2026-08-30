@@ -17,6 +17,7 @@ import {
 import { liveClientCount, listWebserverRoots, setHubListenPort, startParacraftWatch, stopParacraftWatch, tryHandleParacraft, webserverBaseUrl } from '../core/paracraftClients';
 import { tryHandleWebserver } from '../core/webserverProxy';
 import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
+import { TerminalSessionManager } from '../core/terminalSessions';
 
 export interface HttpServerHandle {
     port: number;
@@ -92,6 +93,17 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
     res.end(text);
 }
 
+function terminalOwner(req: http.IncomingMessage): string {
+    return String(req.headers.origin || 'local-no-origin');
+}
+
+function terminalErrorStatus(error: unknown): number {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not found/.test(message)) return 404;
+    if (/required|too long|already running|closed|blocked|does not exist|not a directory|limit reached/i.test(message)) return 400;
+    return 500;
+}
+
 function statusPageHtml(runtime: ServerRuntime, port: number): string {
     return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Keepwork local MCP</title>
@@ -128,6 +140,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
     };
     const token = readOrCreateToken();
     const transports = new Map<string, StreamableHTTPServerTransport>();
+    const terminalSessions = new TerminalSessionManager();
 
     const assertAuth = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
         if (!authRequired) return true;
@@ -162,6 +175,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     webserverBase: webserverBaseUrl(),
                     webservers: listWebserverRoots(),
                     fsApi: FS_API,
+                    terminalApi: 'pty-session-v1',
                 });
                 return;
             }
@@ -186,6 +200,97 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                 sendJson: (status, body) => sendJson(res, status, body),
             });
             if (handledFs) return;
+
+            if (pathname === '/terminal/sessions' && req.method === 'POST') {
+                if (!assertAuth(req, url, res)) return;
+                const origin = String(req.headers.origin || '');
+                if (origin && !originAllowed(origin)) {
+                    sendJson(res, 403, { ok: false, error: 'origin not allowed' });
+                    return;
+                }
+                try {
+                    const body = JSON.parse((await readBody(req)) || '{}') as { cwd?: string; cols?: number; rows?: number };
+                    sendJson(res, 201, {
+                        ok: true,
+                        ...terminalSessions.create(runtime.root, body.cwd, terminalOwner(req), body),
+                    });
+                } catch (error) {
+                    sendJson(res, terminalErrorStatus(error), { ok: false, error: error instanceof Error ? error.message : String(error) });
+                }
+                return;
+            }
+
+            const terminalMatch = pathname.match(/^\/terminal\/sessions\/([^/]+)(?:\/(commands|input|output|stream|resize|interrupt))?$/);
+            if (terminalMatch) {
+                if (!assertAuth(req, url, res)) return;
+                const origin = String(req.headers.origin || '');
+                if (origin && !originAllowed(origin)) {
+                    sendJson(res, 403, { ok: false, error: 'origin not allowed' });
+                    return;
+                }
+                const id = decodeURIComponent(terminalMatch[1]);
+                const action = terminalMatch[2] || '';
+                const owner = terminalOwner(req);
+                try {
+                    if (action === 'commands' && req.method === 'POST') {
+                        const body = JSON.parse((await readBody(req)) || '{}') as { command?: string };
+                        sendJson(res, 202, { ok: true, ...terminalSessions.send(id, owner, String(body.command || '')) });
+                        return;
+                    }
+                    if (action === 'input' && req.method === 'POST') {
+                        const body = JSON.parse((await readBody(req)) || '{}') as { data?: string };
+                        sendJson(res, 202, { ok: true, ...terminalSessions.write(id, owner, String(body.data || '')) });
+                        return;
+                    }
+                    if (action === 'output' && req.method === 'GET') {
+                        const cursor = Number(url.searchParams.get('cursor') || 0);
+                        sendJson(res, 200, { ok: true, ...terminalSessions.output(id, owner, cursor) });
+                        return;
+                    }
+                    if (action === 'stream' && req.method === 'GET') {
+                        const cursor = Number(url.searchParams.get('cursor') || 0);
+                        res.writeHead(200, {
+                            'Content-Type': 'application/x-ndjson; charset=utf-8',
+                            'Cache-Control': 'no-store, no-transform',
+                            Connection: 'keep-alive',
+                            'X-Accel-Buffering': 'no',
+                        });
+                        res.flushHeaders();
+                        let unsubscribe: (() => void) | undefined;
+                        const detach = () => {
+                            unsubscribe?.();
+                            unsubscribe = undefined;
+                        };
+                        unsubscribe = terminalSessions.subscribe(id, owner, cursor, event => {
+                            if (res.writableEnded || res.destroyed) return;
+                            res.write(`${JSON.stringify(event)}\n`);
+                            if (event.closed) res.end();
+                        });
+                        res.once('close', detach);
+                        if (res.writableEnded) detach();
+                        return;
+                    }
+                    if (action === 'interrupt' && req.method === 'POST') {
+                        terminalSessions.interrupt(id, owner);
+                        sendJson(res, 200, { ok: true });
+                        return;
+                    }
+                    if (action === 'resize' && req.method === 'POST') {
+                        const body = JSON.parse((await readBody(req)) || '{}') as { cols?: number; rows?: number };
+                        sendJson(res, 200, { ok: true, ...terminalSessions.resize(id, owner, body.cols, body.rows) });
+                        return;
+                    }
+                    if (!action && req.method === 'DELETE') {
+                        terminalSessions.close(id, owner);
+                        sendJson(res, 200, { ok: true });
+                        return;
+                    }
+                    sendJson(res, 405, { ok: false, error: 'method not allowed' });
+                } catch (error) {
+                    sendJson(res, terminalErrorStatus(error), { ok: false, error: error instanceof Error ? error.message : String(error) });
+                }
+                return;
+            }
 
             const handledCalendar = await tryHandleCalendar({
                 pathname,
@@ -321,6 +426,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
 
     const pruneTimer = setInterval(() => {
         pruneIdleSessions();
+        terminalSessions.prune();
     }, 60_000);
     pruneTimer.unref();
 
@@ -345,6 +451,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
         clearInterval(pruneTimer);
         stopParacraftWatch();
         stopCalendarWatch();
+        terminalSessions.closeAll();
         for (const t of transports.values()) {
             try { await t.close(); } catch { /* ignore */ }
         }

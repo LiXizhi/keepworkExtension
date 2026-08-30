@@ -31,6 +31,18 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 
 `GET /health` includes `workspaceRoot` so AIChat can map cloud workspace slots onto a cwd relative to that root. It also reports `paracraftClients` when desktop Paracraft processes have registered, `webserverBase` (`http://127.0.0.1:<port>/webserver`) so web-paracraft can bind the NPL code wiki, and `fsApi: "workspace"` when local-disk list/write/delete are available. `GET /exists?path=` checks that a typed local absolute path exists; AIChat must verify that path before using `/fs/*`. `run_terminal` accepts that path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`. AIChat local-disk `list_dir` / `search_files` / `read_file` / writes use `/fs/list`, `/fs/search`, `/fs/file`, `/fs/dir` (includes symbolic links and junctions). Local web-paracraft can overlay git files with `?searchroot=<abs>&searchpath=<rel>` via `GET /fs/file` (one file per request, **raw on-disk bytes**, MIME from the extension, no `charset=` — same API as a normal file URL; optional `?base64=true` JSON is unused by the overlay; loopback, confined to that root).
 
+`GET /health` also reports `terminalApi: "pty-session-v1"`. AIChat uses this capability for its user-operated xterm.js workspace Terminal tab; it is not registered as another LLM MCP tool:
+
+- `POST /terminal/sessions` — create a PTY in `{ cwd, cols, rows }`
+- `POST /terminal/sessions/:id/input` — write raw keyboard/input data
+- `GET /terminal/sessions/:id/stream?cursor=` — keep one NDJSON response open for incremental PTY output, with cursor replay on reconnect
+- `GET /terminal/sessions/:id/output?cursor=` — compatibility endpoint for bounded incremental polling
+- `POST /terminal/sessions/:id/resize` — update PTY columns and rows
+- `POST /terminal/sessions/:id/interrupt` — compatibility Ctrl+C endpoint
+- `DELETE /terminal/sessions/:id` — close and forget the session
+
+Sessions are bound to the creating allowed Origin, use the same optional Bearer token as `/mcp`, cap concurrent PTYs and output, expire after inactivity, and close when the daemon stops. Windows uses ConPTY with PowerShell; Unix uses the configured shell. ANSI rendering, cursor control, history keys, Ctrl+C, resize, and interactive CLI/TUI programs work through xterm.js.
+
 **Paracraft CLI hub** (`/paracraft/*`, same loopback server): desktop Paracraft registers on start. If Keepwork MCP is up, the client long-polls jobs (and heartbeats) until the hub goes down. The daemon also scans loopback NPL HTTP (`8099-8115` `/ajax/paracraft_cli`) so a client that started while the daemon was down can still be found. If a client reports an NPL HTTP `nplPort` and the hub can ping it, dispatch goes to that port and skips long-poll. AIChat `ParacraftTool.html` lists desktop clients and dispatches `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`. Client register/poll stay open on loopback. List/dispatch use the pairing token only when `requireAuth` is on.
 
 **WASM NPL code wiki** (`/webserver/<instance>/…`): web-paracraft cannot bind `:8099`. It probes `GET /health` for `webserverBase`, registers, and stores `webserverRoot` as NPL `WebServer:site_url()`. This daemon then proxies console / debugger / ajax into that WASM instance as batched `http_request` jobs (cookie `Keepwork-WebServer` for root-absolute `/wp-includes` and `/ajax`). Full write-up: [docs/paracraft-cli.md](docs/paracraft-cli.md). Engine side: paraworld `docs/aries/paracraft-cli.md`.
@@ -102,6 +114,7 @@ Example `~/.keepwork-mcp/config.json`:
 - MCP and admin APIs are **open on loopback by default**. Set `keepwork.mcp.requireAuth` to require `~/.keepwork-mcp/token`.
 - Commands cannot leave the workspace root. A small deny-list blocks `format`, `shutdown`, `rm -rf /`, etc.
 - AIChat confirms every `run_terminal` call in the UI.
+- The AIChat Terminal tab is direct user input, so it bypasses the model confirmation bar and command deny-list parsing. It is available only for a verified local-folder cwd and remains protected by loopback Origin/auth, owner binding, bounded sessions/output, idle cleanup, and explicit close.
 - `web_search` / `fetch_url` only allow public http(s). Localhost, private IPs, and metadata hosts are blocked. HTML is parsed on this machine; the model receives minified JSON only.
 
 ## Requirements

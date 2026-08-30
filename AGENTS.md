@@ -38,6 +38,7 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 | `src/core/paths.ts` | Workspace root + confine paths |
 | `src/core/config.ts` | Port, token, `~/.keepwork-mcp/` instance file, default user workspace |
 | `src/core/terminal.ts` | Shell spawn / VS Code terminal bridge, timeout, output cap, deny-list, per-session queue |
+| `src/core/terminalSessions.ts` | User-operated node-pty sessions, raw input/output, resize, ownership, caps, idle cleanup |
 | `src/core/vscodeBridge.ts` | Daemon client: POST to the extension terminal bridge |
 | `src/vscode/terminalBridge.ts` | Extension host: reuse Keepwork integrated terminal + `/run` loopback |
 | `src/vscode/notifyBridge.ts` | Extension host: calendar OS/VS Code notifications + open AIChat |
@@ -75,6 +76,8 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 HTTP:
 
 - `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`, `webserverBase`, `webservers` as `{ instance, root }[]`, `fsApi: "workspace"` when list/write/delete are available)
+- `GET /health` also reports `terminalApi: "pty-session-v1"` when the user-operated PTY API is available.
+- `POST /terminal/sessions`, `POST /terminal/sessions/:id/input`, `GET /terminal/sessions/:id/stream?cursor=` (long-lived NDJSON output with cursor replay), compatibility `GET /terminal/sessions/:id/output?cursor=`, `POST /terminal/sessions/:id/resize`, `POST /terminal/sessions/:id/interrupt`, `DELETE /terminal/sessions/:id` — direct AIChat workspace PTY. Keep Origin/auth ownership, verified cwd, bounded output/concurrency, idle cleanup, stream disconnect cleanup, and daemon-close cleanup. Raw user input cannot use whole-command deny-list parsing; do not weaken the separate model-operated `run_terminal` confirmation or deny-list.
 - `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory (AIChat must verify a user-typed local workspace root before `/fs/*`)
 - `GET /fs/list?root=&path=&max=` — directory listing; includes symbolic links / junctions. `recursive=1` returns file paths (BFS, loop-aware, capped)
 - `GET /fs/search?root=&path=&q=&max=` — filename substring search (case-insensitive); includes symlink/junction names, skips `node_modules` / `.git`, loop-aware, scan cap 8000
