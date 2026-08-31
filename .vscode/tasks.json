@@ -27,6 +27,24 @@
       "group": "build"
     },
     {
+      "type": "shell",
+      "label": "Keepwork: Publish Latest VSIX (Entra)",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$candidate = Get-ChildItem -LiteralPath '${workspaceFolder}' -File -Filter 'keepwork-*.vsix' | ForEach-Object { if ($_.BaseName -match '^keepwork-(\\d+\\.\\d+\\.\\d+)$') { [PSCustomObject]@{ File = $_; Version = [version]$Matches[1] } } } | Sort-Object Version -Descending | Select-Object -First 1; if (-not $candidate) { throw 'No keepwork-X.Y.Z.vsix package found in the workspace root.' }; Write-Host \"Publishing $($candidate.File.Name)...\"; $env:PATH = 'C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin;' + $env:PATH; & '${workspaceFolder}\\node_modules\\.bin\\vsce.cmd' publish --azure-credential --packagePath $candidate.File.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
       "type": "npm",
       "script": "dev:server",
       "problemMatcher": "$tsc-watch",

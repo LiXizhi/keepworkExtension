@@ -117,6 +117,52 @@ Example `~/.keepwork-mcp/config.json`:
 - The AIChat Terminal tab is direct user input, so it bypasses the model confirmation bar and command deny-list parsing. It is available only for a verified local-folder cwd and remains protected by loopback Origin/auth, owner binding, bounded sessions/output, idle cleanup, and explicit close.
 - `web_search` / `fetch_url` only allow public http(s). Localhost, private IPs, and metadata hosts are blocked. HTML is parsed on this machine; the model receives minified JSON only.
 
+## Publish to Visual Studio Marketplace
+
+The extension is published as [`Xizhi.keepwork`](https://marketplace.visualstudio.com/items?itemName=Xizhi.keepwork). Use Microsoft Entra ID authentication rather than a Personal Access Token (PAT).
+
+### One-time setup on Windows
+
+1. Install Azure CLI:
+
+  ```powershell
+  winget install --exact --id Microsoft.AzureCLI
+  ```
+
+2. Sign in with Windows Web Account Manager (WAM). Security Defaults block device-code flow, so do not use `--use-device-code`:
+
+  ```powershell
+  az config set core.login_experience_v2=off
+  az login --tenant <tenant-id> --allow-no-subscriptions
+  ```
+
+3. In [Marketplace publisher management](https://marketplace.visualstudio.com/manage/publishers/Xizhi), add the signed-in Entra identity to publisher `Xizhi` with the **Contributor** role. If Marketplace needs the Entra profile ID, retrieve it without printing an access token:
+
+  ```powershell
+  az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me `
+    --resource 499b84ac-1321-427f-aa17-267ca6975798 `
+    --query id -o tsv
+  ```
+
+### Package and publish
+
+`npm run package` compiles the extension, increments the patch version, and creates `keepwork-<version>.vsix`. Review the new version before publishing.
+
+```powershell
+npm install
+npm run package
+.\node_modules\.bin\vsce.cmd publish --azure-credential `
+  --packagePath .\keepwork-<version>.vsix
+```
+
+If Azure CLI was installed after VS Code started, restart VS Code or expose it to the current terminal before running `vsce`:
+
+```powershell
+$env:PATH = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin;' + $env:PATH
+```
+
+Publishing an existing VSIX does not rebuild, increment the version, commit, or create a Git tag. Verify the release on the [public listing](https://marketplace.visualstudio.com/items?itemName=Xizhi.keepwork); propagation can take a few minutes. For automated publishing, follow Microsoft's workload identity federation and managed identity workflow instead of storing interactive credentials.
+
 ## Requirements
 
 - Node.js 18+

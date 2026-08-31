@@ -122,6 +122,26 @@ npm start                          # HTTP daemon :8089
 npm run mcp                        # stdio MCP for Cursor
 ```
 
+### Visual Studio Marketplace release
+
+- Marketplace identity: `Xizhi.keepwork`; public page: `https://marketplace.visualstudio.com/items?itemName=Xizhi.keepwork`.
+- Prefer Microsoft Entra ID via `@vscode/vsce --azure-credential`; do not put PATs, access tokens, or Azure credentials in repository files, chat, logs, or command arguments.
+- The Entra identity must be a **Contributor** (or Owner) of Marketplace publisher `Xizhi` and must have permission to modify the existing `keepwork` extension. When authorization fails, retrieve the profile ID with `az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id -o tsv`, then add that identity in publisher management.
+- On Windows, use normal `az login --tenant <tenant-id> --allow-no-subscriptions` so Web Account Manager can satisfy MFA and Security Defaults. Do not use device-code login when the tenant blocks device code with `AADSTS530035`.
+- `npm run compile` and `npm run package` both run `npm version patch --no-git-tag-version`; they mutate `package.json` and `package-lock.json`. Do not invoke either merely to validate an already-built release, and never run them twice for the same intended version. Use `npm run compile:only` for a non-versioning type check.
+- `npm run package` creates `keepwork-<version>.vsix`. Before publishing, verify that the manifest version and VSIX filename match the intended release.
+- Publish the existing artifact without another build or version bump:
+
+  ```powershell
+  $env:PATH = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin;' + $env:PATH
+  .\node_modules\.bin\vsce.cmd publish --azure-credential --packagePath .\keepwork-<version>.vsix
+  ```
+
+- The explicit PATH prefix is needed only when Azure CLI was installed after the current VS Code process started; a restarted VS Code should inherit it normally.
+- A successful release prints `DONE Published Xizhi.keepwork v<version>`. Verify the public Marketplace page; allow several minutes for propagation.
+- Publishing an existing VSIX must not change source, increment versions, create commits, or create tags. Do not commit or push release changes unless the user explicitly requests it.
+- For unattended CI releases, use Microsoft's workload identity federation plus managed identity flow and add that managed identity as a Publisher Contributor. Do not persist an interactive Azure CLI session as CI authentication.
+
 ### Debug the HTTP MCP server without the extension
 
 Run the VS Code task **Keepwork MCP: Dev Server (8089)**, or start the same workflow from a terminal:
