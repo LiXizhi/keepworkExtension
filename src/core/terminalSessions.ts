@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { chmodSync } from 'node:fs';
+import * as path from 'node:path';
 import * as pty from 'node-pty';
 import { GLOBAL_TERMINAL_CAP, OUTPUT_CHAR_CAP } from './config';
 import { resolveWorkdir } from './paths';
@@ -77,6 +79,17 @@ function shellSpec(): { command: string; args: string[] } {
     return { command: process.env.SHELL || '/bin/sh', args: [] };
 }
 
+function ensureDarwinSpawnHelperExecutable(): void {
+    if (process.platform !== 'darwin') return;
+    const nodePtyDir = path.resolve(path.dirname(require.resolve('node-pty')), '..');
+    const helper = path.join(nodePtyDir, 'prebuilds', `darwin-${process.arch}`, 'spawn-helper');
+    try {
+        chmodSync(helper, 0o755);
+    } catch (error) {
+        throw new Error(`cannot make node-pty spawn-helper executable (${helper}): ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
 export class TerminalSessionManager {
     private readonly sessions = new Map<string, TerminalSession>();
 
@@ -89,6 +102,7 @@ export class TerminalSessionManager {
         if (this.sessions.size >= GLOBAL_TERMINAL_CAP) {
             throw new Error(`terminal session limit reached (${GLOBAL_TERMINAL_CAP})`);
         }
+        ensureDarwinSpawnHelperExecutable();
         const resolvedCwd = resolveWorkdir(root, cwd || '.');
         const shell = shellSpec();
         const cols = clampDimension(dimensions?.cols, DEFAULT_COLS, MIN_COLS, MAX_COLS);
