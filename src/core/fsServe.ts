@@ -294,6 +294,23 @@ function writeSearchFile(rootRaw: string, relRaw: string, body: Buffer) {
     return { rel, size: body.length };
 }
 
+function createDirectory(rootRaw: string, relRaw: string) {
+    const root = resolveRoot(rootRaw);
+    const rel = normalizeRel(relRaw);
+    if (!rel) return { rel: '', created: false };
+    const abs = resolveUnderRoot(root, rel, { includeLinks: true });
+    let created = false;
+    try {
+        const st = fs.statSync(abs);
+        if (!st.isDirectory()) throw new Error('path is not a directory');
+    } catch (err) {
+        if (err instanceof Error && err.message === 'path is not a directory') throw err;
+        fs.mkdirSync(abs, { recursive: true });
+        created = true;
+    }
+    return { rel, created };
+}
+
 function revealInOs(abs: string, folder: boolean): void {
     if (process.platform === 'win32') {
         const args = folder ? [abs] : [`/select,${abs}`];
@@ -456,6 +473,11 @@ export async function tryHandleFs(opts: {
 
         if (opts.pathname === '/fs/file' && method === 'DELETE') {
             opts.sendJson(200, { ok: true, ...deletePath(root, rel, { folder: false }) });
+            return true;
+        }
+
+        if (opts.pathname === '/fs/dir' && method === 'PUT') {
+            opts.sendJson(200, { ok: true, ...createDirectory(root, rel) });
             return true;
         }
 

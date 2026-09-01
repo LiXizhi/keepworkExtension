@@ -82,6 +82,7 @@ HTTP:
 - `GET /fs/list?root=&path=&max=` — directory listing; includes symbolic links / junctions. `recursive=1` returns file paths (BFS, loop-aware, capped)
 - `GET /fs/search?root=&path=&q=&max=` — filename substring search (case-insensitive); includes symlink/junction names, skips `node_modules` / `.git`, loop-aware, scan cap 8000
 - `GET /fs/stat?root=&path=` — `{ exists, isFile, isDirectory, symlink, size }`
+- `PUT /fs/dir?root=&path=` — recursively create a confined directory; returns `{ created }`
 - `GET /fs/file?root=&path=` — one confined file as **raw on-disk bytes**. MIME from extension (Lua/NPL `text/plain`, html/js/css/png/jpg, unknown `.fxo` / `.o` as `application/octet-stream`). **Never** `charset=` (XHR would decode the body). Optional `?base64=true` returns JSON `{ ok, size, rel, type, base64 }` instead. `links=include` uses lexical confine so a symlink inside the root is readable. Loopback, no token, `Cache-Control: no-store`
 - `PUT /fs/file?root=&path=` — write UTF-8/bytes under the verified root (creates parent dirs)
 - `DELETE /fs/file?root=&path=` — delete a file or symlink (not a directory)

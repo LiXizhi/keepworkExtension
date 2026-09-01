@@ -175,6 +175,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     webserverBase: webserverBaseUrl(),
                     webservers: listWebserverRoots(),
                     fsApi: FS_API,
+                    fsDirApi: 'mkdir-v1',
                     terminalApi: 'pty-session-v1',
                 });
                 return;
