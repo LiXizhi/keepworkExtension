@@ -127,10 +127,11 @@ export function listHistory(offset = 0, limit = HISTORY_PAGE_DEFAULT): HistoryPa
     };
 }
 
-export function pruneIdleSessions(): string[] {
+export function pruneIdleSessions(activeSessionIds: ReadonlySet<string> = new Set()): string[] {
     const cutoff = Date.now() - IDLE_SESSION_MS;
     const closed: string[] = [];
     for (const [id, session] of sessions) {
+        if (activeSessionIds.has(id)) continue;
         if (Date.parse(session.lastSeenAt) >= cutoff) continue;
         closeHandlers.get(id)?.();
         sessions.delete(id);

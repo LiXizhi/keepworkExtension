@@ -140,6 +140,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
     };
     const token = readOrCreateToken();
     const transports = new Map<string, StreamableHTTPServerTransport>();
+    const activeMcpStreams = new Set<string>();
     const terminalSessions = new TerminalSessionManager();
 
     const assertAuth = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
@@ -345,9 +346,13 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
             }
 
             if (pathname === '/mcp') {
+                const origin = String(req.headers.origin || '');
+                if (origin && !originAllowed(origin)) {
+                    sendJson(res, 403, { error: 'origin not allowed' });
+                    return;
+                }
                 if (!assertAuth(req, url, res)) return;
                 const sessionId = String(req.headers['mcp-session-id'] || '');
-                const origin = String(req.headers.origin || '');
                 const userAgent = String(req.headers['user-agent'] || '');
                 let parsedBody: unknown;
                 if (req.method === 'POST') {
@@ -359,7 +364,12 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     if (sessionId && transports.has(sessionId)) {
                         touchSession(sessionId);
                         const transport = transports.get(sessionId)!;
-                        await transport.handleRequest(req, res, parsedBody);
+                        if (req.method === 'GET') activeMcpStreams.add(sessionId);
+                        try {
+                            await transport.handleRequest(req, res, parsedBody);
+                        } finally {
+                            if (req.method === 'GET') activeMcpStreams.delete(sessionId);
+                        }
                         return;
                     }
 
@@ -426,7 +436,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
     });
 
     const pruneTimer = setInterval(() => {
-        pruneIdleSessions();
+        pruneIdleSessions(activeMcpStreams);
         terminalSessions.prune();
     }, 60_000);
     pruneTimer.unref();
