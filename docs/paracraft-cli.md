@@ -58,7 +58,7 @@ Wiki bytes come from WASM, not `GET /fs/file`.
 
 ## Try external access
 
-1. Restart Keepwork MCP so `/health` includes `webserverBase` (`npm run compile:only` then restart the daemon / F5 the extension).
+1. Restart Keepwork MCP so `/health` includes `webserverBase` (`npm run compile:only --prefix apps/vscode-extension` then restart the daemon / F5 the extension).
 2. Open web-paracraft; its embedded wiki works independently of Keepwork MCP.
 3. Run `/webserver -external` in the iframe to publish it to Keepwork.
 4. Open `http://127.0.0.1:8089/webserver/webparacraft1/console` (or the ParacraftTool **Code Wiki** button). `GET /health` lists live `webservers`.

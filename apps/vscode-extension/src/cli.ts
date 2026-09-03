@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { resolvePort, resolveRequireAuth, SERVER_NAME } from './core/config';
-import { resolveWorkspaceRoot } from './core/paths';
-import { startHttpServer } from './mcp/http';
-import { startStdioServer } from './mcp/stdio';
+import { resolvePort, resolveRequireAuth, SERVER_NAME } from '../../../src/core/config';
+import { resolveWorkspaceRoot } from '../../../src/core/paths';
+import { startHttpServer } from '../../../src/mcp/http';
+import { startStdioServer } from '../../../src/mcp/stdio';
 
 async function main(): Promise<void> {
     const args = process.argv.slice(2);

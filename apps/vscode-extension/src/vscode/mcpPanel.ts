@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { HISTORY_PAGE_DEFAULT, readToken } from '../core/config';
+import { HISTORY_PAGE_DEFAULT, readToken } from '../../../../src/core/config';
 import { configuredRoot, ensureDaemon, fetchAdminHistory, fetchAdminStatus, probeHealth, stopDaemon } from './daemon';
 import { formatPanelPayload } from './statusBar';
 

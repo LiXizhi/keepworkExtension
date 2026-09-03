@@ -3,7 +3,7 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
-import { BIND_HOST, clearNotifyBridge, writeNotifyBridge } from '../core/config';
+import { BIND_HOST, clearNotifyBridge, writeNotifyBridge } from '../../../../src/core/config';
 
 function isSafeOpenUrl(url: string): boolean {
     try {

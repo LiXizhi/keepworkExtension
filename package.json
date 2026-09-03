@@ -1,121 +1,22 @@
 {
-  "name": "keepwork",
-  "displayName": "Keepwork",
-  "description": "Clone Keepwork repos, open files on keepwork.com, and run a local MCP daemon for AIChat terminal/grep",
-  "version": "0.1.16",
-  "publisher": "Xizhi",
+  "name": "keepwork-extension-repository",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared Keepwork MCP runtime and application build orchestration",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/LiXizhi/keepworkExtension.git"
-  },
-  "engines": {
-    "vscode": "^1.85.0",
-    "node": ">=18.14.1"
-  },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
-  "main": "./out/extension.js",
-  "bin": {
-    "keepwork-mcp": "./out/cli.js"
-  },
-  "contributes": {
-    "commands": [
-      {
-        "command": "keepwork.cloneRepository",
-        "title": "Keepwork: Clone Repository"
-      },
-      {
-        "command": "keepwork.openInKeepwork",
-        "title": "Open in Keepwork"
-      },
-      {
-        "command": "keepwork.showMcpServer",
-        "title": "Keepwork: Show MCP Server"
-      },
-      {
-        "command": "keepwork.startMcpServer",
-        "title": "Keepwork: Start MCP Server"
-      },
-      {
-        "command": "keepwork.stopMcpServer",
-        "title": "Keepwork: Stop MCP Server"
-      },
-      {
-        "command": "keepwork.copyMcpToken",
-        "title": "Keepwork: Copy MCP Token"
-      },
-      {
-        "command": "keepwork.openMcpWorkspace",
-        "title": "Keepwork: Open MCP Working Directory"
-      },
-      {
-        "command": "keepwork.changeMcpWorkspace",
-        "title": "Keepwork: Change MCP Working Directory"
-      },
-      {
-        "command": "keepwork.showMcpTerminal",
-        "title": "Keepwork: Show Terminal"
-      }
-    ],
-    "menus": {
-      "explorer/context": [
-        {
-          "command": "keepwork.openInKeepwork",
-          "when": "resourceScheme == file",
-          "group": "navigation"
-        }
-      ]
-    },
-    "configuration": {
-      "title": "Keepwork",
-      "properties": {
-        "keepwork.mcp.enableHttp": {
-          "type": "boolean",
-          "default": true,
-          "description": "Start or attach to the Keepwork MCP daemon on 127.0.0.1 when the extension activates."
-        },
-        "keepwork.mcp.port": {
-          "type": "number",
-          "default": 8089,
-          "description": "Loopback port for the Keepwork MCP HTTP daemon."
-        },
-        "keepwork.mcp.workspaceRoot": {
-          "type": "string",
-          "default": "",
-          "description": "Parent sandbox for run_terminal and grep_files. Empty uses ~/.keepwork-mcp/workspace (created automatically). AIChat then uses workspace/default or workspace/[workspacename]. Not the open VS Code folder."
-        },
-        "keepwork.mcp.requireAuth": {
-          "type": "boolean",
-          "default": false,
-          "description": "Require the pairing token (~/.keepwork-mcp/token) for /mcp and /admin. Default off so AIChat can connect without a pairing step."
-        }
-      }
-    }
-  },
   "scripts": {
-    "vscode:prepublish": "npm run compile:only",
-    "compile:only": "tsc -p ./",
-    "compile": "npm version patch --no-git-tag-version && npm run compile:only",
-    "watch": "tsc -watch -p ./",
-    "dev:server": "node scripts/dev-server.js",
-    "start": "node out/cli.js",
-    "mcp": "node out/cli.js --stdio",
-    "package": "npm run compile && npx --yes @vscode/vsce package"
-  },
-  "devDependencies": {
-    "@types/node": "^20.10.0",
-    "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^3.9.2",
-    "typescript": "^5.3.0"
+    "install:apps": "npm ci --prefix apps/vscode-extension && npm ci --prefix apps/local-helper",
+    "check:layout": "node scripts/check-layout.cjs",
+    "check:shared": "tsc -p ./ --noEmit && npm run check:layout",
+    "check:all": "npm run check:shared && npm run check --prefix apps/vscode-extension && npm run check --prefix apps/local-helper"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "node-pty": "^1.1.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
   }
 }

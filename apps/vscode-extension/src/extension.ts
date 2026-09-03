@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { parseKeepworkCloneUrl, buildKeepworkOpenUrl } from './core/keepwork';
-import { DEFAULT_WORKSPACE_SLOT, readToken, writeConfigFile } from './core/config';
+import { parseKeepworkCloneUrl, buildKeepworkOpenUrl } from '../../../src/core/keepwork';
+import { DEFAULT_WORKSPACE_SLOT, readToken, writeConfigFile } from '../../../src/core/config';
 import { configuredRoot, ensureDaemon, mcpEnabled, stopDaemon } from './vscode/daemon';
 import { createMcpStatusBar, refreshStatusBar } from './vscode/statusBar';
 import { openMcpPanel } from './vscode/mcpPanel';

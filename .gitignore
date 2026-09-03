@@ -2,3 +2,10 @@ out/
 node_modules/
 .vscode-test/
 *.vsix
+apps/vscode-extension/dist/
+apps/vscode-extension/node_modules/
+apps/local-helper/dist/
+apps/local-helper/release/
+apps/local-helper/node_modules/
+apps/local-helper/build.local.json
+release-manifest.json

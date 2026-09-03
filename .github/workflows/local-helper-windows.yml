@@ -1,0 +1,112 @@
+name: Build KP Local Helper for Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_url:
+        description: Stable HTTPS directory for the Windows update channel
+        required: false
+        type: string
+      require_signing:
+        description: Fail unless the generated installer has a valid Authenticode signature
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/vscode-extension/package-lock.json
+            apps/local-helper/package-lock.json
+
+      - name: Install shared dependencies
+        run: npm ci
+
+      - name: Install VS Code extension dependencies
+        run: npm ci --prefix apps/vscode-extension
+
+      - name: Install helper dependencies
+        run: npm ci --prefix apps/local-helper
+
+      - name: Compile and test all package boundaries
+        run: |
+          npm run check:shared
+          npm --prefix apps/vscode-extension run check
+          npm --prefix apps/local-helper run check
+
+      - name: Create private build configuration
+        shell: pwsh
+        env:
+          KP_CSC_LINK_SECRET: ${{ secrets.KP_WINDOWS_CSC_LINK }}
+          KP_CSC_PASSWORD_SECRET: ${{ secrets.KP_WINDOWS_CSC_KEY_PASSWORD }}
+          KP_CERTIFICATE_SUBJECT: ${{ vars.KP_WINDOWS_CERT_SUBJECT }}
+          KP_REQUIRE_SIGNING_INPUT: ${{ inputs.require_signing }}
+          KP_PUBLISH_URL_INPUT: ${{ inputs.publish_url }}
+        run: |
+          $certificateFile = ''
+          if ($env:KP_CSC_LINK_SECRET) {
+            if (Test-Path -LiteralPath $env:KP_CSC_LINK_SECRET) {
+              $certificateFile = (Resolve-Path -LiteralPath $env:KP_CSC_LINK_SECRET).Path
+            } else {
+              $encoded = $env:KP_CSC_LINK_SECRET -replace '^data:[^;]+;base64,', ''
+              $certificateFile = Join-Path $env:RUNNER_TEMP 'kp-local-helper-signing.pfx'
+              [IO.File]::WriteAllBytes($certificateFile, [Convert]::FromBase64String($encoded))
+            }
+          }
+          $settings = @{
+            KP_WINDOWS_CSC_LINK = $certificateFile
+            KP_WINDOWS_CSC_KEY_PASSWORD = $env:KP_CSC_PASSWORD_SECRET
+            KP_WINDOWS_CERT_SUBJECT = $env:KP_CERTIFICATE_SUBJECT
+            KP_REQUIRE_CODE_SIGNING = $env:KP_REQUIRE_SIGNING_INPUT -eq 'true'
+            KP_HELPER_PUBLISH_URL = $env:KP_PUBLISH_URL_INPUT
+          }
+          $settings | ConvertTo-Json | Set-Content -Encoding utf8 apps/local-helper/build.local.json
+
+      - name: Build Windows installer
+        run: npm --prefix apps/local-helper run make:win
+
+      - name: Verify Authenticode signature
+        if: ${{ inputs.require_signing }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem apps/local-helper/release/KP-Local-Helper-Setup-*.exe | Select-Object -First 1
+          if (-not $installer) { throw 'installer not found' }
+          $signature = Get-AuthenticodeSignature $installer.FullName
+          if ($signature.Status -ne 'Valid') { throw "invalid installer signature: $($signature.Status)" }
+          Write-Host "signed by $($signature.SignerCertificate.Subject)"
+
+      - name: Generate latest.json
+        if: ${{ inputs.publish_url != '' }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem apps/local-helper/release/KP-Local-Helper-Setup-*.exe | Select-Object -First 1
+          $version = node -p "require('./apps/local-helper/package.json').version"
+          node apps/local-helper/scripts/generate-release-manifest.cjs --file $installer.FullName --version $version --protocol-version 0.1.2 --base-url "${{ inputs.publish_url }}" --output apps/local-helper/release/latest.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kp-local-helper-windows-x64
+          path: |
+            apps/local-helper/release/KP-Local-Helper-Setup-*.exe
+            apps/local-helper/release/latest*.yml
+            apps/local-helper/release/latest.json
+          if-no-files-found: error
+
+      - name: Remove private build configuration
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          Remove-Item -Force -ErrorAction SilentlyContinue apps/local-helper/build.local.json
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'kp-local-helper-signing.pfx')

@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
-import { DEFAULT_WORKSPACE_SLOT, SERVER_NAME, mcpHomeDir, readToken, resolvePort } from '../core/config';
-import { resolveWorkspaceRoot } from '../core/paths';
+import { DEFAULT_WORKSPACE_SLOT, SERVER_NAME, mcpHomeDir, readToken, resolvePort } from '../../../../src/core/config';
+import { resolveWorkspaceRoot } from '../../../../src/core/paths';
 
 export interface HealthInfo {
     ok: boolean;
@@ -162,7 +162,7 @@ export async function ensureDaemon(context: vscode.ExtensionContext): Promise<He
         return health;
     }
 
-    const cli = path.join(context.extensionPath, 'out', 'cli.js');
+    const cli = path.join(context.extensionPath, 'dist', 'cli.js');
     if (!fs.existsSync(cli)) {
         return { ok: false, error: `CLI missing: ${cli} (run npm run compile)` };
     }

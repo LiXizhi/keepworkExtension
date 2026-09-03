@@ -6,6 +6,7 @@ Instructions for AI agents working **in this repository**. Product overview:
 ## What this repo is
 
 - **VS Code / Cursor extension** (`keepwork`) plus a **singleton local MCP daemon**
+- **KP Local Helper** (`apps/local-helper`) packages the same daemon as a per-user Electron tray app for web AIChat users without VS Code
 - **Path**: `c:/lxzsrc/keepworkExtension` (GitHub `LiXizhi/keepworkExtension`)
 - **Job**: (1) clone Keepwork git repos and open files on keepwork.com;
   (2) expose `run_terminal` / `grep_files` / `mcp_status` / `web_search` / `fetch_url` so the **AIChat website**
@@ -13,7 +14,7 @@ Instructions for AI agents working **in this repository**. Product overview:
   browser cannot do on its own.
 
 The HTTP MCP listener is **not** inside the extension host. It is a detached
-`node out/cli.js` process on **`http://127.0.0.1:8089`**. Many VS Code windows
+`node apps/vscode-extension/dist/cli.js` process on **`http://127.0.0.1:8089`**. Many VS Code windows
 spawn-or-attach; many AIChat tabs share one daemon (one MCP session each).
 
 `run_terminal` prefers the VS Code **Keepwork** integrated terminal when the
@@ -33,6 +34,8 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 
 ## Layout (where to edit)
 
+The repository root is a private shared-runtime package. Product manifests, entry points, editor settings, tests and build outputs belong under their application directory. `apps/vscode-extension` and `apps/local-helper` may import `src/core` / `src/mcp`; they must not import one another.
+
 | Path | Role |
 |------|------|
 | `src/core/paths.ts` | Workspace root + confine paths |
@@ -40,8 +43,8 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 | `src/core/terminal.ts` | Shell spawn / VS Code terminal bridge, timeout, output cap, deny-list, per-session queue |
 | `src/core/terminalSessions.ts` | User-operated node-pty sessions, raw input/output, resize, ownership, caps, idle cleanup |
 | `src/core/vscodeBridge.ts` | Daemon client: POST to the extension terminal bridge |
-| `src/vscode/terminalBridge.ts` | Extension host: reuse Keepwork integrated terminal + `/run` loopback |
-| `src/vscode/notifyBridge.ts` | Extension host: calendar OS/VS Code notifications + open AIChat |
+| `apps/vscode-extension/src/vscode/terminalBridge.ts` | Extension host: reuse Keepwork integrated terminal + `/run` loopback |
+| `apps/vscode-extension/src/vscode/notifyBridge.ts` | Extension host: calendar OS/VS Code notifications + open AIChat |
 | `src/core/grep.ts` | `rg` if present, else Node walk |
 | `src/core/web.ts` | Public http(s) fetch, SSRF checks, search-engine HTML parsers, compact JSON |
 | `src/core/headless.ts` | System Edge/Chrome `--dump-dom` for `fetch_url` |
@@ -55,11 +58,12 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
 | `src/mcp/sessions.ts` | Connected clients + in-memory call history (paged list) |
 | `src/mcp/stdio.ts` | stdio transport for Cursor (does not take 8089) |
-| `src/cli.ts` | `node out/cli.js` (`--stdio`, `--port`, `--root`) |
-| `src/extension.ts` | VS Code commands + activate spawn-or-attach |
-| `src/vscode/daemon.ts` | Health probe, detached spawn, admin fetch |
-| `src/vscode/statusBar.ts` | Status bar text / tooltip |
-| `src/vscode/mcpPanel.ts` | Click panel: clients + paged history + working directory / terminal |
+| `apps/vscode-extension/src/cli.ts` | app-local `dist/cli.js` (`--stdio`, `--port`, `--root`) |
+| `apps/vscode-extension/src/extension.ts` | VS Code commands + activate spawn-or-attach |
+| `apps/local-helper` | Windows tray app, login startup, notify bridge, updater and NSIS packaging; imports the shared MCP source |
+| `apps/vscode-extension/src/vscode/daemon.ts` | Health probe, detached spawn, admin fetch |
+| `apps/vscode-extension/src/vscode/statusBar.ts` | Status bar text / tooltip |
+| `apps/vscode-extension/src/vscode/mcpPanel.ts` | Click panel: clients + paged history + working directory / terminal |
 
 AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/AIChat/js/local_mcp.js`.
 
@@ -117,10 +121,11 @@ Commands: `keepwork.openMcpWorkspace`, `keepwork.changeMcpWorkspace`, `keepwork.
 
 ```bash
 cd c:/lxzsrc/keepworkExtension
-npm install
-npm run compile
-npm start                          # HTTP daemon :8089
-npm run mcp                        # stdio MCP for Cursor
+npm ci
+npm ci --prefix apps/vscode-extension
+npm run compile:only --prefix apps/vscode-extension
+npm start --prefix apps/vscode-extension       # HTTP daemon :8089
+npm run mcp --prefix apps/vscode-extension     # stdio MCP for Cursor
 ```
 
 ### Visual Studio Marketplace release
@@ -129,13 +134,13 @@ npm run mcp                        # stdio MCP for Cursor
 - Prefer Microsoft Entra ID via `@vscode/vsce --azure-credential`; do not put PATs, access tokens, or Azure credentials in repository files, chat, logs, or command arguments.
 - The Entra identity must be a **Contributor** (or Owner) of Marketplace publisher `Xizhi` and must have permission to modify the existing `keepwork` extension. When authorization fails, retrieve the profile ID with `az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id -o tsv`, then add that identity in publisher management.
 - On Windows, use normal `az login --tenant <tenant-id> --allow-no-subscriptions` so Web Account Manager can satisfy MFA and Security Defaults. Do not use device-code login when the tenant blocks device code with `AADSTS530035`.
-- `npm run compile` and `npm run package` both run `npm version patch --no-git-tag-version`; they mutate `package.json` and `package-lock.json`. Do not invoke either merely to validate an already-built release, and never run them twice for the same intended version. Use `npm run compile:only` for a non-versioning type check.
-- `npm run package` creates `keepwork-<version>.vsix`. Before publishing, verify that the manifest version and VSIX filename match the intended release.
+- `npm run compile --prefix apps/vscode-extension` and `npm run package --prefix apps/vscode-extension` both run `npm version patch --no-git-tag-version`; they mutate the VS Code app's `package.json` and `package-lock.json`. Do not invoke either merely to validate an already-built release, and never run them twice for the same intended version. Use `npm run compile:only --prefix apps/vscode-extension` for a non-versioning check.
+- `npm run package --prefix apps/vscode-extension` creates `apps/vscode-extension/keepwork-<version>.vsix`. Before publishing, verify that the app manifest version and VSIX filename match the intended release.
 - Publish the existing artifact without another build or version bump:
 
   ```powershell
   $env:PATH = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin;' + $env:PATH
-  .\node_modules\.bin\vsce.cmd publish --azure-credential --packagePath .\keepwork-<version>.vsix
+  .\apps\vscode-extension\node_modules\.bin\vsce.cmd publish --azure-credential --packagePath .\apps\vscode-extension\keepwork-<version>.vsix
   ```
 
 - The explicit PATH prefix is needed only when Azure CLI was installed after the current VS Code process started; a restarted VS Code should inherit it normally.
@@ -148,14 +153,14 @@ npm run mcp                        # stdio MCP for Cursor
 Run the VS Code task **Keepwork MCP: Dev Server (8089)**, or start the same workflow from a terminal:
 
 ```bash
-npm run dev:server
+npm run dev:server --prefix apps/vscode-extension
 ```
 
-This compiles TypeScript in watch mode and runs `out/cli.js` on `127.0.0.1:8089`. After every successful source rebuild, it restarts the MCP daemon automatically; compilation failures leave the last working daemon running. On startup it stops an existing daemon only when `/health` identifies it as `keepwork-mcp`, so it will not replace an unrelated service using port 8089. Stop the task with Ctrl+C.
+This rebuilds the app-local `dist/cli.js` in watch mode and runs it on `127.0.0.1:8089`. After every successful source rebuild, it restarts the MCP daemon automatically. On startup it stops an existing daemon only when `/health` identifies it as `keepwork-mcp`, so it will not replace an unrelated service using port 8089. Stop the task with Ctrl+C.
 
 Use `http://127.0.0.1:8089/health` to verify the listener and `http://127.0.0.1:8089/admin/status` to inspect the PID, workspace root, clients, and auth state. This workflow is for debugging the MCP HTTP server and AIChat integration without publishing the extension, pressing F5, or reloading an Extension Development Host.
 
-F5 **Run Extension** in this folder: on `onStartupFinished` the extension probes `:8089` and spawns the CLI if free. Status bar **Keepwork MCP** → click for clients/history.
+Open `apps/vscode-extension` as the VS Code workspace, then run F5 **Run Extension**: on `onStartupFinished` the extension probes `:8089` and spawns its app-local CLI if free. Status bar **Keepwork MCP** → click for clients/history.
 
 Cursor stdio (does not replace the HTTP daemon AIChat needs):
 
@@ -164,7 +169,7 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
   "mcpServers": {
     "keepwork": {
       "command": "node",
-      "args": ["c:/lxzsrc/keepworkExtension/out/cli.js", "--stdio"],
+      "args": ["c:/lxzsrc/keepworkExtension/apps/vscode-extension/dist/cli.js", "--stdio"],
       "env": { "KEEPWORK_MCP_ROOT": "C:/Users/you/.keepwork-mcp/workspace" }
     }
   }
@@ -189,6 +194,7 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 - AIChat local-disk workspace → same `src/core/fsServe.ts` (`/fs/list` `/fs/search` `/fs/stat` `PUT/DELETE /fs/file` `DELETE /fs/dir`); verify `root` with `inspectDiskPath` / `GET /exists`; include symlink names; lexical confine + `links=include` on read.
 - Security / CORS / PNA / token → `src/mcp/http.ts` only; keep origin allowlist tight (`keepwork.com`, localhost).
 - Terminal policy → `src/core/terminal.ts` (deny-list, timeout, output cap) and keep AIChat confirm in `chat_agents.js` (`local-mcp-terminal-confirm`).
-- Singleton / status bar → `src/vscode/daemon.ts` + `statusBar.ts` + `mcpPanel.ts`; do not move the HTTP listener into the extension host. The VS Code terminal bridge (`src/vscode/terminalBridge.ts`) is a separate loopback helper.
+- Singleton / status bar → `apps/vscode-extension/src/vscode/daemon.ts` + `statusBar.ts` + `mcpPanel.ts`; do not move the HTTP listener into the extension host. The VS Code terminal bridge (`apps/vscode-extension/src/vscode/terminalBridge.ts`) is a separate loopback helper.
+- Local Helper packaging → keep product logic in `src/core` / `src/mcp`; `apps/local-helper` may only own tray/lifecycle/update/installer behavior. Build Windows PTY artifacts on Windows, keep native `node-pty` files unpacked, and never commit signing credentials.
 - Default working directory parent → `~/.keepwork-mcp/workspace` via `src/core/config.ts` `defaultUserWorkspace()`. Slots: `default` (no AIChat workspace) and `[workspacename]`. Do not default to the open VS Code folder.
 - Keepwork clone/open URL rules → `src/core/keepwork.ts` (VS Code commands only in v1; not MCP tools).

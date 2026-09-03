@@ -1,0 +1,35 @@
+{
+  "name": "kp-local-helper",
+  "productName": "KP Local Helper",
+  "version": "0.1.15",
+  "description": "Keepwork AIChat local MCP companion",
+  "author": "Xizhi",
+  "license": "MIT",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit && npm run check:config && npm test && npm run build && npm run check:boundaries",
+    "check:boundaries": "node scripts/check-package-boundaries.cjs",
+    "check:config": "node scripts/check-builder-config.cjs",
+    "test": "node --test scripts/generate-release-manifest.test.cjs",
+    "manifest": "node scripts/generate-release-manifest.cjs",
+    "pack": "npm run build && electron-builder --dir",
+    "make:win": "npm run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9",
+    "node-pty": "1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "app-builder-lib": "26.15.3",
+    "electron": "44.1.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "pngjs": "7.0.0",
+    "typescript": "^5.3.0"
+  },
+  "build": {
+    "extends": "./electron-builder.config.cjs"
+  }
+}

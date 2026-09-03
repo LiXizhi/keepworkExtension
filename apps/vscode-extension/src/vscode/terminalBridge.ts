@@ -1,8 +1,8 @@
 import * as http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
-import { BIND_HOST, OUTPUT_CHAR_CAP, clearTerminalBridge, writeTerminalBridge } from '../core/config';
-import type { TerminalResult } from '../core/terminal';
+import { BIND_HOST, OUTPUT_CHAR_CAP, clearTerminalBridge, writeTerminalBridge } from '../../../../src/core/config';
+import type { TerminalResult } from '../../../../src/core/terminal';
 
 export const KEEPWORK_TERMINAL_NAME = 'Keepwork';
 

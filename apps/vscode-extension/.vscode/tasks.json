@@ -1,0 +1,59 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "shell",
+      "command": "npm run compile:only",
+      "problemMatcher": "$tsc",
+      "label": "VS Code Extension: Build",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "type": "shell",
+      "command": "npm run watch",
+      "problemMatcher": [],
+      "label": "VS Code Extension: Watch",
+      "isBackground": true,
+      "group": "build"
+    },
+    {
+      "type": "shell",
+      "command": "npm run package",
+      "problemMatcher": [],
+      "label": "VS Code Extension: Package VSIX",
+      "group": "build"
+    },
+    {
+      "type": "shell",
+      "label": "Keepwork: Publish Latest VSIX (Entra)",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$candidate = Get-ChildItem -LiteralPath '${workspaceFolder}' -File -Filter 'keepwork-*.vsix' | ForEach-Object { if ($_.BaseName -match '^keepwork-(\\d+\\.\\d+\\.\\d+)$') { [PSCustomObject]@{ File = $_; Version = [version]$Matches[1] } } } | Sort-Object Version -Descending | Select-Object -First 1; if (-not $candidate) { throw 'No keepwork-X.Y.Z.vsix package found in apps/vscode-extension.' }; Write-Host \"Publishing $($candidate.File.Name)...\"; $env:PATH = 'C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin;' + $env:PATH; & '${workspaceFolder}\\node_modules\\.bin\\vsce.cmd' publish --azure-credential --packagePath $candidate.File.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "type": "shell",
+      "command": "npm run dev:server",
+      "problemMatcher": [],
+      "label": "Keepwork MCP: Dev Server (8089)",
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    }
+  ]
+}

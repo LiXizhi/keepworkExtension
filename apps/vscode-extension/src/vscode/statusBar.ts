@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { readToken } from '../core/config';
+import { readToken } from '../../../../src/core/config';
 import { fetchAdminHistory, fetchAdminStatus, mcpBaseUrl, probeHealth, type AdminStatus, type HistoryPayload } from './daemon';
 
 export function createMcpStatusBar(onClick: string): vscode.StatusBarItem {

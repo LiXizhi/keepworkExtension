@@ -1,6 +1,16 @@
-# Keepwork Extension for VS Code
+# Keepwork Extension Repository
 
-Clone projects from Keepwork, open files on keepwork.com, and run a **local MCP daemon** so [AIChat](https://keepwork.com/chat) can execute terminal commands and grep on this machine.
+This repository contains the shared Keepwork MCP runtime and its separately packaged applications.
+
+## Repository layout
+
+- `src/core` and `src/mcp`: shared local capabilities and MCP server
+- `apps/vscode-extension`: VS Code/Cursor extension, embedded CLI launcher and VSIX packaging
+- `apps/local-helper`: Windows tray helper and installer packaging
+
+Each application owns its manifest, dependencies, entry points, tests and build output. Applications may import the shared root source, but they do not import each other.
+
+The VS Code extension can clone projects from Keepwork, open files on keepwork.com, and run a **local MCP daemon** so [AIChat](https://keepwork.com/chat) can execute terminal commands and grep on this machine.
 
 ## Features
 
@@ -64,16 +74,23 @@ When the extension is active, `run_terminal` prefers that reused VS Code termina
 
 ## Run the MCP daemon
 
+### Option 0 — KP Local Helper (web AIChat, no editor)
+
+The same repository can produce a per-user Windows tray installer that contains the MCP runtime, Node runtime, and PTY native files. Users install it once and continue using the web AIChat; VS Code and a system Node installation are not required. The helper starts at login, attaches to an existing compatible daemon, supervises its own MCP worker, relays calendar notifications, and updates from the configured HTTPS feed.
+
+Build and release instructions: [apps/local-helper/README.md](apps/local-helper/README.md).
+
 ### Option A — VS Code / Cursor
-Install this extension (F5 **Run Extension** while developing). On activate it probes `:8089` and spawns `node out/cli.js` if the port is free. Requires `node` on PATH.
+Open `apps/vscode-extension` as the VS Code workspace and press F5 **Run Extension** while developing. On activate it probes `:8089` and spawns the app-local `dist/cli.js` if the port is free. Requires `node` on PATH.
 
 ### Option B — CLI (no editor)
 
 ```powershell
 cd c:\lxzsrc\keepworkExtension
-npm install
-npm run compile
-npm start
+npm ci
+npm ci --prefix apps/vscode-extension
+npm run compile:only --prefix apps/vscode-extension
+npm start --prefix apps/vscode-extension
 ```
 
 Optional flags: `--port 8089` `--root %USERPROFILE%\.keepwork-mcp\workspace`. `--stdio` speaks MCP over stdin/stdout for Cursor.
@@ -101,7 +118,7 @@ Example `~/.keepwork-mcp/config.json`:
   "mcpServers": {
     "keepwork": {
       "command": "node",
-      "args": ["c:/lxzsrc/keepworkExtension/out/cli.js", "--stdio"],
+      "args": ["c:/lxzsrc/keepworkExtension/apps/vscode-extension/dist/cli.js", "--stdio"],
       "env": { "KEEPWORK_MCP_ROOT": "C:/Users/you/.keepwork-mcp/workspace" }
     }
   }
@@ -146,13 +163,14 @@ The extension is published as [`Xizhi.keepwork`](https://marketplace.visualstudi
 
 ### Package and publish
 
-`npm run package` compiles the extension, increments the patch version, and creates `keepwork-<version>.vsix`. Review the new version before publishing.
+The VS Code application owns its release version. Its `package` command compiles the extension, increments that patch version, and creates `keepwork-<version>.vsix` under `apps/vscode-extension`. Review the new version before publishing.
 
 ```powershell
-npm install
-npm run package
-.\node_modules\.bin\vsce.cmd publish --azure-credential `
-  --packagePath .\keepwork-<version>.vsix
+npm ci
+npm ci --prefix apps/vscode-extension
+npm run package --prefix apps/vscode-extension
+.\apps\vscode-extension\node_modules\.bin\vsce.cmd publish --azure-credential `
+  --packagePath .\apps\vscode-extension\keepwork-<version>.vsix
 ```
 
 If Azure CLI was installed after VS Code started, restart VS Code or expose it to the current terminal before running `vsce`:

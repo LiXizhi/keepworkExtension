@@ -9,9 +9,9 @@
         "--extensionDevelopmentPath=${workspaceFolder}"
       ],
       "outFiles": [
-        "${workspaceFolder}/out/**/*.js"
+        "${workspaceFolder}/dist/**/*.js"
       ],
-      "preLaunchTask": "npm: compile"
+      "preLaunchTask": "VS Code Extension: Build"
     },
     {
       "name": "Run Extension (Watch)",
@@ -21,17 +21,17 @@
         "--extensionDevelopmentPath=${workspaceFolder}"
       ],
       "outFiles": [
-        "${workspaceFolder}/out/**/*.js"
+        "${workspaceFolder}/dist/**/*.js"
       ]
     },
     {
       "name": "Keepwork MCP (HTTP :8089)",
       "type": "node",
       "request": "launch",
-      "program": "${workspaceFolder}/out/cli.js",
+      "program": "${workspaceFolder}/dist/cli.js",
       "args": ["--root", "C:/lxzsrc"],
       "console": "integratedTerminal",
-      "preLaunchTask": "npm: compile"
+      "preLaunchTask": "VS Code Extension: Build"
     },
     {
       "name": "Build VSIX",
@@ -41,7 +41,7 @@
       "runtimeArgs": ["run", "package"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "preLaunchTask": "npm: compile"
+      "preLaunchTask": "VS Code Extension: Build"
     }
   ]
 }
