@@ -48,5 +48,5 @@ await build({
   ...common,
   entryPoints: [path.join(helperRoot, 'src/worker.ts')],
   outfile: path.join(outdir, 'worker.js'),
-  external: ['node-pty'],
+  external: ['node-pty', 'playwright-core'],
 });

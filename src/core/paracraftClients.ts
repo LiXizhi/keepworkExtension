@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type * as http from 'node:http';
+import * as http from 'node:http';
 
 const KEEP_ALIVE_MS = 10_000;
 const STALE_MS = KEEP_ALIVE_MS;
@@ -18,7 +18,7 @@ const MAX_HISTORY = 40;
 const MAX_SHOTS = 6;
 const SUMMARY_LEN = 160;
 const PING_ACTIONS = new Set(['health']);
-const ACTIONS = new Set(['health', 'world_status', 'run_command', 'screenshot', 'open_world', 'exit', 'bring_to_front']);
+const ACTIONS = new Set(['health', 'world_status', 'run_command', 'screenshot', 'camera_capture', 'open_world', 'exit', 'bring_to_front']);
 
 export interface ParacraftIdentity {
     clientId: string;
@@ -180,19 +180,32 @@ function parseNplPort(value: unknown): number | undefined {
 }
 
 async function loopbackJson(port: number, path: string, init?: RequestInit, timeoutMs = 3000): Promise<{ ok: boolean; status: number; body: Record<string, unknown> }> {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-        const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-            ...init,
-            signal: ctrl.signal,
-            headers: { Accept: 'application/json', ...(init?.headers || {}) },
+    return new Promise((resolve, reject) => {
+        const body = typeof init?.body === 'string' ? init.body : undefined;
+        const req = http.request({
+            hostname: '127.0.0.1', port, path, method: init?.method || 'GET',
+            headers: {
+                Accept: 'application/json', Connection: 'close',
+                ...(body !== undefined ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {}),
+            },
+        }, res => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk: Buffer) => chunks.push(chunk));
+            res.on('error', reject);
+            res.on('end', () => {
+                try {
+                    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                    const status = res.statusCode || 0;
+                    resolve({ ok: status >= 200 && status < 300, status,
+                        body: parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {} });
+                } catch (error) { reject(error); }
+            });
         });
-        const body = await res.json().catch(() => ({}));
-        return { ok: res.ok, status: res.status, body: body && typeof body === 'object' ? body as Record<string, unknown> : {} };
-    } finally {
-        clearTimeout(timer);
-    }
+        const timer = setTimeout(() => req.destroy(new Error('native request timed out')), timeoutMs);
+        req.on('close', () => clearTimeout(timer));
+        req.on('error', reject);
+        req.end(body);
+    });
 }
 
 function identityFromHealth(body: Record<string, unknown>, nplPort: number): Partial<ParacraftIdentity> | null {
@@ -257,7 +270,7 @@ async function dispatchNpl(client: RegisteredClient, action: string, params: Rec
     if (getActions.has(action)) {
         raw = await loopbackJson(port, path, undefined, JOB_WAIT_MS);
     } else {
-        raw = await loopbackJson(port, path, {
+        raw = await loopbackJson(port, '/ajax/paracraft_cli', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ v: 1, id: randomUUID(), action, params }),
@@ -265,6 +278,13 @@ async function dispatchNpl(client: RegisteredClient, action: string, params: Rec
     }
     if (!raw.ok || raw.body.ok === false) {
         throw new Error(String(raw.body.error || `npl ${raw.status}`));
+    }
+    if (action === 'camera_capture') {
+        const image = raw.body.result as Record<string, unknown> | undefined;
+        if (raw.body.action !== action || raw.body.ok !== true || !image || image.ok !== true
+            || typeof image.base64 !== 'string' || !image.base64) {
+            throw new Error('invalid native camera_capture response');
+        }
     }
     return raw.body;
 }
@@ -617,7 +637,7 @@ export function completeJob(id: string, jobId: string, result: unknown): { ok: b
         jobWaiters.delete(jobId);
         const payload = (result && typeof result === 'object') ? result as Record<string, unknown> : { ok: true, result };
         if (waiter.action !== 'http_request') {
-            cacheScreenshot(client, payload);
+            if (waiter.action !== 'camera_capture') cacheScreenshot(client, payload);
             recordEvent(client, waiter.action, (waiter.request.params && typeof waiter.request.params === 'object') ? waiter.request.params as Record<string, unknown> : {}, payload, payload.ok !== false);
         }
         waiter.resolve(payload);
@@ -763,7 +783,7 @@ export async function dispatchAction(id: string, action: string, params: Record<
     if (client.useNpl && client.nplPort) {
         try {
             const result = await dispatchNpl(client, action, params);
-            if (result && typeof result === 'object') cacheScreenshot(client, result as Record<string, unknown>);
+            if (action !== 'camera_capture' && result && typeof result === 'object') cacheScreenshot(client, result as Record<string, unknown>);
             if (action === 'open_world') applyOpenWorldIdentity(client, params);
             recordEvent(client, action, params, result, true);
             if (action === 'exit') dropClient(id, client);

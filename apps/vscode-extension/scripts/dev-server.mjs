@@ -76,7 +76,7 @@ async function main() {
     logLevel: 'info',
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: cliPath,
-    external: ['node-pty'],
+    external: ['node-pty', 'playwright-core'],
     plugins: [{
       name: 'restart-keepwork-mcp',
       setup(build) {

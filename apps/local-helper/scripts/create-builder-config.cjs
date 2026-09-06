@@ -63,6 +63,7 @@ function createBuilderConfig(localConfig = {}, helperRoot = path.resolve(__dirna
     ],
     asar: true,
     asarUnpack: [
+      'node_modules/playwright-core/**/*',
       'node_modules/node-pty/build/Release/**/*',
       'node_modules/node-pty/prebuilds/win32-x64/**/*',
     ],

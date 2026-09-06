@@ -1,0 +1,16 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "shell",
+      "label": "Keepwork MCP: Dev Server (8089)",
+      "command": "npm run dev:server --prefix apps/vscode-extension",
+      "problemMatcher": [],
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    }
+  ]
+}

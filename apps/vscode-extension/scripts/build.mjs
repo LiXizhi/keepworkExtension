@@ -23,13 +23,13 @@ const builds = [
     ...common,
     entryPoints: [path.join(extensionRoot, 'src/extension.ts')],
     outfile: path.join(outdir, 'extension.js'),
-    external: ['vscode', 'node-pty'],
+    external: ['vscode', 'node-pty', 'playwright-core'],
   },
   {
     ...common,
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: path.join(outdir, 'cli.js'),
-    external: ['node-pty'],
+    external: ['node-pty', 'playwright-core'],
   },
 ];
 

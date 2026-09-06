@@ -1,3 +1,4 @@
+import { managedBrowsers } from '../core/browser';
 import * as http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -7,6 +8,7 @@ import {
     resolveRequireAuth,
 } from '../core/config';
 import { FS_API, tryHandleFs } from '../core/fsServe';
+import { FOLDER_BROWSER_API, folderLocations, browseFolders } from '../core/folderBrowser';
 import { inspectDiskPath, resolveWorkspaceRoot } from '../core/paths';
 import { requestContext } from './context';
 import { createMcpServer, ServerRuntime } from './server';
@@ -176,6 +178,8 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     webserverBase: webserverBaseUrl(),
                     webservers: listWebserverRoots(),
                     fsApi: FS_API,
+                    folderBrowserApi: FOLDER_BROWSER_API,
+                    browserApi: 'browser-v1',
                     fsDirApi: 'mkdir-v1',
                     terminalApi: 'pty-session-v1',
                 });
@@ -193,6 +197,23 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                 return;
             }
 
+            if ((pathname === '/fs/locations' || pathname === '/fs/browse') && req.method === 'GET') {
+                if (!originAllowed(String(req.headers.origin || ''))) {
+                    sendJson(res, 403, { error: 'origin not allowed' }); return;
+                }
+                if (!assertAuth(req, url, res)) return;
+                res.setHeader('Cache-Control', 'no-store');
+                try {
+                    const body = pathname === '/fs/locations' ? await folderLocations() : await browseFolders(url.searchParams.get('path') || '', {
+                        hidden: url.searchParams.get('hidden') === '1', filter: (url.searchParams.get('filter') || '').slice(0, 256),
+                        offset: Number(url.searchParams.get('offset')), limit: Number(url.searchParams.get('limit')),
+                    });
+                    sendJson(res, 200, { ok: true, ...body });
+                } catch (error) {
+                    sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+                }
+                return;
+            }
             const handledFs = await tryHandleFs({
                 pathname,
                 method: req.method || 'GET',
@@ -385,6 +406,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                             onsessionclosed: async (sid) => {
                                 transports.delete(sid);
                                 removeSession(sid);
+                                void managedBrowsers.closeOwner(sid);
                             },
                         });
                         transport.onclose = () => {
@@ -392,6 +414,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                             if (sid) {
                                 transports.delete(sid);
                                 removeSession(sid);
+                                void managedBrowsers.closeOwner(sid);
                             }
                         };
                         const mcp = createMcpServer(runtime);
@@ -438,6 +461,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
     const pruneTimer = setInterval(() => {
         pruneIdleSessions(activeMcpStreams);
         terminalSessions.prune();
+        void managedBrowsers.prune();
     }, 60_000);
     pruneTimer.unref();
 
@@ -463,6 +487,7 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
         stopParacraftWatch();
         stopCalendarWatch();
         terminalSessions.closeAll();
+        await managedBrowsers.closeAll();
         for (const t of transports.values()) {
             try { await t.close(); } catch { /* ignore */ }
         }

@@ -15,7 +15,74 @@ Desktop Paracraft registers on start (`POST /paracraft/register`). While this da
 - Otherwise the client long-polls `POST /paracraft/:id/jobs/poll` (and heartbeats) until the hub goes down.
 - `GET /paracraft/clients` lists **desktop** clients only. WASM (`platform=wasm`) is omitted so AIChat does not duplicate the web iframe as a desktop tile.
 
-Public actions: `health`, `world_status`, `run_command`, `screenshot`, `open_world`, `exit`, `bring_to_front`. Do not put `http_request` on this allowlist or on the timeline.
+Public actions: `health`, `world_status`, `run_command`, `screenshot`, `camera_capture`, `open_world`, `exit`, `bring_to_front`. Do not put `http_request` on this allowlist or on the timeline.
+
+`POST /paracraft/:id/camera_capture` takes `eye` and `lookat` world-coordinate
+vectors. The desktop engine returns a one-shot 400x300 JPEG and camera metadata.
+It bypasses ordinary screenshot caching and never populates the player thumbnail
+cache, on either direct NPL or poll-job transport. It has no cached fallback.
+The engine rejects unsupported platforms; this is not a scene-revision fence.
+
+## Debugging desktop ParacraftCLI
+
+Reuse the **Keepwork MCP: Dev Server (8089)** task defined in
+`apps/vscode-extension/.vscode/tasks.json`. It runs `npm run dev:server` from the
+VS Code app directory, watches/rebuilds shared sources and restarts the daemon
+after successful builds. From this repository root, the equivalent is:
+
+```powershell
+npm run dev:server --prefix apps/vscode-extension
+```
+
+Do not run the unprefixed app script from the root, launch a duplicate daemon,
+or package/publish the extension merely to test. If the task exits, inspect its
+output and cwd. Always verify the live service separately:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8089/health -TimeoutSec 5
+Invoke-RestMethod http://127.0.0.1:8089/paracraft/clients -TimeoutSec 5 | ConvertTo-Json -Depth 5
+```
+
+Require `name: keepwork-mcp`. Start desktop Paracraft with `debug="main"`, open the
+intended world, and check its `clientId`, world identity, `worldEntered`, `nplPort`
+and `useNpl`. An empty client list is distinct from an unavailable hub. Preserve
+optional authentication and never print the pairing token.
+
+Use the reported native port for
+`http://127.0.0.1:<nplPort>/ajax/paracraft_cli?action=health` and
+`http://127.0.0.1:<nplPort>/console` (NPL Code Wiki **Run as code (F5)**).
+The native console is not at `:8089/console`. It is a developer execution surface,
+not justification to weaken `/dostring` or expose raw NPL as a public CLI action.
+
+For browser-driven launch, open
+`http://127.0.0.1:3000/maisi/maisi/webgames/tools/AIChat/tools/Paracraft/ParacraftTool.html?pid=530`
+using the actual frontend origin and desired project ID. Use the tool's desktop
+launch controls: it reuses a matching client or clicks the registered Paracraft
+URL protocol link and waits for MCP registration. Do not substitute a bare engine
+launch or shell protocol invocation for this route-based debugging workflow.
+Route-based reuse of project 530 was verified; fresh-launch verification is still
+pending. See the engine guide below for the complete procedure and success checks.
+Pin the client/world during tests; use an approved disposable writable world for
+changes, not a read-only reference project. Keep terminal-tool confirmation unchanged.
+
+For command-line project-530 debugging, the ParaWorld checkout also supplies
+`bin/paracraft-cli-530.bat`. Use that helper instead of inventing an executable
+launch command. **When 8099 is occupied it force-stops all `ParaEngineClient`
+processes, not only project 530**; obtain approval before risking other worlds.
+It does not start MCP. The canonical engine guide below documents invocation,
+preflight precautions and post-launch verification under "Command-line launcher
+for project 530". This is an approved alternative to the browser-driven route.
+
+Transport success is not edit/capture completion. Inspect native callback results,
+logs, and image contents. Ordinary screenshots can use cached results or fallback;
+do not infer fresh frames solely from `fresh: true`. Independent camera validation
+must compare player state and inspect the saved image before destroying the capture.
+
+Detailed native capture API, console workflow, mock test command, and validation
+limits are in the sibling ParaWorld checkout:
+`c:/lxzsrc/ParaEngine/ParaWorld/docs/aries/paracraft-cli.md`, section
+"Debugging desktop CLI with AIChat". Its Game `AGENTS.md` also contains agent-facing
+instructions. Embedded WASM wiki debugging is separate and does not require MCP.
 
 ## WASM NPL code wiki
 

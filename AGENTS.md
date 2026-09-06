@@ -83,6 +83,7 @@ HTTP:
 - `GET /health` also reports `terminalApi: "pty-session-v1"` when the user-operated PTY API is available.
 - `POST /terminal/sessions`, `POST /terminal/sessions/:id/input`, `GET /terminal/sessions/:id/stream?cursor=` (long-lived NDJSON output with cursor replay), compatibility `GET /terminal/sessions/:id/output?cursor=`, `POST /terminal/sessions/:id/resize`, `POST /terminal/sessions/:id/interrupt`, `DELETE /terminal/sessions/:id` — direct AIChat workspace PTY. Keep Origin/auth ownership, verified cwd, bounded output/concurrency, idle cleanup, stream disconnect cleanup, and daemon-close cleanup. Raw user input cannot use whole-command deny-list parsing; do not weaken the separate model-operated `run_terminal` confirmation or deny-list.
 - `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory (AIChat must verify a user-typed local workspace root before `/fs/*`)
+- `GET /fs/locations` and `GET /fs/browse?path=&hidden=1&filter=&offset=&limit=` — read-only AIChat folder picker, implemented in `src/core/folderBrowser.ts`. `/health` advertises `folderBrowserApi: "folders-v1"`. Locations use the daemon OS's configured common folders and roots; browsing is shallow, folder-only and paginated. Keep explicit Origin/auth checks in `src/mcp/http.ts`. No native dialog or model tool. Test with `node --test scripts/folder-browser*.test.cjs`.
 - `GET /fs/list?root=&path=&max=` — directory listing; includes symbolic links / junctions. `recursive=1` returns file paths (BFS, loop-aware, capped)
 - `GET /fs/search?root=&path=&q=&max=` — filename substring search (case-insensitive); includes symlink/junction names, skips `node_modules` / `.git`, loop-aware, scan cap 8000
 - `GET /fs/stat?root=&path=` — `{ exists, isFile, isDirectory, symlink, size }`
@@ -105,7 +106,7 @@ HTTP:
   - `GET /paracraft/clients` — live **desktop** clients (Bearer if `requireAuth`); `platform=wasm` is omitted so ParacraftTool does not duplicate the web iframe
   - `ALL /webserver/:instance/*` — optional external loopback NPL code-wiki front for WASM. The embedded WebParaCraft wiki uses a direct same-origin ServiceWorker/page RPC and does not require Keepwork MCP. For external access, Keepwork queues `http_request` jobs; the WASM instance serves `.page` / ajax / static via ParaIO. Cookie `Keepwork-WebServer` routes root-absolute `/wp-includes` and `/ajax` back to that instance.
   - `GET /paracraft/:id/timeline` — last screenshots + non-`health` action summaries (capped; no ping spam)
-  - `POST /paracraft/:id/:action` — `health` / `world_status` / `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`
+  - `POST /paracraft/:id/:action` — `health` / `world_status` / `run_command` / `screenshot` / `camera_capture` / `open_world` / `exit` / `bring_to_front`. `camera_capture` takes world-coordinate `eye`/`lookat` vectors for an independent desktop viewport; never reuse or populate the ordinary screenshot cache for it.
 - Calendar reminders (plain HTTP, loopback, same CORS as `/paracraft/register`):
   - `POST /calendar/reminders` — replace the next 7-day reminder set `{ events: [{ id, title, start, remindAt, openUrl }], horizonDays }`
   - `GET /calendar/reminders` — inspect the stored set

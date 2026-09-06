@@ -187,6 +187,22 @@ Publishing an existing VSIX does not rebuild, increment the version, commit, or 
 - Git on PATH (clone command)
 - VS Code / Cursor 1.85+ for the extension UI
 
+## AIChat folder browser
+
+AIChat can browse and select a local folder entirely inside its web UI. Both desktop applications share the daemon's `folderBrowserApi: "folders-v1"` capability. `/fs/locations` supplies configured Windows/macOS common folders and drives/volumes; `/fs/browse` supplies one directory's child folders, breadcrumbs, hidden/link metadata, filtering and pagination. Both endpoints require an approved Origin and the pairing token when authentication is enabled. Updating the installed desktop app and restarting its daemon enables the feature; older installations retain AIChat's manual-path and browser-access fallbacks.
+
 ## License
 
 MIT
+
+## On-demand browser debugging
+
+The shared daemon advertises `browserApi: "browser-v1"` and registers `browser_session`, `browser_snapshot`, `browser_action`, `browser_diagnostics`, and `browser_screenshot` over HTTP MCP. AIChat caches these definitions outside its ordinary LLM tools and discovers them only through `runWorkspaceCmd` → `queryBrowserTools` (`backend: "managed"`). It calls them through `callBrowserTool` and supplies the Agent-tree ID itself.
+
+The implementation uses `playwright-core` 1.57.0 to preserve Node 18 compatibility. Both products package this dependency externally; the Local Helper unpacks it from ASAR. No browser binaries are downloaded: install system Edge/Chrome, or set `EDGE_PATH`/`CHROME_PATH`. New sessions are headless and nonpersistent by default; `visible: true` explicitly opens a separate browser window. They do not inherit the user's existing cookies or AIChat login. Public and localhost HTTP(S) URLs work; local file/browser-internal URLs and arbitrary JavaScript evaluation are not exposed.
+
+Each session belongs to its HTTP MCP session plus Agent-tree ID. Operations are serialized per page. Limits: four browser sessions, eight pages each, 15-minute idle expiry, 200 diagnostic records per page, 200 snapshot elements, 3 MB viewport JPEGs. Session deletion, MCP disconnect and daemon shutdown close owned browsers. Password inputs are masked in screenshots; credentials are redacted from diagnostics and URL metadata. No screenshot bytes or browser action arguments are written to MCP call history.
+
+AIChat's discovered `browser_inspect_visual` wrapper captures an image, runs a separate tool-free vision request, and returns text observations to its main agent. Keepwork itself does not call an LLM. Older clients may discover the MCP definitions normally; older daemons leave AIChat's managed-browser capability unavailable without affecting existing tools.
+
+Validation: `node --test scripts/browser*.test.cjs`, shared/application typechecks, application builds and `node apps/local-helper/scripts/check-package-boundaries.cjs`. Browser tests use system Edge/Chrome and isolated fixture servers; the HTTP test uses a temporary home and does not attach to the user's daemon. Updating the source does not replace a running installed extension; install the new product and restart MCP to use it.
