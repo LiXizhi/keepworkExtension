@@ -5,6 +5,7 @@
   "description": "Shared Keepwork MCP runtime and application build orchestration",
   "license": "MIT",
   "scripts": {
+    "dev:server": "npm run dev:server --prefix apps/vscode-extension",
     "install:apps": "npm ci --prefix apps/vscode-extension && npm ci --prefix apps/local-helper",
     "check:layout": "node scripts/check-layout.cjs",
     "check:shared": "tsc -p ./ --noEmit && npm run check:layout",
