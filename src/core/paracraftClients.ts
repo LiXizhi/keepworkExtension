@@ -56,6 +56,7 @@ interface RegisteredClient extends ParacraftIdentity {
     connectedAt: number;
     lastScreenshot?: ScreenshotCache;
     shots: ScreenshotCache[];
+    cameraShots: ScreenshotCache[];
     history: HistoryEvent[];
     jobs: Job[];
     poller: Poller | null;
@@ -353,6 +354,7 @@ function applyLiveIdentity(client: RegisteredClient, ident: Partial<ParacraftIde
         client.worldPath = ident.worldPath ?? null;
         client.lastScreenshot = undefined;
         client.shots = [];
+        client.cameraShots = [];
     } else {
         if (ident.worldName) client.worldName = ident.worldName;
         if (ident.worldPath) client.worldPath = ident.worldPath;
@@ -478,6 +480,7 @@ function applyOpenWorldIdentity(client: RegisteredClient, params: Record<string,
         client.worldPath = null;
         client.lastScreenshot = undefined;
         client.shots = [];
+        client.cameraShots = [];
     }
 }
 
@@ -539,6 +542,7 @@ export async function registerClient(body: Partial<ParacraftIdentity>, opts?: { 
         connectedAt: prev?.connectedAt || now(),
         lastScreenshot: kpChanged ? undefined : prev?.lastScreenshot,
         shots: kpChanged ? [] : (prev?.shots || []),
+        cameraShots: kpChanged ? [] : (prev?.cameraShots || []),
         history: prev?.history || [],
         jobs: prev?.jobs || [],
         poller: prev?.poller || null,
@@ -637,7 +641,7 @@ export function completeJob(id: string, jobId: string, result: unknown): { ok: b
         jobWaiters.delete(jobId);
         const payload = (result && typeof result === 'object') ? result as Record<string, unknown> : { ok: true, result };
         if (waiter.action !== 'http_request') {
-            if (waiter.action !== 'camera_capture') cacheScreenshot(client, payload);
+            cacheScreenshot(client, payload, waiter.action === 'camera_capture');
             recordEvent(client, waiter.action, (waiter.request.params && typeof waiter.request.params === 'object') ? waiter.request.params as Record<string, unknown> : {}, payload, payload.ok !== false);
         }
         waiter.resolve(payload);
@@ -689,12 +693,12 @@ function recordEvent(client: RegisteredClient, action: string, params: Record<st
     if (client.history.length > MAX_HISTORY) client.history.splice(0, client.history.length - MAX_HISTORY);
 }
 
-function cacheScreenshot(client: RegisteredClient, payload: Record<string, unknown>): void {
+function cacheScreenshot(client: RegisteredClient, payload: Record<string, unknown>, camera = false): void {
     const inner = (payload.result && typeof payload.result === 'object')
         ? payload.result as Record<string, unknown>
         : payload;
     const base64 = typeof inner.base64 === 'string' ? inner.base64 : '';
-    if (!base64) return;
+    if (!base64 || payload.ok === false || inner.ok === false) return;
     const shot: ScreenshotCache = {
         mimeType: typeof inner.mimeType === 'string' ? inner.mimeType : 'image/jpeg',
         base64,
@@ -702,25 +706,28 @@ function cacheScreenshot(client: RegisteredClient, payload: Record<string, unkno
         height: typeof inner.height === 'number' ? inner.height : undefined,
         at: now(),
     };
-    client.lastScreenshot = shot;
-    client.shots.push(shot);
-    if (client.shots.length > MAX_SHOTS) client.shots.splice(0, client.shots.length - MAX_SHOTS);
+    if (!camera) client.lastScreenshot = shot;
+    const shots = camera ? client.cameraShots : client.shots;
+    shots.push(shot);
+    if (shots.length > MAX_SHOTS) shots.splice(0, shots.length - MAX_SHOTS);
 }
 
-export function getTimeline(id: string, limit = 20): { ok: boolean; screenshots: Array<{ at: number; mimeType: string; width?: number; height?: number; dataUrl: string }>; events: HistoryEvent[]; updatedAt: number; error?: string } {
+type TimelineShot = Omit<ScreenshotCache, 'base64'> & { dataUrl: string };
+
+export function getTimeline(id: string, limit = 20): { ok: boolean; screenshots: TimelineShot[]; cameraShots: TimelineShot[]; events: HistoryEvent[]; updatedAt: number; error?: string } {
     const client = getLive(id);
-    if (!client) return { ok: false, screenshots: [], events: [], updatedAt: 0, error: 'unknown client' };
+    if (!client) return { ok: false, screenshots: [], cameraShots: [], events: [], updatedAt: 0, error: 'unknown client' };
     const cap = Math.min(MAX_HISTORY, Math.max(1, limit || 20));
     const events = client.history.slice(-cap).reverse();
-    const screenshots = client.shots.slice(-MAX_SHOTS).reverse().map((shot) => ({
+    const serializeShots = (shots: ScreenshotCache[]): TimelineShot[] => shots.slice(-MAX_SHOTS).reverse().map((shot) => ({
         at: shot.at,
         mimeType: shot.mimeType,
         width: shot.width,
         height: shot.height,
         dataUrl: `data:${shot.mimeType};base64,${shot.base64}`,
     }));
-    const updatedAt = Math.max(client.lastScreenshot?.at || 0, client.history[client.history.length - 1]?.at || 0, client.lastSeen);
-    return { ok: true, screenshots, events, updatedAt };
+    const updatedAt = Math.max(client.lastScreenshot?.at || 0, client.cameraShots[client.cameraShots.length - 1]?.at || 0, client.history[client.history.length - 1]?.at || 0, client.lastSeen);
+    return { ok: true, screenshots: serializeShots(client.shots), cameraShots: serializeShots(client.cameraShots), events, updatedAt };
 }
 
 function enqueue(client: RegisteredClient, action: string, params: Record<string, unknown>): Promise<unknown> {
@@ -783,7 +790,7 @@ export async function dispatchAction(id: string, action: string, params: Record<
     if (client.useNpl && client.nplPort) {
         try {
             const result = await dispatchNpl(client, action, params);
-            if (action !== 'camera_capture' && result && typeof result === 'object') cacheScreenshot(client, result as Record<string, unknown>);
+            if (result && typeof result === 'object') cacheScreenshot(client, result as Record<string, unknown>, action === 'camera_capture');
             if (action === 'open_world') applyOpenWorldIdentity(client, params);
             recordEvent(client, action, params, result, true);
             if (action === 'exit') dropClient(id, client);

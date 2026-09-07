@@ -129,3 +129,11 @@ Wiki bytes come from WASM, not `GET /fs/file`.
 2. Open web-paracraft; its embedded wiki works independently of Keepwork MCP.
 3. Run `/webserver -external` in the iframe to publish it to Keepwork.
 4. Open `http://127.0.0.1:8089/webserver/webparacraft1/console` (or the ParacraftTool **Code Wiki** button). `GET /health` lists live `webservers`.
+## Camera timeline
+
+`GET /paracraft/:id/timeline` includes `cameraShots`, a newest-first list of up to
+six independent `camera_capture` results with the same image fields as `screenshots`.
+Both direct NPL and polled job results populate this separate in-memory history.
+Camera captures never populate `lastScreenshot` or `screenshots`; project changes
+clear both image histories. ParacraftTool uses screenshots for its main preview
+and camera shots (including AI pet views) for its upper-right strip.
