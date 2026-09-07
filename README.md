@@ -1,3 +1,7 @@
+# Windows Desktop Control
+
+The `computer_use` MCP tool adds Windows primary-screen computer use with revocable native session approval, a capture-excluded screen outline, and a **Take Back Control** button. Permission must be renewed after revocation or two idle minutes. See [scope, setup, privacy and validation](docs/computer-use.md). It does not provide unattended or secure-desktop control.
+
 # Keepwork Extension Repository
 
 This repository contains the shared Keepwork MCP runtime and its separately packaged applications.

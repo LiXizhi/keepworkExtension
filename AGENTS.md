@@ -188,6 +188,8 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 
 ## When changing behavior
 
+- Computer use: `src/core/computer.ts` + `src/core/computerOverlay.ts` + `src/mcp/computerTools.ts`; Windows primary screen only, revocable native consent bound to the requesting MCP session with two-minute idle expiry, no input queue or model-supplied scripts. The capture-excluded, non-activating overlay provides Take Back Control; renewed consent is mandatory after revocation. AIChat discovery and vision adapter: `js/local_mcp.js` + `js/computer_tools.js`. Keep desktop calls non-retrying. Test `node --test scripts/computer.test.cjs`; see [docs/computer-use.md](docs/computer-use.md).
+
 - New MCP tool → `src/mcp/server.ts` + AIChat `KEEPWORK_TOOL_NAMES` / chip labels in `chat_render.js` + README + this file.
 - Paracraft CLI hub → `src/core/paracraftClients.ts` + `/paracraft/*` in `src/mcp/http.ts`; keep register/poll open on loopback; never log screenshot base64. Narrative: [docs/paracraft-cli.md](docs/paracraft-cli.md).
 - External WASM NPL code wiki gateway → `src/core/webserverProxy.ts` (`/webserver/:instance/*`); register `webserverRoot`; `GET /health` `webserverBase`. The embedded wiki bridge lives in webparacraft `ServiceWorker.js` + `src/emscripten.js`. Same [docs/paracraft-cli.md](docs/paracraft-cli.md); engine: paraworld `docs/aries/paracraft-cli.md`.

@@ -1,4 +1,5 @@
 import { registerBrowserTools } from './browserTools';
+import { registerComputerTools } from './computerTools';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { SERVER_NAME, SERVER_VERSION } from '../core/config';
@@ -65,6 +66,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     });
 
     registerBrowserTools(server);
+    registerComputerTools(server);
 
     server.registerTool(
         'mcp_status',
