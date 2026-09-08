@@ -5,6 +5,9 @@ const https = require('node:https');
 const path = require('node:path');
 
 const REFRESH_URL = 'https://fusion.qiniuapi.com/v2/tune/refresh';
+const MULTIPART_THRESHOLD = 4 * 1024 * 1024;
+const PART_SIZE = 8 * 1024 * 1024;
+const PART_CONCURRENCY = 4;
 
 function required(value, name) {
   const normalized = String(value || '').trim();
@@ -121,7 +124,7 @@ function createMultipartParts(token, remoteKey, fileName) {
   return { boundary, header, footer };
 }
 
-function streamMultipartUpload(uploadHost, token, remoteKey, entry) {
+function streamFormUpload(uploadHost, token, remoteKey, entry) {
   const { boundary, header, footer } = createMultipartParts(token, remoteKey, entry.name);
   const contentLength = header.length + entry.size + footer.length;
   return new Promise((resolve, reject) => {
@@ -160,9 +163,143 @@ function streamMultipartUpload(uploadHost, token, remoteKey, entry) {
   });
 }
 
+function createPartRanges(size, partSize = PART_SIZE) {
+  const parts = [];
+  for (let start = 0, partNumber = 1; start < size; start += partSize, partNumber += 1) {
+    const end = Math.min(size, start + partSize) - 1;
+    parts.push({ partNumber, start, end, size: end - start + 1 });
+  }
+  return parts;
+}
+
+function multipartBasePath(config, entry) {
+  return `/buckets/${encodeURIComponent(config.bucket)}/objects/${urlSafeBase64(entry.remoteKey)}/uploads`;
+}
+
+function parseQiniuResponse(response, label) {
+  if (!response.ok) throw new Error(`${label}: HTTP ${response.status} ${response.text}`);
+  return JSON.parse(response.text);
+}
+
+function requestBuffer(requestUrl, options, body) {
+  return new Promise((resolve, reject) => {
+    const request = https.request(requestUrl, options, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve({
+        ok: response.statusCode >= 200 && response.statusCode < 300,
+        status: response.statusCode,
+        text: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+    request.on('error', reject);
+    request.end(body);
+  });
+}
+
+function uploadPart(config, entry, token, uploadId, part, totalParts) {
+  const requestUrl = new URL(
+    `${multipartBasePath(config, entry)}/${encodeURIComponent(uploadId)}/${part.partNumber}`,
+    config.uploadHost,
+  );
+  return new Promise((resolve, reject) => {
+    const request = https.request(requestUrl, {
+      method: 'PUT',
+      headers: {
+        Authorization: `UpToken ${token}`,
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': part.size,
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        try {
+          const result = parseQiniuResponse({
+            ok: response.statusCode >= 200 && response.statusCode < 300,
+            status: response.statusCode,
+            text: Buffer.concat(chunks).toString('utf8'),
+          }, `Qiniu part ${part.partNumber} upload failed for ${entry.name}`);
+          process.stdout.write(`Uploaded ${entry.name}: part ${part.partNumber}/${totalParts}\n`);
+          resolve({ partNumber: part.partNumber, etag: result.etag });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.on('error', reject);
+    const fileStream = fs.createReadStream(entry.filePath, { start: part.start, end: part.end });
+    fileStream.on('error', (error) => request.destroy(error));
+    fileStream.pipe(request);
+  });
+}
+
+async function mapConcurrent(values, concurrency, task) {
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(values[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  return results;
+}
+
+async function uploadLargeEntry(config, entry, token) {
+  const basePath = multipartBasePath(config, entry);
+  const authorization = `UpToken ${token}`;
+  const initResponse = await requestBuffer(new URL(basePath, config.uploadHost), {
+    method: 'POST',
+    headers: { Authorization: authorization },
+  });
+  const initResult = parseQiniuResponse(initResponse, `Qiniu multipart initialization failed for ${entry.name}`);
+  const uploadId = required(initResult.uploadId, 'Qiniu uploadId');
+  const parts = createPartRanges(entry.size);
+
+  try {
+    const uploadedParts = await mapConcurrent(
+      parts,
+      PART_CONCURRENCY,
+      (part) => uploadPart(config, entry, token, uploadId, part, parts.length),
+    );
+    const body = Buffer.from(JSON.stringify({
+      parts: uploadedParts,
+      fname: entry.name,
+      mimeType: 'application/octet-stream',
+    }));
+    const completeResponse = await requestBuffer(
+      new URL(`${basePath}/${encodeURIComponent(uploadId)}`, config.uploadHost),
+      {
+        method: 'POST',
+        headers: {
+          Authorization: authorization,
+          'Content-Type': 'application/json',
+          'Content-Length': body.length,
+        },
+      },
+      body,
+    );
+    const result = parseQiniuResponse(completeResponse, `Qiniu multipart completion failed for ${entry.name}`);
+    if (result.key !== entry.remoteKey) throw new Error(`Qiniu returned an unexpected key for ${entry.name}`);
+  } catch (error) {
+    await requestBuffer(new URL(`${basePath}/${encodeURIComponent(uploadId)}`, config.uploadHost), {
+      method: 'DELETE',
+      headers: { Authorization: authorization },
+    }).catch(() => undefined);
+    throw error;
+  }
+}
+
 async function uploadEntry(config, entry) {
   const token = createUploadToken(config.accessKey, config.secretKey, config.bucket, entry.remoteKey);
-  const response = await streamMultipartUpload(config.uploadHost, token, entry.remoteKey, entry);
+  if (entry.size > MULTIPART_THRESHOLD) {
+    await uploadLargeEntry(config, entry, token);
+    return;
+  }
+  const response = await streamFormUpload(config.uploadHost, token, entry.remoteKey, entry);
   if (!response.ok) throw new Error(`Qiniu upload failed for ${entry.name}: HTTP ${response.status} ${response.text}`);
   const responseText = response.text;
   const result = JSON.parse(responseText);
@@ -273,8 +410,10 @@ if (require.main === module) {
 module.exports = {
   collectReleaseFiles,
   createMultipartParts,
+  createPartRanges,
   createQBoxAuthorization,
   createUploadToken,
+  multipartBasePath,
   normalizePrefix,
   normalizeVersion,
   verifyEntriesWithRetry,

@@ -8,8 +8,10 @@ const test = require('node:test');
 const {
   collectReleaseFiles,
   createMultipartParts,
+  createPartRanges,
   createQBoxAuthorization,
   createUploadToken,
+  multipartBasePath,
   normalizePrefix,
   normalizeVersion,
 } = require('./publish-qiniu-release.cjs');
@@ -99,4 +101,19 @@ test('creates a bounded multipart form for streaming uploads', () => {
   assert.match(header, /name="key"\r\n\r\nkeepwork\/releases\/file\.exe\r\n/);
   assert.match(header, /name="file"; filename="file\.exe"/);
   assert.equal(footer, `\r\n--${parts.boundary}--\r\n`);
+});
+
+test('splits large files into ordered multipart v2 ranges', () => {
+  assert.deepEqual(createPartRanges(9, 4), [
+    { partNumber: 1, start: 0, end: 3, size: 4 },
+    { partNumber: 2, start: 4, end: 7, size: 4 },
+    { partNumber: 3, start: 8, end: 8, size: 1 },
+  ]);
+  assert.equal(
+    multipartBasePath(
+      { bucket: 'haqi' },
+      { remoteKey: 'keepwork/releases/file.exe' },
+    ),
+    '/buckets/haqi/objects/a2VlcHdvcmsvcmVsZWFzZXMvZmlsZS5leGU=/uploads',
+  );
 });

@@ -80,7 +80,7 @@ Configure repository Actions secrets `KP_QINIU_ACCESS_KEY` and `KP_QINIU_SECRET_
 
 Open GitHub Actions and manually run **Build and publish KP Local Helper for Windows** to publish the current stable `X.Y.Z` version. On later pushes to `main`, the workflow compares `apps/local-helper/package.json` before and after the push. It publishes only when the version strictly increases; unchanged versions are skipped and invalid or decreasing versions fail. Releases are serialized so an older build cannot overwrite newer `latest` metadata.
 
-The workflow builds on Windows x64, retains a versioned GitHub Actions artifact, uploads the installer and block map before `latest.yml` and `latest.json`, refreshes the CDN, and verifies every published file by SHA-256. Current releases are intentionally unsigned until Authenticode credentials and policy are enabled again.
+The workflow builds on Windows x64, retains a versioned GitHub Actions artifact, uploads the installer with Qiniu multipart v2 and the smaller files with form upload before publishing `latest.yml` and `latest.json`, refreshes the CDN, and verifies every published file by SHA-256. Current releases are intentionally unsigned until Authenticode credentials and policy are enabled again.
 
 ## Update and download publication
 
