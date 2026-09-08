@@ -64,21 +64,23 @@ For an unsigned internal build, leave the certificate fields empty and keep `KP_
   "KP_WINDOWS_CSC_KEY_PASSWORD": "the-pfx-password",
   "KP_WINDOWS_CERT_SUBJECT": "",
   "KP_REQUIRE_CODE_SIGNING": true,
-  "KP_HELPER_PUBLISH_URL": "https://cdn.keepwork.com/downloads/kp-local-helper/windows-x64"
+  "KP_HELPER_PUBLISH_URL": "https://cdn.keepwork.com/keepwork/KeepworkExtension-Windows-Setup"
 }
 ```
 
 `KP_WINDOWS_CSC_LINK` is a local PFX path in this file. Alternatively, leave the PFX fields empty and set `KP_WINDOWS_CERT_SUBJECT` to the subject of a certificate installed in the Windows certificate store. HSM or cloud signing requires the provider-specific Electron Builder signing adapter.
 
-`build.local.json` is ignored by Git and must remain local. A public build must set `KP_REQUIRE_CODE_SIGNING` to `true`, so packaging fails instead of silently producing an unsigned installer.
+`build.local.json` is ignored by Git and must remain local. The current release workflow intentionally produces an unsigned installer, so Windows identifies the publisher as unknown and may show a SmartScreen warning. When Authenticode credentials are available, set `KP_REQUIRE_CODE_SIGNING` to `true` so packaging fails instead of silently publishing an unsigned installer.
 
-## Run the Windows CI build
+## Run the Windows release workflow
 
-1. For a GitHub-hosted Windows runner, configure repository secret `KP_WINDOWS_CSC_LINK` with the base64-encoded PFX and `KP_WINDOWS_CSC_KEY_PASSWORD` with its password. Use `KP_WINDOWS_CERT_SUBJECT` only on a self-hosted runner where that certificate is already installed.
-2. Open GitHub Actions, select **Build KP Local Helper for Windows**, and run the workflow. Leave **require signing** enabled for any public build.
-3. Optionally enter the stable HTTPS update-channel URL. This embeds the updater feed and adds `latest.json` to the CI artifact.
-4. Download the `kp-local-helper-windows-x64` artifact. The workflow has already rejected a missing or invalid Authenticode signature when signing is required.
-5. Publish the verified files to the CDN in a separate release step with production upload credentials.
+Configure repository Actions secrets `KP_QINIU_ACCESS_KEY` and `KP_QINIU_SECRET_KEY`. The values are used only by the Windows release job and must never be committed or printed. The workflow publishes unsigned internal releases to:
+
+`https://cdn.keepwork.com/keepwork/KeepworkExtension-Windows-Setup/`
+
+Open GitHub Actions and manually run **Build and publish KP Local Helper for Windows** to publish the current stable `X.Y.Z` version. On later pushes to `main`, the workflow compares `apps/local-helper/package.json` before and after the push. It publishes only when the version strictly increases; unchanged versions are skipped and invalid or decreasing versions fail. Releases are serialized so an older build cannot overwrite newer `latest` metadata.
+
+The workflow builds on Windows x64, retains a versioned GitHub Actions artifact, uploads the installer and block map before `latest.yml` and `latest.json`, refreshes the CDN, and verifies every published file by SHA-256. Current releases are intentionally unsigned until Authenticode credentials and policy are enabled again.
 
 ## Update and download publication
 
@@ -89,8 +91,8 @@ node apps/local-helper/scripts/generate-release-manifest.cjs `
   --file apps/local-helper/release/KP-Local-Helper-Setup-0.1.15-x64.exe `
   --version 0.1.15 `
   --protocol-version 0.1.2 `
-  --base-url https://cdn.keepwork.com/downloads/kp-local-helper/windows-x64 `
+  --base-url https://cdn.keepwork.com/keepwork/KeepworkExtension-Windows-Setup `
   --output apps/local-helper/release/latest.json
 ```
 
-Upload the signed installer, `latest.yml`, block map, and `latest.json` to that stable HTTPS object-storage/CDN directory. Keep older installers available by their versioned file names. The workflow intentionally creates a CI artifact but does not upload to a production CDN until its provider and credentials are explicitly configured.
+The automated workflow uploads the installer, `latest.yml`, block map, and `latest.json` to the stable HTTPS object-storage/CDN directory. Keep older installers available by their versioned file names; only the two `latest` metadata files are replaced on each release.

@@ -1,24 +1,55 @@
-name: Build KP Local Helper for Windows
+name: Build and publish KP Local Helper for Windows
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - apps/local-helper/package.json
   workflow_dispatch:
-    inputs:
-      publish_url:
-        description: Stable HTTPS directory for the Windows update channel
-        required: false
-        type: string
-      require_signing:
-        description: Fail unless the generated installer has a valid Authenticode signature
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: read
 
+concurrency:
+  group: kp-local-helper-windows-release
+  cancel-in-progress: false
+
+env:
+  KP_HELPER_PUBLISH_URL: https://cdn.keepwork.com/keepwork/KeepworkExtension-Windows-Setup
+  KP_QINIU_BUCKET: haqi
+  KP_QINIU_DOMAIN: https://cdn.keepwork.com
+  KP_QINIU_UPLOAD_HOST: https://up-z2.qiniup.com
+  KP_QINIU_PREFIX: keepwork/KeepworkExtension-Windows-Setup/
+
 jobs:
-  build-windows-x64:
+  release-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+      previous_version: ${{ steps.version.outputs.previous_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check Local Helper release version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: >-
+          node apps/local-helper/scripts/check-release-version.cjs
+          --event "$EVENT_NAME"
+          --before-sha "${BEFORE_SHA:-0000000000000000000000000000000000000000}"
+          --package-path apps/local-helper/package.json
+          --output "$GITHUB_OUTPUT"
+
+  build-and-publish-windows-x64:
+    needs: release-gate
+    if: needs.release-gate.outputs.publish == 'true'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -31,14 +62,11 @@ jobs:
             apps/vscode-extension/package-lock.json
             apps/local-helper/package-lock.json
 
-      - name: Install shared dependencies
-        run: npm ci
-
-      - name: Install VS Code extension dependencies
-        run: npm ci --prefix apps/vscode-extension
-
-      - name: Install helper dependencies
-        run: npm ci --prefix apps/local-helper
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix apps/vscode-extension
+          npm ci --prefix apps/local-helper
 
       - name: Compile and test all package boundaries
         run: |
@@ -48,65 +76,62 @@ jobs:
 
       - name: Create private build configuration
         shell: pwsh
-        env:
-          KP_CSC_LINK_SECRET: ${{ secrets.KP_WINDOWS_CSC_LINK }}
-          KP_CSC_PASSWORD_SECRET: ${{ secrets.KP_WINDOWS_CSC_KEY_PASSWORD }}
-          KP_CERTIFICATE_SUBJECT: ${{ vars.KP_WINDOWS_CERT_SUBJECT }}
-          KP_REQUIRE_SIGNING_INPUT: ${{ inputs.require_signing }}
-          KP_PUBLISH_URL_INPUT: ${{ inputs.publish_url }}
         run: |
-          $certificateFile = ''
-          if ($env:KP_CSC_LINK_SECRET) {
-            if (Test-Path -LiteralPath $env:KP_CSC_LINK_SECRET) {
-              $certificateFile = (Resolve-Path -LiteralPath $env:KP_CSC_LINK_SECRET).Path
-            } else {
-              $encoded = $env:KP_CSC_LINK_SECRET -replace '^data:[^;]+;base64,', ''
-              $certificateFile = Join-Path $env:RUNNER_TEMP 'kp-local-helper-signing.pfx'
-              [IO.File]::WriteAllBytes($certificateFile, [Convert]::FromBase64String($encoded))
-            }
-          }
           $settings = @{
-            KP_WINDOWS_CSC_LINK = $certificateFile
-            KP_WINDOWS_CSC_KEY_PASSWORD = $env:KP_CSC_PASSWORD_SECRET
-            KP_WINDOWS_CERT_SUBJECT = $env:KP_CERTIFICATE_SUBJECT
-            KP_REQUIRE_CODE_SIGNING = $env:KP_REQUIRE_SIGNING_INPUT -eq 'true'
-            KP_HELPER_PUBLISH_URL = $env:KP_PUBLISH_URL_INPUT
+            KP_WINDOWS_CSC_LINK = ''
+            KP_WINDOWS_CSC_KEY_PASSWORD = ''
+            KP_WINDOWS_CERT_SUBJECT = ''
+            KP_REQUIRE_CODE_SIGNING = $false
+            KP_HELPER_PUBLISH_URL = $env:KP_HELPER_PUBLISH_URL
           }
           $settings | ConvertTo-Json | Set-Content -Encoding utf8 apps/local-helper/build.local.json
 
-      - name: Build Windows installer
+      - name: Build unsigned NSIS installer
         run: npm --prefix apps/local-helper run make:win
 
-      - name: Verify Authenticode signature
-        if: ${{ inputs.require_signing }}
+      - name: Validate release files and generate latest.json
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
         run: |
-          $installer = Get-ChildItem apps/local-helper/release/KP-Local-Helper-Setup-*.exe | Select-Object -First 1
-          if (-not $installer) { throw 'installer not found' }
-          $signature = Get-AuthenticodeSignature $installer.FullName
-          if ($signature.Status -ne 'Valid') { throw "invalid installer signature: $($signature.Status)" }
-          Write-Host "signed by $($signature.SignerCertificate.Subject)"
+          $installer = "apps/local-helper/release/KP-Local-Helper-Setup-$env:RELEASE_VERSION-x64.exe"
+          $required = @($installer, "$installer.blockmap", 'apps/local-helper/release/latest.yml')
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "release file not found: $file" }
+          }
+          node apps/local-helper/scripts/generate-release-manifest.cjs `
+            --file $installer `
+            --version $env:RELEASE_VERSION `
+            --protocol-version 0.1.2 `
+            --base-url $env:KP_HELPER_PUBLISH_URL `
+            --output apps/local-helper/release/latest.json
 
-      - name: Generate latest.json
-        if: ${{ inputs.publish_url != '' }}
-        shell: pwsh
-        run: |
-          $installer = Get-ChildItem apps/local-helper/release/KP-Local-Helper-Setup-*.exe | Select-Object -First 1
-          $version = node -p "require('./apps/local-helper/package.json').version"
-          node apps/local-helper/scripts/generate-release-manifest.cjs --file $installer.FullName --version $version --protocol-version 0.1.2 --base-url "${{ inputs.publish_url }}" --output apps/local-helper/release/latest.json
-
-      - uses: actions/upload-artifact@v4
+      - name: Retain GitHub Actions artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: kp-local-helper-windows-x64
+          name: kp-local-helper-windows-x64-${{ needs.release-gate.outputs.version }}
           path: |
             apps/local-helper/release/KP-Local-Helper-Setup-*.exe
-            apps/local-helper/release/latest*.yml
+            apps/local-helper/release/KP-Local-Helper-Setup-*.exe.blockmap
+            apps/local-helper/release/latest.yml
             apps/local-helper/release/latest.json
           if-no-files-found: error
+
+      - name: Upload release to Qiniu and verify CDN
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
+        run: >-
+          node apps/local-helper/scripts/publish-qiniu-release.cjs
+          --release-dir apps/local-helper/release
+          --version "$env:RELEASE_VERSION"
+          --bucket "$env:KP_QINIU_BUCKET"
+          --prefix "$env:KP_QINIU_PREFIX"
+          --domain "$env:KP_QINIU_DOMAIN"
+          --upload-host "$env:KP_QINIU_UPLOAD_HOST"
 
       - name: Remove private build configuration
         if: ${{ always() }}
         shell: pwsh
-        run: |
-          Remove-Item -Force -ErrorAction SilentlyContinue apps/local-helper/build.local.json
-          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'kp-local-helper-signing.pfx')
+        run: Remove-Item -Force -ErrorAction SilentlyContinue apps/local-helper/build.local.json

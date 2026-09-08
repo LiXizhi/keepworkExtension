@@ -11,7 +11,7 @@
     "check": "tsc --noEmit && npm run check:config && npm test && npm run build && npm run check:boundaries",
     "check:boundaries": "node scripts/check-package-boundaries.cjs",
     "check:config": "node scripts/check-builder-config.cjs",
-    "test": "node --test scripts/generate-release-manifest.test.cjs",
+    "test": "node --test scripts/generate-release-manifest.test.cjs scripts/check-release-version.test.cjs scripts/publish-qiniu-release.test.cjs",
     "manifest": "node scripts/generate-release-manifest.cjs",
     "pack": "npm run build && electron-builder --dir",
     "make:win": "npm run build && electron-builder --win nsis --x64"
