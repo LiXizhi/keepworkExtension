@@ -5,7 +5,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
-const { collectReleaseFiles, createQBoxAuthorization, createUploadToken, normalizePrefix, normalizeVersion } = require('./publish-qiniu-release.cjs');
+const {
+  collectReleaseFiles,
+  createMultipartParts,
+  createQBoxAuthorization,
+  createUploadToken,
+  normalizePrefix,
+  normalizeVersion,
+} = require('./publish-qiniu-release.cjs');
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-qiniu-release-'));
@@ -81,4 +88,15 @@ test('creates scoped upload and QBox path signatures', () => {
     createQBoxAuthorization('access', 'secret', 'https://fusion.qiniuapi.com/v2/tune/refresh'),
     `QBox access:${expectedSignature}`,
   );
+});
+
+test('creates a bounded multipart form for streaming uploads', () => {
+  const parts = createMultipartParts('upload-token', 'keepwork/releases/file.exe', 'file.exe');
+  const header = parts.header.toString('utf8');
+  const footer = parts.footer.toString('utf8');
+  assert.match(parts.boundary, /^----kp-local-helper-[a-f0-9]{24}$/);
+  assert.match(header, /name="token"\r\n\r\nupload-token\r\n/);
+  assert.match(header, /name="key"\r\n\r\nkeepwork\/releases\/file\.exe\r\n/);
+  assert.match(header, /name="file"; filename="file\.exe"/);
+  assert.equal(footer, `\r\n--${parts.boundary}--\r\n`);
 });

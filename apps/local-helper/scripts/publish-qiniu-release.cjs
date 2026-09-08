@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const https = require('node:https');
 const path = require('node:path');
 
 const REFRESH_URL = 'https://fusion.qiniuapi.com/v2/tune/refresh';
@@ -107,14 +108,63 @@ function createQBoxAuthorization(accessKey, secretKey, requestUrl) {
   return `QBox ${accessKey}:${signature}`;
 }
 
+function createMultipartParts(token, remoteKey, fileName) {
+  const boundary = `----kp-local-helper-${crypto.randomBytes(12).toString('hex')}`;
+  const safeFileName = fileName.replace(/["\r\n]/g, '_');
+  const header = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="token"\r\n\r\n${token}\r\n`
+    + `--${boundary}\r\nContent-Disposition: form-data; name="key"\r\n\r\n${remoteKey}\r\n`
+    + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFileName}"\r\n`
+    + 'Content-Type: application/octet-stream\r\n\r\n',
+  );
+  const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+  return { boundary, header, footer };
+}
+
+function streamMultipartUpload(uploadHost, token, remoteKey, entry) {
+  const { boundary, header, footer } = createMultipartParts(token, remoteKey, entry.name);
+  const contentLength = header.length + entry.size + footer.length;
+  return new Promise((resolve, reject) => {
+    const request = https.request(uploadHost, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': contentLength,
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve({
+        ok: response.statusCode >= 200 && response.statusCode < 300,
+        status: response.statusCode,
+        text: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+    request.on('error', reject);
+    request.write(header);
+
+    let uploaded = 0;
+    let nextProgress = 16 * 1024 * 1024;
+    const fileStream = fs.createReadStream(entry.filePath);
+    fileStream.on('data', (chunk) => {
+      uploaded += chunk.length;
+      if (uploaded >= nextProgress || uploaded === entry.size) {
+        const percent = Math.min(100, Math.floor((uploaded * 100) / entry.size));
+        process.stdout.write(`Uploaded ${entry.name}: ${percent}%\n`);
+        nextProgress += 16 * 1024 * 1024;
+      }
+    });
+    fileStream.on('error', (error) => request.destroy(error));
+    fileStream.on('end', () => request.end(footer));
+    fileStream.pipe(request, { end: false });
+  });
+}
+
 async function uploadEntry(config, entry) {
-  const form = new FormData();
-  form.append('token', createUploadToken(config.accessKey, config.secretKey, config.bucket, entry.remoteKey));
-  form.append('key', entry.remoteKey);
-  form.append('file', new Blob([fs.readFileSync(entry.filePath)]), entry.name);
-  const response = await fetch(config.uploadHost, { method: 'POST', body: form });
-  const responseText = await response.text();
-  if (!response.ok) throw new Error(`Qiniu upload failed for ${entry.name}: HTTP ${response.status} ${responseText}`);
+  const token = createUploadToken(config.accessKey, config.secretKey, config.bucket, entry.remoteKey);
+  const response = await streamMultipartUpload(config.uploadHost, token, entry.remoteKey, entry);
+  if (!response.ok) throw new Error(`Qiniu upload failed for ${entry.name}: HTTP ${response.status} ${response.text}`);
+  const responseText = response.text;
   const result = JSON.parse(responseText);
   if (result.key !== entry.remoteKey) throw new Error(`Qiniu returned an unexpected key for ${entry.name}`);
 }
@@ -210,9 +260,22 @@ async function main() {
 
 if (require.main === module) {
   main().catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    const messages = [];
+    for (let current = error; current; current = current.cause) {
+      const message = current instanceof Error ? current.message : String(current);
+      if (!messages.includes(message)) messages.push(message);
+    }
+    process.stderr.write(`${messages.join(': ')}\n`);
     process.exitCode = 1;
   });
 }
 
-module.exports = { collectReleaseFiles, createQBoxAuthorization, createUploadToken, normalizePrefix, normalizeVersion, verifyEntriesWithRetry };
+module.exports = {
+  collectReleaseFiles,
+  createMultipartParts,
+  createQBoxAuthorization,
+  createUploadToken,
+  normalizePrefix,
+  normalizeVersion,
+  verifyEntriesWithRetry,
+};
