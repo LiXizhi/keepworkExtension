@@ -18,11 +18,19 @@ test('HTTP browser discovery, authentication, execution and session teardown', {
         await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
         const port = reservation.address().port;
         await new Promise(resolve => reservation.close(resolve));
-        server = await startHttpServer({ port, root: home, requireAuth: true });
+        server = await startHttpServer({
+            port,
+            root: home,
+            requireAuth: true,
+            hostKind: 'local-helper',
+            hostVersion: '0.1.15',
+        });
         const url = `http://127.0.0.1:${port}/mcp`;
         const headers = { Origin: 'http://localhost:5500', Authorization: `Bearer ${server.token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
         const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
         assert.equal(health.browserApi, 'browser-v1');
+        assert.equal(health.hostKind, 'local-helper');
+        assert.equal(health.hostVersion, '0.1.15');
         assert.equal((await fetch(url, { method: 'POST', headers: { ...headers, Authorization: '' }, body: '{}' })).status, 401);
         assert.equal((await fetch(url, { method: 'POST', headers: { ...headers, Origin: 'https://untrusted.example' }, body: '{}' })).status, 403);
         let id = 0;

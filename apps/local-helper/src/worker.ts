@@ -14,7 +14,13 @@ async function main(): Promise<void> {
     const root = resolveWorkspaceRoot();
     const requireAuth = resolveRequireAuth();
     try {
-        const server = await startHttpServer({ port, root, requireAuth });
+        const server = await startHttpServer({
+            port,
+            root,
+            requireAuth,
+            hostKind: 'local-helper',
+            hostVersion: process.env.KEEPWORK_MCP_HOST_VERSION,
+        });
         notifyParent({ type: 'ready', port: server.port, root, requireAuth: server.requireAuth });
     } catch (error) {
         const err = error as NodeJS.ErrnoException;

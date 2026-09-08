@@ -28,6 +28,16 @@ export interface HttpServerHandle {
     close(): Promise<void>;
 }
 
+export type McpHostKind = 'local-helper' | 'vscode-extension';
+
+export interface HttpServerOptions {
+    port?: number;
+    root?: string;
+    requireAuth?: boolean;
+    hostKind?: McpHostKind;
+    hostVersion?: string;
+}
+
 const ALLOWED_ORIGIN_HOSTS = new Set(['keepwork.com', 'cdn.keepwork.com', 'localhost', '127.0.0.1']);
 
 function originAllowed(origin: string): boolean {
@@ -130,7 +140,7 @@ function escapeHtml(s: string): string {
     return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
 
-export async function startHttpServer(opts?: { port?: number; root?: string; requireAuth?: boolean }): Promise<HttpServerHandle> {
+export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpServerHandle> {
     const port = opts?.port && opts.port > 0 ? opts.port : 8089;
     const authRequired = resolveRequireAuth(opts?.requireAuth);
     setHubListenPort(port);
@@ -169,6 +179,10 @@ export async function startHttpServer(opts?: { port?: number; root?: string; req
                     ok: true,
                     name: SERVER_NAME,
                     version: SERVER_VERSION,
+                    ...(opts?.hostKind ? { hostKind: opts.hostKind } : {}),
+                    ...(opts?.hostKind === 'local-helper' && opts.hostVersion
+                        ? { hostVersion: opts.hostVersion }
+                        : {}),
                     port,
                     pid: process.pid,
                     clients: sessionCount(),

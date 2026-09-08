@@ -176,7 +176,11 @@ function spawnWorker(): void {
     const entry = path.join(__dirname, 'worker.js');
     const child = utilityProcess.fork(entry, [], {
         serviceName: 'KP Local Helper MCP',
-        env: { ...process.env },
+        env: {
+            ...process.env,
+            KEEPWORK_MCP_HOST_KIND: 'local-helper',
+            KEEPWORK_MCP_HOST_VERSION: app.getVersion(),
+        },
     });
     worker = child;
     child.on('message', (message) => appendLog(`worker: ${JSON.stringify(message)}`));

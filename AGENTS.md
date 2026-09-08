@@ -79,7 +79,7 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 
 HTTP:
 
-- `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`, `webserverBase`, `webservers` as `{ instance, root }[]`, `fsApi: "workspace"` when list/write/delete are available)
+- `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`, `webserverBase`, `webservers` as `{ instance, root }[]`, `fsApi: "workspace"` when list/write/delete are available). New daemons report `hostKind`: `local-helper` or `vscode-extension`; only Local Helper reports its application `hostVersion`. Browser clients must not interpret the service protocol `version` as an application version.
 - `GET /health` also reports `terminalApi: "pty-session-v1"` when the user-operated PTY API is available.
 - `POST /terminal/sessions`, `POST /terminal/sessions/:id/input`, `GET /terminal/sessions/:id/stream?cursor=` (long-lived NDJSON output with cursor replay), compatibility `GET /terminal/sessions/:id/output?cursor=`, `POST /terminal/sessions/:id/resize`, `POST /terminal/sessions/:id/interrupt`, `DELETE /terminal/sessions/:id` — direct AIChat workspace PTY. Keep Origin/auth ownership, verified cwd, bounded output/concurrency, idle cleanup, stream disconnect cleanup, and daemon-close cleanup. Raw user input cannot use whole-command deny-list parsing; do not weaken the separate model-operated `run_terminal` confirmation or deny-list.
 - `GET /exists?path=` — public probe: does this absolute/`~` path exist as a directory (AIChat must verify a user-typed local workspace root before `/fs/*`)
