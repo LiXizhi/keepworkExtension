@@ -23,6 +23,8 @@ const APP_ID = 'com.keepwork.local-helper';
 const LOGIN_ARGS = ['--background'];
 const POLL_MS = 4000;
 const MAX_RETRY_MS = 30_000;
+const UPDATE_CHECK_DELAY_MS = 15_000;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TRAY_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAyZpVFh0WE1MOmNvbS5hZG9iZS54bXAAAAAAADw/eHBhY2tldCBiZWdpbj0i77u/IiBpZD0iVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkIj8+IDx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IkFkb2JlIFhNUCBDb3JlIDUuNi1jMTM4IDc5LjE1OTgyNCwgMjAxNi8wOS8xNC0wMTowOTowMSAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTcgKFdpbmRvd3MpIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjNGQUNBRTk5MEY3NTExRTc4NzVFOEVDRjJFMDg2QTkwIiB4bXBNTTpEb2N1bWVudElEPSJ4bXAuZGlkOjNGQUNBRTlBMEY3NTExRTc4NzVFOEVDRjJFMDg2QTkwIj4gPHhtcE1NOkRlcml2ZWRGcm9tIHN0UmVmOmluc3RhbmNlSUQ9InhtcC5paWQ6M0ZBQ0FFOTcwRjc1MTFFNzg3NUU4RUNGMkUwODZBOTAiIHN0UmVmOmRvY3VtZW50SUQ9InhtcC5kaWQ6M0ZBQ0FFOTgwRjc1MTFFNzg3NUU4RUNGMkUwODZBOTAiLz4gPC9yZGY6RGVzY3JpcHRpb24+IDwvcmRmOlJERj4gPC94OnhtcG1ldGE+IDw/eHBhY2tldCBlbmQ9InIiPz4JASiTAAABBElEQVR42mJkaNzFQApgYiARoGsQ5mTVFeMhVoOWKPedXJtiS3liNaQYSgtwsCCLGEjwZpnIinGzwUVQpIU4WeFsblbmVieVXDNZJkbGRAMpszkn/2NqgAM7ecGF/toKApxA9sGH71M3X/uP1QY4WBOqJ8rF9vnXn9Ldt2edffIfSQq7BqDqk08/Bq+6+PTzT6Li4fKrL99//8s1k0P2Lj4Nk089ApLm0vzz/LT81UUZCWqYfe5p0a6bzz7/5GZlKTCX73JVJZw0zr/4nLTp6uprL/79/3/g/nu4OCNy4jOS5JPj53j08ce555/ggpwsTN///MMeSkB1yEohAFk1OakVIMAANBZWi7NyWjUAAAAASUVORK5CYII=';
 
 type HelperStatus = 'starting' | 'running' | 'attached' | 'stopped' | 'conflict' | 'error';
@@ -56,6 +58,7 @@ let shuttingDown = false;
 let retryAttempt = 0;
 let retryTimer: NodeJS.Timeout | null = null;
 let pollTimer: NodeJS.Timeout | null = null;
+let updateTimer: NodeJS.Timeout | null = null;
 
 function helperHome(): string {
     const dir = mcpHomeDir();
@@ -224,6 +227,22 @@ async function checkForUpdates(manual: boolean): Promise<void> {
     }
 }
 
+function startUpdateChecks(): void {
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('checking-for-update', () => appendLog('checking for updates'));
+    autoUpdater.on('update-available', (info) => appendLog(`update available: ${info.version}`));
+    autoUpdater.on('update-not-available', (info) => appendLog(`update not available: ${info.version}`));
+    autoUpdater.on('error', (error) => appendLog(`updater error: ${error instanceof Error ? error.message : String(error)}`));
+    autoUpdater.on('update-downloaded', (info) => {
+        appendLog(`update downloaded: ${info.version}`);
+        showMessage('KP 本地助手', '新版本已下载，将在退出后自动安装');
+    });
+    setTimeout(() => { void checkForUpdates(false); }, UPDATE_CHECK_DELAY_MS).unref();
+    updateTimer = setInterval(() => { void checkForUpdates(false); }, UPDATE_CHECK_INTERVAL_MS);
+    updateTimer.unref();
+}
+
 function rebuildTrayMenu(): void {
     if (!tray) return;
     const login = app.getLoginItemSettings({ args: LOGIN_ARGS });
@@ -261,13 +280,7 @@ async function start(): Promise<void> {
     await maintainService();
     pollTimer = setInterval(() => { void maintainService(); }, POLL_MS);
     pollTimer.unref();
-
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on('update-downloaded', () => {
-        showMessage('KP 本地助手', '新版本已下载，将在退出后自动安装');
-    });
-    setTimeout(() => { void checkForUpdates(false); }, 15_000).unref();
+    startUpdateChecks();
 }
 
 const gotLock = app.requestSingleInstanceLock();
@@ -286,6 +299,8 @@ app.on('before-quit', () => {
     clearRetry();
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
+    if (updateTimer) clearInterval(updateTimer);
+    updateTimer = null;
     notifyBridge?.dispose();
     notifyBridge = null;
     worker?.kill();
