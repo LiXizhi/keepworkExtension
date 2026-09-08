@@ -1,4 +1,14 @@
-# Windows Computer Use
+# Computer Use
+
+## Experimental macOS
+
+Uses built-in `osascript`, `screencapture` and `sips`; no additional runtime binary. Supports status, screenshot, left click, type and named navigation keys. Scroll and right-click fail explicitly. Accessibility-based clicks may fail on custom canvases; typing has application and Unicode limitations.
+
+EVERY action requires native Allow Once approval with Cancel as default and a 20-second expiry. No consent is retained and there is no Take Back Control panel. The original foreground process is restored after approval. Inputs return a new screenshot. Screenshots are unmasked, sent to the model, and briefly stored in a private temporary directory removed after capture; a process crash may leave a temporary file. Close private windows first.
+
+macOS may require Screen Recording, Accessibility and Automation permissions for the launching app (VS Code, Terminal or another host). Failures must not be automatically retried because input might already have been delivered. Only the primary display is supported. Screenshots are normalized to screen-point dimensions to align Retina click coordinates with the returned image.
+
+Run `node --test scripts/computer-mac.test.cjs` and `npm run check:shared`. Rebuild with `npm run compile:only --prefix apps/vscode-extension`, restart the daemon and reconnect AIChat. Actual permissions, focus restoration and click alignment require a supervised smoke test. The Windows sections below describe the separate Windows backend.
 
 ## Delivery plan and implemented scope
 

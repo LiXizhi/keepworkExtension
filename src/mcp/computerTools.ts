@@ -15,7 +15,7 @@ export const computerToolSchema = z.object({
 
 export function registerComputerTools(server: McpServer) {
     server.registerTool('computer_use', {
-        description: 'Windows primary desktop control: status, screenshot, click, type, key, scroll. Start with screenshot. Issue only ONE desktop action per model turn, then inspect its returned screenshot before deciding the next action. Every input returns a fresh screenshot after a short settling interval; inputSent means input delivered, not task success. If an app is still loading, request screenshot again. Never guess coordinates or repeat an ineffective click. Click x/y use the returned image width/height pixel grid; scale from any resized display. To open an app, locate Start in the screenshot, click it, type the app name, inspect results, then press Enter. Requires native session approval (20 seconds to respond), renewed after Take Back Control, session changes or 2 idle minutes. A capture-excluded border and bottom control panel remain visible. Agent clicks in the panel area fail. Screenshots are unmasked. Input targets the foreground app. No secure desktop/UAC, unattended operation or automatic retries. Prefer browser tools for web pages. Never enter secrets; ask the user to enter them locally.',
+        description: 'Primary desktop control on Windows and experimental macOS. Start with status, then screenshot. macOS requires Allow Once for EVERY action; supports screenshot, left click, type and navigation key only, no scroll, right-click or reclaim panel. Mac accessibility clicks and typing may fail on custom UI. Windows supports all listed actions with revocable session consent, capture-excluded panel and 2-minute idle expiry. Issue ONE action per model turn and inspect its returned screenshot. inputSent means delivered, not success. Coordinates use the returned image grid (Mac images normalized to screen points); scale resized previews. Open apps using visible OS controls; do not assume Windows Start on Mac. Screenshots are unmasked and shared with the model. Approval expires after 20 seconds. No unattended operation or automatic retries. Prefer browser tools for web work. Never enter secrets; ask the user to enter them locally.',
         inputSchema: computerToolSchema,
     }, async input => {
         const parsed = computerSchema.safeParse(input);
@@ -25,8 +25,8 @@ export function registerComputerTools(server: McpServer) {
         try {
             if (!currentRequest().sessionId) throw new Error('Desktop control requires an initialized HTTP MCP session');
             return await computerController.run(parsed.data, currentRequest().sessionId);
-        } catch {
-            return { isError: true, content: [{ type: 'text' as const, text: 'Desktop action unavailable, busy, denied or failed. Inspect desktop state before retrying.' }] };
+        } catch (error) {
+            return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : 'Desktop action unavailable, busy, denied or failed. Inspect desktop state before retrying.' }] };
         }
     });
 }

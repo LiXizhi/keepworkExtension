@@ -2,6 +2,7 @@ import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import { computerOverlay } from './computerOverlay';
+import { executeMac } from './computerMac';
 
 export const computerSchema = z.discriminatedUnion('action', [
     z.object({ action: z.literal('status') }).strict(),
@@ -120,12 +121,12 @@ try {
 
 export class ComputerController {
     private busy = false;
-    constructor(private platform = process.platform, private execute = executeWindows) {}
+    constructor(private platform = process.platform, private execute = platform === 'darwin' ? executeMac : executeWindows) {}
 
     async run(input: unknown, owner = 'local') {
         const args = computerSchema.parse(input);
-        if (args.action === 'status') return { content: [{ type: 'text' as const, text: JSON.stringify({ supported: this.platform === 'win32', scope: 'primary-screen', permission: 'revocable native session consent; expires after 2 idle minutes', unattended: false }) }] };
-        if (this.platform !== 'win32') throw new Error('Desktop control currently supports Windows only');
+        if (args.action === 'status') return { content: [{ type: 'text' as const, text: JSON.stringify({ supported: this.platform === 'win32' || this.platform === 'darwin', platform: this.platform, experimental: this.platform === 'darwin', scope: 'primary-screen', permission: this.platform === 'darwin' ? 'native approval for EVERY action; no retained consent or reclaim panel; requires macOS Screen Recording, Accessibility and Automation permissions' : 'revocable native session consent; expires after 2 idle minutes', limitations: this.platform === 'darwin' ? ['no scroll or right-click', 'accessibility-based clicks may fail on custom UI', 'typing depends on application and keyboard support', 'screenshots normalized to screen points'] : [], unattended: false }) }] };
+        if (this.platform !== 'win32' && this.platform !== 'darwin') throw new Error('Desktop control supports Windows and experimental macOS only');
         if (this.busy) throw new Error('Desktop is busy; no actions are queued');
         this.busy = true;
         try {
