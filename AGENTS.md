@@ -188,7 +188,7 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 
 ## When changing behavior
 
-- Experimental macOS computer use lives in `src/core/computerMac.ts`: built-in OS commands only, approval for every action, no retained consent or reclaim panel, no scroll/right-click. Screenshots normalize to screen points. Preserve argument-only user data and explicit unsupported-action failures. Test `node --test scripts/computer-mac.test.cjs`. Windows safeguards below remain unchanged.
+- Experimental macOS computer use lives in `src/core/computerMac.ts`: built-in OS commands only, native consent bound to the requesting MCP session (24-hour absolute expiry, no idle timeout), Escape/top-left stop checks before actions, no reclaim panel, no scroll/right-click. Screenshots normalize to screen points. Preserve argument-only user data and explicit unsupported-action failures. Test `node --test scripts/computer-mac.test.cjs`. Windows safeguards below remain unchanged.
 
 - Computer use: `src/core/computer.ts` + `src/core/computerOverlay.ts` + `src/mcp/computerTools.ts`; Windows primary screen only, revocable native consent bound to the requesting MCP session with two-minute idle expiry, no input queue or model-supplied scripts. The capture-excluded, non-activating overlay provides Take Back Control; renewed consent is mandatory after revocation. AIChat discovery and vision adapter: `js/local_mcp.js` + `js/computer_tools.js`. Keep desktop calls non-retrying. Test `node --test scripts/computer.test.cjs`; see [docs/computer-use.md](docs/computer-use.md).
 
