@@ -18,7 +18,7 @@ const MAX_HISTORY = 40;
 const MAX_SHOTS = 6;
 const SUMMARY_LEN = 160;
 const PING_ACTIONS = new Set(['health']);
-const ACTIONS = new Set(['health', 'world_status', 'run_command', 'screenshot', 'camera_capture', 'open_world', 'exit', 'bring_to_front']);
+const ACTIONS = new Set(['health', 'world_status', 'get_scene_info', 'query_scene', 'read_scene_object', 'run_command', 'screenshot', 'camera_capture', 'open_world', 'exit', 'bring_to_front']);
 
 export interface ParacraftIdentity {
     clientId: string;

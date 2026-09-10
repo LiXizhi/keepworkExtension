@@ -15,7 +15,15 @@ Desktop Paracraft registers on start (`POST /paracraft/register`). While this da
 - Otherwise the client long-polls `POST /paracraft/:id/jobs/poll` (and heartbeats) until the hub goes down.
 - `GET /paracraft/clients` lists **desktop** clients only. WASM (`platform=wasm`) is omitted so AIChat does not duplicate the web iframe as a desktop tile.
 
-Public actions: `health`, `world_status`, `run_command`, `screenshot`, `camera_capture`, `open_world`, `exit`, `bring_to_front`. Do not put `http_request` on this allowlist or on the timeline.
+Public actions: `health`, `world_status`, `get_scene_info`, `query_scene`, `read_scene_object`, `run_command`, `screenshot`, `camera_capture`, `open_world`, `exit`, `bring_to_front`. Do not put `http_request` on this allowlist or on the timeline.
+
+MCP tools `paracraft_clients`, `paracraft_get_scene_info`, `paracraft_query_scene`
+and `paracraft_read_scene_object` expose progressive read-only scene inspection.
+Pass an explicit `clientId`; scene arguments/results forward unchanged over
+native HTTP or poll jobs. A chunk read returns at most 200 bottom-to-top
+`/setblock` lines and an opaque continuation cursor. Missing chunks are unknown.
+Cursor expiry and object-reference validation belong to the engine.
+Focused transport check: `node --test scripts/paracraft-scene.test.cjs`.
 
 `POST /paracraft/:id/camera_capture` takes `eye` and `lookat` world-coordinate
 vectors. The desktop engine returns a one-shot 400x300 JPEG and camera metadata.

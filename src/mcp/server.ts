@@ -10,6 +10,7 @@ import { vscodeTerminalBridgeLive } from '../core/vscodeBridge';
 import { fetchUrl, webSearch } from '../core/web';
 import { currentRequest } from './context';
 import { recordCall, summarizeArgs } from './sessions';
+import { dispatchAction, listClients } from '../core/paracraftClients';
 
 export interface ServerRuntime {
     root: string;
@@ -67,6 +68,30 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
 
     registerBrowserTools(server);
     registerComputerTools(server);
+
+    server.registerTool('paracraft_clients', {
+        description: 'List connected desktop Paracraft clients. Select a clientId for scene inspection.',
+        inputSchema: z.object({}),
+    }, wrap('paracraft_clients', async () => textResult(JSON.stringify(await listClients()))));
+
+    const sceneTools = [
+        { name: 'get_scene_info', description: 'Read world, player, CLI pet, camera coordinates and nearby 16x16 chunk columns. Does not load or edit the world.',
+            schema: z.object({ clientId: z.string(), anchor: z.enum(['player', 'pet', 'camera']).optional() }) },
+        { name: 'query_scene', description: 'Read one loaded 16x16 scene column as at most 200 bottom-to-top /setblock lines. Exports sky-connected surfaces, omits buried interiors, compresses identical rectangles. Continue with returned cursor and the same chunk coordinates. Unloaded chunks are unknown. Snapshot cursors expire after five minutes or eviction; reread without cursor for current state.',
+            schema: z.object({ clientId: z.string(), chunkX: z.number().int().min(-4096).max(4095), chunkZ: z.number().int().min(-4096).max(4095), cursor: z.string().optional() }) },
+        { name: 'read_scene_object', description: 'Read an entity or special block using a ref returned by scene inspection. Includes position, type, model and code-block source where available. References expire when the world session changes.',
+            schema: z.object({ clientId: z.string(), ref: z.object({ worldSession: z.string(), kind: z.enum(['block', 'entity']), position: z.tuple([z.number().int(), z.number().int(), z.number().int()]).optional(), id: z.string().optional() }) }) },
+    ];
+    for (const tool of sceneTools) {
+        server.registerTool(`paracraft_${tool.name}`, {
+            description: tool.description, inputSchema: tool.schema,
+        }, wrap(`paracraft_${tool.name}`, async (args: Record<string, unknown>) => {
+            const { clientId, ...params } = args;
+            const response = await dispatchAction(String(clientId), tool.name, params);
+            const body = response.body as { ok?: boolean } | null;
+            return textResult(JSON.stringify(response.body), response.status !== 200 || body?.ok === false);
+        }));
+    }
 
     server.registerTool(
         'mcp_status',
