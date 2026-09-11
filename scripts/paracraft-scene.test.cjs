@@ -18,6 +18,7 @@ test('scene actions preserve parameters, pages and errors through poll transport
     await hub.registerClient({ clientId, kpProjectId: 1 });
     try {
         for (const [action, params, result] of [
+            ['world_files', { operation: 'read', path: '_codeblocks_/test_block(-1,2,-3)', expectedIdentity: { clientId, worldPath: 'world/', sessionId: 1 } }, { ok: true, content: 'print(1)' }],
             ['get_scene_info', { anchor: 'pet' }, { ok: true, chunks: [{ chunkX: -1, chunkZ: 0 }] }],
             ['query_scene', { chunkX: -1, chunkZ: 0, cursor: 'scene-1:201' }, { ok: true, lines: ['/setblock -16 3 0 (15 0 15) 2:0'], hasMore: false }],
             ['read_scene_object', { ref: { worldSession: 'old', kind: 'entity', id: '1' } }, { ok: false, error: 'stale object reference' }],

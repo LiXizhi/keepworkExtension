@@ -1,5 +1,12 @@
 # Paracraft CLI hub + external WASM NPL code wiki
 
+The experimental `world_files` client action forwards identity-pinned file
+requests through the same native HTTP/poll dispatcher. It does not expose
+`http_request` or arbitrary roots. AIChat uses it for a transient
+conversation-local `//.paraworld/` root. Engine confinement and expected-content
+checks are authoritative. Poll forwarding is tested; full live native/WASM
+file-workspace acceptance is pending engine ordinary-file support.
+
 The Keepwork MCP daemon on `http://127.0.0.1:8089` is more than MCP tools. It is also the **loopback hub** for desktop Paracraft and an optional **external HTTP front** for a web-paracraft (WASM) NPL code wiki.
 
 Engine side (identity, `http_request`, `site_url`): `c:/lxzsrc/ParaEngine/paraworld` → `docs/aries/paracraft-cli.md`.  
