@@ -18,6 +18,8 @@ test('scene actions preserve parameters, pages and errors through poll transport
     await hub.registerClient({ clientId, kpProjectId: 1 });
     try {
         for (const [action, params, result] of [
+            ['read_official_wiki', { path: 'index.md' }, { ok: true, path: 'index.md', content: 'official index', readOnly: true, source: 'bundled' }],
+            ['read_official_wiki', { path: '../secret' }, { ok: false, error: 'unregistered official wiki page' }],
             ['world_files', { operation: 'read', path: '_codeblocks_/test_block(-1,2,-3)', expectedIdentity: { clientId, worldPath: 'world/', sessionId: 1 } }, { ok: true, content: 'print(1)' }],
             ['get_scene_info', { anchor: 'pet' }, { ok: true, chunks: [{ chunkX: -1, chunkZ: 0 }] }],
             ['query_scene', { chunkX: -1, chunkZ: 0, cursor: 'scene-1:201' }, { ok: true, lines: ['/setblock -16 3 0 (15 0 15) 2:0'], hasMore: false }],
