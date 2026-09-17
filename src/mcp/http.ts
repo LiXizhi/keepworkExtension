@@ -28,7 +28,7 @@ export interface HttpServerHandle {
     close(): Promise<void>;
 }
 
-export type McpHostKind = 'local-helper' | 'vscode-extension';
+export type McpHostKind = 'local-helper' | 'vscode-extension' | 'standalone' | 'electron-node-runtime';
 
 export interface HttpServerOptions {
     port?: number;
@@ -180,7 +180,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     name: SERVER_NAME,
                     version: SERVER_VERSION,
                     ...(opts?.hostKind ? { hostKind: opts.hostKind } : {}),
-                    ...(opts?.hostKind === 'local-helper' && opts.hostVersion
+                    ...(opts?.hostVersion
                         ? { hostVersion: opts.hostVersion }
                         : {}),
                     port,

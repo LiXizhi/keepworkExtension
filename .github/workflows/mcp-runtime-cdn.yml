@@ -1,0 +1,127 @@
+name: Build and publish Keepwork MCP NodeRuntime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/mcp-runtime/**
+      - src/**
+      - package.json
+      - package-lock.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keepwork-mcp-node-runtime-release
+  cancel-in-progress: false
+
+env:
+  KP_QINIU_BUCKET: haqi
+  KP_QINIU_DOMAIN: https://cdn.keepwork.com
+  KP_QINIU_UPLOAD_HOST: https://up-z2.qiniup.com
+  KP_QINIU_PREFIX: keepwork/node-runtimes/keepwork-mcp/
+  KP_RUNTIME_BASE_URL: https://cdn.keepwork.com/keepwork/node-runtimes/keepwork-mcp
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check MCP runtime release version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: >-
+          node apps/mcp-runtime/scripts/check-release-version.cjs
+          --event "$EVENT_NAME"
+          --before-sha "${BEFORE_SHA:-0000000000000000000000000000000000000000}"
+          --package-path apps/mcp-runtime/package.json
+          --output "$GITHUB_OUTPUT"
+
+  build-and-publish:
+    needs: release-gate
+    if: needs.release-gate.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos
+            arch: arm64
+          - os: windows-latest
+            platform: windows
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/mcp-runtime/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix apps/mcp-runtime
+
+      - name: Check shared and MCP runtime
+        run: |
+          npm run check:shared
+          npm --prefix apps/mcp-runtime run check
+
+      - name: Package runtime
+        run: npm --prefix apps/mcp-runtime run make
+
+      - name: Smoke runtime
+        run: npm --prefix apps/mcp-runtime run smoke
+
+      - name: Generate latest manifest
+        shell: bash
+        run: |
+          archive="apps/mcp-runtime/release/Keepwork-MCP-NodeRuntime-${{ needs.release-gate.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}.${{ matrix.platform == 'windows' && 'zip' || 'tar.gz' }}"
+          node apps/mcp-runtime/scripts/generate-release-manifest.cjs \
+            --file "$archive" \
+            --version "${{ needs.release-gate.outputs.version }}" \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --base-url "$KP_RUNTIME_BASE_URL" \
+            --output "apps/mcp-runtime/release/latest-${{ matrix.platform }}-${{ matrix.arch }}.json"
+
+      - name: Retain GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keepwork-mcp-node-runtime-${{ matrix.platform }}-${{ matrix.arch }}-${{ needs.release-gate.outputs.version }}
+          path: |
+            apps/mcp-runtime/release/Keepwork-MCP-NodeRuntime-*
+            apps/mcp-runtime/release/latest-${{ matrix.platform }}-${{ matrix.arch }}.json
+          if-no-files-found: error
+
+      - name: Upload release to Qiniu and verify CDN
+        shell: bash
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+        run: >-
+          node apps/mcp-runtime/scripts/publish-qiniu-release.cjs
+          --release-dir apps/mcp-runtime/release
+          --version "${{ needs.release-gate.outputs.version }}"
+          --platform "${{ matrix.platform }}"
+          --arch "${{ matrix.arch }}"
+          --bucket "$KP_QINIU_BUCKET"
+          --prefix "$KP_QINIU_PREFIX"
+          --domain "$KP_QINIU_DOMAIN"
+          --upload-host "$KP_QINIU_UPLOAD_HOST"
