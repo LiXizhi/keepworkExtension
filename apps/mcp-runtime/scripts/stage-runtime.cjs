@@ -9,6 +9,7 @@ const tar = require('tar');
 const runtimeRoot = path.resolve(__dirname, '..');
 const packageJson = require(path.join(runtimeRoot, 'package.json'));
 const supported = new Set(['win32-x64', 'darwin-arm64', 'darwin-x64']);
+const hostNpm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function readArgs(argv) {
   const result = {};
@@ -25,6 +26,31 @@ function normalizeNodeVersion(value) {
   const version = String(value || '').trim();
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid Node.js version: ${version || '(empty)'}`);
   return version;
+}
+
+function resolveTarget(args) {
+  const platform = normalizePlatform(args.platform || process.platform);
+  const arch = normalizeArch(args.arch || process.arch);
+  const key = `${platform}-${arch}`;
+  if (!supported.has(key)) throw new Error(`unsupported runtime target: ${key}`);
+  return {
+    platform,
+    arch,
+    isWindows: platform === 'win32',
+    runtimePlatform: platform === 'win32' ? 'windows' : 'macos',
+    nodePlatform: platform === 'win32' ? 'win' : 'darwin',
+  };
+}
+
+function normalizePlatform(value) {
+  if (value === 'win32' || value === 'windows') return 'win32';
+  if (value === 'darwin' || value === 'macos') return 'darwin';
+  throw new Error(`unsupported target platform: ${value}`);
+}
+
+function normalizeArch(value) {
+  if (value === 'x64' || value === 'arm64') return value;
+  throw new Error(`unsupported target arch: ${value}`);
 }
 
 async function download(url, output) {
@@ -62,12 +88,17 @@ async function extractNodeArchive(archiveFile, extractDir) {
   else await tar.x({ file: archiveFile, cwd: extractDir, gzip: true, strict: true });
 }
 
-function npmCi(appDir) {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const result = spawnSync(npm, ['ci', '--omit=dev', '--no-audit', '--no-fund'], {
+function npmCi(appDir, target) {
+  const result = spawnSync(hostNpm, ['ci', '--omit=dev', '--no-audit', '--no-fund', `--os=${target.platform}`, `--cpu=${target.arch}`], {
     cwd: appDir,
     stdio: 'inherit',
-    env: process.env,
+    env: {
+      ...process.env,
+      npm_config_os: target.platform,
+      npm_config_cpu: target.arch,
+      npm_config_platform: target.platform,
+      npm_config_arch: target.arch,
+    },
   });
   if (result.status !== 0) throw new Error(`npm ci --omit=dev failed with exit code ${result.status}`);
 }
@@ -75,38 +106,35 @@ function npmCi(appDir) {
 async function main() {
   const args = readArgs(process.argv.slice(2));
   const nodeVersion = normalizeNodeVersion(args['node-version'] || process.env.KP_RUNTIME_NODE_VERSION || '22.23.2');
-  const host = `${process.platform}-${process.arch}`;
-  if (!supported.has(host)) throw new Error(`unsupported runtime build host: ${host}`);
-  const platform = process.platform === 'win32' ? 'windows' : 'macos';
-  const nodePlatform = process.platform === 'win32' ? 'win' : 'darwin';
-  const archiveName = process.platform === 'win32'
-    ? `node-v${nodeVersion}-${nodePlatform}-${process.arch}.zip`
-    : `node-v${nodeVersion}-${nodePlatform}-${process.arch}.tar.gz`;
+  const target = resolveTarget(args);
+  const archiveName = target.isWindows
+    ? `node-v${nodeVersion}-${target.nodePlatform}-${target.arch}.zip`
+    : `node-v${nodeVersion}-${target.nodePlatform}-${target.arch}.tar.gz`;
   const nodeFolderName = archiveName.replace(/\.(?:zip|tar\.gz)$/, '');
   const cacheDir = path.join(runtimeRoot, '.cache');
   const archiveFile = await ensureNodeArchive(nodeVersion, archiveName, cacheDir);
-  const extractDir = path.join(cacheDir, `node-v${nodeVersion}-${nodePlatform}-${process.arch}`);
+  const extractDir = path.join(cacheDir, `node-v${nodeVersion}-${target.nodePlatform}-${target.arch}`);
   await extractNodeArchive(archiveFile, extractDir);
 
   const nestedNodeRoot = path.join(extractDir, nodeFolderName);
-  const nodeRoot = fs.existsSync(path.join(nestedNodeRoot, process.platform === 'win32' ? 'node.exe' : 'bin/node'))
+  const nodeRoot = fs.existsSync(path.join(nestedNodeRoot, target.isWindows ? 'node.exe' : 'bin/node'))
     ? nestedNodeRoot
     : extractDir;
-  const stageDir = path.join(runtimeRoot, 'staging', `${platform}-${process.arch}`);
+  const stageDir = path.join(runtimeRoot, 'staging', `${target.runtimePlatform}-${target.arch}`);
   const stageApp = path.join(stageDir, 'app');
   fs.rmSync(stageDir, { recursive: true, force: true });
   fs.mkdirSync(stageApp, { recursive: true });
 
-  const sourceNode = path.join(nodeRoot, process.platform === 'win32' ? 'node.exe' : 'bin/node');
-  const targetNode = path.join(stageDir, process.platform === 'win32' ? 'node.exe' : 'bin/node');
+  const sourceNode = path.join(nodeRoot, target.isWindows ? 'node.exe' : 'bin/node');
+  const targetNode = path.join(stageDir, target.isWindows ? 'node.exe' : 'bin/node');
   fs.mkdirSync(path.dirname(targetNode), { recursive: true });
   fs.copyFileSync(sourceNode, targetNode);
   fs.copyFileSync(path.join(nodeRoot, 'LICENSE'), path.join(stageDir, 'LICENSE-node.txt'));
-  if (process.platform !== 'win32') fs.chmodSync(targetNode, 0o755);
+  if (!target.isWindows) fs.chmodSync(targetNode, 0o755);
 
   fs.copyFileSync(path.join(runtimeRoot, 'package.json'), path.join(stageApp, 'package.json'));
   fs.copyFileSync(path.join(runtimeRoot, 'package-lock.json'), path.join(stageApp, 'package-lock.json'));
-  npmCi(stageApp);
+  npmCi(stageApp, target);
   fs.copyFileSync(path.join(runtimeRoot, 'dist/cli.cjs'), path.join(stageApp, 'cli.cjs'));
 
   const runtimePackage = {
@@ -119,8 +147,8 @@ async function main() {
   fs.rmSync(path.join(stageApp, 'package-lock.json'), { force: true });
   fs.rmSync(path.join(stageApp, 'node_modules', '.package-lock.json'), { force: true });
 
-  if (process.platform === 'darwin') {
-    const helper = path.join(stageApp, 'node_modules', 'node-pty', 'prebuilds', `darwin-${process.arch}`, 'spawn-helper');
+  if (target.platform === 'darwin') {
+    const helper = path.join(stageApp, 'node_modules', 'node-pty', 'prebuilds', `darwin-${target.arch}`, 'spawn-helper');
     fs.chmodSync(helper, 0o755);
   }
   fs.writeFileSync(path.join(stageDir, 'runtime.json'), `${JSON.stringify({
@@ -130,8 +158,8 @@ async function main() {
     product: 'keepwork-mcp-node-runtime',
     version: packageJson.version,
     nodeVersion,
-    platform,
-    arch: process.arch,
+    platform: target.runtimePlatform,
+    arch: target.arch,
     entry: 'app/cli.cjs',
     args: ['--port', '8089'],
     env: {
