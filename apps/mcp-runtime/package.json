@@ -11,9 +11,8 @@
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build.mjs",
     "stage": "npm run typecheck && npm run build && node scripts/stage-runtime.cjs",
-    "make": "npm run stage && node scripts/package-runtime.cjs",
     "smoke": "node scripts/smoke-runtime.cjs",
-    "check": "npm run typecheck && npm run build"
+    "check": "npm run stage && npm run smoke"
   },
   "dependencies": {
     "node-pty": "1.1.0",
@@ -21,7 +20,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "archiver": "8.0.0",
     "esbuild": "0.28.2",
     "extract-zip": "2.0.1",
     "tar": "7.5.22",

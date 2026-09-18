@@ -9,6 +9,11 @@ const tar = require('tar');
 const runtimeRoot = path.resolve(__dirname, '..');
 const packageJson = require(path.join(runtimeRoot, 'package.json'));
 const supported = new Set(['win32-x64', 'darwin-arm64', 'darwin-x64']);
+const defaultTargets = [
+  { platform: 'darwin', arch: 'arm64' },
+  { platform: 'darwin', arch: 'x64' },
+  { platform: 'win32', arch: 'x64' },
+];
 const hostNpm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function readArgs(argv) {
@@ -40,6 +45,11 @@ function resolveTarget(args) {
     runtimePlatform: platform === 'win32' ? 'windows' : 'macos',
     nodePlatform: platform === 'win32' ? 'win' : 'darwin',
   };
+}
+
+function resolveTargets(args) {
+  if (args.platform || args.arch) return [resolveTarget(args)];
+  return defaultTargets.map(resolveTarget);
 }
 
 function normalizePlatform(value) {
@@ -103,10 +113,7 @@ function npmCi(appDir, target) {
   if (result.status !== 0) throw new Error(`npm ci --omit=dev failed with exit code ${result.status}`);
 }
 
-async function main() {
-  const args = readArgs(process.argv.slice(2));
-  const nodeVersion = normalizeNodeVersion(args['node-version'] || process.env.KP_RUNTIME_NODE_VERSION || '22.23.2');
-  const target = resolveTarget(args);
+async function stageRuntime(nodeVersion, target) {
   const archiveName = target.isWindows
     ? `node-v${nodeVersion}-${target.nodePlatform}-${target.arch}.zip`
     : `node-v${nodeVersion}-${target.nodePlatform}-${target.arch}.tar.gz`;
@@ -175,6 +182,13 @@ async function main() {
     logFile: 'keepwork-mcp.log',
   }, null, 2)}\n`);
   process.stdout.write(`${stageDir}\n`);
+}
+
+async function main() {
+  const args = readArgs(process.argv.slice(2));
+  const nodeVersion = normalizeNodeVersion(args['node-version'] || process.env.KP_RUNTIME_NODE_VERSION || '22.23.2');
+  const targets = resolveTargets(args);
+  for (const target of targets) await stageRuntime(nodeVersion, target);
 }
 
 main().catch((error) => {
