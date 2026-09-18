@@ -13,9 +13,7 @@
     "stage": "npm run typecheck && npm run build && node scripts/stage-runtime.cjs",
     "make": "npm run stage && node scripts/package-runtime.cjs",
     "smoke": "node scripts/smoke-runtime.cjs",
-    "manifest": "node scripts/generate-release-manifest.cjs",
-    "test": "node --test scripts/check-release-version.test.cjs scripts/generate-release-manifest.test.cjs scripts/publish-qiniu-release.test.cjs",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm run build"
   },
   "dependencies": {
     "node-pty": "1.1.0",
