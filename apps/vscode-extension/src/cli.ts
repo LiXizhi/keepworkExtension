@@ -23,6 +23,7 @@ async function main(): Promise<void> {
     try {
         const handle = await startHttpServer({ port, root, requireAuth, hostKind: 'vscode-extension' });
         console.error(`${SERVER_NAME} listening on http://127.0.0.1:${handle.port}/mcp`);
+        console.error(`dashboard: http://127.0.0.1:${handle.port}/dashboard`);
         console.error(`workspace root: ${resolveWorkspaceRoot(root)}`);
         console.error(`auth: ${handle.requireAuth ? 'token required' : 'open (no token)'}`);
         if (handle.requireAuth) {
