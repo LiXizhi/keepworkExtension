@@ -4,6 +4,8 @@ import * as http from 'node:http';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { DingService, DingTransports, keepworkDingModel } from '../core/dingtalk';
 import { DingListener, sendDingDraft, queryDingReceipt } from '../core/dingtalkDws';
+import { latestAichatClient, aichatClientRemembered } from '../core/aichatPresence';
+import { DingChromePool, DING_CHROME_PROFILE, launchVisibleChrome } from '../core/dingtalkChrome';
 
 export const DINGTALK_API = 'dingtalk-drafts-v1';
 type Listener = Pick<DingListener, 'start' | 'stop' | 'status'>;
@@ -21,7 +23,9 @@ export class DingController {
     private operations: Promise<unknown> = Promise.resolve();
     private closed = false;
     private retentionTimer?: NodeJS.Timeout;
-    constructor(home: string, transports: DingTransports = { model: keepworkDingModel, send: sendDingDraft, receipt: queryDingReceipt },
+    private pool?: DingChromePool;
+    private hasChrome: boolean;
+    constructor(home: string, transports?: DingTransports,
         private modelReady = () => !!process.env.KEEPWORK_DINGTALK_MODEL_TOKEN,
         private makeListener = (profile: string, kind: 'all-direct' | 'at-me'): Listener => new DingListener(profile, kind, event => this.service.receive(event), undefined,
             path.join(home, `listener-${createHash('sha256').update(profile).digest('hex')}-${kind}.json`))) {
@@ -30,7 +34,17 @@ export class DingController {
         if (!fs.existsSync(tokenFile)) fs.writeFileSync(tokenFile, randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
         this.token = fs.readFileSync(tokenFile, 'utf8').trim();
         if (!/^[a-f0-9]{64}$/.test(this.token)) throw new Error('Invalid DingTalk pairing token');
-        this.service = new DingService(path.join(home, 'state.json'), transports);
+        const merged: DingTransports = { model: keepworkDingModel, send: sendDingDraft, receipt: queryDingReceipt, ...(transports || {}) };
+        if (!transports) {
+            this.pool = new DingChromePool(launchVisibleChrome, path.join(path.dirname(home), DING_CHROME_PROFILE));
+            merged.chrome = turn => {
+                const client = latestAichatClient();
+                if (!client?.token) throw new Error('No AIChat client');
+                return this.pool!.turn(turn.event, client, turn.key);
+            };
+        }
+        this.hasChrome = !!merged.chrome;
+        this.service = new DingService(path.join(home, 'state.json'), merged);
     }
     private async stopListeners(): Promise<void> {
         const results = await Promise.allSettled(this.listeners.map(listener => listener.stop()));
@@ -40,7 +54,7 @@ export class DingController {
     private startListeners(): void {
         if (this.closed || this.listeners.length || !this.service.isActive()) return;
         const config = this.service.configuration();
-        if (!config || !this.modelReady()) { this.service.pause(); return; }
+        if (!config || (!this.hasChrome && !this.modelReady())) { this.service.pause(); return; }
         this.listeners = ['all-direct', 'at-me'].map(kind => this.makeListener(config.profile, kind as 'all-direct' | 'at-me'));
         for (const listener of this.listeners) listener.start();
     }
@@ -55,13 +69,39 @@ export class DingController {
     status() {
         const state = this.service.status();
         return { ...state, jobs: state.jobs.slice(-100).reverse(), jobCount: state.jobs.length,
-            listeners: this.listeners.map(listener => listener.status()), modelReady: this.modelReady(), api: DINGTALK_API };
+            listeners: this.listeners.map(listener => listener.status()), modelReady: this.modelReady(),
+            aichatClient: aichatClientRemembered(), api: DINGTALK_API };
+    }
+    dashboard() {
+        const state = this.status();
+        const listeners = state.listeners.map(listener => ({ kind: listener.kind, state: listener.state }));
+        const ready = listeners.length > 0 && listeners.every(listener => listener.state === 'ready');
+        const blocked = listeners.some(listener => listener.state === 'blocked' || listener.state === 'stop-unconfirmed');
+        const connection = state.faulted ? 'faulted'
+            : !state.config ? 'not-configured'
+            : state.paused ? 'paused'
+            : blocked ? 'blocked'
+            : ready ? 'connected'
+            : 'connecting';
+        return {
+            available: true,
+            connected: connection === 'connected',
+            connection,
+            profile: state.config?.profile || '',
+            listeners,
+            aichatClient: state.aichatClient,
+            messages: state.jobs.map(job => ({
+                time: job.receivedAt, kind: job.event.kind, sender: job.event.sender_open_dingtalk_id,
+                text: job.event.content, state: job.state, reply: job.reply || '', error: job.error || '',
+            })),
+        };
     }
     async close(): Promise<void> {
         this.closed = true;
         if (this.retentionTimer) clearInterval(this.retentionTimer);
         await this.operations.catch(() => undefined);
         await this.stopListeners();
+        await this.pool?.close();
         await this.service.drain();
     }
     async handle(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<boolean> {
@@ -96,8 +136,9 @@ export class DingController {
                         this.service.configure(body);
                         break;
                     case '/dingtalk/enable':
-                        if (!this.modelReady()) throw new Error('Host model credential missing');
-                        if (body.mode !== 'draft') throw new Error('Only draft mode supported; DWS requires concrete send confirmation');
+                        if (body.mode !== 'draft' && body.mode !== 'reply') throw new Error('Use reply or draft mode');
+                        if (body.mode === 'draft' && !this.modelReady()) throw new Error('Host model credential missing');
+                        if (body.mode === 'reply' && !this.hasChrome) throw new Error('Visible Chrome reply handler missing');
                         if (this.listeners.length) throw new Error('Pause before restarting listeners');
                         this.service.enable(body.consent === true);
                         this.startListeners();

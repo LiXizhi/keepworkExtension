@@ -39,21 +39,33 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                 assert.match(html, /Keepwork local MCP/);
                 assert.match(html, /href="#history"/);
                 assert.match(html, /id="view-history" hidden/);
+                assert.match(html, /href="#dingtalk"/);
+                assert.match(html, /id="view-dingtalk" hidden/);
                 assert.match(html, /href="#api-docs"/);
                 assert.ok(!html.includes(server.token));
                 assert.ok(!html.includes(home));
                 new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
             }
-            for (const route of ['/admin/status', '/admin/history', '/admin/api-docs']) {
+            for (const route of ['/admin/status', '/admin/history', '/admin/api-docs', '/admin/dingtalk']) {
                 assert.equal((await fetch(base + route)).status, requireAuth ? 401 : 200);
                 const headers = { Authorization: `Bearer ${server.token}`, Origin: base };
                 const response = await fetch(base + route, { headers });
                 assert.equal(response.status, 200);
                 assert.equal(response.headers.get('cache-control'), 'no-store');
+                if (route === '/admin/dingtalk') {
+                    const ding = await response.json();
+                    assert.equal(ding.ok, true);
+                    assert.equal(ding.connected, false);
+                    assert.equal(ding.connection, 'not-configured');
+                    assert.ok(Array.isArray(ding.messages));
+                    assert.ok(Array.isArray(ding.listeners));
+                    assert.ok(!JSON.stringify(ding).includes(server.token));
+                }
                 if (route === '/admin/api-docs') {
                     const catalog = await response.json();
                     assert.ok(catalog.endpoints.length > 40);
                     assert.ok(catalog.endpoints.some(entry => entry.path === '/paracraft/{id}/query_scene'));
+                    assert.ok(catalog.endpoints.some(entry => entry.path === '/admin/dingtalk'));
                     assert.ok(catalog.endpoints.every(entry => entry.example.includes(base)));
                     assert.ok(!JSON.stringify(catalog).includes(server.token));
                 }

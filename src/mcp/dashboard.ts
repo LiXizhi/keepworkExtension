@@ -9,7 +9,7 @@ body{max-width:none;padding:0;display:grid;grid-template-columns:220px minmax(0,
 body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-direction:column;overflow:hidden}body.chat-view #view-title{display:none}body.chat-view #notice:empty{display:none}body.chat-view #notice{margin:0;padding:8px 12px}body.chat-view #auth{margin:0;padding:8px 12px}body.chat-view #view-chat{flex:1;min-height:0}#chat-frame{display:block;width:100%;height:100%;border:0;background:white}
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP</div><nav class="tree" aria-label="Dashboard navigation">
-<a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#paracrafts">Paracrafts</a>
+<a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#paracrafts">Paracrafts</a><a href="#dingtalk">DingTalk</a>
 <a href="#chat">AI 对话</a>
 <details open><summary>Developer</summary><a href="#api-docs">API docs</a></details>
 </nav></aside><main>
@@ -24,13 +24,15 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div>
 </section>
 <section class="view" id="view-paracrafts" hidden><div id="paracrafts" class="scroll"></div><h2>Web Paracraft</h2><div id="webparacrafts" class="scroll"></div></section>
+<section class="view" id="view-dingtalk" hidden><dl id="dingtalk-status"></dl><h2>Received messages / 收到的消息</h2><div id="dingtalk-messages" class="scroll"></div></section>
 <section class="view" id="view-api-docs" hidden><p id="api-info"></p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
 <section class="view" id="view-chat" hidden><iframe id="chat-frame" title="Keepwork MCP AI 对话" referrerpolicy="no-referrer" allow="clipboard-write"></iframe></section>
 </main>
 <script>
 const byId = id => document.getElementById(id);
 let token = '', offset = 0, busy = false, stopped = false, view = 'overview', apiCatalog = null;
-const viewNames = {overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs',chat:'AI 对话'};
+const viewNames = {overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts',dingtalk:'DingTalk','api-docs':'API docs',chat:'AI 对话'};
+const dingLabels = {connected:'Connected / 已连接',paused:'Paused / 已暂停','not-configured':'Not configured / 未配置',connecting:'Connecting / 连接中',blocked:'Listener blocked / 监听失败',faulted:'Faulted / 故障',unavailable:'Unavailable / 不可用'};
 function startChat() {
   const url = new URL('https://keepwork.com/chat');
   const params = {layout:'thin',chat:'new',persist:'0',frontpage:'hide',disable_automation:'1',hide:'sidebar,pet,share,history,search',skill:'keepwork-mcp-assistant',skillUrl:location.origin + '/dashboard/skills/keepwork-mcp-assistant/SKILL.md',skillName:'Keepwork MCP Assistant'};
@@ -63,7 +65,18 @@ async function refresh() {
   const requestedView = view;
   try {
     const status = await request('/admin/status');
-    metadata({Status:'Running', URL:location.origin + '/mcp', PID:status.pid, Port:status.port, Root:status.workspaceRoot, Uptime:Math.round(status.uptimeMs / 1000) + 's', Auth:status.requireAuth ? 'Token required' : 'Open (loopback only)'});
+    const ding = await request('/admin/dingtalk');
+    const dingText = dingLabels[ding.connection] || ding.connection || 'Unavailable / 不可用';
+    metadata({Status:'Running', URL:location.origin + '/mcp', PID:status.pid, Port:status.port, Root:status.workspaceRoot, Uptime:Math.round(status.uptimeMs / 1000) + 's', Auth:status.requireAuth ? 'Token required' : 'Open (loopback only)', DingTalk:dingText});
+    const dingMeta = byId('dingtalk-status');
+    dingMeta.replaceChildren();
+    const listenerText = (ding.listeners || []).map(listener => listener.kind + ': ' + listener.state).join(', ') || 'none';
+    for (const [label, value] of [['Connection', dingText], ['Profile', ding.profile || '-'], ['Listeners', listenerText], ['AIChat client', ding.aichatClient ? 'remembered' : 'missing']]) {
+      const term = document.createElement('dt'), detail = document.createElement('dd');
+      term.textContent = label; detail.textContent = value; if (label === 'Connection') detail.className = ding.connected ? 'ok' : 'fail';
+      dingMeta.append(term, detail);
+    }
+    if (requestedView === 'dingtalk' || requestedView === 'overview') table('dingtalk-messages',['Time','Kind','From','Message','Reply','State'],(ding.messages || []).map(row => [new Date(row.time).toLocaleString(), row.kind, row.sender, row.text, row.reply || row.error, row.state]),'No DingTalk messages received.');
     const clientRows = status.clients.map(client => [client.sessionId.slice(0,8),client.origin,client.connectedAt,client.lastSeenAt,client.callCount]);
     for (const target of ['clients','overview-clients']) table(target,['Session','Origin','Connected','Last seen','Calls'],clientRows,'No connected AIChat sessions.');
     if (requestedView === 'history') {
@@ -81,7 +94,7 @@ async function refresh() {
     if (requestedView === 'api-docs' && !apiCatalog) { apiCatalog = await request('/admin/api-docs'); renderApis(); }
     byId('auth').hidden = true; byId('stop').disabled = false; byId('notice').textContent = '';
   } catch (error) {
-    metadata({Status:'Unavailable'}); for (const target of ['clients','overview-clients','history','paracrafts','webparacrafts','api-docs']) byId(target).replaceChildren(); apiCatalog = null;
+    metadata({Status:'Unavailable'}); for (const target of ['clients','overview-clients','history','paracrafts','webparacrafts','dingtalk-messages','dingtalk-status','api-docs']) byId(target).replaceChildren(); apiCatalog = null;
     byId('stop').disabled = true; byId('prev').disabled = true; byId('next').disabled = true; byId('range').textContent = '0 of 0'; byId('notice').textContent = error.message;
   } finally { busy = false; byId('refresh').disabled = false; if (view !== requestedView) refresh(); }
 }

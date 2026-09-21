@@ -167,3 +167,99 @@ test('listener restart preserves cooldown and blocks ambiguous interrupted consu
     assert.equal(interrupted.status().state, 'blocked');
     assert.equal(launches, 0);
 });
+
+test('a note to myself is answered once and the reply echo is not', async context => {
+    let calls = 0;
+    const item = fixture(context, {
+        chrome: async () => { calls++; return 'note to self'; },
+        send: async () => 'task-self',
+    });
+    const note = { ...item.event, sender_open_dingtalk_id: 'self', content: 'remember this' };
+    assert.ok(await item.service.receive(note));
+    assert.equal(calls, 1);
+    assert.equal(item.service.status().jobs[0].target, 'dm:self');
+    assert.equal(item.service.status().jobs[0].state, 'sent');
+    assert.equal(await item.service.receive({ ...note, event_id: 'echo', message_id: 'echo', content: 'note to self' }), null);
+    assert.equal(calls, 1);
+    assert.ok(await item.service.receive({ ...note, event_id: 'e2', message_id: 'm2', content: 'another note' }));
+    assert.equal(calls, 2);
+});
+
+test('chrome replies overlap across people and append for the same person', async context => {
+    let active = 0;
+    let maximum = 0;
+    const seen = [];
+    let sends = 0;
+    const item = fixture(context, {
+        chrome: async ({ key, event }) => {
+            seen.push(`${key}:${event.content}`);
+            active++;
+            maximum = Math.max(maximum, active);
+            await new Promise(resolve => setImmediate(resolve));
+            active--;
+            return `reply ${event.content}`;
+        },
+        send: async () => { sends++; return 'task'; },
+    });
+    const alice = { ...item.event, sender_open_dingtalk_id: 'alice', content: 'a' };
+    const bob = { ...item.event, event_id: 'eb', message_id: 'mb', sender_open_dingtalk_id: 'bob', content: 'b' };
+    await Promise.all([item.service.receive(alice), item.service.receive(bob)]);
+    assert.equal(maximum, 2);
+    assert.equal(sends, 2);
+    assert.equal(item.service.status().autoSupported, true);
+    assert.equal(item.service.status().jobs.every(job => job.state === 'sent'), true);
+    await item.service.receive({ ...alice, event_id: 'ea2', message_id: 'ma2', content: 'a2' });
+    assert.deepEqual(seen.filter(item => item.startsWith('dm:alice')), ['dm:alice:a', 'dm:alice:a2']);
+});
+
+test('visible chrome keeps one tab per thread, stays headed, and remembers presence', async context => {
+    const { DingChromePool, chromeLaunchArgs, writeChromeProfilePrefs } = require('../src/core/dingtalkChrome.ts');
+    const { rememberAichatClient, latestAichatClient, noteAichatSessionClosed, aichatPresenceView } = require('../src/core/aichatPresence.ts');
+    const args = chromeLaunchArgs();
+    assert.equal(args.some(arg => /headless/i.test(arg)), false);
+    for (const flag of ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows']) {
+        assert.ok(args.includes(flag));
+    }
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ding-chrome-'));
+    context.after(() => fs.rmSync(home, { recursive: true, force: true }));
+    writeChromeProfilePrefs(home);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'Default', 'Preferences'), 'utf8')).performance_tuning.high_efficiency_mode.state, 2);
+    const histories = new Map();
+    let pages = 0;
+    const launch = async () => ({
+        newPage: async () => {
+            const id = ++pages;
+            const history = [];
+            histories.set(id, history);
+            return {
+                addInitScript: async source => { assert.match(source, /"worker":true/); assert.match(source, /login-secret/); },
+                goto: async url => { assert.equal(url.includes('token='), false); },
+                waitUntilReady: async () => {},
+                evaluate: async message => {
+                    history.push(message.text);
+                    return { ok: true, reply: `answer ${history.length}`, convId: `conv-${id}` };
+                },
+            };
+        },
+        close: async () => {},
+    });
+    const pool = new DingChromePool(launch, home, 8);
+    context.after(() => pool.close());
+    const client = { url: 'https://keepwork.com/chat?token=login-secret&x=1', token: 'login-secret', baseURL: '', seenAt: 1 };
+    const event = (id, sender, kind, conversation) => ({ event_id: id, message_id: id, conversation_id: conversation, sender_open_dingtalk_id: sender, content: id, timestamp: Date.now(), kind });
+    await Promise.all([
+        pool.turn(event('a', 'alice', 'all-direct', 'c1'), client, 'dm:alice'),
+        pool.turn(event('b', 'bob', 'all-direct', 'c2'), client, 'dm:bob'),
+    ]);
+    assert.equal(pages, 2);
+    await pool.turn(event('a2', 'alice', 'all-direct', 'c1'), client, 'dm:alice');
+    assert.equal(pages, 2);
+    assert.deepEqual([...histories.values()].find(history => history[0] === 'a'), ['a', 'a2']);
+    rememberAichatClient({ sessionId: 's1', url: client.url, token: 'login-secret' });
+    noteAichatSessionClosed('s1');
+    assert.equal(latestAichatClient().token, 'login-secret');
+    assert.equal(latestAichatClient().url.includes('token'), false);
+    rememberAichatClient({ sessionId: 'worker', url: 'https://keepwork.com/chat', token: 'worker-token', handler: true });
+    assert.equal(latestAichatClient().token, 'login-secret');
+    assert.equal(JSON.stringify(aichatPresenceView()).includes('login-secret'), false);
+});

@@ -1,4 +1,5 @@
 import { HISTORY_MAX, HISTORY_PAGE_DEFAULT, HISTORY_PAGE_MAX, IDLE_SESSION_MS } from '../core/config';
+import { noteAichatSessionClosed } from '../core/aichatPresence';
 
 export interface ClientSession {
     sessionId: string;
@@ -53,6 +54,11 @@ export function touchSession(sessionId: string): void {
 export function removeSession(sessionId: string): void {
     sessions.delete(sessionId);
     closeHandlers.delete(sessionId);
+    noteAichatSessionClosed(sessionId);
+}
+
+export function hasSession(sessionId: string): boolean {
+    return sessions.has(sessionId);
 }
 
 export function setSessionCloser(sessionId: string, closer: () => void): void {

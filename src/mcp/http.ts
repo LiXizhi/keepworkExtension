@@ -15,13 +15,14 @@ import { requestContext } from './context';
 import { createMcpServer, ServerRuntime } from './server';
 import {
     listHistory, listSessions, pruneIdleSessions, removeSession, sessionCount,
-    setSessionCloser, upsertSession, touchSession,
+    setSessionCloser, upsertSession, touchSession, hasSession,
 } from './sessions';
 import { liveClientCount, listWebserverRoots, setHubListenPort, startParacraftWatch, stopParacraftWatch, tryHandleParacraft, webserverBaseUrl } from '../core/paracraftClients';
 import { tryHandleWebserver } from '../core/webserverProxy';
 import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
 import { TerminalSessionManager } from '../core/terminalSessions';
 import { DingController, DINGTALK_API } from './dingtalk';
+import { tryHandleAichatPresence, aichatClientRemembered } from '../core/aichatPresence';
 import { dashboardHtml } from './dashboard';
 import { dashboardSkill } from './dashboardSkill';
 import { apiDocs } from './apiDocs';
@@ -156,6 +157,10 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         }
 
         try {
+            if (pathname === '/aichat/presence') {
+                await tryHandleAichatPresence(req, res, hasSession);
+                return;
+            }
             if (pathname.startsWith('/dingtalk/')) {
                 if (dingtalk) await dingtalk.handle(req, res, pathname);
                 else sendJson(res, 503, { error: 'DingTalk integration unavailable; inspect private store and restart Helper' });
@@ -184,6 +189,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     fsDirApi: 'mkdir-v1',
                     terminalApi: 'pty-session-v1',
                     dingtalkApi: dingtalk ? DINGTALK_API : null,
+                    aichatClient: aichatClientRemembered(),
                 });
                 return;
             }
@@ -370,6 +376,12 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
             if (pathname === '/admin/api-docs' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, apiDocs(port, authRequired, !!dingtalk));
+                return;
+            }
+
+            if (pathname === '/admin/dingtalk' && req.method === 'GET') {
+                if (!assertAuth(req, url, res)) return;
+                sendJson(res, 200, dingtalk ? { ok: true, ...dingtalk.dashboard() } : { ok: true, available: false, connected: false, connection: 'unavailable', profile: '', listeners: [], aichatClient: false, messages: [] });
                 return;
             }
 

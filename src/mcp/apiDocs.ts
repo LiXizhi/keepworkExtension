@@ -35,6 +35,7 @@ export function apiDocs(port: number, requireAuth: boolean, dingtalkAvailable: b
     add('Service', 'GET', '/dashboard/skills/keepwork-mcp-assistant/SKILL.md', 'Bundled MCP assistant instructions for the dashboard temporary AIChat. Contains no credentials or private runtime data.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/', 'Default browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
     add('Admin', 'GET', '/admin/status', 'Daemon status and connected MCP sessions. Allowed Origin required when supplied.');
+    add('Admin', 'GET', '/admin/dingtalk', 'Whether DingTalk is listening, plus recent received messages and reply state. Does not include pairing tokens or AIChat logins.');
     add('Admin', 'GET', '/admin/history', 'Newest-first tool-call history.', 'Query: offset (default 0), limit (default 20, max 50).', '/admin/history?offset=0&limit=20');
     add('Admin', 'GET', '/admin/api-docs', 'Structured API catalog for the current daemon.');
     add('Admin', 'POST', '/admin/stop', 'Stops the daemon and disconnects clients. Restart externally.');
@@ -66,8 +67,9 @@ export function apiDocs(port: number, requireAuth: boolean, dingtalkAvailable: b
     add('Web Paracraft', 'GET', '/webserver/{instance}/{path}', 'Proxy an external WASM NPL wiki request. Other HTTP methods are forwarded as well.', 'instance and root from /health.webservers; path is the wiki resource.', undefined, undefined, 'No token required');
     if (dingtalkAvailable) {
         const auth = 'Bearer token always required, plus an explicit allowed Origin (even when global auth is off)';
-        add('DingTalk', 'GET', '/dingtalk/status', 'Integration configuration, listener state and draft status.', undefined, undefined, undefined, auth);
-        for (const [action, body] of Object.entries({ configure: {}, enable: { mode: 'draft', consent: true }, pause: {}, test: { question: '<QUESTION>' }, send: { id: '<DRAFT_ID>', confirmation: '<USER_CONFIRMATION>' }, reconcile: { id: '<DRAFT_ID>' } })) add('DingTalk', 'POST', '/dingtalk/' + action, 'Integration action: ' + action + '. Sending requires concrete user confirmation.', 'Content-Type: application/json. Configure requires the integration configuration schema; other bodies illustrated below.', undefined, body, auth);
+        add('DingTalk', 'GET', '/dingtalk/status', 'Integration configuration, listener state and reply status. Does not include AIChat tokens.', undefined, undefined, undefined, auth);
+        for (const [action, body] of Object.entries({ configure: {}, enable: { mode: 'reply', consent: true }, pause: {}, test: { question: '<QUESTION>' }, send: { id: '<DRAFT_ID>', confirmation: '<USER_CONFIRMATION>' }, reconcile: { id: '<DRAFT_ID>' } })) add('DingTalk', 'POST', '/dingtalk/' + action, 'Integration action: ' + action + '. reply mode answers in visible Chrome and sends to the same chat. draft mode still requires confirmation.', 'Content-Type: application/json. Configure requires the integration configuration schema; other bodies illustrated below.', undefined, body, auth);
     }
+    add('AIChat', 'POST', '/aichat/presence', 'Remember the latest AIChat page URL and login in memory. A closed session does not erase it. The response never echoes the login.', 'Header: Mcp-Session-Id of a live MCP session. JSON: url, token, optional baseURL. Explicit allowed Origin required.', undefined, { url: 'https://keepwork.com/chat', token: '<KEEPWORK_LOGIN>' }, 'Live Mcp-Session-Id and explicit allowed Origin');
     return { description: 'Runtime API catalog. Examples are JavaScript fetch calls; replace placeholders before use. Browser requests remain subject to Origin rules. Write, terminal and lifecycle operations have side effects. MCP tool schemas are available through tools/list.', endpoints };
 }

@@ -28,17 +28,19 @@ export type DingJobState = 'received' | 'generating' | 'draft' | 'sending' | 'se
 export interface DingJob {
     id: string; event: DingEvent; receivedAt: number; revision: string;
     state: DingJobState; reply?: string; error?: string; receipt?: string;
-    target: string; citations?: string[]; test?: boolean;
+    target: string; citations?: string[]; test?: boolean; echoed?: boolean;
 }
 interface DingState {
     version: 1; paused: boolean; config?: DingConfig; jobs: DingJob[];
     seen: string[]; disconnectedAt?: number;
 }
 export interface DingModelRequest { model: string; prompt: string; question: string; sources: { path: string; text: string }[] }
+export interface DingChromeTurn { event: DingEvent; key: string }
 export interface DingTransports {
     model(request: DingModelRequest): Promise<string>;
     send(config: DingConfig, job: DingJob): Promise<string>;
     receipt(config: DingConfig, receipt: string): Promise<'sent' | 'failed' | 'unknown'>;
+    chrome?(turn: DingChromeTurn): Promise<string>;
 }
 export function atomicDingWrite(file: string, value: unknown): void {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -100,9 +102,14 @@ export function validateDingConfig(input: Partial<DingConfig>): DingConfig {
 }
 function digest(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 
+export function dingSessionKey(event: Pick<DingEvent, 'kind' | 'conversation_id' | 'sender_open_dingtalk_id'>): string {
+    return event.kind === 'all-direct' ? `dm:${event.sender_open_dingtalk_id}` : `group:${event.conversation_id}`;
+}
+
 export class DingService {
     private state: DingState;
     private running: Promise<void> = Promise.resolve();
+    private lanes = new Map<string, Promise<void>>();
     private pending = 0;
     private faulted = false;
     constructor(private file: string, private transports: DingTransports, private write = atomicDingWrite) {
@@ -127,7 +134,7 @@ export class DingService {
         if (!job) throw new Error('Job missing');
         Object.assign(job, patch); this.commit(next);
     }
-    status() { return structuredClone({ ...this.state, seen: undefined, faulted: this.faulted, autoSupported: false, pending: this.pending }); }
+    status() { return structuredClone({ ...this.state, seen: undefined, faulted: this.faulted, autoSupported: !!this.transports.chrome, pending: this.pending }); }
     configuration(): DingConfig | undefined { return this.state.config ? structuredClone(this.state.config) : undefined; }
     isActive(): boolean { return !this.state.paused && !this.faulted; }
     configure(input: Partial<DingConfig>): void {
@@ -155,15 +162,38 @@ export class DingService {
         if (![event.event_id, event.message_id, event.conversation_id, event.sender_open_dingtalk_id].every(value => typeof value === 'string' && value.length > 0 && value.length <= 512)) throw new Error('Stable event identity required');
         if (!['all-direct', 'at-me'].includes(event.kind)) throw new Error('Unsupported event kind');
         if (typeof event.content !== 'string' || event.content.length > 8000 || !Number.isFinite(event.timestamp)) throw new Error('Unsupported content or timestamp');
-        if (event.sender_open_dingtalk_id === config.selfId) return null;
         const keys = [digest(`${config.profile}:${config.selfId}:event:${event.event_id}`), digest(`${config.profile}:${config.selfId}:${event.conversation_id}:${event.message_id}`)];
+        const sessionKey = dingSessionKey(event);
+        if (this.consumeReplyEcho(sessionKey, event.content, keys)) return null;
         if (keys.some(key => this.state.seen.includes(key))) return null;
         if (this.pending >= 100 || this.state.jobs.length >= 2000 || this.state.seen.length >= 100000) throw new Error('Private inbox capacity reached; pause and archive required');
         const next = structuredClone(this.state);
+        const key = sessionKey;
         const job: DingJob = { id: randomUUID(), event: structuredClone(event), receivedAt: Date.now(), revision: config.revision,
-            target: event.kind === 'all-direct' ? `dm:${event.sender_open_dingtalk_id}` : `group:${event.conversation_id}`, state: 'received', test };
+            target: key, state: 'received', test };
         next.jobs.push(job); next.seen.push(...keys); this.commit(next);
         this.pending++;
+        const chrome = this.transports.chrome;
+        if (chrome && !test) {
+            const lane = (this.lanes.get(key) || Promise.resolve()).then(async () => {
+                try {
+                    if (!this.isActive() || this.configuration()?.revision !== config.revision) throw new Error('Policy changed');
+                    if (Date.now() - event.timestamp > 300000 || event.timestamp > Date.now() + 60000) throw new Error('Stale event held; no automatic backlog processing');
+                    if (!event.content.trim()) throw new Error('Unsupported non-text message');
+                    this.update(job.id, { state: 'generating' });
+                    const reply = await chrome({ event: structuredClone(event), key });
+                    const text = typeof reply === 'string' ? reply.trim().slice(0, 6000) : '';
+                    if (!text) throw new Error('Invalid Chrome reply');
+                    this.update(job.id, { state: 'draft', reply: text });
+                    await this.autoSend(job.id);
+                } catch {
+                    if (!this.faulted) this.update(job.id, { state: 'failed', error: 'Reply unavailable: check the visible Chrome tab, AIChat login and second brain' });
+                } finally { this.pending--; }
+            }).catch(() => { this.faulted = true; });
+            this.lanes.set(key, lane.then(() => undefined, () => undefined));
+            await lane;
+            return job.id;
+        }
         this.running = this.running.then(async () => {
             try {
                 if ((!test && !this.isActive()) || this.configuration()?.revision !== config.revision) throw new Error('Policy changed');
@@ -182,6 +212,35 @@ export class DingService {
         }).catch(() => { this.faulted = true; });
         await this.running;
         return job.id;
+    }
+    /** A DingTalk echo of a reply we just sent must not start another turn. The user's own later notes still do. */
+    private consumeReplyEcho(key: string, content: string, seenKeys: string[]): boolean {
+        const text = content.trim();
+        if (!text) return false;
+        const next = structuredClone(this.state);
+        const job = [...next.jobs].reverse().find(item => item.target === key && !item.echoed && item.reply?.trim() === text
+            && (item.state === 'draft' || item.state === 'sending' || item.state === 'sent' || item.state === 'unknown'));
+        if (!job) return false;
+        job.echoed = true;
+        next.seen.push(...seenKeys);
+        this.commit(next);
+        return true;
+    }
+    private async autoSend(id: string): Promise<void> {
+        const config = this.configuration();
+        const job = this.state.jobs.find(item => item.id === id);
+        if (!config || !this.isActive() || !job || job.test || job.state !== 'draft' || !job.reply
+            || job.revision !== config.revision || Date.now() - job.event.timestamp > 300000) throw new Error('Send policy rejected');
+        this.update(id, { state: 'sending' });
+        try {
+            const receipt = await this.transports.send(config, structuredClone(job));
+            if (!receipt) throw new Error('No receipt');
+            this.update(id, { receipt });
+            const result = await this.transports.receipt(config, receipt);
+            this.update(id, { state: result });
+        } catch {
+            if (!this.faulted) this.update(id, { state: 'unknown', error: 'Delivery not verified; never resend automatically' });
+        }
     }
     async send(id: string, confirmation: string): Promise<void> {
         const config = this.configuration();
@@ -207,7 +266,7 @@ export class DingService {
         if (!config || !job?.receipt || job.revision !== config.revision || job.state !== 'unknown') throw new Error('No reconcilable receipt');
         this.update(id, { state: await this.transports.receipt(config, job.receipt) });
     }
-    async drain(): Promise<void> { await this.running; }
+    async drain(): Promise<void> { await this.running; await Promise.all([...this.lanes.values()]); }
 }
 
 export async function keepworkDingModel(request: DingModelRequest): Promise<string> {

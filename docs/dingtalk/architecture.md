@@ -1,12 +1,16 @@
 # Technical Architecture
 
-Stage: architect complete, 2026-09-21. Input: design.md.
+Stage: visible Chrome replies, 2026-09-22. Input: design.md.
+
+An in-process Node host that imports AIChat and calls `sendChatMessage` directly is **not implemented**. It is recorded in [node-host-alternative.md](node-host-alternative.md). Live replies use a dedicated visible Chrome window.
 
 ## Ownership and files
 
-- `src/core/dingtalk.ts`: typed private durable state, restricted retrieval, bounded Node Keepwork model adapter, serialized jobs and send policy.
+- `src/core/dingtalk.ts`: typed private durable state, restricted retrieval, bounded Node Keepwork model adapter, per-conversation Chrome replies, and send policy.
+- `src/core/dingtalkChrome.ts`: visible dedicated Chrome, anti-throttle launch flags, one persistent tab per DingTalk group or person.
+- `src/core/aichatPresence.ts`: in-memory latest AIChat page URL and login. Not written to disk. Session close does not erase it.
 - `src/core/dingtalkDws.ts`: argument-only CLI discovery, supervised NDJSON subscriptions, bounded retries, receipt queries.
-- `src/mcp/dingtalk.ts`: mandatory dedicated Bearer token, exact Origin policy, bounded JSON routes.
+- `src/mcp/dingtalk.ts`: mandatory dedicated Bearer token, exact Origin policy, bounded JSON routes. `reply` mode does not require `KEEPWORK_DINGTALK_MODEL_TOKEN`.
 - `src/mcp/http.ts`: advertise capability, restore only after successful loopback bind, stop on host shutdown.
 - AIChat `js/dingtalk_connection.js`: existing settings panel controller/template, memory-only pairing token; explicit bind of selected brain/model. No cloud profile modifications.
 - Focused Node tests use temporary homes and fake transports; no production subscriptions or message bodies.
@@ -23,7 +27,9 @@ Keepwork SDK `src/ai-chat/AIGenerators.base.ts` chatViaProxy is the contract: PO
 
 DWS dynamically resolves installed npm launcher/PATH, no installation/authentication. Two managed consumers use pinned `--profile`, `event +listen-im --kind all-direct|at-me --flatten -f ndjson`. Drain both pipes, detect stderr ready, stop by stdin close, bounded buffers. Retry budgets false/true/unknown = 0/2/1, honor cooldown and terminal_hold. Retry metadata never contains raw stderr.
 
-The installed `confirmation.md` specifies review of the concrete action then explicit confirmation, not standing unattended authorization. Therefore **auto mode is blocked** until a supported standing-consent contract is established. Allowlisted, labeled manual sends require confirmation of the exact stored draft revision; no background `--yes`, no shell approval bypass. Receipt query determines sent/failed/unknown, unknown is never re-sent. This is a deliberate unresolved design acceptance gate, not a successful auto-reply implementation.
+`POST /dingtalk/enable` with `{ mode: "reply", consent: true }` listens to `all-direct` and `at-me` and answers in a visible Chrome window. The daemon launches its own Google Chrome (Edge only if Chrome is not installed) with a dedicated user-data directory `~/.keepwork-mcp/dingtalk-chrome`. The window is not headless. Launch flags disable background timer throttling, renderer backgrounding, occluded-window pausing, Memory Saver, and tab discarding. The profile preference `performance_tuning.high_efficiency_mode.state` is `2` (off). Each group (`group:<conversation_id>`) and each 1:1 person (`dm:<sender_open_dingtalk_id>`), including a chat with yourself, has one tab and one AIChat conversation. A copy of a reply this daemon just sent is ignored so it does not start another turn. Later notes you write yourself still do. Later messages append there, so history and the page’s existing auto-compact run. Different threads run at the same time, up to 8 tabs; a ninth waits. The page is the remembered AIChat URL with the login injected before boot, not placed in the address bar. The worker holds a Web Lock and does not register as the latest AIChat client.
+
+The reply is sent to that same chat. Unknown delivery is not resent. `draft` mode remains the confirm-to-send model path and still needs `KEEPWORK_DINGTALK_MODEL_TOKEN`. Receipt query determines sent/failed/unknown.
 
 ## Milestones and deviations
 

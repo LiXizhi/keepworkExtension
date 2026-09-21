@@ -79,7 +79,7 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 
 HTTP:
 
-- `GET /` and `GET /dashboard` — browser dashboard with Overview, History, Clients, Paracrafts and API docs hash views. `GET /admin/api-docs` returns the runtime-aware structured API catalog; maintain HTTP definitions in `src/mcp/apiDocs.ts` when adding routes. Test with `scripts/dashboard.test.cjs`; browser smoke test `scripts/dashboard-browser.test.cjs` requires a running development daemon and Edge.
+- `GET /` and `GET /dashboard` — browser dashboard with Overview, History, Clients, Paracrafts, DingTalk and API docs hash views. The DingTalk view reads `GET /admin/dingtalk` (same admin token and Origin as `/admin/status`) and shows listener connection plus recent received messages. It does not expose the DingTalk pairing token or an AIChat login. `GET /admin/api-docs` returns the runtime-aware structured API catalog; maintain HTTP definitions in `src/mcp/apiDocs.ts` when adding routes. Test with `scripts/dashboard.test.cjs`; browser smoke test `scripts/dashboard-browser.test.cjs` requires a running development daemon and Edge.
 - `GET /health` — public probe (`name: keepwork-mcp`, `requireAuth`, `workspaceRoot`, `paracraftClients`, `webserverBase`, `webservers` as `{ instance, root }[]`, `fsApi: "workspace"` when list/write/delete are available). New daemons report `hostKind`: `local-helper` or `vscode-extension`; only Local Helper reports its application `hostVersion`. Browser clients must not interpret the service protocol `version` as an application version.
 - `GET /health` also reports `terminalApi: "pty-session-v1"` when the user-operated PTY API is available.
 - `POST /terminal/sessions`, `POST /terminal/sessions/:id/input`, `GET /terminal/sessions/:id/stream?cursor=` (long-lived NDJSON output with cursor replay), compatibility `GET /terminal/sessions/:id/output?cursor=`, `POST /terminal/sessions/:id/resize`, `POST /terminal/sessions/:id/interrupt`, `DELETE /terminal/sessions/:id` — direct AIChat workspace PTY. Keep Origin/auth ownership, verified cwd, bounded output/concurrency, idle cleanup, stream disconnect cleanup, and daemon-close cleanup. Raw user input cannot use whole-command deny-list parsing; do not weaken the separate model-operated `run_terminal` confirmation or deny-list.
@@ -95,7 +95,7 @@ HTTP:
 - `DELETE /fs/dir?root=&path=` — recursive directory delete
 - `POST /fs/reveal?root=&path=` — show the confined path in the OS file manager (`revealFileInOS` when the VS Code extension is up, else `explorer /select` / `open -R` / `xdg-open` dir). Optional `mode=open` opens the file with the default app; `mode=dir` opens the containing folder.
 - `POST/GET/DELETE /mcp` — Streamable HTTP; Bearer token only if `requireAuth`
-- `GET /admin/status`, `GET /admin/history?offset=&limit=`, `POST /admin/stop` — token, loopback
+- `GET /admin/status`, `GET /admin/dingtalk`, `GET /admin/history?offset=&limit=`, `POST /admin/stop` — token, loopback
   (`/admin/history` returns one newest-first page, default `limit=20`, max 50; includes `total` / `hasMore`)
 - Paracraft CLI hub (plain HTTP, not MCP):
   - Hub **awakens** desktop Paracraft: while the daemon is up it scans `127.0.0.1:8099-8115` and pings `/ajax/paracraft_cli?action=health`. Desktop **registers once on start**; if that succeeds it long-polls jobs (and heartbeats) while the hub stays up. If register fails it does **not** poll `:8089` until NPL inbound or the next start.
