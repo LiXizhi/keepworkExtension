@@ -197,9 +197,16 @@ test('archives preserve root layout, dependencies, hidden files and executable m
   const output = packageRuntime(stage, path.join(dir, 'out'), identity);
   const extracted = path.join(dir, 'extracted');
   fs.mkdirSync(extracted);
-  // GitHub Windows has bsdtar, which also extracts ZIP files.
-  if (process.platform === 'win32') execFileSync('tar', ['-xf', output, '-C', extracted]);
-  else execFileSync('unzip', ['-q', output, '-d', extracted]);
+  if (process.platform === 'win32') {
+    // Git Bash can put GNU tar first on PATH; it treats C: as a remote host.
+    // Use the same native ZIP API as packaging, with paths passed as data.
+    execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:KP_ARCHIVE_SOURCE, $env:KP_ARCHIVE_DESTINATION)"], {
+      env: { ...process.env, KP_ARCHIVE_SOURCE: output, KP_ARCHIVE_DESTINATION: extracted }, stdio: 'inherit',
+    });
+  } else {
+    execFileSync('unzip', ['-q', output, '-d', extracted]);
+  }
   assert.equal(path.basename(output), `${platform}-${arch}.zip`);
   assert.equal(fs.readFileSync(output).subarray(0, 4).toString('hex'), '504b0304');
   const metadata = JSON.parse(fs.readFileSync(path.join(dir, 'out', `${platform}-${arch}.json`)));
