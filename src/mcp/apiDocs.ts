@@ -10,14 +10,13 @@ interface ApiEntry {
     example: string;
 }
 
-export function apiDocs(port: number, requireAuth: boolean, dingtalkAvailable: boolean) {
+export function apiDocs(port: number, requireAuth: boolean) {
     const endpoints: ApiEntry[] = [];
     const base = `http://127.0.0.1:${port}`;
     const guarded = requireAuth ? 'Bearer token required' : 'Optional Bearer token; authentication currently disabled';
     const add = (group: string, method: string, route: string, description: string, parameters = 'No parameters.', samplePath = route, body?: unknown, auth = guarded) => {
         const headers: Record<string, string> = {};
         if (auth !== 'No token required') headers.Authorization = 'Bearer <PAIRING_TOKEN>';
-        if (group === 'DingTalk') headers.Origin = base;
         if (group === 'MCP') {
             headers.Accept = method === 'GET' ? 'text/event-stream' : 'application/json, text/event-stream';
             if (method !== 'POST') {
@@ -35,7 +34,6 @@ export function apiDocs(port: number, requireAuth: boolean, dingtalkAvailable: b
     add('Service', 'GET', '/dashboard/skills/keepwork-mcp-assistant/SKILL.md', 'Bundled MCP assistant instructions for the dashboard temporary AIChat. Contains no credentials or private runtime data.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/', 'Default browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
     add('Admin', 'GET', '/admin/status', 'Daemon status and connected MCP sessions. Allowed Origin required when supplied.');
-    add('Admin', 'GET', '/admin/dingtalk', 'Whether DingTalk is listening, plus recent received messages and reply state. Does not include pairing tokens or AIChat logins.');
     add('Admin', 'GET', '/admin/history', 'Newest-first tool-call history.', 'Query: offset (default 0), limit (default 20, max 50).', '/admin/history?offset=0&limit=20');
     add('Admin', 'GET', '/admin/api-docs', 'Structured API catalog for the current daemon.');
     add('Admin', 'POST', '/admin/stop', 'Stops the daemon and disconnects clients. Restart externally.');
@@ -65,11 +63,6 @@ export function apiDocs(port: number, requireAuth: boolean, dingtalkAvailable: b
     }
     for (const [route, body] of Object.entries({ register: { clientId: '<CLIENT_ID>', platform: 'desktop' }, unregister: { clientId: '<CLIENT_ID>' }, '{id}/jobs/poll': { waitMs: 2000 }, '{id}/jobs/results': { results: [{ jobId: '<JOB_ID>', result: {} }] }, '{id}/jobs/{jobId}/result': { result: {} } })) add('Paracraft bridge', 'POST', '/paracraft/' + route, 'Engine registration / job transport. Intended for Paracraft clients.', 'Replace path placeholders; JSON body as below.', undefined, body, 'No token required');
     add('Web Paracraft', 'GET', '/webserver/{instance}/{path}', 'Proxy an external WASM NPL wiki request. Other HTTP methods are forwarded as well.', 'instance and root from /health.webservers; path is the wiki resource.', undefined, undefined, 'No token required');
-    if (dingtalkAvailable) {
-        const auth = 'Bearer token always required, plus an explicit allowed Origin (even when global auth is off)';
-        add('DingTalk', 'GET', '/dingtalk/status', 'Integration configuration, listener state and reply status. Does not include AIChat tokens.', undefined, undefined, undefined, auth);
-        for (const [action, body] of Object.entries({ configure: {}, enable: { mode: 'reply', consent: true }, pause: {}, test: { question: '<QUESTION>' }, send: { id: '<DRAFT_ID>', confirmation: '<USER_CONFIRMATION>' }, reconcile: { id: '<DRAFT_ID>' } })) add('DingTalk', 'POST', '/dingtalk/' + action, 'Integration action: ' + action + '. reply mode answers in visible Chrome and sends to the same chat. draft mode still requires confirmation.', 'Content-Type: application/json. Configure requires the integration configuration schema; other bodies illustrated below.', undefined, body, auth);
-    }
     add('AIChat', 'POST', '/aichat/presence', 'Remember the latest AIChat page URL and login in memory. A closed session does not erase it. The response never echoes the login.', 'Header: Mcp-Session-Id of a live MCP session. JSON: url, token, optional baseURL. Explicit allowed Origin required.', undefined, { url: 'https://keepwork.com/chat', token: '<KEEPWORK_LOGIN>' }, 'Live Mcp-Session-Id and explicit allowed Origin');
     return { description: 'Runtime API catalog. Examples are JavaScript fetch calls; replace placeholders before use. Browser requests remain subject to Origin rules. Write, terminal and lifecycle operations have side effects. MCP tool schemas are available through tools/list.', endpoints };
 }

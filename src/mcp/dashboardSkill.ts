@@ -1,3 +1,4 @@
+
 export function dashboardSkill(baseUrl: string): string {
     return `---
 name: keepwork-mcp-assistant

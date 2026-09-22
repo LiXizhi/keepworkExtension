@@ -70,6 +70,21 @@ test('dashboard navigation, API filter, history paging and responsive layout', a
         assert.ok(layout.scroll <= layout.width, JSON.stringify(layout));
         assert.equal(layout.historyHidden, true);
         await page.screenshot({ path: path.join(os.tmpdir(), 'dashboard-mobile.png') });
+        assert.equal(await page.getByRole('link', { name: 'DingTalk', exact: true }).count(), 0);
+        const developmentUrl = 'http://127.0.0.1:3002/maisi/maisi/webgames/tools/AIChat/AIChat.html';
+        await page.route(developmentUrl + '?*', route => route.fulfill({ contentType: 'text/html', body: '<h1>Development chat fixture</h1>' }));
+        const dashboardUrl = new URL(process.env.DASHBOARD_URL || 'http://127.0.0.1:8089/dashboard');
+        dashboardUrl.searchParams.set('aichat', developmentUrl);
+        dashboardUrl.hash = 'chat';
+        await page.goto(dashboardUrl.href);
+        await page.frameLocator('#chat-frame').getByText('Development chat fixture').waitFor();
+        const developmentFrameUrl = new URL(await page.locator('#chat-frame').getAttribute('src'));
+        assert.equal(developmentFrameUrl.origin + developmentFrameUrl.pathname, developmentUrl);
+        assert.equal(developmentFrameUrl.searchParams.get('skill'), 'keepwork-mcp-assistant');
+        assert.equal(developmentFrameUrl.searchParams.has('draft'), false);
+        dashboardUrl.searchParams.set('aichat', 'javascript:alert(1)');
+        await page.goto(dashboardUrl.href);
+        assert.equal(await page.locator('#chat-frame').getAttribute('src'), null);
         assert.deepEqual(errors, []);
     } finally {
         await browser.close();

@@ -29,7 +29,15 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
             const skill = await skillResponse.text();
             assert.match(skill, /name: keepwork-mcp-assistant/);
             assert.ok(skill.includes(base));
+            assert.doesNotMatch(skill, /listen_dingtalk_messages/);
             assert.ok(!skill.includes(server.token));
+            const dingSkillResponse = await fetch(base + '/dashboard/skills/dingtalk/SKILL.md', { headers: { Origin: 'https://keepwork.com' } });
+            assert.equal(dingSkillResponse.status, 404);
+            const health = await (await fetch(base + '/health')).json();
+            assert.equal('dingtalkApi' in health, false);
+            for (const route of ['/admin/dingtalk', '/dingtalk/status']) {
+                assert.equal((await fetch(base + route, { headers: { Authorization: `Bearer ${server.token}`, Origin: base } })).status, 404);
+            }
             for (const route of ['/', '/dashboard', '/dashboard/']) {
                 const response = await fetch(base + route);
                 assert.equal(response.status, 200);
@@ -39,33 +47,23 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                 assert.match(html, /Keepwork local MCP/);
                 assert.match(html, /href="#history"/);
                 assert.match(html, /id="view-history" hidden/);
-                assert.match(html, /href="#dingtalk"/);
-                assert.match(html, /id="view-dingtalk" hidden/);
+                assert.doesNotMatch(html, /dingtalk/i);
                 assert.match(html, /href="#api-docs"/);
                 assert.ok(!html.includes(server.token));
                 assert.ok(!html.includes(home));
                 new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
             }
-            for (const route of ['/admin/status', '/admin/history', '/admin/api-docs', '/admin/dingtalk']) {
+            for (const route of ['/admin/status', '/admin/history', '/admin/api-docs']) {
                 assert.equal((await fetch(base + route)).status, requireAuth ? 401 : 200);
                 const headers = { Authorization: `Bearer ${server.token}`, Origin: base };
                 const response = await fetch(base + route, { headers });
                 assert.equal(response.status, 200);
                 assert.equal(response.headers.get('cache-control'), 'no-store');
-                if (route === '/admin/dingtalk') {
-                    const ding = await response.json();
-                    assert.equal(ding.ok, true);
-                    assert.equal(ding.connected, false);
-                    assert.equal(ding.connection, 'not-configured');
-                    assert.ok(Array.isArray(ding.messages));
-                    assert.ok(Array.isArray(ding.listeners));
-                    assert.ok(!JSON.stringify(ding).includes(server.token));
-                }
                 if (route === '/admin/api-docs') {
                     const catalog = await response.json();
                     assert.ok(catalog.endpoints.length > 40);
                     assert.ok(catalog.endpoints.some(entry => entry.path === '/paracraft/{id}/query_scene'));
-                    assert.ok(catalog.endpoints.some(entry => entry.path === '/admin/dingtalk'));
+                    assert.ok(!catalog.endpoints.some(entry => /dingtalk/i.test(entry.path)));
                     assert.ok(catalog.endpoints.every(entry => entry.example.includes(base)));
                     assert.ok(!JSON.stringify(catalog).includes(server.token));
                 }

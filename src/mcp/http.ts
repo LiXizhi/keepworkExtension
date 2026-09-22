@@ -21,7 +21,6 @@ import { liveClientCount, listWebserverRoots, setHubListenPort, startParacraftWa
 import { tryHandleWebserver } from '../core/webserverProxy';
 import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
 import { TerminalSessionManager } from '../core/terminalSessions';
-import { DingController, DINGTALK_API } from './dingtalk';
 import { tryHandleAichatPresence, aichatClientRemembered } from '../core/aichatPresence';
 import { dashboardHtml } from './dashboard';
 import { dashboardSkill } from './dashboardSkill';
@@ -136,7 +135,6 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     const transports = new Map<string, StreamableHTTPServerTransport>();
     const activeMcpStreams = new Set<string>();
     const terminalSessions = new TerminalSessionManager();
-    let dingtalk: DingController | undefined;
 
     const assertAuth = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
         if (!authRequired) return true;
@@ -161,11 +159,6 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 await tryHandleAichatPresence(req, res, hasSession);
                 return;
             }
-            if (pathname.startsWith('/dingtalk/')) {
-                if (dingtalk) await dingtalk.handle(req, res, pathname);
-                else sendJson(res, 503, { error: 'DingTalk integration unavailable; inspect private store and restart Helper' });
-                return;
-            }
             if (pathname === '/health' && req.method === 'GET') {
                 sendJson(res, 200, {
                     ok: true,
@@ -188,7 +181,6 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     browserApi: 'browser-v1',
                     fsDirApi: 'mkdir-v1',
                     terminalApi: 'pty-session-v1',
-                    dingtalkApi: dingtalk ? DINGTALK_API : null,
                     aichatClient: aichatClientRemembered(),
                 });
                 return;
@@ -335,7 +327,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 res.writeHead(200, {
                     'Content-Type': 'text/html; charset=utf-8',
                     'Cache-Control': 'no-store',
-                    'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src https://keepwork.com; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+                    'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src https://keepwork.com http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
                     'X-Content-Type-Options': 'nosniff',
                 });
                 res.end(dashboardHtml());
@@ -347,6 +339,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 res.end(dashboardSkill(`http://127.0.0.1:${port}`));
                 return;
             }
+
 
             if (pathname.startsWith('/admin/')) {
                 res.setHeader('Cache-Control', 'no-store');
@@ -375,15 +368,10 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
 
             if (pathname === '/admin/api-docs' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
-                sendJson(res, 200, apiDocs(port, authRequired, !!dingtalk));
+                sendJson(res, 200, apiDocs(port, authRequired));
                 return;
             }
 
-            if (pathname === '/admin/dingtalk' && req.method === 'GET') {
-                if (!assertAuth(req, url, res)) return;
-                sendJson(res, 200, dingtalk ? { ok: true, ...dingtalk.dashboard() } : { ok: true, available: false, connected: false, connection: 'unavailable', profile: '', listeners: [], aichatClient: false, messages: [] });
-                return;
-            }
 
             if (pathname === '/admin/history' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
@@ -518,15 +506,8 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     });
     startParacraftWatch();
     startCalendarWatch();
-    try {
-        dingtalk = new DingController(path.join(mcpHomeDir(), 'dingtalk'));
-        dingtalk.restore();
-    } catch {
-        console.error('DingTalk integration unavailable; private store or host configuration requires review');
-    }
 
     const close = async () => {
-        await dingtalk?.close();
         clearInterval(pruneTimer);
         stopParacraftWatch();
         stopCalendarWatch();
