@@ -1,11 +1,12 @@
 import { managedBrowsers } from '../core/browser';
 import * as http from 'node:http';
+import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
     BIND_HOST, HISTORY_PAGE_DEFAULT, SERVER_NAME, SERVER_VERSION, writeInstance, clearInstance, readOrCreateToken,
-    resolveRequireAuth,
+    resolveRequireAuth, mcpHomeDir,
 } from '../core/config';
 import { FS_API, tryHandleFs } from '../core/fsServe';
 import { FOLDER_BROWSER_API, folderLocations, browseFolders } from '../core/folderBrowser';
@@ -14,12 +15,16 @@ import { requestContext } from './context';
 import { createMcpServer, ServerRuntime } from './server';
 import {
     listHistory, listSessions, pruneIdleSessions, removeSession, sessionCount,
-    setSessionCloser, upsertSession, touchSession,
+    setSessionCloser, upsertSession, touchSession, hasSession,
 } from './sessions';
 import { liveClientCount, listWebserverRoots, setHubListenPort, startParacraftWatch, stopParacraftWatch, tryHandleParacraft, webserverBaseUrl } from '../core/paracraftClients';
 import { tryHandleWebserver } from '../core/webserverProxy';
 import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
 import { TerminalSessionManager } from '../core/terminalSessions';
+import { tryHandleAichatPresence, aichatClientRemembered } from '../core/aichatPresence';
+import { dashboardHtml } from './dashboard';
+import { dashboardSkill } from './dashboardSkill';
+import { apiDocs } from './apiDocs';
 
 export interface HttpServerHandle {
     port: number;
@@ -116,30 +121,6 @@ function terminalErrorStatus(error: unknown): number {
     return 500;
 }
 
-function statusPageHtml(runtime: ServerRuntime, port: number): string {
-    return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Keepwork local MCP</title>
-<style>
-body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
-code{background:#f4f4f5;padding:.1em .35em;border-radius:4px}
-</style></head>
-<body>
-<h1>Keepwork local MCP</h1>
-<p>Daemon is running on <code>http://127.0.0.1:${port}</code>.</p>
-<ul>
-<li>workspace root: <code>${escapeHtml(runtime.root)}</code></li>
-<li>pid: ${process.pid}</li>
-<li>clients: ${sessionCount()}</li>
-<li>auth: ${runtime.requireAuth ? 'token required' : 'open (no token)'}</li>
-</ul>
-<p>AIChat at keepwork.com/chat connects automatically when auth is open. To require a pairing token, set <code>keepwork.mcp.requireAuth</code> or <code>KEEPWORK_MCP_REQUIRE_AUTH=1</code>.</p>
-</body></html>`;
-}
-
-function escapeHtml(s: string): string {
-    return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
-}
-
 export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpServerHandle> {
     const port = opts?.port && opts.port > 0 ? opts.port : 8089;
     const authRequired = resolveRequireAuth(opts?.requireAuth);
@@ -174,6 +155,10 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         }
 
         try {
+            if (pathname === '/aichat/presence') {
+                await tryHandleAichatPresence(req, res, hasSession);
+                return;
+            }
             if (pathname === '/health' && req.method === 'GET') {
                 sendJson(res, 200, {
                     ok: true,
@@ -196,6 +181,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     browserApi: 'browser-v1',
                     fsDirApi: 'mkdir-v1',
                     terminalApi: 'pty-session-v1',
+                    aichatClient: aichatClientRemembered(),
                 });
                 return;
             }
@@ -337,10 +323,30 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
             });
             if (handledCalendar) return;
 
-            if (pathname === '/' && req.method === 'GET') {
-                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(statusPageHtml(runtime, port));
+            if ((pathname === '/' || pathname === '/dashboard') && req.method === 'GET') {
+                res.writeHead(200, {
+                    'Content-Type': 'text/html; charset=utf-8',
+                    'Cache-Control': 'no-store',
+                    'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src https://keepwork.com http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+                    'X-Content-Type-Options': 'nosniff',
+                });
+                res.end(dashboardHtml());
                 return;
+            }
+
+            if (pathname === '/dashboard/skills/keepwork-mcp-assistant/SKILL.md' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+                res.end(dashboardSkill(`http://127.0.0.1:${port}`));
+                return;
+            }
+
+
+            if (pathname.startsWith('/admin/')) {
+                res.setHeader('Cache-Control', 'no-store');
+                if (!originAllowed(String(req.headers.origin || ''))) {
+                    sendJson(res, 403, { error: 'origin not allowed' });
+                    return;
+                }
             }
 
             if (pathname === '/admin/status' && req.method === 'GET') {
@@ -360,6 +366,13 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 return;
             }
 
+            if (pathname === '/admin/api-docs' && req.method === 'GET') {
+                if (!assertAuth(req, url, res)) return;
+                sendJson(res, 200, apiDocs(port, authRequired));
+                return;
+            }
+
+
             if (pathname === '/admin/history' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
                 const offset = Number(url.searchParams.get('offset') || 0);
@@ -373,9 +386,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, { ok: true, stopping: true });
                 setTimeout(() => {
-                    server.close();
-                    clearInstance();
-                    process.exit(0);
+                    void close().then(() => process.exit(0)).catch(() => console.error('Daemon stop incomplete; owned consumer cleanup required'));
                 }, 50);
                 return;
             }

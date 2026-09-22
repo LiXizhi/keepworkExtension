@@ -46,6 +46,7 @@ test('HTTP browser discovery, authentication, execution and session teardown', {
         await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'browser-test', version: '1' } });
         const listed = await rpc('tools/list', {});
         assert.ok(listed.tools.some(t => t.name === 'browser_screenshot'));
+        assert.ok(!listed.tools.some(t => t.name === 'listen_dingtalk_messages'));
         const call = args => rpc('tools/call', { name: 'browser_session', arguments: args });
         assert.deepEqual(JSON.parse((await call({ treeId: 'one', action: 'list' })).content[0].text).sessions, []);
         const created = await call({ treeId: 'one', action: 'create' });

@@ -1,3 +1,24 @@
+# Browser Dashboard
+
+Open `http://127.0.0.1:8089/dashboard` (or `/`) while the daemon is running.
+The dashboard refreshes service status, connected clients, and paginated tool history every two seconds.
+It also offers Copy MCP URL, Open AIChat, and Stop service with confirmation.
+When authentication is enabled, enter the pairing token from `~/.keepwork-mcp/token`; it stays in page memory only.
+Start/restart, workspace configuration, and the integrated terminal remain in VS Code or Local Helper.
+The dashboard uses the existing admin APIs and does not start another server.
+The **AI 对话** tab lazily embeds `https://keepwork.com/chat` with `chat=new&persist=0` and a local
+`/dashboard/skills/keepwork-mcp-assistant/SKILL.md` Skill. Switching tabs retains the in-memory chat;
+refreshing the dashboard resets it. The chat fills the area beside the sidebar without an extra heading or toolbar. The Skill explains MCP and guides actions
+through existing AIChat tools and confirmations, without forwarding the dashboard pairing token.
+Keepwork login, local-network browser permission and AIChat MCP pairing may be required.
+The sidebar separates Overview, History, Clients, Paracrafts and Developer > API docs;
+each view has a shareable hash URL (for example `/dashboard#history`). History is loaded only in its own view.
+API docs are rendered from `/admin/api-docs`, with filtering, authentication notes, parameters and JavaScript fetch examples.
+The server generates this catalog from structured definitions in `src/mcp/apiDocs.ts`, the live Paracraft action set,
+and runtime integration availability. Add HTTP endpoint definitions there when adding new routes; MCP tool schemas remain discoverable through `tools/list`.
+Run `node --test scripts/dashboard.test.cjs` for HTTP tests. With a running unauthenticated development daemon and Edge installed,
+run `node --test scripts/dashboard-browser.test.cjs` for browser validation (`DASHBOARD_URL` overrides the default URL).
+
 # Windows Desktop Control
 
 The `computer_use` MCP tool adds Windows primary-screen computer use with revocable native session approval, a capture-excluded screen outline, and a **Take Back Control** button. Permission must be renewed after revocation or two idle minutes. See [scope, setup, privacy and validation](docs/computer-use.md). It does not provide unattended or secure-desktop control.
@@ -43,6 +64,7 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 | `mcp_status` | Report root, port, pid, ripgrep |
 | `web_search` | Search the public web from this machine; returns minified JSON (`title` / `url` / `snippet`) |
 | `fetch_url` | Fetch one public http(s) page, render HTML in local Edge/Chrome when possible, extract structured text as minified JSON |
+
 
 `GET /health` includes `workspaceRoot` so AIChat can map cloud workspace slots onto a cwd relative to that root. It also reports `paracraftClients` when desktop Paracraft processes have registered, `webserverBase` (`http://127.0.0.1:<port>/webserver`) so web-paracraft can bind the NPL code wiki, and `fsApi: "workspace"` when local-disk list/write/delete are available. `GET /exists?path=` checks that a typed local absolute path exists; AIChat must verify that path before using `/fs/*`. `run_terminal` accepts that path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`. AIChat local-disk `list_dir` / `search_files` / `read_file` / writes use `/fs/list`, `/fs/search`, `/fs/file`, `/fs/dir` (includes symbolic links and junctions). Local web-paracraft can overlay git files with `?searchroot=<abs>&searchpath=<rel>` via `GET /fs/file` (one file per request, **raw on-disk bytes**, MIME from the extension, no `charset=` — same API as a normal file URL; optional `?base64=true` JSON is unused by the overlay; loopback, confined to that root).
 
