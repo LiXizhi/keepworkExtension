@@ -6,13 +6,6 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const runtimeRoot = path.resolve(__dirname, '..');
-const packageJson = require(path.join(runtimeRoot, 'package.json'));
-
-function defaultExecutable() {
-  const platform = process.platform === 'win32' ? 'windows' : 'macos';
-  const archiveFormat = process.platform === 'win32' ? 'zip' : 'tar.gz';
-  return path.join(runtimeRoot, 'release', `Keepwork-MCP-NodeRuntime-${packageJson.version}-${platform}-${process.arch}.${archiveFormat}`);
-}
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -51,14 +44,16 @@ async function main() {
   if (!fs.statSync(entry, { throwIfNoEntry: false })?.isFile()) {
     throw new Error(`runtime entry not found: ${entry}`);
   }
-  if (process.platform !== 'win32') fs.chmodSync(nodePath, 0o755);
   const port = await freePort();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-mcp-runtime-smoke-'));
   const child = spawn(nodePath, [entry, '--port', String(port), '--root', root], {
-    env: { ...process.env, KEEPWORK_MCP_REQUIRE_AUTH: '0' },
+    env: { ...process.env, KEEPWORK_MCP_REQUIRE_AUTH: '0', KEEPWORK_MCP_HOST_KIND: 'standalone' },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  let spawnError;
+  child.once('error', (error) => { spawnError = error; });
+  const closed = new Promise((resolve) => child.once('close', resolve));
   let output = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { output += chunk; });
@@ -81,8 +76,12 @@ async function main() {
     process.stdout.write(`runtime smoke test passed: ${runtimePath}\n`);
   } finally {
     if (child.exitCode === null) child.kill();
-    fs.rmSync(root, { recursive: true, force: true });
+    const forceKill = setTimeout(() => child.kill('SIGKILL'), 5000);
+    try { await closed; } finally { clearTimeout(forceKill); }
+    // Windows can briefly retain file handles while a PTY process exits.
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     if (child.exitCode && output) process.stderr.write(output);
+    if (spawnError) throw spawnError;
   }
 }
 

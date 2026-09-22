@@ -14,7 +14,6 @@ const defaultTargets = [
   { platform: 'darwin', arch: 'x64' },
   { platform: 'win32', arch: 'x64' },
 ];
-const hostNpm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function readArgs(argv) {
   const result = {};
@@ -99,7 +98,11 @@ async function extractNodeArchive(archiveFile, extractDir) {
 }
 
 function npmCi(appDir, target) {
-  const result = spawnSync(hostNpm, ['ci', '--omit=dev', '--no-audit', '--no-fund', `--os=${target.platform}`, `--cpu=${target.arch}`], {
+  // npm.cmd cannot be spawned directly on Windows. npm run supplies its JS entry,
+  // which lets us launch npm without a shell or command-string interpolation.
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) throw new Error('Run staging through npm run stage so npm_execpath is available');
+  const result = spawnSync(process.execPath, [npmCli, 'ci', '--omit=dev', '--no-audit', '--no-fund', `--os=${target.platform}`, `--cpu=${target.arch}`], {
     cwd: appDir,
     stdio: 'inherit',
     env: {
@@ -110,6 +113,7 @@ function npmCi(appDir, target) {
       npm_config_arch: target.arch,
     },
   });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`npm ci --omit=dev failed with exit code ${result.status}`);
 }
 

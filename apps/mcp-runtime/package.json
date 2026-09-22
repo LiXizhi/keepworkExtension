@@ -12,6 +12,8 @@
     "build": "node scripts/build.mjs",
     "stage": "npm run typecheck && npm run build && node scripts/stage-runtime.cjs",
     "smoke": "node scripts/smoke-runtime.cjs",
+    "package": "node scripts/package-runtime.cjs",
+    "test:release": "node --test scripts/release.test.cjs",
     "check": "npm run stage && npm run smoke"
   },
   "dependencies": {

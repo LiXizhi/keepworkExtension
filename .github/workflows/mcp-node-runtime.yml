@@ -1,0 +1,134 @@
+name: Build and publish MCP NodeRuntime
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  KP_RUNTIME_NODE_VERSION: 22.23.2
+  KP_QINIU_BUCKET: haqi
+  KP_QINIU_DOMAIN: https://cdn.keepwork.com
+  KP_QINIU_UPLOAD_HOST: https://up-z2.qiniup.com
+  KP_QINIU_PREFIX: keepwork/mcp-runtime/
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read application version
+        id: identity
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { releaseIdentity } = require('./apps/mcp-runtime/scripts/release.cjs');
+          const { version } = require('./apps/mcp-runtime/package.json');
+          releaseIdentity(version, process.env.GITHUB_SHA);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          NODE
+      - name: Test release publication and existing Local Helper compatibility
+        run: node --test apps/mcp-runtime/scripts/*.test.cjs apps/local-helper/scripts/publish-qiniu-release.test.cjs
+
+  build:
+    needs: prepare
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform: win32
+            arch: x64
+            target: windows-x64
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+            target: macos-arm64
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+            target: macos-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.KP_RUNTIME_NODE_VERSION }}
+          architecture: ${{ matrix.arch }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/mcp-runtime/package-lock.json
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix apps/mcp-runtime
+      - name: Typecheck shared source and test release scripts
+        run: |
+          npx --no-install tsc -p ./ --noEmit
+          npm run test:release --prefix apps/mcp-runtime
+      - name: Build native runtime
+        run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+      - name: Package and smoke test extracted runtime
+        run: >-
+          npm run package --prefix apps/mcp-runtime -- --commit "$GITHUB_SHA"
+          --prefix "$KP_QINIU_PREFIX" --domain "$KP_QINIU_DOMAIN"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcp-node-runtime-${{ matrix.target }}
+          path: |
+            apps/mcp-runtime/release/${{ matrix.target }}.zip
+            apps/mcp-runtime/release/${{ matrix.target }}.json
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Serialize replacement of the six fixed CDN objects.
+    concurrency:
+      group: mcp-node-runtime-cdn-publish
+      cancel-in-progress: false
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mcp-node-runtime-*
+          path: apps/mcp-runtime/release
+          merge-multiple: true
+      - name: Validate all three ZIP and JSON pairs
+        run: >-
+          node apps/mcp-runtime/scripts/release.cjs
+          --release-dir apps/mcp-runtime/release
+          --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
+          --prefix "$KP_QINIU_PREFIX" --domain "$KP_QINIU_DOMAIN" --dry-run
+      - name: Overwrite ZIP files, verify CDN, then overwrite package JSON files
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+        run: >-
+          node apps/mcp-runtime/scripts/release.cjs
+          --release-dir apps/mcp-runtime/release
+          --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
+          --prefix "$KP_QINIU_PREFIX" --domain "$KP_QINIU_DOMAIN"
+          --bucket "$KP_QINIU_BUCKET" --upload-host "$KP_QINIU_UPLOAD_HOST"

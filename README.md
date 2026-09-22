@@ -11,6 +11,7 @@ This repository contains the shared Keepwork MCP runtime and its separately pack
 - `src/core` and `src/mcp`: shared local capabilities and MCP server
 - `apps/vscode-extension`: VS Code/Cursor extension, embedded CLI launcher and VSIX packaging
 - `apps/local-helper`: Windows tray helper and installer packaging
+- `apps/mcp-runtime`: standalone NodeRuntime for Windows x64 and macOS arm64/x64; [build and automatic CDN release](apps/mcp-runtime/README.md), [external download contract](docs/node-runtime-cdn.md)
 
 Each application owns its manifest, dependencies, entry points, tests and build output. Applications may import the shared root source, but they do not import each other.
 

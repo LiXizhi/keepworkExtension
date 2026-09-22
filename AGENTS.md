@@ -120,6 +120,16 @@ Commands: `keepwork.openMcpWorkspace`, `keepwork.changeMcpWorkspace`, `keepwork.
 
 ## Common workflows
 
+### NodeRuntime CDN release
+
+- `apps/mcp-runtime` owns standalone runtime staging, archive packaging and release metadata. See [its README](apps/mcp-runtime/README.md).
+- `.github/workflows/mcp-node-runtime.yml` builds Windows x64 and macOS arm64/x64 on native runners on every `main` push, or manual dispatch on `main`. It reuses the Local Helper Qiniu secrets and publishes under `keepwork/mcp-runtime/`.
+- Keep all three extracted-archive smoke tests passing before publishing. Preserve native PTY files and macOS executable modes. Publish exactly six fixed objects: `windows-x64.zip/json`, `macos-arm64.zip/json`, `macos-x64.zip/json`. Each platform JSON contains version, commit, builtAt, size and SHA-256; no version directories or filename suffixes. Do not mutate package versions in CI.
+- Overwrite and verify the three ZIPs before overwriting and verifying their three JSON files. Serialize publishers and check current remote `main` before starting; once overwrite begins, complete the matching pairs. Fixed objects are not atomically replaced; consumers must verify hashes and retry mismatched downloads. External contract: [docs/node-runtime-cdn.md](docs/node-runtime-cdn.md). Shared Qiniu transport lives in `scripts/lib/qiniu-release.cjs`; applications must not import one another's release scripts.
+- Validate release changes with `node --test apps/mcp-runtime/scripts/*.test.cjs apps/local-helper/scripts/publish-qiniu-release.test.cjs` plus native staging/package smoke tests.
+
+### Extension development
+
 ```bash
 cd c:/lxzsrc/keepworkExtension
 npm ci
