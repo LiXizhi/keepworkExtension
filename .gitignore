@@ -9,3 +9,4 @@ apps/local-helper/release/
 apps/local-helper/node_modules/
 apps/local-helper/build.local.json
 release-manifest.json
+.idea
