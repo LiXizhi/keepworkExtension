@@ -23,8 +23,20 @@ function collectReleaseFiles(releaseDir, version, prefix, domain) {
   const manifestPath = path.join(releaseDir, 'latest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   const installerPath = path.join(releaseDir, installerName);
-  if (manifest.version !== version || manifest.fileName !== installerName) {
+  if (manifest.schemaVersion !== 1
+    || manifest.product !== 'kp-local-helper'
+    || manifest.channel !== 'internal'
+    || manifest.signed !== false
+    || manifest.version !== version
+    || manifest.fileName !== installerName) {
     throw new Error('latest.json does not match the requested version and installer');
+  }
+  if (!Array.isArray(manifest.capabilities)
+    || manifest.capabilities.length !== 2
+    || !manifest.capabilities.includes('mcp')
+    || !manifest.capabilities.includes('local-model')
+    || manifest.localModelProtocolVersion !== '1.0.0') {
+    throw new Error('latest.json does not declare the bundled MCP and local-model capabilities');
   }
   if (manifest.url !== `${baseUrl}/${encodeURIComponent(installerName)}`) {
     throw new Error(`latest.json URL must use ${baseUrl}`);
@@ -70,12 +82,15 @@ async function main() {
     uploadHost: normalizeHttpsUrl(required(args['upload-host'], 'upload-host'), 'upload-host'),
   };
 
-  for (const entry of entries) {
-    process.stdout.write(`Uploading ${entry.name} -> ${entry.remoteKey}\n`);
-    await uploadEntry(config, entry);
+  const groups = [entries.slice(0, 2), [entries[2]], [entries[3]]];
+  for (const group of groups) {
+    for (const entry of group) {
+      process.stdout.write(`Uploading ${entry.name} -> ${entry.remoteKey}\n`);
+      await uploadEntry(config, entry);
+    }
+    await refreshUrls(config, group.map((entry) => entry.url));
+    await verifyEntriesWithRetry(group);
   }
-  await refreshUrls(config, entries.map((entry) => entry.url));
-  await verifyEntriesWithRetry(entries);
   process.stdout.write('Qiniu upload, refresh, and CDN verification completed.\n');
 }
 

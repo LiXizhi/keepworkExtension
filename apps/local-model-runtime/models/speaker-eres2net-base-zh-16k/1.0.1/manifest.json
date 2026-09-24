@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "modelId": "speaker-eres2net-base-zh-16k",
+  "modelVersion": "1.0.1",
+  "artifact": {
+    "path": "models/speaker-eres2net-base-zh-16k/1.0.1/model.onnx",
+    "bytes": 39593743,
+    "sha256": "1d00a4d0c826da2c243e9209ccca9c02a027f9cfbe1a80015539c6815ec68b49"
+  },
+  "packageFiles": {
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "README.md": "f3d08e366f56edd26d4aa036f7b4c63c42b777b6dc844995b0e54faba6af388f"
+  },
+  "configSha256": "1c7c0c2c22c36c05538430e4f294a1e38e6f2a69d54c643a1d63f0e41cf38dac",
+  "createdAt": "2026-09-20T02:19:57.190Z",
+  "signature": {
+    "algorithm": "Ed25519",
+    "keyId": "4aa1584c8b1078d8",
+    "value": "Jdk4r71GS1M/tx5UpJX2neKHknSncYz9ba3NkiY1kjBeAL9daO1swfryQJZi6sg7w4PxQYqV53EHzL1mG0HqDQ=="
+  }
+}

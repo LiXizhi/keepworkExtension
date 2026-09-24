@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keepwork.com/schemas/local-model/model.schema.json",
+  "title": "Keepwork local model configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "identity", "artifact", "runtime", "input", "preprocess", "operations", "output", "resources", "transports", "privacy", "selfTest"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "capability", "description", "license"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
+        "version": { "type": "string", "minLength": 1 },
+        "capability": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "license": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "pattern": "^https://" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "manifest", "publicKey", "platforms"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^[^/].*\\.onnx$" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "manifest": { "type": "string", "pattern": "^[^/].*\\.json$" },
+        "publicKey": { "type": "string", "pattern": "^[^/].*\\.pem$" },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64"] }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "provider", "threads", "load"],
+      "properties": {
+        "adapter": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
+        "provider": { "enum": ["cpu"] },
+        "threads": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "load": { "enum": ["on-demand", "preload"] }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encodings", "sampleRate", "channels", "minDurationMs", "maxDurationMs", "valueRange"],
+      "properties": {
+        "encodings": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["pcm_f32le", "pcm_s16le", "wav"] } },
+        "sampleRate": { "type": "integer", "minimum": 8000, "maximum": 192000 },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "minDurationMs": { "type": "integer", "minimum": 1 },
+        "maxDurationMs": { "type": "integer", "minimum": 1 },
+        "valueRange": { "type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [{ "type": "number" }, { "type": "number" }], "items": false }
+      }
+    },
+    "preprocess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resample", "mono", "normalize", "owner"],
+      "properties": {
+        "resample": { "type": "boolean" },
+        "mono": { "type": "boolean" },
+        "normalize": { "type": "boolean" },
+        "owner": { "enum": ["runtime", "adapter"] }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["embedding", "compare"] }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "dimension", "normalized", "formatVersion"],
+      "properties": {
+        "type": { "enum": ["float32"] },
+        "dimension": { "type": "integer", "minimum": 1 },
+        "normalized": { "type": "boolean" },
+        "formatVersion": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxConcurrency", "maxQueue", "timeoutMs", "idleUnloadMs"],
+      "properties": {
+        "maxConcurrency": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "maxQueue": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "idleUnloadMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "transports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cli", "http", "websocket", "streaming"],
+      "properties": {
+        "cli": { "type": "boolean" },
+        "http": { "type": "boolean" },
+        "websocket": { "type": "boolean" },
+        "streaming": { "type": "boolean" }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logInput", "logOutput", "logMetrics"],
+      "properties": {
+        "logInput": { "type": "boolean" },
+        "logOutput": { "type": "boolean" },
+        "logMetrics": { "type": "boolean" }
+      }
+    },
+    "selfTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtures", "expectedDimension", "sameSpeaker", "differentSpeaker"],
+      "properties": {
+        "fixtures": { "type": "array", "minItems": 3, "items": { "type": "string", "pattern": "^[^/].*\\.wav$" } },
+        "expectedDimension": { "type": "integer", "minimum": 1 },
+        "sameSpeaker": { "type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [{ "type": "integer", "minimum": 0 }, { "type": "integer", "minimum": 0 }], "items": false },
+        "differentSpeaker": { "type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [{ "type": "integer", "minimum": 0 }, { "type": "integer", "minimum": 0 }], "items": false }
+      }
+    }
+  }
+}

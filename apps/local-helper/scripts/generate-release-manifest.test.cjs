@@ -9,13 +9,13 @@ const test = require('node:test');
 test('generates a versioned download manifest with checksum', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-helper-manifest-'));
     try {
-        const artifact = path.join(dir, 'KP-Local-Helper-Setup-0.1.15-x64.exe');
+        const artifact = path.join(dir, 'KP-Local-Helper-Setup-0.1.16-x64.exe');
         const output = path.join(dir, 'latest.json');
         fs.writeFileSync(artifact, 'signed-installer-placeholder');
         const result = spawnSync(process.execPath, [
             path.join(__dirname, 'generate-release-manifest.cjs'),
             '--file', artifact,
-            '--version', '0.1.15',
+            '--version', '0.1.16',
             '--protocol-version', '0.1.2',
             '--base-url', 'https://cdn.keepwork.com/downloads/kp-local-helper/windows-x64/',
             '--output', output,
@@ -24,11 +24,15 @@ test('generates a versioned download manifest with checksum', () => {
         const manifest = JSON.parse(fs.readFileSync(output, 'utf8'));
         assert.equal(manifest.schemaVersion, 1);
         assert.equal(manifest.product, 'kp-local-helper');
-        assert.equal(manifest.version, '0.1.15');
+        assert.equal(manifest.channel, 'internal');
+        assert.equal(manifest.signed, false);
+        assert.equal(manifest.version, '0.1.16');
         assert.equal(manifest.protocolVersion, '0.1.2');
+        assert.deepEqual(manifest.capabilities, ['mcp', 'local-model']);
+        assert.equal(manifest.localModelProtocolVersion, '1.0.0');
         assert.equal(manifest.platform, 'windows');
         assert.equal(manifest.arch, 'x64');
-        assert.equal(manifest.url, 'https://cdn.keepwork.com/downloads/kp-local-helper/windows-x64/KP-Local-Helper-Setup-0.1.15-x64.exe');
+        assert.equal(manifest.url, 'https://cdn.keepwork.com/downloads/kp-local-helper/windows-x64/KP-Local-Helper-Setup-0.1.16-x64.exe');
         assert.equal(manifest.sha256, crypto.createHash('sha256').update('signed-installer-placeholder').digest('hex'));
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });

@@ -50,3 +50,9 @@ await build({
   outfile: path.join(outdir, 'worker.js'),
   external: ['node-pty', 'playwright-core'],
 });
+
+await build({
+  ...common,
+  entryPoints: [path.join(helperRoot, 'src/localModelSupervisor.ts')],
+  outfile: path.join(outdir, 'localModelSupervisor.js'),
+});

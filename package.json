@@ -6,10 +6,10 @@
   "license": "MIT",
   "scripts": {
     "dev:server": "npm run dev:server --prefix apps/vscode-extension",
-    "install:apps": "npm ci --prefix apps/vscode-extension && npm ci --prefix apps/local-helper",
+    "install:apps": "npm ci --prefix apps/vscode-extension && npm ci --prefix apps/local-helper && npm ci --prefix apps/local-model-runtime",
     "check:layout": "node scripts/check-layout.cjs",
     "check:shared": "tsc -p ./ --noEmit && npm run check:layout",
-    "check:all": "npm run check:shared && npm run check --prefix apps/vscode-extension && npm run check --prefix apps/local-helper"
+    "check:all": "npm run check:shared && npm run check --prefix apps/vscode-extension && npm run check --prefix apps/local-model-runtime && npm test --prefix apps/local-model-runtime && npm run check --prefix apps/local-helper"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

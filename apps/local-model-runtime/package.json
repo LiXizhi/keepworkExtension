@@ -1,0 +1,55 @@
+{
+  "name": "@keepwork/local-model-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Keepwork loopback service for locally managed AI models",
+  "license": "UNLICENSED",
+  "type": "module",
+  "files": [
+    "dist/src/",
+    "configs/",
+    "schemas/",
+    "keys/model-signing-public.pem",
+    "models/**/manifest.json",
+    "models/**/checksums.json",
+    "models/**/LICENSE",
+    "models/**/README.md",
+    "docs/",
+    "openapi.yaml",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "bin": {
+    "local-model": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 dist/tests/*.test.js",
+    "start": "node dist/src/cli.js serve",
+    "dev": "npm run build && node dist/src/cli.js serve",
+    "model:download": "node scripts/download-model.cjs",
+    "model:sign": "tsx scripts/sign-model.ts",
+    "benchmark": "npm run build && node dist/scripts/benchmark.js",
+    "parity": "npm run build && node dist/scripts/model-parity.js",
+    "size": "tsx scripts/size-report.ts",
+    "runtime:stage": "npm run build && node scripts/runtime-stage.cjs",
+    "runtime:smoke": "node scripts/runtime-smoke.cjs",
+    "runtime:check": "npm run check && npm run runtime:stage -- --platform win32 --arch x64 && npm run runtime:smoke -- runtime-staging/windows-x64"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "busboy": "1.6.0",
+    "sherpa-onnx-node": "1.13.8",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/busboy": "1.5.4",
+    "@types/node": "22.18.6",
+    "tar": "7.5.22",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

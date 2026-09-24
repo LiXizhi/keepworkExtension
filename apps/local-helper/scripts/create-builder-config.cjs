@@ -10,6 +10,7 @@ function createBuilderConfig(localConfig = {}, helperRoot = path.resolve(__dirna
   const certificatePassword = String(localConfig.KP_WINDOWS_CSC_KEY_PASSWORD || '');
   const certificateSubjectName = text(localConfig.KP_WINDOWS_CERT_SUBJECT);
   const requireCodeSigning = localConfig.KP_REQUIRE_CODE_SIGNING === true;
+  const runtimeDir = text(localConfig.KP_LOCAL_MODEL_RUNTIME_DIR || process.env.KP_LOCAL_MODEL_RUNTIME_DIR);
 
   if (certificateLink && certificateSubjectName) {
     throw new Error('Configure either KP_WINDOWS_CSC_LINK or KP_WINDOWS_CERT_SUBJECT, not both');
@@ -62,6 +63,10 @@ function createBuilderConfig(localConfig = {}, helperRoot = path.resolve(__dirna
       '!node_modules/node-pty/build/{.deps,Makefile,*.mk,*.gypi,gyp-mac-tool}/**/*',
     ],
     asar: true,
+    extraResources: runtimeDir ? [{
+      from: path.resolve(helperRoot, runtimeDir),
+      to: 'local-model-runtime',
+    }] : [],
     asarUnpack: [
       'node_modules/playwright-core/**/*',
       'node_modules/node-pty/build/Release/**/*',

@@ -3,5 +3,6 @@
   "KP_WINDOWS_CSC_KEY_PASSWORD": "",
   "KP_WINDOWS_CERT_SUBJECT": "",
   "KP_REQUIRE_CODE_SIGNING": false,
-  "KP_HELPER_PUBLISH_URL": ""
+  "KP_HELPER_PUBLISH_URL": "",
+  "KP_LOCAL_MODEL_RUNTIME_DIR": "../local-model-runtime/runtime-staging/windows-x64"
 }

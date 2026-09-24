@@ -1,0 +1,9 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "model.onnx": "1d00a4d0c826da2c243e9209ccca9c02a027f9cfbe1a80015539c6815ec68b49",
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "README.md": "f3d08e366f56edd26d4aa036f7b4c63c42b777b6dc844995b0e54faba6af388f",
+    "manifest.json": "0fc3546b172e56a52d0a7da2e9620dd4aac46b1582b405d528926c69e9ed4d23"
+  }
+}

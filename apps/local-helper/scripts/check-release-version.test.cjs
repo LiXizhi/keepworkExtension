@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { decideRelease, parseStableVersion } = require('./check-release-version.cjs');
+const { assertCoupledChangesPublished, decideRelease, parseStableVersion } = require('./check-release-version.cjs');
 
 test('manual dispatch publishes the current stable version', () => {
   assert.deepEqual(decideRelease('workflow_dispatch', '', '0.1.15'), {
@@ -21,4 +21,17 @@ test('release versions must use stable X.Y.Z syntax', () => {
   for (const value of ['1.2', '1.2.3-beta.1', '01.2.3', 'v1.2.3']) {
     assert.throws(() => parseStableVersion(value, 'version'), /stable X.Y.Z/);
   }
+});
+
+test('local-model runtime changes require a helper release', () => {
+  assert.throws(
+    () => assertCoupledChangesPublished(['apps/local-model-runtime/src/cli.ts'], 'apps/local-model-runtime', false),
+    /require a Local Helper version increase/,
+  );
+  assert.doesNotThrow(() => assertCoupledChangesPublished(
+    ['apps/local-model-runtime/src/cli.ts'],
+    'apps/local-model-runtime',
+    true,
+  ));
+  assert.doesNotThrow(() => assertCoupledChangesPublished(['README.md'], 'apps/local-model-runtime', false));
 });

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - apps/local-helper/package.json
+      - apps/local-model-runtime/**
   workflow_dispatch:
 
 permissions:
@@ -43,6 +44,7 @@ jobs:
           --event "$EVENT_NAME"
           --before-sha "${BEFORE_SHA:-0000000000000000000000000000000000000000}"
           --package-path apps/local-helper/package.json
+          --coupled-path apps/local-model-runtime
           --output "$GITHUB_OUTPUT"
 
   build-and-publish-windows-x64:
@@ -61,18 +63,35 @@ jobs:
             package-lock.json
             apps/vscode-extension/package-lock.json
             apps/local-helper/package-lock.json
+            apps/local-model-runtime/package-lock.json
 
       - name: Install dependencies
         run: |
           npm ci
           npm ci --prefix apps/vscode-extension
           npm ci --prefix apps/local-helper
+          npm ci --prefix apps/local-model-runtime
 
       - name: Compile and test all package boundaries
         run: |
           npm run check:shared
           npm --prefix apps/vscode-extension run check
           npm --prefix apps/local-helper run check
+          npm --prefix apps/local-model-runtime run check
+          npm --prefix apps/local-model-runtime test
+
+      - name: Verify VSIX excludes local-model
+        shell: pwsh
+        run: |
+          Push-Location apps/vscode-extension
+          npx --no-install vsce package --out "$env:RUNNER_TEMP/keepwork-boundary.vsix"
+          Pop-Location
+          node apps/vscode-extension/scripts/assert-vsix-boundary.cjs "$env:RUNNER_TEMP/keepwork-boundary.vsix"
+
+      - name: Stage and smoke-test local-model runtime
+        run: |
+          npm --prefix apps/local-model-runtime run runtime:stage -- --platform win32 --arch x64
+          npm --prefix apps/local-model-runtime run runtime:smoke -- runtime-staging/windows-x64
 
       - name: Create private build configuration
         shell: pwsh
@@ -83,11 +102,30 @@ jobs:
             KP_WINDOWS_CERT_SUBJECT = ''
             KP_REQUIRE_CODE_SIGNING = $false
             KP_HELPER_PUBLISH_URL = $env:KP_HELPER_PUBLISH_URL
+            KP_LOCAL_MODEL_RUNTIME_DIR = "../local-model-runtime/runtime-staging/windows-x64"
           }
           $settings | ConvertTo-Json | Set-Content -Encoding utf8 apps/local-helper/build.local.json
 
       - name: Build unsigned NSIS installer
         run: npm --prefix apps/local-helper run make:win
+
+      - name: Install and smoke-test the unified Helper
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
+        run: |
+          $installer = (Resolve-Path "apps/local-helper/release/KP-Local-Helper-Setup-$env:RELEASE_VERSION-x64.exe").Path
+          $installDir = Join-Path $env:RUNNER_TEMP "kp-local-helper-installed"
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "installer exited with $($process.ExitCode)" }
+          $helper = Join-Path $installDir 'KP Local Helper.exe'
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw "installed helper not found: $helper" }
+          Start-Process -FilePath $helper -ArgumentList '--background'
+          $fixture = (Get-ChildItem apps/local-model-runtime/tests/fixtures -Filter *.wav | Select-Object -First 1).FullName
+          node apps/local-helper/scripts/smoke-installed-helper.cjs $fixture
+          Start-Process -FilePath $helper -ArgumentList '--uninstall' -Wait
+          Get-Process -Name 'KP Local Helper' -ErrorAction SilentlyContinue | Stop-Process -Force
+          Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installDir*" } | Stop-Process -Force
 
       - name: Validate release files and generate latest.json
         shell: pwsh

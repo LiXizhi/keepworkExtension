@@ -18,13 +18,19 @@ const {
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-qiniu-release-'));
-  const version = '0.1.15';
+  const version = '0.1.16';
   const installer = `KP-Local-Helper-Setup-${version}-x64.exe`;
   fs.writeFileSync(path.join(dir, installer), 'installer');
   fs.writeFileSync(path.join(dir, `${installer}.blockmap`), 'blockmap');
   fs.writeFileSync(path.join(dir, 'latest.yml'), `version: ${version}\npath: ${installer}\n`);
   fs.writeFileSync(path.join(dir, 'latest.json'), JSON.stringify({
+    schemaVersion: 1,
+    product: 'kp-local-helper',
+    channel: 'internal',
+    signed: false,
     version,
+    capabilities: ['mcp', 'local-model'],
+    localModelProtocolVersion: '1.0.0',
     fileName: installer,
     url: `https://cdn.keepwork.com/keepwork/releases/${installer}`,
     size: 9,
@@ -55,6 +61,22 @@ test('rejects unsafe prefixes and mismatched manifests', () => {
     manifest.sha256 = '0'.repeat(64);
     fs.writeFileSync(manifestPath, JSON.stringify(manifest));
     assert.throws(() => collectReleaseFiles(dir, version, 'keepwork/releases/', 'https://cdn.keepwork.com'), /SHA-256/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects a legacy helper manifest without local-model capability', () => {
+  const { dir, version } = fixture();
+  try {
+    const manifestPath = path.join(dir, 'latest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    manifest.capabilities = ['mcp'];
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.throws(
+      () => collectReleaseFiles(dir, version, 'keepwork/releases/', 'https://cdn.keepwork.com'),
+      /bundled MCP and local-model capabilities/,
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

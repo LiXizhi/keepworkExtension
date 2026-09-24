@@ -1,0 +1,68 @@
+schemaVersion: 1
+identity:
+  id: speaker-eres2net-base-zh-16k
+  version: 1.0.1
+  capability: speaker-embedding
+  description: 3D-Speaker ERes2Net Base Chinese speaker embedding model
+  license: Apache-2.0
+  source: https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
+artifact:
+  path: models/speaker-eres2net-base-zh-16k/1.0.1/model.onnx
+  bytes: 39593743
+  sha256: 1d00a4d0c826da2c243e9209ccca9c02a027f9cfbe1a80015539c6815ec68b49
+  manifest: models/speaker-eres2net-base-zh-16k/1.0.1/manifest.json
+  publicKey: keys/model-signing-public.pem
+  platforms:
+    - darwin-arm64
+    - darwin-x64
+    - win32-x64
+runtime:
+  adapter: sherpa-speaker-embedding
+  provider: cpu
+  threads: 1
+  load: on-demand
+input:
+  encodings:
+    - pcm_f32le
+    - pcm_s16le
+    - wav
+  sampleRate: 16000
+  channels: 1
+  minDurationMs: 300
+  maxDurationMs: 15000
+  valueRange: [-1, 1]
+preprocess:
+  resample: true
+  mono: true
+  normalize: true
+  owner: adapter
+operations:
+  - embedding
+  - compare
+output:
+  type: float32
+  dimension: 512
+  normalized: true
+  formatVersion: 1
+resources:
+  maxConcurrency: 1
+  maxQueue: 8
+  timeoutMs: 2000
+  idleUnloadMs: 600000
+transports:
+  cli: true
+  http: true
+  websocket: false
+  streaming: false
+privacy:
+  logInput: false
+  logOutput: false
+  logMetrics: true
+selfTest:
+  fixtures:
+    - tests/fixtures/speaker1_a_cn_16k.wav
+    - tests/fixtures/speaker1_b_cn_16k.wav
+    - tests/fixtures/speaker2_a_cn_16k.wav
+  expectedDimension: 512
+  sameSpeaker: [0, 1]
+  differentSpeaker: [0, 2]

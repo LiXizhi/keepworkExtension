@@ -6,7 +6,7 @@ Instructions for AI agents working **in this repository**. Product overview:
 ## What this repo is
 
 - **VS Code / Cursor extension** (`keepwork`) plus a **singleton local MCP daemon**
-- **KP Local Helper** (`apps/local-helper`) packages the same daemon as a per-user Electron tray app for web AIChat users without VS Code
+- **KP Local Helper** (`apps/local-helper`) packages the same daemon plus the separate `apps/local-model-runtime` process as one per-user Windows installer
 - **Path**: `c:/lxzsrc/keepworkExtension` (GitHub `LiXizhi/keepworkExtension`)
 - **Job**: (1) clone Keepwork git repos and open files on keepwork.com;
   (2) expose `run_terminal` / `grep_files` / `mcp_status` / `web_search` / `fetch_url` so the **AIChat website**
@@ -34,7 +34,7 @@ daemon; it may drop the terminal bridge (next command falls back to spawn).
 
 ## Layout (where to edit)
 
-The repository root is a private shared-runtime package. Product manifests, entry points, editor settings, tests and build outputs belong under their application directory. `apps/vscode-extension` and `apps/local-helper` may import `src/core` / `src/mcp`; they must not import one another.
+The repository root is a private shared-runtime package. Product manifests, entry points, editor settings, tests and build outputs belong under their application directory. `apps/vscode-extension` and `apps/local-helper` may import `src/core` / `src/mcp`; applications must not import one another. `apps/local-model-runtime` is an installer resource and independent process; its source, dependencies, ONNX model, manifests and staged runtime must never enter the VSIX.
 
 | Path | Role |
 |------|------|
@@ -61,6 +61,7 @@ The repository root is a private shared-runtime package. Product manifests, entr
 | `apps/vscode-extension/src/cli.ts` | app-local `dist/cli.js` (`--stdio`, `--port`, `--root`) |
 | `apps/vscode-extension/src/extension.ts` | VS Code commands + activate spawn-or-attach |
 | `apps/local-helper` | Windows tray app, login startup, notify bridge, updater and NSIS packaging; imports the shared MCP source |
+| `apps/local-model-runtime` | Windows x64 local-model source, integrity data, tests and staged NodeRuntime; bundled only as Local Helper `extraResources` |
 | `apps/vscode-extension/src/vscode/daemon.ts` | Health probe, detached spawn, admin fetch |
 | `apps/vscode-extension/src/vscode/statusBar.ts` | Status bar text / tooltip |
 | `apps/vscode-extension/src/vscode/mcpPanel.ts` | Click panel: clients + paged history + working directory / terminal |

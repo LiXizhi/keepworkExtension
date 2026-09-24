@@ -61,6 +61,14 @@ function appendGitHubOutputs(outputPath, decision) {
   ].join('\n'), 'utf8');
 }
 
+function assertCoupledChangesPublished(changedPaths, coupledPath, publish) {
+  const prefix = String(coupledPath || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/?$/, '/');
+  if (!prefix || publish) return;
+  if (changedPaths.some(file => String(file).replace(/\\/g, '/').startsWith(prefix))) {
+    throw new Error(`Changes under ${prefix} require a Local Helper version increase`);
+  }
+}
+
 function main() {
   const args = readArgs(process.argv.slice(2));
   const eventName = String(args.event || '').trim();
@@ -71,8 +79,9 @@ function main() {
 
   const currentVersion = packageVersionFromText(fs.readFileSync(packagePath, 'utf8'), 'current version');
   let previousVersion = '';
+  let beforeSha = '';
   if (eventName === 'push') {
-    const beforeSha = String(args['before-sha'] || '').trim();
+    beforeSha = String(args['before-sha'] || '').trim();
     if (!/^[0-9a-f]{40}$/i.test(beforeSha) || /^0+$/.test(beforeSha)) {
       throw new Error('--before-sha must be a non-zero 40-character Git commit SHA for push events');
     }
@@ -84,6 +93,13 @@ function main() {
   }
 
   const decision = decideRelease(eventName, previousVersion, currentVersion);
+  if (eventName === 'push' && args['coupled-path']) {
+    const changedPaths = execFileSync('git', ['diff', '--name-only', beforeSha, 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).split(/\r?\n/).filter(Boolean);
+    assertCoupledChangesPublished(changedPaths, args['coupled-path'], decision.publish);
+  }
   appendGitHubOutputs(outputPath, decision);
   process.stdout.write(`${JSON.stringify(decision)}\n`);
 }
@@ -97,4 +113,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { compareVersions, decideRelease, parseStableVersion };
+module.exports = { assertCoupledChangesPublished, compareVersions, decideRelease, parseStableVersion };

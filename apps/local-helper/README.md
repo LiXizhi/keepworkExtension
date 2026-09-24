@@ -1,6 +1,6 @@
 # KP Local Helper
 
-KP Local Helper packages the existing Keepwork MCP server as a per-user Windows tray application for people who use the web AIChat without VS Code. It is built from this repository and imports the same `src/core` and `src/mcp` implementation as the extension and CLI.
+KP Local Helper packages the Keepwork MCP server and the independent local-model runtime as one per-user Windows x64 tray application. One installation provides MCP on `127.0.0.1:8089` and speaker embedding on `127.0.0.1:18089`.
 
 ## Repository layout
 
@@ -8,17 +8,18 @@ KP Local Helper packages the existing Keepwork MCP server as a per-user Windows 
 - `apps/vscode-extension/src/cli.ts`: CLI entry point embedded in the VS Code application
 - `apps/vscode-extension/src/extension.ts`, `apps/vscode-extension/src/vscode`: VS Code integration
 - `apps/local-helper`: Electron tray, login startup, notification bridge, update and installer configuration
+- `apps/local-model-runtime`: separately staged Node.js runtime, model service, ONNX artifact and integrity metadata
 
-The nested package owns the helper's packaging metadata, release version and desktop-only dependencies. It is not a separate repository or a copy of the MCP implementation. The repository root is a private shared-runtime package, not a product manifest.
+The nested package owns the helper's packaging metadata, release version and desktop-only dependencies. local-model remains a separate supervised process so model failures do not take down MCP. It has no independent installer or release manifest. The VS Code VSIX never includes its source, native dependency or model files.
 
 ## End-user flow
 
-1. Download the signed `KP-Local-Helper-Setup-<version>-x64.exe` from the Keepwork website.
+1. Download the internal unsigned `KP-Local-Helper-Setup-<version>-x64.exe` from the Keepwork website.
 2. Run the installer once. It installs for the current Windows user without an administrator prompt and starts the tray helper.
 3. Open [https://keepwork.com/chat](https://keepwork.com/chat). AIChat continues to use the local MCP endpoint exactly as it does with the VS Code extension.
-4. On later Windows logins, the helper starts in the system tray automatically. The tray menu shows service status and provides workspace, update, log, and exit actions.
+4. On later Windows logins, the helper starts in the system tray automatically. The tray shows MCP and model status independently and provides unified recheck, update, log, and exit actions.
 
-Uninstalling removes the application and its login entry. It intentionally keeps `%USERPROFILE%\.keepwork-mcp`, including the user's workspace and logs, so uninstall cannot delete user-created files.
+Uninstalling stops only processes started by this Helper and removes its login entry. It intentionally keeps `%USERPROFILE%\.keepwork-mcp`, AIChat IndexedDB speaker profiles, and user-created workspace files. A compatible service already occupying either port is attached, not killed.
 
 ## Local development
 
@@ -26,6 +27,9 @@ Uninstalling removes the application and its login entry. It intentionally keeps
 npm ci
 npm run check:shared
 npm ci --prefix apps/local-helper
+npm ci --prefix apps/local-model-runtime
+npm --prefix apps/local-model-runtime run check
+npm --prefix apps/local-model-runtime test
 npm --prefix apps/local-helper run check
 npm --prefix apps/local-helper run pack
 ```
@@ -39,6 +43,9 @@ Build Windows x64 on Windows so the bundled `node-pty` native files are rebuilt 
 ```powershell
 npm ci
 npm ci --prefix apps/local-helper
+npm ci --prefix apps/local-model-runtime
+npm --prefix apps/local-model-runtime run runtime:stage -- --platform win32 --arch x64
+npm --prefix apps/local-model-runtime run runtime:smoke -- apps/local-model-runtime/runtime-staging/windows-x64
 npm run check:shared
 npm --prefix apps/local-helper run check
 npm --prefix apps/local-helper run make:win
@@ -88,11 +95,11 @@ Set `KP_HELPER_PUBLISH_URL` in `build.local.json` while building a release to em
 
 ```powershell
 node apps/local-helper/scripts/generate-release-manifest.cjs `
-  --file apps/local-helper/release/KP-Local-Helper-Setup-0.1.15-x64.exe `
-  --version 0.1.15 `
+  --file apps/local-helper/release/KP-Local-Helper-Setup-0.1.16-x64.exe `
+  --version 0.1.16 `
   --protocol-version 0.1.2 `
   --base-url https://cdn.keepwork.com/keepwork/KeepworkExtension-Windows-Setup `
   --output apps/local-helper/release/latest.json
 ```
 
-The automated workflow uploads the installer, `latest.yml`, block map, and `latest.json` to the stable HTTPS object-storage/CDN directory. Keep older installers available by their versioned file names; only the two `latest` metadata files are replaced on each release.
+The automated workflow stages and smoke-tests local-model, builds the unified installer, silently installs it, verifies both health endpoints and a real 512-dimensional embedding, then uploads the installer, block map, `latest.yml`, and `latest.json` in that order. `latest.json` declares `capabilities: ["mcp", "local-model"]`, `localModelProtocolVersion`, installer size and SHA-256. CDN bytes are verified before publication completes. Keep older installers available by versioned file name; only latest metadata is replaced.

@@ -33,8 +33,12 @@ function main() {
     const manifest = {
         schemaVersion: 1,
         product: 'kp-local-helper',
+        channel: 'internal',
+        signed: false,
         version,
         protocolVersion,
+        capabilities: ['mcp', 'local-model'],
+        localModelProtocolVersion: '1.0.0',
         platform: args.platform || 'windows',
         arch: args.arch || 'x64',
         fileName: path.basename(file),

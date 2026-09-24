@@ -6,6 +6,12 @@ async function main() {
   const debugLogger = { isEnabled: false, add() {} };
   await validateConfiguration(require('../electron-builder.config.cjs'), debugLogger);
   await validateConfiguration(createBuilderConfig(), debugLogger);
+  const modelConfig = createBuilderConfig({
+    KP_LOCAL_MODEL_RUNTIME_DIR: '../local-model-runtime/runtime-staging/windows-x64',
+  });
+  await validateConfiguration(modelConfig, debugLogger);
+  assert.equal(modelConfig.extraResources.length, 1);
+  assert.equal(modelConfig.extraResources[0].to, 'local-model-runtime');
   await validateConfiguration(createBuilderConfig({
     KP_WINDOWS_CSC_LINK: 'C:\\secure\\keepwork-test.pfx',
     KP_WINDOWS_CSC_KEY_PASSWORD: 'test-only',

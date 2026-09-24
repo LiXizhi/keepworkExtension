@@ -1,0 +1,140 @@
+openapi: 3.1.0
+info:
+  title: Keepwork local-model API
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:18089
+paths:
+  /v1/health:
+    get:
+      responses:
+        '200':
+          description: Service and model health
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+  /v1/models:
+    get:
+      responses:
+        '200': { description: Configured model list }
+  /v1/models/{modelId}:
+    parameters:
+      - $ref: '#/components/parameters/ModelId'
+    get:
+      responses:
+        '200': { description: Model information }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/models/{modelId}/load:
+    parameters:
+      - $ref: '#/components/parameters/ModelId'
+    post:
+      responses:
+        '200': { description: Loaded model information }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/models/{modelId}/unload:
+    parameters:
+      - $ref: '#/components/parameters/ModelId'
+    post:
+      responses:
+        '200': { description: Unloaded model information }
+  /v1/speaker/embedding:
+    post:
+      requestBody:
+        $ref: '#/components/requestBodies/SpeakerAudio'
+      responses:
+        '200':
+          description: Normalized speaker embedding
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmbeddingResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /v1/speaker/compare:
+    post:
+      description: Metadata must additionally contain a 512-number template array.
+      requestBody:
+        $ref: '#/components/requestBodies/SpeakerAudio'
+      responses:
+        '200':
+          description: Cosine similarity without a threshold decision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompareResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+components:
+  parameters:
+    ModelId:
+      name: modelId
+      in: path
+      required: true
+      schema: { type: string }
+  requestBodies:
+    SpeakerAudio:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            required: [metadata, audio]
+            properties:
+              metadata:
+                type: string
+                description: JSON string containing encoding and input metadata.
+              audio:
+                type: string
+                format: binary
+  responses:
+    Error:
+      description: Structured local-model error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+  schemas:
+    HealthResponse:
+      type: object
+      required: [requestId, service, version, protocolVersion, status, models]
+      properties:
+        requestId: { type: string }
+        service: { const: keepwork-local-model }
+        version: { type: string }
+        protocolVersion: { const: 1.0.0 }
+        status: { const: ok }
+        models: { type: array, items: { type: object } }
+    EmbeddingResponse:
+      type: object
+      required: [requestId, modelId, modelVersion, dimension, formatVersion, normalized, durationMs, processingMs, embedding]
+      properties:
+        requestId: { type: string }
+        modelId: { type: string }
+        modelVersion: { type: string }
+        dimension: { const: 512 }
+        formatVersion: { type: integer }
+        normalized: { const: true }
+        durationMs: { type: number }
+        processingMs: { type: number }
+        embedding: { type: array, minItems: 512, maxItems: 512, items: { type: number } }
+    CompareResponse:
+      type: object
+      required: [requestId, modelId, modelVersion, formatVersion, durationMs, processingMs, score]
+      properties:
+        requestId: { type: string }
+        modelId: { type: string }
+        modelVersion: { type: string }
+        formatVersion: { type: integer }
+        durationMs: { type: number }
+        processingMs: { type: number }
+        score: { type: number, minimum: -1, maximum: 1 }
+    ErrorResponse:
+      type: object
+      required: [requestId, error]
+      properties:
+        requestId: { type: string }
+        error:
+          type: object
+          required: [code, message, retryable]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            retryable: { type: boolean }
+            details: {}

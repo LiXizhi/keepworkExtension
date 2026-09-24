@@ -17,6 +17,7 @@ import {
 } from '../../../src/core/config';
 import { resolveWorkspaceRoot } from '../../../src/core/paths';
 import { startHelperNotifyBridge, HelperNotifyBridgeHandle } from './notifyBridge';
+import { LocalModelState, LocalModelSupervisor } from './localModelSupervisor';
 
 const AI_CHAT_URL = 'https://keepwork.com/chat';
 const APP_ID = 'com.keepwork.local-helper';
@@ -25,6 +26,7 @@ const POLL_MS = 4000;
 const MAX_RETRY_MS = 30_000;
 const UPDATE_CHECK_DELAY_MS = 15_000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const UNINSTALL_ARG = '--uninstall';
 const TRAY_ICON = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAyZpVFh0WE1MOmNvbS5hZG9iZS54bXAAAAAAADw/eHBhY2tldCBiZWdpbj0i77u/IiBpZD0iVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkIj8+IDx4OnhtcG1ldGEgeG1sbnM6eD0iYWRvYmU6bnM6bWV0YS8iIHg6eG1wdGs9IkFkb2JlIFhNUCBDb3JlIDUuNi1jMTM4IDc5LjE1OTgyNCwgMjAxNi8wOS8xNC0wMTowOTowMSAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIiB4bWxuczp4bXBNTT0iaHR0cDovL25zLmFkb2JlLmNvbS94YXAvMS4wL21tLyIgeG1sbnM6c3RSZWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9zVHlwZS9SZXNvdXJjZVJlZiMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIENDIDIwMTcgKFdpbmRvd3MpIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjNGQUNBRTk5MEY3NTExRTc4NzVFOEVDRjJFMDg2QTkwIiB4bXBNTTpEb2N1bWVudElEPSJ4bXAuZGlkOjNGQUNBRTlBMEY3NTExRTc4NzVFOEVDRjJFMDg2QTkwIj4gPHhtcE1NOkRlcml2ZWRGcm9tIHN0UmVmOmluc3RhbmNlSUQ9InhtcC5paWQ6M0ZBQ0FFOTcwRjc1MTFFNzg3NUU4RUNGMkUwODZBOTAiIHN0UmVmOmRvY3VtZW50SUQ9InhtcC5kaWQ6M0ZBQ0FFOTgwRjc1MTFFNzg3NUU4RUNGMkUwODZBOTAiLz4gPC9yZGY6RGVzY3JpcHRpb24+IDwvcmRmOlJERj4gPC94OnhtcG1ldGE+IDw/eHBhY2tldCBlbmQ9InIiPz4JASiTAAABBElEQVR42mJkaNzFQApgYiARoGsQ5mTVFeMhVoOWKPedXJtiS3liNaQYSgtwsCCLGEjwZpnIinGzwUVQpIU4WeFsblbmVieVXDNZJkbGRAMpszkn/2NqgAM7ecGF/toKApxA9sGH71M3X/uP1QY4WBOqJ8rF9vnXn9Ldt2edffIfSQq7BqDqk08/Bq+6+PTzT6Li4fKrL99//8s1k0P2Lj4Nk089ApLm0vzz/LT81UUZCWqYfe5p0a6bzz7/5GZlKTCX73JVJZw0zr/4nLTp6uprL/79/3/g/nu4OCNy4jOS5JPj53j08ce555/ggpwsTN///MMeSkB1yEohAFk1OakVIMAANBZWi7NyWjUAAAAASUVORK5CYII=';
 
 type HelperStatus = 'starting' | 'running' | 'attached' | 'stopped' | 'conflict' | 'error';
@@ -59,6 +61,8 @@ let retryAttempt = 0;
 let retryTimer: NodeJS.Timeout | null = null;
 let pollTimer: NodeJS.Timeout | null = null;
 let updateTimer: NodeJS.Timeout | null = null;
+let modelSupervisor: LocalModelSupervisor | null = null;
+let modelState: LocalModelState = { status: 'stopped', detail: '模型服务未启动' };
 
 function helperHome(): string {
     const dir = mcpHomeDir();
@@ -118,6 +122,23 @@ function statusLabel(): string {
         case 'stopped': return '本地服务已停止';
         default: return '本地服务正在启动';
     }
+}
+
+function modelStatusLabel(): string {
+    switch (modelState.status) {
+        case 'running': return `运行中 - ${modelState.detail}`;
+        case 'attached': return `已连接现有服务 - ${modelState.detail}`;
+        case 'conflict': return `端口冲突 - ${modelState.detail}`;
+        case 'error': return `异常 - ${modelState.detail}`;
+        case 'starting': return `正在启动 - ${modelState.detail}`;
+        default: return '已停止';
+    }
+}
+
+function localModelRuntimeRoot(): string {
+    if (app.isPackaged) return path.join(process.resourcesPath, 'local-model-runtime');
+    const configured = String(process.env.KP_LOCAL_MODEL_RUNTIME_DIR || '').trim();
+    return configured || path.resolve(__dirname, '../../local-model-runtime/runtime-staging/windows-x64');
 }
 
 function setOpenAtLogin(enabled: boolean): void {
@@ -246,13 +267,17 @@ function startUpdateChecks(): void {
 function rebuildTrayMenu(): void {
     if (!tray) return;
     const login = app.getLoginItemSettings({ args: LOGIN_ARGS });
-    tray.setToolTip(`KP Local Helper - ${statusLabel()}`);
+    tray.setToolTip(`KP Local Helper - MCP ${statusLabel()}；模型 ${modelStatusLabel()}`);
     tray.setContextMenu(Menu.buildFromTemplate([
-        { label: statusLabel(), enabled: false },
+        { label: `MCP：${statusLabel()}`, enabled: false },
+        { label: `模型：${modelStatusLabel()}`, enabled: false },
         { type: 'separator' },
         { label: '打开 AIChat', click: () => { void shell.openExternal(AI_CHAT_URL); } },
         { label: '打开本地工作目录', click: () => { void shell.openPath(resolveWorkspaceRoot()); } },
-        { label: '重新检测本地服务', click: () => { void maintainService(); } },
+        { label: '重新检测本地服务', click: () => {
+            void maintainService();
+            void modelSupervisor?.maintain();
+        } },
         { type: 'separator' },
         {
             label: '登录电脑后自动启动',
@@ -267,18 +292,60 @@ function rebuildTrayMenu(): void {
     ]));
 }
 
+async function stopWorker(): Promise<void> {
+    const child = worker;
+    worker = null;
+    if (!child) return;
+    await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+        };
+        const timer = setTimeout(finish, 3000);
+        timer.unref?.();
+        child.once('exit', finish);
+        child.kill();
+    });
+}
+
+async function prepareForUninstall(): Promise<void> {
+    setOpenAtLogin(false);
+    await Promise.all([modelSupervisor?.stop(), stopWorker()]);
+}
+
 async function start(): Promise<void> {
     app.setAppUserModelId(APP_ID);
+    if (process.argv.includes(UNINSTALL_ARG)) {
+        await prepareForUninstall();
+        app.quit();
+        return;
+    }
     initializeOpenAtLogin();
 
     tray = new Tray(nativeImage.createFromDataURL(TRAY_ICON));
     rebuildTrayMenu();
     tray.on('click', () => { void shell.openExternal(AI_CHAT_URL); });
 
+    modelSupervisor = new LocalModelSupervisor({
+        runtimeRoot: localModelRuntimeRoot(),
+        onLog: message => appendLog(`local-model: ${message}`),
+        onState: next => {
+            modelState = next;
+            rebuildTrayMenu();
+        },
+    });
+
     notifyBridge = await startHelperNotifyBridge();
     appendLog(`notify bridge listening on ${notifyBridge.port}`);
     await maintainService();
-    pollTimer = setInterval(() => { void maintainService(); }, POLL_MS);
+    await modelSupervisor.maintain();
+    pollTimer = setInterval(() => {
+        void maintainService();
+        void modelSupervisor?.maintain();
+    }, POLL_MS);
     pollTimer.unref();
     startUpdateChecks();
 }
@@ -287,7 +354,13 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
     app.quit();
 } else {
-    app.on('second-instance', () => { void shell.openExternal(AI_CHAT_URL); });
+    app.on('second-instance', (_event, argv) => {
+        if (argv.includes(UNINSTALL_ARG)) {
+            void prepareForUninstall().finally(() => app.quit());
+            return;
+        }
+        void shell.openExternal(AI_CHAT_URL);
+    });
     app.whenReady().then(start).catch((error) => {
         appendLog(`startup failed: ${error instanceof Error ? error.stack || error.message : String(error)}`);
         app.quit();
@@ -305,6 +378,8 @@ app.on('before-quit', () => {
     notifyBridge = null;
     worker?.kill();
     worker = null;
+    void modelSupervisor?.stop();
+    modelSupervisor = null;
     tray?.destroy();
     tray = null;
 });

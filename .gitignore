@@ -8,5 +8,11 @@ apps/local-helper/dist/
 apps/local-helper/release/
 apps/local-helper/node_modules/
 apps/local-helper/build.local.json
+apps/local-model-runtime/node_modules/
+apps/local-model-runtime/dist/
+apps/local-model-runtime/.cache/
+apps/local-model-runtime/runtime-staging/
+apps/local-model-runtime/reports/
+apps/local-model-runtime/.keys/
 release-manifest.json
 .idea
