@@ -95,8 +95,8 @@ Set `KP_HELPER_PUBLISH_URL` in `build.local.json` while building a release to em
 
 ```powershell
 node apps/local-helper/scripts/generate-release-manifest.cjs `
-  --file apps/local-helper/release/KP-Local-Helper-Setup-0.1.16-x64.exe `
-  --version 0.1.16 `
+  --file apps/local-helper/release/KP-Local-Helper-Setup-0.1.17-x64.exe `
+  --version 0.1.17 `
   --protocol-version 0.1.2 `
   --base-url https://cdn.keepwork.com/keepwork/KeepworkExtension-Windows-Setup `
   --output apps/local-helper/release/latest.json

@@ -47,6 +47,10 @@ assert.equal(vscodePackage.main, './dist/extension.js', 'VS Code entry must be a
 assert.equal(helperPackage.main, 'dist/main.js', 'helper entry must be app-local');
 assert.equal(modelPackage.bin?.['local-model'], 'dist/src/cli.js', 'local-model CLI must remain app-local');
 assert.equal(vscodePackage.dependencies?.['sherpa-onnx-node'], undefined, 'VSIX must not depend on local-model native code');
+const modelAttributes = fs.readFileSync(path.join(modelRoot, '.gitattributes'), 'utf8');
+for (const rule of ['* text=auto eol=lf', '*.onnx binary', '*.wav binary', '*.npy binary']) {
+  assert.ok(modelAttributes.includes(rule), `local-model Git attributes must include ${rule}`);
+}
 
 assert.deepEqual(fs.readdirSync(sharedRoot).sort(), ['core', 'mcp'], 'root src may contain only shared core and mcp');
 for (const oldPath of ['.vscodeignore', 'src/extension.ts', 'src/cli.ts', 'src/vscode']) {
