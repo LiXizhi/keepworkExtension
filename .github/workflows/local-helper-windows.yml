@@ -88,10 +88,11 @@ jobs:
           Pop-Location
           node apps/vscode-extension/scripts/assert-vsix-boundary.cjs "$env:RUNNER_TEMP/keepwork-boundary.vsix"
 
-      - name: Stage and smoke-test local-model runtime
-        run: |
-          npm --prefix apps/local-model-runtime run runtime:stage -- --platform win32 --arch x64
-          npm --prefix apps/local-model-runtime run runtime:smoke -- runtime-staging/windows-x64
+      - name: Stage local-model runtime
+        run: npm --prefix apps/local-model-runtime run runtime:stage -- --platform win32 --arch x64
+
+      - name: Smoke-test staged local-model runtime
+        run: npm --prefix apps/local-model-runtime run runtime:smoke -- runtime-staging/windows-x64
 
       - name: Create private build configuration
         shell: pwsh

@@ -13,7 +13,7 @@ const defaultTargets = [
   { platform: 'darwin', arch: 'x64' },
   { platform: 'win32', arch: 'x64' },
 ];
-const hostNpm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const npmCli = process.env.npm_execpath;
 
 function readArgs(argv) {
   const result = {};
@@ -114,7 +114,11 @@ function copyRecursive(source, target) {
 }
 
 function npmCi(appDir, target) {
-  const result = spawnSync(hostNpm, ['ci', '--omit=dev', '--no-audit', '--no-fund', `--os=${target.platform}`, `--cpu=${target.arch}`], {
+  if (!npmCli || !fs.statSync(npmCli, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error(`npm CLI entry is unavailable: ${npmCli || '(empty)'}`);
+  }
+  const args = [npmCli, 'ci', '--omit=dev', '--no-audit', '--no-fund', `--os=${target.platform}`, `--cpu=${target.arch}`];
+  const result = spawnSync(process.execPath, args, {
     cwd: appDir,
     stdio: 'inherit',
     env: {
@@ -125,6 +129,7 @@ function npmCi(appDir, target) {
       npm_config_arch: target.arch,
     },
   });
+  if (result.error) throw new Error(`npm ci --omit=dev failed to start: ${result.error.message}`);
   if (result.status !== 0) throw new Error(`npm ci --omit=dev failed with exit code ${result.status}`);
 }
 
