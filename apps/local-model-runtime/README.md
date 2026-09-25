@@ -86,8 +86,10 @@ Reports are written under the ignored `reports/` directory.
 
 ## NodeRuntime package
 
-`local-model` is staged as an Electron-managed Windows x64 NodeRuntime and
-bundled only by `apps/local-helper` under `resources/local-model-runtime`.
+`local-model` is staged as an Electron-managed NodeRuntime. KP Local Helper
+bundles the Windows x64 runtime under `resources/local-model-runtime`; Keepwork
+Client bundles Windows x64, macOS arm64, and macOS x64 runtimes from this same
+source tree.
 
 ```bash
 npm run runtime:stage -- --platform win32 --arch x64
@@ -106,10 +108,11 @@ LOCAL_MODEL_ROOT=<runtime>/app
 ## Distribution boundary
 
 This application has no Electron shell, independent installer, CI publisher or
-CDN manifest. The Windows x64 KP Local Helper workflow stages it, runs all
-tests and a real embedding, includes the complete runtime as `extraResources`,
-then repeats health, trust and embedding checks after silently installing the
-Helper. Any local-model change must increase the Local Helper SemVer.
+CDN manifest. Host products stage and verify it from this directory. KP Local
+Helper ships it in the Windows installer; Keepwork Client ships it in all three
+Client archives and pins the exact keepworkExtension commit used to build a
+release. Both hosts update local-model only as part of their complete product,
+never through an independent model hot-update channel.
 
 The current unified installer is `internal / unsigned`. SmartScreen warnings
 are expected. macOS and Linux downloads are not offered in the first release.
