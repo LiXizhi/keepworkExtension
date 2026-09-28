@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "sherpaOnnx": {
+    "version": "1.13.8",
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-android.tar.bz2",
+    "size": 46093321,
+    "sha256": "2ff63469a71cb6009aa2e3ed5f4a670f8abdcbe4bb9ffd23776afc792a6b4f44"
+  },
+  "model": {
+    "id": "speaker-eres2net-base-zh-16k",
+    "version": "1.0.1",
+    "source": "../local-model-runtime"
+  }
+}

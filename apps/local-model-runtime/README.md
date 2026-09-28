@@ -114,6 +114,11 @@ Client archives and pins the exact keepworkExtension commit used to build a
 release. Both hosts update local-model only as part of their complete product,
 never through an independent model hot-update channel.
 
+The managed Android Helper also treats this directory as the only model source.
+Its build verifies this package and Ed25519 manifest, copies the model into the
+APK, and pairs it with pinned sherpa-onnx Android JNI libraries. Android does
+not embed the desktop NodeRuntime and does not maintain a second model config.
+
 The current unified installer is `internal / unsigned`. SmartScreen warnings
 are expected. macOS and Linux downloads are not offered in the first release.
 Model updates are delivered only through a complete Local Helper update.

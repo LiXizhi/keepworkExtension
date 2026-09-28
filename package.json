@@ -9,7 +9,8 @@
     "install:apps": "npm ci --prefix apps/vscode-extension && npm ci --prefix apps/local-helper && npm ci --prefix apps/local-model-runtime",
     "check:layout": "node scripts/check-layout.cjs",
     "check:shared": "tsc -p ./ --noEmit && npm run check:layout",
-    "check:all": "npm run check:shared && npm run check --prefix apps/vscode-extension && npm run check --prefix apps/local-model-runtime && npm test --prefix apps/local-model-runtime && npm run check --prefix apps/local-helper"
+    "check:android": "node --test apps/android-helper/scripts/*.test.cjs",
+    "check:all": "npm run check:shared && npm run check --prefix apps/vscode-extension && npm run check --prefix apps/local-model-runtime && npm test --prefix apps/local-model-runtime && npm run check --prefix apps/local-helper && npm run check:android"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

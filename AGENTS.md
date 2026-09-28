@@ -62,6 +62,7 @@ The repository root is a private shared-runtime package. Product manifests, entr
 | `apps/vscode-extension/src/extension.ts` | VS Code commands + activate spawn-or-attach |
 | `apps/local-helper` | Windows tray app, login startup, notify bridge, updater and NSIS packaging; imports the shared MCP source |
 | `apps/local-model-runtime` | Windows x64 local-model source, integrity data, tests and staged NodeRuntime; bundled only as Local Helper `extraResources` |
+| `apps/android-helper` | Android 10+ managed-tablet Device Owner APK; Android-safe MCP plus sherpa JNI/model derived from `apps/local-model-runtime`; never enters VSIX |
 | `apps/vscode-extension/src/vscode/daemon.ts` | Health probe, detached spawn, admin fetch |
 | `apps/vscode-extension/src/vscode/statusBar.ts` | Status bar text / tooltip |
 | `apps/vscode-extension/src/vscode/mcpPanel.ts` | Click panel: clients + paged history + working directory / terminal |

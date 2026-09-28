@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KP Local Helper</string>
+    <string name="device_admin_description">Keeps the managed-device local AI services available and protected.</string>
+    <string name="notification_channel_name">Keepwork local services</string>
+    <string name="notification_supervisor_title">KP Local Helper 正在运行</string>
+    <string name="notification_supervisor_text">本机 MCP 与声纹服务由设备管理员维护</string>
+    <string name="notification_model_title">本地声纹服务正在运行</string>
+    <string name="notification_model_text">仅监听本机端口 18089</string>
+</resources>

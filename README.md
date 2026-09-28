@@ -34,12 +34,20 @@ This repository contains the shared Keepwork MCP runtime and its separately pack
 - `apps/local-helper`: Windows tray helper and unified MCP + local-model installer packaging
 - `apps/local-model-runtime`: staged Windows x64 model service bundled only by Local Helper; never part of the VSIX
 - `apps/mcp-runtime`: standalone NodeRuntime for Windows x64 and macOS arm64/x64; [build and automatic CDN release](apps/mcp-runtime/README.md), [external download contract](docs/node-runtime-cdn.md)
+- `apps/android-helper`: managed-device Android 10+ ARM64 APK with a Device Owner policy controller, Android-safe MCP and the signed local-model asset
 
 Each application owns its manifest, dependencies, entry points, tests and build output. Applications may import the shared root source, but they do not import each other.
 
 The VS Code extension provides only editor and MCP capabilities on port `8089`. The Windows x64 KP Local Helper installer provides the same MCP service on `8089` and supervises the separate local-model process on `18089`. A model change therefore requires a Local Helper version increase and a complete Helper update.
 
 The VS Code extension can clone projects from Keepwork, open files on keepwork.com, and run a **local MCP daemon** so [AIChat](https://keepwork.com/chat) can execute terminal commands and grep on this machine.
+
+The managed Android Helper is a separate product from both the VSIX and the
+Windows Electron Helper. One signed APK embeds the model and runs loopback MCP
+on `8089` plus local-model on `18089`. It is provisioned as Device Owner before
+tablets are handed to users, starts on boot, has no user stop action, and keeps
+an administrator-authenticated maintenance path. See
+[apps/android-helper/README.md](apps/android-helper/README.md).
 
 ## Features
 

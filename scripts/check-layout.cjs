@@ -8,6 +8,7 @@ const appsRoot = path.join(repoRoot, 'apps');
 const vscodeRoot = path.join(appsRoot, 'vscode-extension');
 const helperRoot = path.join(appsRoot, 'local-helper');
 const modelRoot = path.join(appsRoot, 'local-model-runtime');
+const androidRoot = path.join(appsRoot, 'android-helper');
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -38,6 +39,7 @@ const rootPackage = readJson(path.join(repoRoot, 'package.json'));
 const vscodePackage = readJson(path.join(vscodeRoot, 'package.json'));
 const helperPackage = readJson(path.join(helperRoot, 'package.json'));
 const modelPackage = readJson(path.join(modelRoot, 'package.json'));
+const androidSettings = fs.readFileSync(path.join(androidRoot, 'settings.gradle.kts'), 'utf8');
 
 assert.equal(rootPackage.private, true, 'the repository package must remain private');
 for (const field of ['main', 'bin', 'contributes', 'activationEvents']) {
@@ -46,6 +48,7 @@ for (const field of ['main', 'bin', 'contributes', 'activationEvents']) {
 assert.equal(vscodePackage.main, './dist/extension.js', 'VS Code entry must be app-local');
 assert.equal(helperPackage.main, 'dist/main.js', 'helper entry must be app-local');
 assert.equal(modelPackage.bin?.['local-model'], 'dist/src/cli.js', 'local-model CLI must remain app-local');
+assert.match(androidSettings, /rootProject\.name\s*=\s*"KPAndroidHelper"/, 'Android Helper must remain app-local');
 assert.equal(vscodePackage.dependencies?.['sherpa-onnx-node'], undefined, 'VSIX must not depend on local-model native code');
 const modelAttributes = fs.readFileSync(path.join(modelRoot, '.gitattributes'), 'utf8');
 for (const rule of ['* text=auto eol=lf', '*.onnx binary', '*.wav binary', '*.npy binary']) {
@@ -60,9 +63,11 @@ for (const requiredPath of ['.vscode', '.vscodeignore', 'src/extension.ts', 'src
   assert.equal(fs.existsSync(path.join(vscodeRoot, requiredPath)), true, `missing VS Code app path ${requiredPath}`);
 }
 
-const applicationRoots = [vscodeRoot, helperRoot, modelRoot];
+const applicationRoots = [vscodeRoot, helperRoot, modelRoot, androidRoot];
 for (const applicationRoot of applicationRoots) {
-  for (const file of walk(path.join(applicationRoot, 'src'), '.ts')) {
+  const sourceRoot = path.join(applicationRoot, 'src');
+  if (!fs.existsSync(sourceRoot)) continue;
+  for (const file of walk(sourceRoot, '.ts')) {
     for (const imported of relativeImports(file)) {
       for (const otherRoot of applicationRoots.filter(candidate => candidate !== applicationRoot)) {
         assert.equal(isInside(imported, otherRoot), false, `${path.relative(repoRoot, file)} imports another application`);

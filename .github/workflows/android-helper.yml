@@ -1,0 +1,219 @@
+name: Build and publish KP Local Helper for managed Android tablets
+
+on:
+  pull_request:
+    paths:
+      - apps/android-helper/**
+      - apps/local-model-runtime/**
+      - .github/workflows/android-helper.yml
+  push:
+    branches: [main]
+    paths:
+      - apps/android-helper/**
+      - apps/local-model-runtime/**
+      - .github/workflows/android-helper.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kp-local-helper-android-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  KP_ANDROID_CDN_BASE: https://cdn.keepwork.com/keepwork/KP-Local-Helper-Android
+  KP_QINIU_BUCKET: haqi
+  KP_QINIU_DOMAIN: https://cdn.keepwork.com
+  KP_QINIU_UPLOAD_HOST: https://up-z2.qiniup.com
+  KP_QINIU_PREFIX: keepwork/KP-Local-Helper-Android/
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Check Android release version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "Android releases can only be dispatched from main" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = pull_request ]; then
+            VERSION=$(node -p "require('./apps/android-helper/version.json').version")
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = push ] && ! git cat-file -e "$BEFORE_SHA:apps/android-helper/version.json" 2>/dev/null; then
+            VERSION=$(node -p "require('./apps/android-helper/version.json').version")
+            node -e 'if (!/^\d+\.\d+\.\d+$/.test(process.argv[1])) process.exit(1)' "$VERSION"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "previous_version=" >> "$GITHUB_OUTPUT"
+          else
+            node apps/local-helper/scripts/check-release-version.cjs \
+              --event "$EVENT_NAME" --before-sha "${BEFORE_SHA:-0000000000000000000000000000000000000000}" \
+              --package-path apps/android-helper/version.json \
+              --coupled-path apps/local-model-runtime --output "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: release-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/local-model-runtime/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install and verify source runtime
+        run: |
+          npm ci --prefix apps/local-model-runtime
+          npm --prefix apps/local-model-runtime run check
+          npm --prefix apps/local-model-runtime test
+          node --test apps/android-helper/scripts/*.test.cjs
+          node apps/android-helper/scripts/prepare-runtime.cjs
+      - name: Compile tests and debug APK
+        working-directory: apps/android-helper
+        run: gradle --no-daemon testDebugUnitTest assembleDebug
+      - name: Upload emulator APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: kp-local-helper-android-debug
+          path: apps/android-helper/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+      - name: Decode internal signing key
+        if: needs.release-gate.outputs.publish == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KP_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/kp-android.p12"
+      - name: Build signed ARM64 release APK
+        if: needs.release-gate.outputs.publish == 'true'
+        working-directory: apps/android-helper
+        env:
+          KP_ANDROID_KEYSTORE: ${{ runner.temp }}/kp-android.p12
+          KP_ANDROID_STORE_PASSWORD: ${{ secrets.KP_ANDROID_STORE_PASSWORD }}
+          KP_ANDROID_KEY_ALIAS: ${{ secrets.KP_ANDROID_KEY_ALIAS }}
+          KP_ANDROID_KEY_PASSWORD: ${{ secrets.KP_ANDROID_KEY_PASSWORD }}
+        run: gradle --no-daemon assembleRelease
+      - name: Verify and describe release APK
+        if: needs.release-gate.outputs.publish == 'true'
+        id: release
+        env:
+          VERSION: ${{ needs.release-gate.outputs.version }}
+        run: |
+          APK=apps/android-helper/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" files list "$APK" | grep 'lib/arm64-v8a/libsherpa-onnx-jni.so'
+          ! "$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" files list "$APK" | grep -q 'lib/x86_64/'
+          mkdir -p apps/android-helper/release
+          OUT=apps/android-helper/release/KP-Local-Helper-Android-$VERSION-arm64-v8a.apk
+          cp "$APK" "$OUT"
+          node apps/android-helper/scripts/generate-release-manifest.cjs --file "$OUT" --version "$VERSION" --commit "$GITHUB_SHA" --base-url "$KP_ANDROID_CDN_BASE" --output apps/android-helper/release/latest.json
+      - name: Upload signed release candidate
+        if: needs.release-gate.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kp-local-helper-android-release
+          path: apps/android-helper/release/*
+          if-no-files-found: error
+
+  emulator-smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [29, 33, 34, 35]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with:
+          name: kp-local-helper-android-debug
+          path: apk
+      - name: Managed-device cold boot and embedding smoke
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          script: |
+            adb install apk/app-debug.apk
+            adb shell dpm set-device-owner com.keepwork.localhelper/.policy.KeepworkDeviceAdminReceiver
+            adb shell am start -n com.keepwork.localhelper/.MainActivity
+            node apps/android-helper/scripts/smoke-device.cjs apps/local-model-runtime/tests/fixtures/speaker1_a_cn_16k.wav
+            adb reboot
+            adb wait-for-device
+            adb shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done'
+            node apps/android-helper/scripts/smoke-device.cjs apps/local-model-runtime/tests/fixtures/speaker1_a_cn_16k.wav
+            adb shell dpm list-owners | grep com.keepwork.localhelper
+
+  arm64-device-smoke:
+    if: needs.release-gate.outputs.publish == 'true'
+    needs: [release-gate, build]
+    runs-on: [self-hosted, keepwork-android-arm64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with:
+          name: kp-local-helper-android-release
+          path: release
+      - name: Install managed release and run real embedding
+        env:
+          VERSION: ${{ needs.release-gate.outputs.version }}
+        run: |
+          adb install -r "release/KP-Local-Helper-Android-$VERSION-arm64-v8a.apk"
+          adb shell am start -n com.keepwork.localhelper/.MainActivity
+          node apps/android-helper/scripts/smoke-device.cjs apps/local-model-runtime/tests/fixtures/speaker1_a_cn_16k.wav
+
+  publish:
+    if: needs.release-gate.outputs.publish == 'true'
+    needs: [release-gate, emulator-smoke, arm64-device-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with:
+          name: kp-local-helper-android-release
+          path: apps/android-helper/release
+      - name: Upload versioned APK, verify, then replace latest.json
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          VERSION: ${{ needs.release-gate.outputs.version }}
+        run: >-
+          node apps/android-helper/scripts/publish-qiniu-release.cjs
+          --release-dir apps/android-helper/release --version "$VERSION"
+          --bucket "$KP_QINIU_BUCKET" --prefix "$KP_QINIU_PREFIX"
+          --domain "$KP_QINIU_DOMAIN" --upload-host "$KP_QINIU_UPLOAD_HOST"
