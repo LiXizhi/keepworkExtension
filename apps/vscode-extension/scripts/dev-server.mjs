@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { context } from 'esbuild';
+import { creationSkillPlugin } from '../../../scripts/creation-skill-build.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(here, '..');
@@ -77,7 +78,7 @@ async function main() {
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: cliPath,
     external: ['node-pty', 'playwright-core'],
-    plugins: [{
+    plugins: [creationSkillPlugin(path.dirname(cliPath)), {
       name: 'restart-keepwork-mcp',
       setup(build) {
         build.onEnd((result) => {

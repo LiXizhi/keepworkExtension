@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paracraft Art Creation"
+  short_description: "Build voxel scenes and animated assets with MCP"
+  default_prompt: "Use $paracraft-create to build and visually verify an editable voxel scene or animated character."

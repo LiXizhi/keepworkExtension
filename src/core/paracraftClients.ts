@@ -1,3 +1,4 @@
+import { createParacraftLauncher } from './paracraftLaunch';
 import { randomUUID } from 'node:crypto';
 import * as http from 'node:http';
 
@@ -18,7 +19,7 @@ const MAX_HISTORY = 40;
 const MAX_SHOTS = 6;
 const SUMMARY_LEN = 160;
 const PING_ACTIONS = new Set(['health']);
-const ACTIONS = new Set(['health', 'world_status', 'read_official_wiki', 'world_files', 'get_scene_info', 'query_scene', 'read_scene_object', 'run_command', 'screenshot', 'camera_capture', 'open_world', 'exit', 'bring_to_front']);
+const ACTIONS = new Set(['health', 'world_status', 'read_official_wiki', 'world_files', 'get_scene_info', 'query_scene', 'read_scene_object', 'get_creation_capabilities', 'find_build_site', 'run_code', 'code_job', 'run_command', 'screenshot', 'camera_capture', 'open_world', 'exit', 'bring_to_front']);
 
 export function listParacraftActions(): string[] {
     return [...ACTIONS];
@@ -453,6 +454,8 @@ export function liveClientCount(): number {
     return [...clients.values()].filter((c) => !isWasmClient(c)).length;
 }
 
+export const paracraftLauncher = createParacraftLauncher(() => listClients());
+
 export async function listClients() {
     await discoverNplClients();
     pruneStale();
@@ -801,7 +804,7 @@ export async function dispatchAction(id: string, action: string, params: Record<
             return { status: 200, body: result };
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
-            if (action === 'screenshot' && client.lastScreenshot) {
+            if (action === 'screenshot' && client.lastScreenshot && !wantsFreshScreenshot(params)) {
                 const shot = client.lastScreenshot;
                 return {
                     status: 200,
@@ -874,6 +877,22 @@ export async function tryHandleParacraft(opts: {
     if (pathname === '/paracraft/unregister' && method === 'POST') {
         const body = parseJson(await opts.readBody());
         sendJson(200, unregisterClient(String(body.clientId || '')));
+        return true;
+    }
+
+    if ((pathname === '/paracraft/launch' || pathname === '/paracraft/launch_status') && method === 'POST') {
+        if (!assertAuth()) return true;
+        const body = parseJson(await opts.readBody());
+        const waitSeconds = body.waitSeconds === undefined ? 0 : body.waitSeconds;
+        if (typeof waitSeconds !== 'number' || !Number.isFinite(waitSeconds) || waitSeconds < 0 || waitSeconds > 20) {
+            sendJson(400, { ok: false, error: 'waitSeconds must be within 0..20' }); return true;
+        }
+        try {
+            const result = pathname === '/paracraft/launch'
+                ? await paracraftLauncher.launch(body.projectId as number, waitSeconds)
+                : await paracraftLauncher.status(String(body.launchId || ''), waitSeconds);
+            sendJson(200, result);
+        } catch { sendJson(400, { ok: false, error: 'positive integer projectId required' }); }
         return true;
     }
 

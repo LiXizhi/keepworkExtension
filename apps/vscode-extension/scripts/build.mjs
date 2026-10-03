@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build, context } from 'esbuild';
+import { creationSkillPlugin } from '../../../scripts/creation-skill-build.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(here, '..');
@@ -29,6 +30,7 @@ const builds = [
     ...common,
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: path.join(outdir, 'cli.js'),
+    plugins: [creationSkillPlugin(outdir)],
     external: ['node-pty', 'playwright-core'],
   },
 ];

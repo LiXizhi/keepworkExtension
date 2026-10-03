@@ -85,6 +85,24 @@ Sessions are bound to the creating allowed Origin, use the same optional Bearer 
 
 **Paracraft CLI hub** (`/paracraft/*`, same loopback server): desktop Paracraft registers on start. If Keepwork MCP is up, the client long-polls jobs (and heartbeats) until the hub goes down. The daemon also scans loopback NPL HTTP (`8099-8115` `/ajax/paracraft_cli`) so a client that started while the daemon was down can still be found. If a client reports an NPL HTTP `nplPort` and the hub can ping it, dispatch goes to that port and skips long-poll. AIChat `ParacraftTool.html` lists desktop clients and dispatches `run_command` / `screenshot` / `open_world` / `exit` / `bring_to_front`. Client register/poll stay open on loopback. List/dispatch use the pairing token only when `requireAuth` is on.
 
+Standard MCP clients use one `paracraft_cli` tool with `action`, optional
+`clientId`, and `params`. Call `help` for action names or `help` with
+`params.action` for one schema. Call `skill` for the root workflow or with
+`params.path` to load one reference. Only the root skill resource is advertised.
+Read the engine's `creation.md` page before generating source. `createScene`
+automatically asks the virtual pet to find a loaded, empty construction site;
+the user need not supply coordinates. Scripts have normal CodeBlock authority.
+Execution returns a job ID; poll it and reuse the same request ID after a
+transport timeout. Source completion and persistent callbacks are separate.
+Images use native MCP image content, with session and camera metadata. Fresh
+captures never substitute cached images. Camera captures accept a MovieBlock
+position and time to verify a pose without moving the player. Saving source,
+exporting assets, saving the world, and publishing remain separate operations.
+The stdio entry point forwards Paracraft requests to the singleton HTTP hub and
+uses its existing optional authentication. Desktop acceptance is separate from
+the deferred AIChat and WASM integrations. Tests: `node --test
+scripts/paracraft-creation.test.cjs`.
+
 The CLI gateway also forwards `read_official_wiki` with `{path:"index.md"}` or a linked registered topic. The engine validates paths and returns whole bounded bundled Markdown with read-only provenance, even before world entry. It never reads world overrides or arbitrary disk paths. Old clients may reject the action; no duplicate manual fallback is provided.
 
 **WASM NPL code wiki** (`/webserver/<instance>/…`): web-paracraft cannot bind `:8099`. It probes `GET /health` for `webserverBase`, registers, and stores `webserverRoot` as NPL `WebServer:site_url()`. This daemon then proxies console / debugger / ajax into that WASM instance as batched `http_request` jobs (cookie `Keepwork-WebServer` for root-absolute `/wp-includes` and `/ajax`). Full write-up: [docs/paracraft-cli.md](docs/paracraft-cli.md). Engine side: paraworld `docs/aries/paracraft-cli.md`.
@@ -238,3 +256,16 @@ Each session belongs to its HTTP MCP session plus Agent-tree ID. Operations are 
 AIChat's discovered `browser_inspect_visual` wrapper captures an image, runs a separate tool-free vision request, and returns text observations to its main agent. Keepwork itself does not call an LLM. Older clients may discover the MCP definitions normally; older daemons leave AIChat's managed-browser capability unavailable without affecting existing tools.
 
 Validation: `node --test scripts/browser*.test.cjs`, shared/application typechecks, application builds and `node apps/local-helper/scripts/check-package-boundaries.cjs`. Browser tests use system Edge/Chrome and isolated fixture servers; the HTTP test uses a temporary home and does not attach to the user's daemon. Updating the source does not replace a running installed extension; install the new product and restart MCP to use it.
+
+## Paracraft art creation skill
+
+Use the bundled [Paracraft creation skill](skills/paracraft-create/SKILL.md) to
+build editable voxel scenes and animated assets through MCP. Read it remotely
+through the single `paracraft_cli` tool (action `skill`). Only the root skill
+is advertised; action schemas and supporting guides load on demand. [Installation, Codex connection and live testing](docs/paracraft-creation-skill.md).
+
+Paracraft startup is available inside the same `paracraft_cli` gateway:
+`{action:"launch",params:{projectId:530}}` reuses a ready desktop project or opens
+its installed Windows protocol handler. Poll `launch_status` with the returned
+`launchId` if it is still waiting. No `clientId` is needed until startup completes.
+See [connection guide](skills/paracraft-create/references/connection.md).

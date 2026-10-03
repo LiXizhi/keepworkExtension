@@ -5,6 +5,7 @@ import { createMcpServer } from './server';
 
 export async function startStdioServer(opts?: { root?: string; port?: number }): Promise<void> {
     const server = createMcpServer({
+        viaHub: true,
         root: resolveWorkspaceRoot(opts?.root),
         port: resolvePort(opts?.port),
         startedAt: new Date().toISOString(),

@@ -152,3 +152,13 @@ Both direct NPL and polled job results populate this separate in-memory history.
 Camera captures never populate `lastScreenshot` or `screenshots`; project changes
 clear both image histories. ParacraftTool uses screenshots for its main preview
 and camera shots (including AI pet views) for its upper-right strip.
+
+The single MCP gateway also supports desktop startup without a `clientId`:
+`{action:"launch", params:{projectId:530, waitSeconds:15}}`. The hub first reuses
+a desktop whose project matches and whose world has entered. Otherwise it opens
+the installed Windows `paracraft://cmd/loadworld 530 debug="main"` protocol handler.
+It never switches unrelated clients. A pending result contains `launchId`; poll
+`{action:"launch_status", params:{launchId:"...",waitSeconds:0}}` until `ready`
+returns `clientId`, then fetch world capabilities. Pending launches are shared
+across HTTP/stdio and chats; registration deadline is 60 seconds. Saving or editing
+the opened project remains a separate operation.

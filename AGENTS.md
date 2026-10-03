@@ -50,11 +50,13 @@ The repository root is a private shared-runtime package. Product manifests, entr
 | `src/core/headless.ts` | System Edge/Chrome `--dump-dom` for `fetch_url` |
 | `src/core/html_text.ts` | Structured HTML → text (headings/lists; never markup) |
 | `src/core/keepwork.ts` | Keepwork URL → git clone URL / open-in-browser URL |
+| `src/core/paracraftLaunch.ts` | Fixed Windows protocol launch grammar, project reuse, shared launch IDs and registration status; no direct executable launch |
 | `src/core/paracraftClients.ts` | Desktop Paracraft CLI registry + job queue (`/paracraft/*`) |
 | `src/core/webserverProxy.ts` | WASM NPL code wiki front (`/webserver/:instance/*`) |
 | `src/core/calendarReminders.ts` | AIChat calendar 7-day reminders (`/calendar/reminders`) |
 | `src/core/fsServe.ts` | Loopback file overlay (`GET /fs/file`) + AIChat local-disk workspace (`/fs/list` `/fs/search` `/fs/stat` PUT/DELETE) |
 | `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
+| `src/mcp/paracraftTools.ts` | Creation jobs, official wiki, fresh MCP images, stdio singleton-hub forwarding; engine-owned API documentation |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
 | `src/mcp/sessions.ts` | Connected clients + in-memory call history (paged list) |
 | `src/mcp/stdio.ts` | stdio transport for Cursor (does not take 8089) |
@@ -207,7 +209,8 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 
 - New MCP tool → `src/mcp/server.ts` + AIChat `KEEPWORK_TOOL_NAMES` / chip labels in `chat_render.js` + README + this file.
 - Paracraft CLI hub → `src/core/paracraftClients.ts` + `/paracraft/*` in `src/mcp/http.ts`; keep register/poll open on loopback; never log screenshot base64. Narrative: [docs/paracraft-cli.md](docs/paracraft-cli.md).
-- Official Paracraft docs: `read_official_wiki` is an ACTIONS gateway entry, not a new MCP tool. Forward `{path}` unchanged; the engine registry validates it and returns bounded bundled read-only content before world entry. Preserve provenance/errors. Do not duplicate the engine manual or page registry here. Test with `scripts/paracraft-scene.test.cjs`.
+- Official Paracraft docs: `read_official_wiki` is an ACTIONS gateway entry through the single `paracraft_cli` MCP gateway. Forward `{path}` unchanged; the engine registry validates it and returns bounded bundled read-only content before world entry. Preserve provenance/errors. Do not duplicate the engine manual or page registry here. Test with `scripts/paracraft-scene.test.cjs`.
+- Paracraft art skill: canonical files are under `skills/paracraft-create/`. `src/mcp/paracraftGuide.ts` advertises only the root skill resource; `paracraft_cli` action `skill` loads individual guides on demand. Both product builds copy it under `dist/skills/`; keep it in packages. Test `scripts/paracraft-guide.test.cjs`. The skill guides art decisions; engine-owned wiki remains the API authority.
 - External WASM NPL code wiki gateway → `src/core/webserverProxy.ts` (`/webserver/:instance/*`); register `webserverRoot`; `GET /health` `webserverBase`. The embedded wiki bridge lives in webparacraft `ServiceWorker.js` + `src/emscripten.js`. Same [docs/paracraft-cli.md](docs/paracraft-cli.md); engine: paraworld `docs/aries/paracraft-cli.md`.
 - Web-paracraft local script overlay → `src/core/fsServe.ts` (`GET /fs/file`); confine to the URL `root` with realpath; MIME from file extension (text vs binary; unknown as `application/octet-stream`); never append `charset=` — overlay uses `overrideMimeType(... charset=x-user-defined)` so bytes stay 1:1. Optional `?base64=true` JSON is supported but unused by the overlay.
 - AIChat local-disk workspace → same `src/core/fsServe.ts` (`/fs/list` `/fs/search` `/fs/stat` `PUT/DELETE /fs/file` `DELETE /fs/dir`); verify `root` with `inspectDiskPath` / `GET /exists`; include symlink names; lexical confine + `links=include` on read.
