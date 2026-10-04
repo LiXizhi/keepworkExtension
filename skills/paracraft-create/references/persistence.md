@@ -23,6 +23,12 @@ save via the native explicit world operation, reopen, rediscover the new session
 identity, inspect groups/rig/movie and capture the reopened asset. Never do this
 to an unrelated user's world merely to test the skill. Use a disposable world.
 
+Check a second save/reopen when validating dense animation: repeated native float
+rounding can cause drift that a single reload misses. Updated TimeSeries items
+preserve finite track values exactly, but older saved tracks may already have
+lost precision. Do not clear stale fingerprints or rerun an entire generator
+merely to hide a mismatch; inspect the affected member and revise deliberately.
+
 Delivery should name the scene, exported files, editable source, captures used,
 verified clips, and any unresolved visual or runtime limitations. Keep concise
 technical evidence separate from claims about aesthetic quality.
@@ -36,3 +42,20 @@ so the asset can be reused at the intended size. Verify pivots, root motion and
 animation displacement after normalization. Describe an intentional alternate
 scale explicitly when the user requested it. Internal engine world/camera units
 must still be converted with the native block conversion APIs.
+
+`exportVoxelX` with `scale` and capability `voxelExportScale` bakes an explicit
+technical-rig normalization into the file. Its result `bakedScale` differs from
+the independent instance scale, which remains 1. Validate native capture bounds,
+`bones[].pivotMeters` and `translationMeters` at a moving clip time; checking only
+the mesh height can miss unscaled joints or root motion. Bone-key translations
+are already authored in local meters by helpers; do not convert them a second
+time with `scene:toWorld` or the native block size.
+
+For miniature color props used as standalone MovieBlock actors, prefer
+`exportVoxelX("blocktemplates/<unique>.x",group)` over a nested world template.
+This writes a single color mesh with intrinsic scale, preserving source blocks.
+Without a rig/animation option it exports a static mesh; the surrounding MovieBlock
+retains actor motion. With explicit rig membership and `animation`, it embeds
+bone clips for independent animation-ID playback; see [animation.md](animation.md).
+Uniform-grid expansion
+can be larger than the source octree: keep within the advertised cell limit.

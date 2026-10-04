@@ -66,6 +66,42 @@
         "reveal": "always",
         "panel": "dedicated"
       }
+    },
+    {
+      "label": "KeepWork 第二大脑: Start",
+      "type": "shell",
+      "command": "npm",
+      "args": [
+        "start"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/apps/aichat-desktop",
+        "env": {
+          "AICHAT_DESKTOP_LOCAL_SOURCE": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "KeepWork 第二大脑: Build",
+      "type": "shell",
+      "command": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/apps/aichat-desktop"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
     }
   ]
 }

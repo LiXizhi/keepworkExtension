@@ -29,7 +29,7 @@ export function apiDocs(port: number, requireAuth: boolean) {
         endpoints.push({ group, method, path: route, description, auth, parameters,
             example: `fetch(${JSON.stringify(base + samplePath)}, ${JSON.stringify(options, null, 2)})\n  .then(response => response.text())\n  .then(console.log);` });
     };
-    add('Service', 'GET', '/health', 'Service identity, runtime capabilities, workspace and Web Paracraft instances.', undefined, undefined, undefined, 'No token required');
+    add('Service', 'GET', '/health', 'Service identity, runtime capabilities, workspace and Web Paracraft instances. runtimeVersion/runtimeCommit identify the MCP build independently of protocol version and application hostVersion.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/dashboard', 'Browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/dashboard/skills/keepwork-mcp-assistant/SKILL.md', 'Bundled MCP assistant instructions for the dashboard temporary AIChat. Contains no credentials or private runtime data.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/', 'Default browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
@@ -64,7 +64,7 @@ export function apiDocs(port: number, requireAuth: boolean) {
         const creation = ['run_code', 'find_build_site'].includes(action)
             ? ' Returns an asynchronous job ID; expectedIdentity and requestId are required. Recover timeouts with code_job or the same requestId, never a new mutation request.'
             : action === 'code_job' ? ' Status/cancel uses jobId and expectedIdentity; source completion and persistent callbacks are separate.' : '';
-        add('Paracraft', 'POST', '/paracraft/{id}/' + action, 'Dispatch engine action: ' + action + '.' + creation, 'Path: id from /paracraft/clients. JSON: engine action parameters; read the bundled creation.md through read_official_wiki. GET is also accepted with an empty payload. camera_capture uses independent eye/lookat world vectors and supports moviePosition/timeSeconds pose capture.', undefined, {});
+        add('Paracraft', 'POST', '/paracraft/{id}/' + action, 'Dispatch engine action: ' + action + '.' + creation, 'Path: id from /paracraft/clients. JSON: engine action parameters; read the bundled creation.md through read_official_wiki. GET is also accepted with an empty payload. camera_capture uses independent eye/lookat world vectors, supports moviePosition/timeSeconds pose capture, or asset:{filename,animId,timeSeconds} for an isolated world-local model PNG, or assembly:{moviePosition,timeSeconds} for a neutral multi-actor movie PNG.', undefined, {});
     }
     for (const [route, body] of Object.entries({ register: { clientId: '<CLIENT_ID>', platform: 'desktop' }, unregister: { clientId: '<CLIENT_ID>' }, '{id}/jobs/poll': { waitMs: 2000 }, '{id}/jobs/results': { results: [{ jobId: '<JOB_ID>', result: {} }] }, '{id}/jobs/{jobId}/result': { result: {} } })) add('Paracraft bridge', 'POST', '/paracraft/' + route, 'Engine registration / job transport. Intended for Paracraft clients.', 'Replace path placeholders; JSON body as below.', undefined, body, 'No token required');
     add('Web Paracraft', 'GET', '/webserver/{instance}/{path}', 'Proxy an external WASM NPL wiki request. Other HTTP methods are forwarded as well.', 'instance and root from /health.webservers; path is the wiki resource.', undefined, undefined, 'No token required');

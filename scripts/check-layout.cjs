@@ -60,7 +60,7 @@ for (const requiredPath of ['.vscode', '.vscodeignore', 'src/extension.ts', 'src
   assert.equal(fs.existsSync(path.join(vscodeRoot, requiredPath)), true, `missing VS Code app path ${requiredPath}`);
 }
 
-const applicationRoots = [vscodeRoot, helperRoot, modelRoot];
+const applicationRoots = [vscodeRoot, helperRoot, modelRoot, path.join(appsRoot, 'aichat-desktop'), path.join(appsRoot, 'mcp-runtime')];
 for (const applicationRoot of applicationRoots) {
   for (const file of walk(path.join(applicationRoot, 'src'), '.ts')) {
     for (const imported of relativeImports(file)) {

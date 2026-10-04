@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,10 @@ const outdir = path.join(extensionRoot, 'dist');
 const watchMode = process.argv.includes('--watch');
 
 const common = {
+  define: {
+    'process.env.KEEPWORK_MCP_BUILD_VERSION': JSON.stringify(JSON.parse(await fs.readFile(path.join(extensionRoot, 'package.json'), 'utf8')).version),
+    'process.env.KEEPWORK_MCP_BUILD_COMMIT': JSON.stringify(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: extensionRoot, encoding: 'utf8' }).trim()),
+  },
   bundle: true,
   platform: 'node',
   format: 'cjs',

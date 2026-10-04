@@ -1,0 +1,127 @@
+name: Coordinated Keepwork stable release
+on:
+  workflow_dispatch:
+  push:
+    tags: ['keepwork-v*']
+permissions:
+  contents: read
+concurrency:
+  group: keepwork-stable-release
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  KP_RUNTIME_NODE_VERSION: 22.23.2
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - id: identity
+        run: |
+          version=$(node scripts/stable-release.cjs --mode validate)
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "keepwork-v$version" ]]; then exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+  runtime:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, platform: win32, arch: x64, target: windows-x64 }
+          - { runner: macos-15, platform: darwin, arch: arm64, target: macos-arm64 }
+          - { runner: macos-15-intel, platform: darwin, arch: x64, target: macos-x64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.23.2', architecture: '${{ matrix.arch }}' }
+      - run: npm ci
+      - run: npm ci --prefix apps/mcp-runtime
+      - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+      - run: npm run package --prefix apps/mcp-runtime -- --commit "$GITHUB_SHA" --prefix 'keepwork/mcp-stable/${{ needs.gate.outputs.version }}/'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-${{ matrix.target }}
+          path: |
+            apps/mcp-runtime/release/*.zip
+            apps/mcp-runtime/release/*.json
+  packages:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci
+      - run: npm ci --prefix apps/mcp-runtime
+      - run: npm ci --prefix apps/vscode-extension
+      - run: npm run build --prefix apps/mcp-runtime
+      - run: node scripts/prepare-npm-runtime.cjs
+      - run: npm pack ./apps/mcp-runtime/release/npm --pack-destination ./apps/mcp-runtime/release
+      - run: npm run compile:only --prefix apps/vscode-extension
+      - working-directory: apps/vscode-extension
+        run: npx --no-install vsce package --out ../../keepwork.vsix
+      - run: node apps/vscode-extension/scripts/assert-vsix-boundary.cjs keepwork.vsix
+      - run: |
+          mkdir -p release-packages
+          cp apps/mcp-runtime/release/*.tgz keepwork.vsix release-packages/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-packages
+          path: release-packages/*
+  publish:
+    needs: [gate, runtime, packages]
+    runs-on: ubuntu-latest
+    environment: keepwork-stable
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, registry-url: 'https://registry.npmjs.org' }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'stable-*', path: release-stable, merge-multiple: true }
+      - run: npm ci
+      - run: npm ci --prefix apps/vscode-extension
+      - name: Upload and verify immutable runtime artifacts
+        run: node scripts/stable-release.cjs --mode artifacts --dir release-stable --commit "$GITHUB_SHA"
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+      - name: Publish npm with trusted publishing (retry matching releases)
+        env:
+          RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          existing=$(npm view "keepwork-mcp-runtime@$RELEASE_VERSION" keepworkCommit --json 2>/dev/null || true)
+          if [[ "$existing" == "\"$GITHUB_SHA\"" ]]; then
+            echo 'Matching npm release already published'
+          elif [[ -n "$existing" && "$existing" != *'E404'* ]]; then
+            echo 'npm version already exists with a different commit'; exit 1
+          else
+            npm publish "release-stable/keepwork-mcp-runtime-$RELEASE_VERSION.tgz" --access public --provenance --tag next
+          fi
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Publish matching VSIX without rebuilding or bumping versions
+        working-directory: apps/vscode-extension
+        run: npx --no-install vsce publish --azure-credential --skip-duplicate --packagePath ../../release-stable/keepwork.vsix
+      - name: Promote stable CDN metadata after both package publications succeed
+        run: node scripts/stable-release.cjs --mode promote --dir release-stable --commit "$GITHUB_SHA"
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+      - name: Promote npm latest
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_DIST_TAG_TOKEN }}
+          RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+        run: npm dist-tag add "keepwork-mcp-runtime@$RELEASE_VERSION" latest

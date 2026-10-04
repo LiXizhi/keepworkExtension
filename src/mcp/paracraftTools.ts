@@ -7,6 +7,8 @@ import { readInstance, readToken } from '../core/config';
 import { currentRequest } from './context';
 import { recordCall } from './sessions';
 import { readCreationGuide } from './paracraftGuide';
+import { compileCreationTemplate, creationTemplateInfo } from './paracraftTemplates';
+import { summarizeCreationJob } from './paracraftJobResult';
 
 export interface ParacraftTransport { port: number; viaHub?: boolean }
 
@@ -14,11 +16,25 @@ const launchSchemas = {
     launch: z.object({ projectId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), waitSeconds: z.number().min(0).max(20).default(15) }).strict(),
     launch_status: z.object({ launchId: z.string().min(1), waitSeconds: z.number().min(0).max(20).default(0) }).strict(),
 };
+const templateInfoSchema = z.object({ template: z.string().min(1) }).strict();
+// A crashed or test hub may leave a discovery record behind. Do not send a
+// mutation to that dead port or retry it; choose the configured hub before I/O.
+function hubPort(runtime: ParacraftTransport): number {
+    const instance = readInstance();
+    if (!instance || !Number.isInteger(instance.pid) || instance.pid <= 0
+        || !Number.isInteger(instance.port) || instance.port < 1 || instance.port > 65535) return runtime.port;
+    try { process.kill(instance.pid, 0); }
+    catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return runtime.port;
+        // Permission denial does not establish that the process is absent.
+    }
+    return instance.port;
+}
 async function launchRequest(runtime: ParacraftTransport, action: 'launch' | 'launch_status', params: Record<string, unknown>) {
     if (!runtime.viaHub) return { status: 200, body: action === 'launch'
         ? await paracraftLauncher.launch(params.projectId as number, params.waitSeconds as number)
         : await paracraftLauncher.status(params.launchId as string, params.waitSeconds as number) };
-    const port = readInstance()?.port || runtime.port, token = readToken();
+    const port = hubPort(runtime), token = readToken();
     const response = await fetch(`http://127.0.0.1:${port}/paracraft/${action}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify(params), signal: AbortSignal.timeout(25000),
@@ -29,7 +45,7 @@ async function launchRequest(runtime: ParacraftTransport, action: 'launch' | 'la
 // Stdio is a client of the singleton hub, not a second Paracraft registry.
 export async function paracraftRequest(runtime: ParacraftTransport, clientId?: string, action?: string, params: Record<string, unknown> = {}) {
     if (!runtime.viaHub) return clientId && action ? dispatchAction(clientId, action, params) : { status: 200, body: await listClients() };
-    const port = readInstance()?.port || runtime.port;
+    const port = hubPort(runtime);
     const token = readToken();
     const path = clientId && action ? `/paracraft/${encodeURIComponent(clientId)}/${action}` : '/paracraft/clients';
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -69,9 +85,13 @@ export const creationSchemas = {
     read_official_wiki: z.object({ ...client, path: z.string() }).strict(),
     find_build_site: z.object({ ...job, dimensions: vector, clearance: z.number().int().min(0).max(8).optional(), radius: z.number().int().min(1).max(128).optional(), exclude: z.array(vector).max(100).optional() }).strict(),
     run_code: z.object({ ...job, code: z.string().min(1).max(65536), scene: z.record(z.string(), z.unknown()).optional() }).strict(),
-    code_job: z.object({ ...client, expectedIdentity: identity, jobId: z.string(), operation: z.enum(['status', 'cancel']).default('status') }).strict(),
+    run_template: z.object({ ...job, template: z.string().min(1).max(64), templateHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), origin: z.tuple([z.number().int(), z.number().int(), z.number().int()]).optional(), palette: z.record(z.string(), z.string().regex(/^#[a-fA-F0-9]{6}$/)).optional(), saveSource: z.boolean().default(false) }).strict(),
+    code_job: z.union([
+        z.object({ ...client, expectedIdentity: identity, jobId: z.string().min(1).max(128), operation: z.enum(['status', 'cancel']).default('status'), resultDetail: z.enum(['summary', 'full']).default('summary') }).strict(),
+        z.object({ ...client, expectedIdentity: identity, requestId: z.string().min(1).max(128), operation: z.enum(['status', 'cancel']).default('status'), resultDetail: z.enum(['summary', 'full']).default('summary') }).strict(),
+    ]),
     screenshot: z.object({ ...client, expectedIdentity: identity }).strict(),
-    camera_capture: z.object({ ...client, expectedIdentity: identity, moviePosition: vector.optional(), timeSeconds: z.number().min(0).max(600).optional(), eye: vector.optional(), lookat: vector.optional(), nearPet: z.boolean().optional(), nearPlayer: z.boolean().optional(), view: z.enum(['orbit', 'overhead', 'forward', 'front']).optional(), offset: vector.optional(), targetOffset: vector.optional() }).strict(),
+    camera_capture: z.object({ ...client, expectedIdentity: identity, moviePosition: vector.optional(), timeSeconds: z.number().min(0).max(600).optional(), eye: vector.optional(), lookat: vector.optional(), nearPet: z.boolean().optional(), nearPlayer: z.boolean().optional(), view: z.enum(['orbit', 'overhead', 'forward', 'front']).optional(), offset: vector.optional(), targetOffset: vector.optional(), assembly: z.object({moviePosition:vector,timeSeconds:z.number().min(0).max(600),actors:z.array(z.string().min(1).max(64)).min(1).max(16).optional(),yaw:z.number().min(-Math.PI*2).max(Math.PI*2).optional(),elevation:z.number().min(-1.4).max(1.4).optional(),distanceMeters:z.number().min(0.01).max(1000).optional(),size:z.union([z.literal(128),z.literal(256),z.literal(512),z.literal(1024)]).optional()}).strict().optional(), asset: z.object({filename:z.string().min(1).max(512),animId:z.number().int().min(0).max(65535).optional(),timeSeconds:z.number().min(0).max(600).optional(),yaw:z.number().min(-Math.PI*2).max(Math.PI*2).optional(),elevation:z.number().min(-1.4).max(1.4).optional(),distanceMeters:z.number().min(0.01).max(1000).optional(),size:z.union([z.literal(128),z.literal(256),z.literal(512),z.literal(1024)]).optional()}).strict().optional() }).strict(),
 };
 const descriptions: Record<keyof typeof creationSchemas, string> = {
     get_scene_info: 'Read world, player, pet and camera positions without loading terrain.',
@@ -81,9 +101,10 @@ const descriptions: Record<keyof typeof creationSchemas, string> = {
     read_official_wiki: 'Read the engine-owned official wiki, including creation.md, before authoring CodeBlock source.',
     find_build_site: 'Have the virtual pet inspect and navigate to a suitable empty site within 128 blocks in loaded terrain. Returns a job ID; poll code_job. Does not move the player or build blocks.',
     run_code: 'Run normal CodeBlock Lua with createScene(), including automatic pet site selection when origin is omitted. Normal CodeBlock authority, not a restricted sandbox. Returns a job ID; poll code_job. Request IDs deduplicate execution. Never retry with a new ID after timeout.',
-    code_job: 'Read creation/scouting progress, output, result and persistent-runtime status, or stop owned execution. Completion is distinct from visual verification. Cancellation does not undo arbitrary CodeBlock commands.',
+    run_template: 'Run a packaged creation template without copying Lua; template_info describes its asset writes and palette. Automatic pet scouting unless origin is supplied. Native run_code jobs, world identity, chat ordering and deduplication apply. Save source only with saveSource=true; never saves the world.',
+    code_job: 'Read creation/scouting status or cancel owned execution. Supply exactly one jobId or original requestId; request lookup recovers a lost first response without recompiling or repeating mutations and requires requestJobLookup. Results summarize dense rotation-key arrays by default; resultDetail="full" reads unchanged details. Completion is distinct from visual verification. Cancellation does not undo arbitrary CodeBlock commands.',
     screenshot: 'Capture a fresh native viewport including editor UI and return an MCP image. Cached fallback is rejected.',
-    camera_capture: 'Capture an independent fresh scene image using explicit world eye/lookat or nearPet/nearPlayer presets. Does not move the player or main camera.',
+    camera_capture: 'Capture an independent fresh scene image using world eye/lookat or nearPet/nearPlayer presets; asset renders one world-local .x/.bmax, and assembly renders MovieBlock actors together on a neutral canvas. Does not move the player or main camera.',
 };
 
 export function registerCreationTools(server: McpServer, runtime: ParacraftTransport) {
@@ -107,14 +128,17 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
             } else if (action === 'skill') {
                 const args = z.object({ path: z.string().default('SKILL.md') }).strict().parse(params);
                 result = { content: [{ type: 'text', text: JSON.stringify(readCreationGuide(args.path)) }] };
+            } else if (action === 'template_info') {
+                const args = templateInfoSchema.parse(params);
+                result = { content: [{ type: 'text', text: JSON.stringify(creationTemplateInfo(args.template)) }] };
             } else if (action === 'help') {
                 const args = z.object({ action: z.string().optional() }).strict().parse(params);
-                const schema = creationSchemas[args.action as keyof typeof creationSchemas] || launchSchemas[args.action as keyof typeof launchSchemas];
-                const actions = ['help', 'skill', 'context', 'clients', 'launch', 'launch_status', ...listParacraftActions()];
+                const schema = creationSchemas[args.action as keyof typeof creationSchemas] || launchSchemas[args.action as keyof typeof launchSchemas] || (args.action === 'template_info' ? templateInfoSchema : undefined);
+                const actions = ['help', 'skill', 'context', 'clients', 'launch', 'launch_status', 'template_info', 'run_template', ...listParacraftActions()];
                 if (args.action && !actions.includes(args.action)) throw new Error('unsupported_action');
                 const details = args.action ? {
                     action: args.action,
-                    description: descriptions[args.action as keyof typeof descriptions] || (args.action === 'launch' ? 'Reuse the requested desktop world or open its installed paracraft URL protocol. Requires no clientId. Poll launch_status if waiting; never repeat a launch after a transport timeout.' : args.action === 'launch_status' ? 'Wait for the requested desktop world to register. Returns clientId only once worldEntered is true.' : undefined),
+                    description: descriptions[args.action as keyof typeof descriptions] || (args.action === 'template_info' ? 'Read one packaged template description, dimensions, asset writes and source hash without returning its Lua.' : args.action === 'launch' ? 'Reuse the requested desktop world or open its installed paracraft URL protocol. Requires no clientId. Poll launch_status if waiting; never repeat a launch after a transport timeout.' : args.action === 'launch_status' ? 'Wait for the requested desktop world to register. Returns clientId only once worldEntered is true.' : undefined),
                     inputSchema: schema ? z.toJSONSchema(schema, { io: 'input' }) : undefined,
                     usage: args.action === 'skill' ? { action: 'skill', params: { path: 'SKILL.md' } }
                         : args.action === 'clients' ? { action: 'clients' }
@@ -133,19 +157,34 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
                 const response = await paracraftRequest(runtime);
                 result = paracraftResult(response.status, response.body);
             } else {
-                if (!listParacraftActions().includes(action)) throw new Error('unsupported_action: use help');
+                if (action !== 'run_template' && !listParacraftActions().includes(action)) throw new Error('unsupported_action: use help');
                 if (!clientId) throw new Error('clientId required: use clients');
                 const schema = creationSchemas[action as keyof typeof creationSchemas];
+                let templateInput: z.infer<typeof creationSchemas.run_template> | undefined;
                 if (schema) {
                     const validated = schema.parse({ ...params, clientId });
+                    if (action === 'run_template') templateInput = validated as z.infer<typeof creationSchemas.run_template>;
                     const { clientId: ignored, ...validatedParams } = validated;
                     Object.assign(params, validatedParams);
                 }
-                if (['run_code', 'find_build_site', 'code_job', 'get_scene_info', 'camera_capture', 'screenshot'].includes(action)) {
+                if (['run_code', 'run_template', 'find_build_site', 'code_job', 'get_scene_info', 'camera_capture', 'screenshot'].includes(action)) {
                     params.authoringSession = authoringSession;
                     params.petId = petId || 'main';
                 }
                 if (action === 'screenshot') params.fresh = true;
+                if (action === 'code_job' && params.requestId) {
+                    const capabilities = await paracraftRequest(runtime, clientId, 'get_creation_capabilities');
+                    if (!(capabilities.body as {result?: {requestJobLookup?: boolean}})?.result?.requestJobLookup) {
+                        throw new Error('unsupported_capability: request-based job recovery; update the Paracraft engine or use the returned jobId');
+                    }
+                }
+                if (action === 'camera_capture' && (params.asset || params.assembly)) {
+                    const capabilities = await paracraftRequest(runtime, clientId, 'get_creation_capabilities');
+                    const captureCapabilities=(capabilities.body as {result?: {isolatedAssetCapture?: boolean;isolatedAssemblyCapture?: boolean}})?.result;
+                    if (params.assembly ? !captureCapabilities?.isolatedAssemblyCapture : !captureCapabilities?.isolatedAssetCapture) {
+                        throw new Error(`unsupported_capability: isolated ${params.assembly ? 'assembly' : 'asset'} capture; update the Paracraft engine`);
+                    }
+                }
                 const sameIdentity = (a: unknown, b: unknown) => {
                     const x = a as Record<string, unknown> | undefined, y = b as Record<string, unknown> | undefined;
                     return !!x && !!y && x.clientId === y.clientId && x.worldPath === y.worldPath && x.sessionId === y.sessionId;
@@ -155,7 +194,31 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
                     const identityNow = (before.body as { result?: { identity?: unknown } })?.result?.identity;
                     if (!sameIdentity(identityNow, params.expectedIdentity)) throw new Error('world_session_changed or unsupported engine');
                 }
-                const response = await paracraftRequest(runtime, clientId, action, params);
+                const resultDetail = action === 'code_job' ? params.resultDetail : 'full';
+                if (action === 'code_job') delete params.resultDetail; // Local presentation option; older engines see no new argument.
+                let nativeAction = action, nativeParams = params;
+                let templateMetadata;
+                if (action === 'run_template') {
+                    const { template, templateHash, origin, palette, saveSource, ...forwarded } = params;
+                    const prepared = compileCreationTemplate(templateInput!, authoringSession);
+                    if (prepared.requiredCapabilities.length) {
+                        const capabilities = await paracraftRequest(runtime, clientId, 'get_creation_capabilities');
+                        const available = (capabilities.body as { result?: Record<string, unknown> })?.result;
+                        for (const name of prepared.requiredCapabilities) {
+                            if (capabilities.status !== 200 || available?.[name] !== true) {
+                                throw new Error(`unsupported_capability: ${name} required by ${template}; update the Paracraft engine`);
+                            }
+                        }
+                        if (!sameIdentity(available?.identity, forwarded.expectedIdentity)) throw new Error('world_session_changed');
+                    }
+                    nativeAction = 'run_code'; nativeParams = { ...forwarded, code: prepared.code };
+                    templateMetadata = prepared.metadata;
+                }
+                const response = await paracraftRequest(runtime, clientId, nativeAction, nativeParams);
+                if (templateMetadata && response.status === 200) {
+                    const payload = (response.body as { result?: Record<string, unknown> })?.result;
+                    if (payload) payload.template = templateMetadata;
+                }
                 if (action === 'screenshot') {
                     const after = await paracraftRequest(runtime, clientId, 'get_creation_capabilities');
                     const identityNow = (after.body as { result?: { identity?: unknown } })?.result?.identity;
@@ -163,7 +226,9 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
                     const payload = (response.body as { result?: Record<string, unknown> })?.result;
                     if (payload) payload.identity = identityNow;
                 }
-                result = paracraftResult(response.status, response.body, action === 'screenshot' || action === 'camera_capture');
+                const responseBody = action === 'code_job' && resultDetail === 'summary' && response.status === 200
+                    ? summarizeCreationJob(response.body) : response.body;
+                result = paracraftResult(response.status, responseBody, action === 'screenshot' || action === 'camera_capture');
             }
             ok = !result.isError;
             return result;

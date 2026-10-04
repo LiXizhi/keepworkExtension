@@ -6,7 +6,68 @@ fresh screenshots and independent camera captures. Use only `paracraft_cli({acti
 `{action:"clients"}`. `{action:"help"}` lists actions and
 `{action:"help",params:{action:"run_code"}}` loads one action schema.
 
+Packaged templates can run without copying Lua: query `template_info` for one
+of `desk_fan`, `compact_car`, `rowing_boat`, `light_aircraft`, `butterfly` or `bird`, then `run_template` with its hash, world
+identity and request ID. Keepwork submits native `run_code` using the same chat,
+pet and job controls. It exports unique assets; source saving is opt-in and world
+saving remains explicit. See the skill's connection guide for the schema and
+transport-recovery behavior. The native engine does not need a new action.
+For clean exported-asset feedback, `camera_capture` also accepts a world-local
+`asset:{filename,animId,timeSeconds}`. On supported desktop engines it renders a
+fresh neutral-background PNG in a separate mini-scene and reports native final
+bone poses and meter bounds at scale 1. Time is local to the selected clip; source
+movies, world blocks and player/main camera are unchanged. Optional asset yaw,
+elevation, meter distance and image size are discovered in the existing action's
+schema. Older engines return an explicit unsupported capability error. Native
+acceptance: `scripts/paracraft-asset-mcp-native.cjs` and its decoded-pixel check.
+For clean multi-part feedback, the same action accepts
+`assembly:{moviePosition:[x,y,z],timeSeconds:1.25}`. Supported engines seek movie
+time and freeze up to 16 world-local model actors together in a neutral PNG.
+Optional actor names and camera settings load through the same action schema.
+Native clone bone transforms, relative meter positions and the absolute origin
+are returned without changing source timelines or moving the player/main camera.
+Use world views for ground contact. Acceptance uses
+`scripts/paracraft-assembly-mcp-native.cjs`; no new tool or eager resource.
+Each template exposes named RGB palette roles; partial overrides can make a new
+variant without rewriting source. Existing placed components still use named
+group revisions through `run_code`. Native template acceptance is
+`scripts/paracraft-template-mcp-native.cjs` against an exact disposable world.
+
 ## Skill distribution
+
+The lazy animal guide also routes `idle_fox`: a ~0.75 m stylized juvenile fox
+with a separate bushy tail, pointed ears, cream muzzle and planted paws. Native
+acceptance checks all nine tail poses, dimensions and joint offsets; isolated
+assembly PNGs show the rest and sway extremes. This template exports two rigid
+color meshes and keeps its MovieBlock, without claiming a walking gait or a
+single skinned character. Palette roles are discovered through `template_info`.
+
+For integral BoneBlock technical rigs at a different construction scale, the
+engine's `voxelExportScale` capability permits uniform baked `exportVoxelX` scale.
+Independent acceptance measures mesh dimensions, native pivots and root motion
+at instance scale 1, while checking unchanged rotations, source and camera.
+This is infrastructure for small multi-joint animals; it does not make the
+current rigid `idle_fox` template a skinned walking character.
+
+Packaged `skinned_fox` provides the six-bone counterpart: whole-carrier component
+ownership, retained BoneBlocks, baked 1/32 scale, embedded idle ID 0 and diagonal
+trot-in-place ID 1. Native isolated-file acceptance checks all six parents and
+pivots, foot-corner clearance, both clip IDs, loop closure and unchanged source.
+The technical construction site is 30 × 16 × 30 m; delivered bounds are about
+0.17 × 0.44 × 0.78 m. This rigid-limb cycle has no knee IK or forward locomotion.
+
+The shared `curious_fox` variant adds one independently bound head bone and an
+idle look left/right cycle. Native asset feedback checks seven parents/pivots,
+head quaternions, loop endpoints and fixed body/foot poses without a source movie.
+The original six-bone template remains available with its own deterministic hash.
+
+MCP `code_job` defaults to `resultDetail:"summary"`: dense actor rotation audit
+arrays become counts and time bounds in `resultDetails.omitted`, while job state,
+placement, actor dimensions and generated file references remain available.
+`resultDetails.full` contains a complete `paracraft_cli` call to retrieve the full
+result from the same job, retaining its chat and world identity. Do not rerun the
+generator to recover details. This is a gateway display option; native HTTP/poll
+job data remains complete and unchanged.
 
 Canonical skill: [`skills/paracraft-create/SKILL.md`](../skills/paracraft-create/SKILL.md).
 It has focused reference guides and executable Lua examples. It adapts the staged
@@ -153,3 +214,34 @@ checks; water level/data and material changes remain significant.
 `node scripts/paracraft-terrain-native.cjs` is opt-in acceptance against the exact
 CreationAcceptance disposable world on port 8100: paving, water, saved resume,
 original-floor restoration, native undo/redo and a fresh independent capture.
+
+## Art improvement series
+
+The [100-round RSI record](paracraft-art-rsi.md) tracks verified changes and remaining
+visual defects. Vegetation guidance and its compact garden template load on demand
+from the root skill; they add no MCP tools or advertised subfile resources.
+
+The lazy `pond_garden` template combines flush gravel/stone paths, backed-up pool
+terrain, native reeds/flowers and horizontal LilyPad 222 (`data=2`), plus a
+1.5 m color-only bench exported once and reused at scale 1. Its vegetation guide
+loads the example only for geometry changes. Native acceptance checks containment,
+original terrain snapshots, member fingerprints, independent meter bounds and
+fresh screenshots without moving the player/main camera.
+
+On engines advertising `requestJobLookup`, `code_job` accepts an original
+`requestId` in place of `jobId` to recover a lost initial execution response.
+World/chat identity remains mandatory; no template is recompiled or run again.
+The acceptance runner preserves original request/template metadata on recovery
+and labels missing legacy provenance as unknown rather than replacing it with
+the current template version.
+
+Stdio ignores a discovery record naming an exited process and chooses its
+configured hub port before sending an action. A live process still takes
+precedence. Failed requests never retry mutations against another port; recover
+the original job/request instead. Tests cover native fresh-image feedback under
+stale discovery and verify exactly one dispatch for execution.
+
+Template metadata includes `requiredCapabilities` only for examples that require
+a newer helper. The single gateway checks those flags and exact world identity
+before dispatching source. Missing capability or changed session sends no
+construction request; templates with sequential fallbacks incur no extra read.

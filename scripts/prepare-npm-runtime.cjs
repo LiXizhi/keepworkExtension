@@ -1,0 +1,15 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const root = path.resolve(__dirname, '..');
+const source = path.join(root, 'apps/mcp-runtime');
+const dest = path.join(source, 'release/npm');
+const pkg = JSON.parse(fs.readFileSync(path.join(source, 'package.json')));
+pkg.keepworkCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+delete pkg.scripts; delete pkg.devDependencies; delete pkg.private;
+pkg.repository = { type: 'git', url: 'git+https://github.com/LiXizhi/keepworkExtension.git', directory: 'apps/mcp-runtime' };
+fs.mkdirSync(dest, { recursive: true });
+fs.cpSync(path.join(source, 'dist'), path.join(dest, 'dist'), { recursive: true });
+fs.copyFileSync(path.join(source, 'README.md'), path.join(dest, 'README.md'));
+fs.writeFileSync(path.join(dest, 'package.json'), JSON.stringify(pkg, null, 2));
+console.log(dest);

@@ -29,3 +29,18 @@ insufficient views.
 Retain a compact local design/review record for long tasks: component names,
 dimensions, palette, source files, job IDs, fixed scene origin, captures and
 unresolved differences. A record supports resuming; it is not visual evidence.
+
+## Unfamiliar structures
+
+When unsure how to represent a subject economically, search online for Minecraft
+build photos, templates or schematics as temporary visual references. Learn the
+structural trick: silhouette, negative space, stair/slab/rail combinations and how
+few blocks imply a complex detail. Do not copy/download those references into this
+skill or its templates, or add external build catalogs to the skill. Borrow the
+construction technique rather than importing an entire schematic. Adapt the idea
+to verified Paracraft names/IDs and meter scale; Minecraft numerical IDs and
+schematic formats do not map directly. Block out the borrowed silhouette with a
+small number of blocks and inspect it in a fresh screenshot before adding detail.
+Prefer a compact native-block solution, then use miniature color voxels or Paracraft
+BMax when native shapes cannot express the requested result. Do not force every
+subject onto a whole-meter grid or inflate its size for detail.

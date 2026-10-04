@@ -1,7 +1,7 @@
 {
   "name": "keepwork-mcp-runtime",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.31",
+  "private": false,
   "description": "Standalone Keepwork MCP runtime",
   "license": "MIT",
   "bin": {
@@ -26,5 +26,16 @@
     "extract-zip": "2.0.1",
     "tar": "7.5.22",
     "typescript": "^5.3.0"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   }
 }

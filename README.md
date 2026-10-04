@@ -32,6 +32,7 @@ This repository contains the shared Keepwork MCP runtime and its separately pack
 - `src/core` and `src/mcp`: shared local capabilities and MCP server
 - `apps/vscode-extension`: VS Code/Cursor extension, embedded CLI launcher and VSIX packaging
 - `apps/local-helper`: Windows tray helper and unified MCP + local-model installer packaging
+- `apps/aichat-desktop`: Windows/macOS AIChat window, native folder grants and PTY, independently updated MCP; see [desktop setup and releases](apps/aichat-desktop/README.md)
 - `apps/local-model-runtime`: staged Windows x64 model service bundled only by Local Helper; never part of the VSIX
 - `apps/mcp-runtime`: standalone NodeRuntime for Windows x64 and macOS arm64/x64; [build and automatic CDN release](apps/mcp-runtime/README.md), [external download contract](docs/node-runtime-cdn.md)
 

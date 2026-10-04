@@ -1,0 +1,86 @@
+name: Build KeepWork 第二大脑
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish signed installers and promote desktop updates
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: aichat-desktop-release
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, platform: win32, arch: x64, runtime: windows-x64 }
+          - { runner: macos-15, platform: darwin, arch: arm64, runtime: macos-arm64 }
+          - { runner: macos-15-intel, platform: darwin, arch: x64, runtime: macos-x64 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      KP_RUNTIME_NODE_VERSION: 22.23.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.23.2', architecture: '${{ matrix.arch }}' }
+      - run: npm ci
+      - run: npm ci --prefix apps/mcp-runtime
+      - run: npm ci --prefix apps/aichat-desktop
+      - run: npm run check:shared
+      - run: npm run check --prefix apps/aichat-desktop
+      - run: node apps/aichat-desktop/scripts/native-smoke.cjs
+      - name: Verify Electron bridge against AIChat source adapters
+        run: |
+          git clone --depth 1 https://code.kp-para.cn/paracraft/apps "$RUNNER_TEMP/aichat-source"
+          export AICHAT_SOURCE_DIR="$RUNNER_TEMP/aichat-source/official/apps/tools/AIChat"
+          node apps/aichat-desktop/scripts/electron-smoke.cjs
+      - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+      - run: npm run smoke --prefix apps/mcp-runtime
+      - name: Set runtime path
+        run: echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+      - name: Package desktop
+        working-directory: apps/aichat-desktop
+        env:
+          AICHAT_PUBLIC_RELEASE: ${{ inputs.publish && '1' || '0' }}
+          CSC_LINK: ${{ matrix.platform == 'win32' && secrets.WINDOWS_CSC_LINK || secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'win32' && secrets.WINDOWS_CSC_KEY_PASSWORD || secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ '${{ matrix.platform }}' == win32 ]]; then npm run make:win; else npm run make:mac -- --${{ matrix.arch }}; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            apps/aichat-desktop/release/*.exe
+            apps/aichat-desktop/release/*.dmg
+            apps/aichat-desktop/release/*.zip
+            apps/aichat-desktop/release/*.blockmap
+            apps/aichat-desktop/release/latest*.yml
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment: aichat-desktop-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'desktop-*', path: desktop-release }
+      - name: Upload binaries before promoting each platform feed
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+        run: |
+          for target in win32-x64 darwin-arm64 darwin-x64; do
+            node scripts/publish-desktop.cjs --dir "desktop-release/desktop-$target" --target "$target"
+          done

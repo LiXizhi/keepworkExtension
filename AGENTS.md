@@ -57,6 +57,8 @@ The repository root is a private shared-runtime package. Product manifests, entr
 | `src/core/fsServe.ts` | Loopback file overlay (`GET /fs/file`) + AIChat local-disk workspace (`/fs/list` `/fs/search` `/fs/stat` PUT/DELETE) |
 | `src/mcp/server.ts` | MCP tool registration (`run_terminal`, `grep_files`, `mcp_status`, `web_search`, `fetch_url`) |
 | `src/mcp/paracraftTools.ts` | Creation jobs, official wiki, fresh MCP images, stdio singleton-hub forwarding; engine-owned API documentation |
+| `src/mcp/paracraftTemplates.ts` | Lazy packaged-template metadata, deterministic native source and named RGB palette overrides; tests in `scripts/paracraft-template.test.cjs` |
+| `src/mcp/paracraftJobResult.ts` | Display-only compact creation results and same-job full recovery; tests in `scripts/paracraft-creation.test.cjs` |
 | `src/mcp/http.ts` | Streamable HTTP, CORS/PNA, session map, admin API |
 | `src/mcp/sessions.ts` | Connected clients + in-memory call history (paged list) |
 | `src/mcp/stdio.ts` | stdio transport for Cursor (does not take 8089) |

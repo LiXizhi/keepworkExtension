@@ -144,6 +144,9 @@ async function stageRuntime(nodeVersion, target) {
   if (!target.isWindows) fs.chmodSync(targetNode, 0o755);
 
   fs.copyFileSync(path.join(runtimeRoot, 'package.json'), path.join(stageApp, 'package.json'));
+  if (fs.existsSync(path.join(runtimeRoot, 'dist/skills'))) {
+    fs.cpSync(path.join(runtimeRoot, 'dist/skills'), path.join(stageApp, 'skills'), { recursive: true });
+  }
   fs.copyFileSync(path.join(runtimeRoot, 'package-lock.json'), path.join(stageApp, 'package-lock.json'));
   npmCi(stageApp, target);
   fs.copyFileSync(path.join(runtimeRoot, 'dist/cli.cjs'), path.join(stageApp, 'cli.cjs'));
@@ -151,6 +154,7 @@ async function stageRuntime(nodeVersion, target) {
   const runtimePackage = {
     name: packageJson.name,
     version: packageJson.version,
+    commit: require('node:child_process').execFileSync('git', ['rev-parse', 'HEAD'], { cwd: runtimeRoot, encoding: 'utf8' }).trim(),
     private: true,
     dependencies: packageJson.dependencies,
   };

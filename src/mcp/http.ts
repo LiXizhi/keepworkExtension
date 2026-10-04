@@ -164,6 +164,10 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     ok: true,
                     name: SERVER_NAME,
                     version: SERVER_VERSION,
+                    ...(process.env.KEEPWORK_MCP_RUNTIME_VERSION || process.env.KEEPWORK_MCP_BUILD_VERSION
+                        ? { runtimeVersion: process.env.KEEPWORK_MCP_RUNTIME_VERSION || process.env.KEEPWORK_MCP_BUILD_VERSION } : {}),
+                    ...(process.env.KEEPWORK_MCP_RUNTIME_COMMIT || process.env.KEEPWORK_MCP_BUILD_COMMIT
+                        ? { runtimeCommit: process.env.KEEPWORK_MCP_RUNTIME_COMMIT || process.env.KEEPWORK_MCP_BUILD_COMMIT } : {}),
                     ...(opts?.hostKind ? { hostKind: opts.hostKind } : {}),
                     ...(opts?.hostVersion
                         ? { hostVersion: opts.hostVersion }

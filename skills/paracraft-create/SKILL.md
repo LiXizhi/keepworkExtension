@@ -54,6 +54,12 @@ On resume, inspect the saved scene and stale members before changing anything.
 Keep the chosen origin fixed. Use named-group revisions rather than rebuilding
 unrelated art. Persist the final generator when saving is in scope.
 
+For unfamiliar shapes, search Minecraft build images, templates or schematics
+when useful and borrow economical ways to suggest complex forms with few blocks.
+Keep external references out of this skill; if native shapes still fall short,
+use Paracraft BMax or miniature color voxels. See
+[reference-analysis.md](references/reference-analysis.md).
+
 ## Design and build
 
 For a simple prop, a brief component list and a visual check may suffice. For a
@@ -85,6 +91,27 @@ Examples: [pavilion.lua](examples/pavilion.lua), [idle-wave.lua](examples/idle-w
 and [revision.lua](examples/revision.lua). They are working starting points, not
 required designs. Read an example before executing it: the first two explicitly
 save source/manifests and export world-local assets with fixed example names.
+
+Choose native IDs by appearance and habitat, not Minecraft numeric IDs. For
+plants, ground/water or textiles, load only the relevant palette in
+[world-materials.md](references/world-materials.md).
+
+For animated small animals, load [animals.md](references/animals.md); verify
+standalone geometry and actual poses before claiming a completed animation.
+
+For human characters at realistic scale, load [characters.md](references/characters.md).
+
+For cars, fans, wheels and propellers, load [moving-objects.md](references/moving-objects.md)
+for rigid-part pivots and verified rotations.
+For boats and waterside previews, load [boats.md](references/boats.md).
+For airplanes and propeller assemblies, load [aircraft.md](references/aircraft.md).
+
+For an existing packaged design, use `template_info` and `run_template` to avoid
+copying its Lua into the chat. See [connection.md](references/connection.md).
+
+For trees, flowers and grass, load [vegetation.md](references/vegetation.md) and
+only its selected template. Reuse deterministic generators rather than writing
+individual placements or returning full member lists after each edit.
 
 ## Operational invariants
 

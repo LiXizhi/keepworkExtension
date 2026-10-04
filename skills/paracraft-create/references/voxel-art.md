@@ -5,6 +5,13 @@ and cones can form architecture and stylized organic shapes. Plan overlaps
 explicitly: destinations are occupied by default, and cells belong to named
 groups. Build trim and body in separate non-overlapping regions where possible.
 
+For a color-only prop assembled from many small boxes, use `voxelBoxes` when
+capabilities advertise `voxelBoxBatch`. Supply one group's box list and one
+fractional `size`; it plans and writes each carrier once. Use `replace=true` only
+for intentional ordered overlaps. Maximum 512 boxes and 65,536 aggregate scanned
+voxels per call; split larger designs by logical group. See the lazy picnic-table
+template for a sequential fallback on older engines.
+
 A block represents one real-world meter for authoring; `size=0.25` means a
 25 cm voxel and `size=1/16` means a 6.25 cm voxel. Keep realistic object dimensions
 and refine the voxel grid to fit details, rather than making the object larger.
@@ -21,6 +28,11 @@ fractional cells share a whole-block carrier; keep such a carrier within one
 editable group. Negative absolute coordinates are valid, but all local geometry
 must remain inside the scene's fixed bounds. Grid rotation is in quarter turns
 around Y; native model instances support continuous facing/pitch/roll and scale.
+Editable miniature voxel carriers currently collide as whole meter cells. For
+walkways and headroom, reserve whole empty cells for the player; a visible beam
+at y=2.5 still occupies its collision carrier from y=2. Use native partial shapes
+for flush walkable surfaces. Exported mesh dimensions and visual clearance do not
+prove source-world collision clearance.
 
 For BMax props and character bodies, use only ID 10 color blocks and miniature
 color voxels. Keep BoneBlocks as rig controls and MovieBlocks as animation controls.
@@ -103,3 +115,6 @@ A raw lower-door placement does not automatically reproduce `ItemDoor:TryCreate`
 upper-window placement. Verify support-dependent windows, doors, foliage and
 fence joins after all neighboring blocks are present. Use named groups and helper
 replacement/removal so revisions retain bounds, stale checks and undo behavior.
+
+For native flowers/grass, terrain/water and wool/carpet name-to-ID palettes with
+appearance and habitat notes, read [world-materials.md](world-materials.md).

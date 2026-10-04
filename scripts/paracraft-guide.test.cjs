@@ -6,7 +6,7 @@ const ts = require('typescript');
 require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText, filename);
-const { registerCreationGuide, loadCreationGuide } = require('../src/mcp/paracraftGuide.ts');
+const { registerCreationGuide, loadCreationGuide, readCreationGuide } = require('../src/mcp/paracraftGuide.ts');
 const { createMcpServer } = require('../src/mcp/server.ts');
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
@@ -51,4 +51,23 @@ test('one CLI and one root skill, with schemas and references loaded on demand',
     assert.equal((await call('not_an_action')).isError, true);
     assert.equal((await call('run_code', {code:'return 1'})).isError, true);
   } finally { await client.close();await server.close(); }
+});
+
+
+test('one guide read performs one file read and no catalog scan', () => {
+  const originalRead=fs.readFileSync, originalList=fs.readdirSync;
+  const reads=[];
+  fs.readFileSync=(file,...args)=>{reads.push(String(file));return originalRead(file,...args);};
+  fs.readdirSync=()=>{throw new Error('Runtime guide request enumerated the catalog');};
+  try {
+    const guide=readCreationGuide('references/vegetation.md');
+    assert.match(guide.content,/Trees, flowers and grass/);
+    assert.equal(reads.length,1);
+    assert.ok(reads[0].replace(/\\/g,'/').endsWith('/references/vegetation.md'));
+    for (const invalid of ['../SKILL.md','references/../SKILL.md','/SKILL.md',
+      'C:/SKILL.md','references\\vegetation.md','references/missing.md','package.json']) {
+      assert.throws(()=>readCreationGuide(invalid),/unknown_guide/);
+    }
+    assert.equal(reads.length,1,'Rejected guide read touched content');
+  } finally {fs.readFileSync=originalRead;fs.readdirSync=originalList;}
 });

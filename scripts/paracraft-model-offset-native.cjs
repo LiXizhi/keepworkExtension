@@ -1,0 +1,17 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {Client}=require('@modelcontextprotocol/sdk/client/index.js'),{StdioClientTransport}=require('@modelcontextprotocol/sdk/client/stdio.js');
+const table=JSON.parse(fs.readFileSync('out/rsi/048/latest-job.json')),lantern=JSON.parse(fs.readFileSync('out/rsi/052/build/latest-job.json'));
+const [outArg,exampleArg,requestArg]=process.argv.slice(2);
+assert.deepEqual(table.identity,lantern.identity);const out=path.resolve(outArg||'out/rsi/054');fs.mkdirSync(out,{recursive:true});
+let code=fs.readFileSync(exampleArg||'skills/paracraft-create/examples/model-offset.lua','utf8').replace('blocktemplates/table.x',table.result.prop.filename).replace('blocktemplates/lantern.x',lantern.result.prop.filename).replace('local info=s:inspect();','s:save();local info=s:inspect();');
+(async()=>{const c=new Client({name:'model-offset-native',version:'1'});await c.connect(new StdioClientTransport({command:process.execPath,args:[path.resolve('apps/vscode-extension/dist/cli.js'),'--stdio']}));
+ const raw=async(action,params={})=>{const r=await c.callTool({name:'paracraft_cli',arguments:{action,clientId:table.identity.clientId,chatSessionId:table.authoringSession,params}});assert(!r.isError,r.content[0]?.text);return r;};const call=async(action,p)=>JSON.parse((await raw(action,p)).content[0].text);
+ try{const caps=(await call('get_creation_capabilities')).result;assert.deepEqual(caps.identity,table.identity);assert(caps.modelOffset);const before=(await call('get_scene_info')).result;
+  const handleFile=path.join(out,'job.json');let handle;
+  if(fs.existsSync(handleFile)){handle=JSON.parse(fs.readFileSync(handleFile));assert.deepEqual(handle.identity,table.identity);}
+  else{const request={expectedIdentity:table.identity,requestId:requestArg||'rsi-model-offset-054',code};fs.writeFileSync(path.join(out,'request.json'),JSON.stringify(request,null,2));const first=(await call('run_code',request)).result;handle={identity:table.identity,jobId:first.jobId};fs.writeFileSync(handleFile,JSON.stringify(handle,null,2));const repeat=(await call('run_code',request)).result;assert.equal(repeat.jobId,handle.jobId);}
+  let job=(await call('code_job',{expectedIdentity:table.identity,jobId:handle.jobId})).result;const deadline=Date.now()+125000;while(job.state==='running'&&Date.now()<deadline){await new Promise(r=>setTimeout(r,500));job=(await call('code_job',{expectedIdentity:table.identity,jobId:handle.jobId})).result;}fs.writeFileSync(path.join(out,'latest-job.json'),JSON.stringify(job,null,2));assert.equal(job.state,'completed',job.error);
+  const images=[];for(const view of ['overview','detail']){const r=await raw('camera_capture',{expectedIdentity:table.identity,...job.result[view]});const image=r.content.find(x=>x.type==='image');assert(image);const file=path.join(out,view+'.jpg');fs.writeFileSync(file,Buffer.from(image.data,'base64'));images.push({file,metadata:JSON.parse(r.content[0].text)});}
+  const after=(await call('get_scene_info')).result;assert.deepEqual(before.player,after.player);assert.deepEqual(before.camera,after.camera);fs.writeFileSync(path.join(out,'report.json'),JSON.stringify({identity:table.identity,jobId:job.jobId,images,playerUnchanged:true,cameraUnchanged:true,reusedFiles:[table.result.prop.filename,lantern.result.prop.filename]},null,2));console.log('PASS reused model offsets and fresh world views from the retained job');
+ }finally{await c.close();}
+})().catch(e=>{console.error(e.message);process.exitCode=1;});

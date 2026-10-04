@@ -1,5 +1,16 @@
 # Keepwork MCP NodeRuntime
 
+## Stable desktop and npm releases
+
+The separate `keepwork-stable.yml` workflow publishes matching-version npm CLI, VSIX and
+native runtime artifacts from one commit. Its versioned archives and stable platform JSON
+live under `keepwork/mcp-stable/`; the existing every-main six-file feed below is unchanged.
+The public npm package is `keepwork-mcp-runtime` (Node 22+); npm registry publication and
+publisher setup are required before users can install it. China users can use the read-only
+`https://registry.npmmirror.com` mirror. AIChat Desktop uses bundled/downloaded NodeRuntime
+archives and does not require npm on the user's computer. See `apps/aichat-desktop/README.md`
+from the repository root for release credentials and retry instructions.
+
 Standalone Keepwork MCP with a bundled Node.js executable and production dependencies.
 Each ZIP includes `runtime.json`, `LICENSE-node.txt`, `app/cli.cjs`,
 `app/package.json`, `app/node_modules`, and either `node.exe` (Windows) or `bin/node`
