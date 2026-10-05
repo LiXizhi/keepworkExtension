@@ -3,6 +3,39 @@ import { readCreationGuide } from './paracraftGuide';
 
 // Curated runnable templates, not a recursive directory catalog in every call.
 const templates = {
+    timber_cottage: { path: 'examples/timber-cottage.lua', description: '5 x 5 m unfurnished native timber/wool cottage: 3 m walls, five tinted panes, open 2 m door, colored stair roof with 5.5 m slab ridge, flush floor/path and thin carpet. No exports.', dimensions: [7, 6, 8], assetCount: 0,
+        requiredCapabilities: ['doorAssemblies', 'terrainEditing', 'nativeBlockNames', 'sceneCameraPoints'], palette: { wall: '#E5DDC8', roof: '#8C5B48', glass: '#91B9B9', rug: '#BE997C' } },
+    doorway: { path: 'examples/doorway.lua', description: 'Two native 1 x 2 m wooden doors, one closed and one open, in timber frames over a flush wood floor. Two-cell helper preflight and one undo command per door; no exports.', dimensions: [6, 3, 4], assetCount: 0,
+        requiredCapabilities: ['doorAssemblies', 'terrainEditing', 'nativeBlockNames', 'sceneCameraPoints'], palette: { glass: '#AAC9C9' } },
+    pocket_pond: { path: 'examples/pocket-pond.lua', description: '4 x 4 m garden with a flush 2 x 2 m native-water pond, solid masonry bed, horizontal lily pad, three bank plants and 1 m gravel path. Twelve backed-up ground cells; no exports.', dimensions: [4, 2, 4], assetCount: 0,
+        requiredCapabilities: ['nativeBlockNames', 'sceneCameraPoints', 'terrainEditing'], palette: {} },
+    trotting_dog: { path: 'examples/trotting-dog.lua', description: 'Small floppy-eared dog, about 0.55 m nose-to-rump and 0.44 m tall. Three color-only meshes, four independent rigid legs and tail; editable idle/trot in place, no knee IK or embedded clips.', dimensions: [9, 3, 7], assetCount: 3,
+        requiredCapabilities: ['voxelBoxBatch', 'keyframeBatches', 'sceneCameraPoints'], palette: { fur: '#B89166', cream: '#E8D6B6', ear: '#6F513B', nose: '#302E2B', collar: '#5D9F9B' } },
+    reading_corner: { path: 'examples/reading-corner.lua', description: '4 x 4 m open cutaway room, 3 m walls with native glass pane, flush wood floor and thin patterned native carpet. Reuses a 1.5 m bench and 0.875 m planter at scale 1; no exports.', dimensions: [4, 3, 4], assetCount: 0,
+        requiredCapabilities: ['nativeBlockNames', 'sceneCameraPoints', 'modelOffset', 'modelContactPlacement', 'modelDependencies', 'creationModelReferences'],
+        assetSlots: { bench: 'blocktemplates/bench.x', plant: 'blocktemplates/plant.x' }, palette: { wall: '#E5DDCA', glass: '#9EC1C4', rug: '#C39B7B', stripe: '#7EA79B' } },
+    flower_border: { path: 'examples/flower-border.lua', description: '4 x 4 m native rose/dandelion border with sparse grass, visible bare soil and a flush 1 m gravel path. Four native plants, nine backed-up ground cells; no exports.', dimensions: [4, 2, 4], assetCount: 0,
+        requiredCapabilities: ['nativeBlockNames', 'sceneCameraPoints'], palette: {} },
+    birdbath_garden: { path: 'examples/birdbath-garden.lua', description: '7 x 7 m seating garden: reused 1.5 m bench and 0.75 m decorative birdbath, native oak-leaf hedges/flowers, flush paving and open front. Two scale-1 instances, no exports or native fluid.', dimensions: [7, 3, 7], assetCount: 0,
+        requiredCapabilities: ['nativeBlockNames', 'modelOffset', 'modelContactPlacement', 'modelDependencies'],
+        assetSlots: { bench: 'blocktemplates/bench.x', bath: 'blocktemplates/bath.x' }, palette: { rail: '#F2EBDD' } },
+    sitting_cat: { path: 'examples/sitting-cat.lua', description: 'Small seated tabby, about 0.59 m including curved tail and 0.45 m to pointed ears; pale paws/muzzle, pink ears, green eyes and side stripes. Two color-only scale-1 meshes and rigid tail idle, no gait.', dimensions: [7, 3, 7], assetCount: 2, requiredCapabilities: ['voxelBoxBatch', 'keyframeBatches'],
+        palette: { fur: '#C2A67D', cream: '#E2D6B9', pink: '#C6938D', stripe: '#7D6957', iris: '#95B0A8', eyes: '#35413B' } },
+    hopping_rabbit: { path: 'examples/hopping-rabbit.lua', description: '0.453 m long stylized rabbit with four planted paws, muzzle/tail and two independently tilting ears. Editable idle and toy-like rigid hop; three color-only scale-1 meshes, no embedded clips.', dimensions: [7, 3, 7], assetCount: 3, requiredCapabilities: ['voxelBoxBatch', 'keyframeBatches'],
+        palette: { fur: '#B19B81', cream: '#DDD2BB', pink: '#C69091', eyes: '#32353A' } },
+    garden_birdbath: { path: 'examples/garden-birdbath.lua', description: '0.75 m round birdbath, 0.6875 m high, stepped pedestal and hollow raised rim; recessed blue decorative basin, color-only scale-1 asset, no native liquid.', dimensions: [6, 3, 6], assetCount: 1, requiredCapabilities: ['voxelBoxBatch'],
+        palette: { stone: '#AAA89B', edge: '#CBC9B9', water: '#6C9FA8' } },
+    bench_garden: { path: 'examples/bench-garden.lua', description: '5 × 6 m pocket garden: 1.5 m reused bench, two planters, flush native paving, pale rail and sparse native roses/yellow flowers/grass. No exports.', dimensions: [5, 3, 6], assetCount: 0,
+        requiredCapabilities: ['nativeBlockNames', 'modelOffset', 'modelContactPlacement', 'modelDependencies'],
+        assetSlots: { bench: 'blocktemplates/bench.x', plant: 'blocktemplates/plant.x' }, palette: { rail: '#F2EBDD' } },
+    garden_bench: { path: 'examples/garden-bench.lua', description: '1.5 m two-seat garden bench, open wood slats, dark narrow frames and lower brace; 0.4375 m seat, 0.9375 m top, color-only scale-1 asset.', dimensions: [7, 3, 6], assetCount: 1, requiredCapabilities: ['voxelBoxBatch'],
+        palette: { timber: '#A7815E', light: '#BD9872', metal: '#454D50' } },
+    patio_cafe: { path: 'examples/patio-cafe.lua', description: '10 × 8 m terrace with two 0.75 m tables, four human-scale chairs, two tabletop lanterns, three planters, flush native wood/stone floor, white native fence and roses; 11 reused scale-1 instances, no exports.', dimensions: [10, 3, 8], assetCount: 0,
+        requiredCapabilities: ['modelOffset', 'modelContactPlacement', 'modelDependencies'],
+        assetSlots: { table: 'blocktemplates/table.x', chair: 'blocktemplates/chair.x', plant: 'blocktemplates/plant.x', lantern: 'blocktemplates/lantern.x' }, palette: { rail: '#FFFFFF' } },
+    tabletop_lantern: { path: 'examples/model-contact.lua', description: 'Reuse a verified 0.75 m bottom-pivot round table and 0.5 m lantern at scale 1; flush native floor and exact tabletop contact. No exports; two required world-local assets.', dimensions: [6, 3, 6], assetCount: 0,
+        requiredCapabilities: ['modelOffset', 'modelContactPlacement', 'modelDependencies'],
+        assetSlots: { table: 'blocktemplates/table.x', lantern: 'blocktemplates/lantern.x' }, palette: {} },
     patio_lantern: { path: 'examples/patio-lantern.lua', description: '0.25 m wide, 0.5 m tall decorative candle lantern: thin open frame, stepped cap and loop handle; color-only scale-1 asset, no light emission.', dimensions: [6, 3, 6], assetCount: 1, requiredCapabilities: ['voxelBoxBatch'],
         palette: { metal: '#3C4B4C', edge: '#63716D', wax: '#E6D7AE', flame: '#E8AF56' } },
     terracotta_planter: { path: 'examples/terracotta-planter.lua', description: '0.5 m wide, 0.875 m tall leafy planter with tapered hollow terracotta walls, thick rim, soil and exposed stem; reusable color-only scale-1 asset.', dimensions: [6, 3, 6], assetCount: 1, requiredCapabilities: ['voxelBoxBatch'],
@@ -43,9 +76,43 @@ const templates = {
         palette: { bark: '#5D4839', barkLight: '#786048' } },
     cherry_garden: { path: 'examples/cherry-garden.lua', description: '6 m branching cherry, native blossoms, fallen petals and a flush path.', dimensions: [9, 7, 8], assetCount: 0,
         palette: { bark: '#725347', barkLight: '#93715D', petal: '#EBC3D1' } },
-    mini_character: { path: 'examples/mini-character.lua', description: '1.75 m color-voxel person with a native two-bone rig and embedded idle/wave IDs.', dimensions: [12, 5, 8], assetCount: 2,
+    mini_character: { path: 'examples/mini-character.lua', description: '1.75 m color-voxel person with a native two-bone rig and embedded idle/wave IDs.', dimensions: [12, 5, 8], assetCount: 2, requiredCapabilities: ['keyframeBatches'],
         palette: { shoes: '#373F50', trousers: '#3B526F', shirt: '#559E94', skin: '#E9C8A6', hair: '#514236', eyes: '#303340', mouth: '#B97F70' } },
 } as const;
+
+export const creationTemplateCategories = ['architecture', 'gardens', 'furniture', 'animals', 'characters', 'moving_objects'] as const;
+const categories: Record<typeof creationTemplateCategories[number], readonly (keyof typeof templates)[]> = {
+    architecture: ['timber_cottage', 'doorway', 'reading_corner', 'garden_pergola'],
+    gardens: ['pocket_pond', 'flower_border', 'birdbath_garden', 'bench_garden', 'patio_cafe', 'pond_garden', 'conifer_garden', 'cherry_garden'],
+    furniture: ['garden_birdbath', 'garden_bench', 'tabletop_lantern', 'patio_lantern', 'terracotta_planter', 'bistro_table', 'garden_chair', 'garden_parasol', 'picnic_table'],
+    animals: ['trotting_dog', 'sitting_cat', 'hopping_rabbit', 'curious_fox', 'skinned_fox', 'idle_fox', 'butterfly', 'bird'],
+    characters: ['mini_character'],
+    moving_objects: ['banking_aircraft', 'light_aircraft', 'rowing_boat', 'compact_car', 'desk_fan'],
+};
+
+// Discovery reads curated metadata only; source/hash loading stays name-specific.
+export function searchCreationTemplates(options: { category?: string; query?: string; offset?: number; limit?: number } = {}) {
+    const offset = options.offset ?? 0, limit = options.limit ?? 5;
+    if (!Number.isInteger(offset) || offset < 0 || offset > 10000 || !Number.isInteger(limit) || limit < 1 || limit > 10) throw new Error('invalid_template_page');
+    if (options.category && !Object.prototype.hasOwnProperty.call(categories, options.category)) throw new Error('unknown_template_category');
+    if (options.query !== undefined && (typeof options.query !== 'string' || options.query.trim().length === 0 || options.query.length > 120)) throw new Error('invalid_template_query');
+    const terms = options.query?.trim().toLowerCase().split(/\s+/) || [];
+    const names = (options.category ? [...categories[options.category as keyof typeof categories]] : Object.keys(templates))
+        .sort().filter(name => {
+            const entry = templates[name as keyof typeof templates];
+            const text = (name.replace(/_/g, ' ') + ' ' + entry.description).toLowerCase();
+            return terms.every(term => text.includes(term));
+        });
+    const page = names.slice(offset, offset + limit).map(name => {
+        const entry = templates[name as keyof typeof templates];
+        return { template: name, description: entry.description, dimensions: entry.dimensions,
+            writesAssets: entry.assetCount > 0, assetCount: entry.assetCount,
+            assetRoles: 'assetSlots' in entry ? Object.keys(entry.assetSlots) : [],
+            requiredCapabilities: 'requiredCapabilities' in entry ? entry.requiredCapabilities : [] };
+    });
+    return { templates: page, categories: creationTemplateCategories, total: names.length, offset,
+        nextOffset: offset + page.length < names.length ? offset + page.length : null };
+}
 
 function load(name: string) {
     if (!Object.prototype.hasOwnProperty.call(templates, name)) throw new Error('unknown_template: load the relevant skill guide');
@@ -80,6 +147,7 @@ export interface TemplateInput {
     origin?: [number, number, number];
     saveSource?: boolean;
     palette?: Record<string, string>;
+    assets?: Record<string, string>;
 }
 export function compileCreationTemplate(input: TemplateInput, authoringSession: string) {
     const { entry, source, hash } = load(input.template);
@@ -102,11 +170,24 @@ export function compileCreationTemplate(input: TemplateInput, authoringSession: 
     }
     // One simultaneous pass: swapping two palette colors must not cascade.
     code = code.replace(/#[A-Fa-f0-9]{6}/g, color => overrides.get(color.toUpperCase()) || color);
+    const slots: Record<string, string> = 'assetSlots' in entry ? entry.assetSlots : {};
+    const assets = input.assets || {};
+    for (const role of Object.keys(assets)) if (!Object.prototype.hasOwnProperty.call(slots, role)) throw new Error('unknown_asset_role: read template_info');
+    const replacements = new Map<string, string>();
+    for (const [role, placeholder] of Object.entries(slots)) {
+        const file = assets[role];
+        if (!file) throw new Error(`missing_asset_role: ${role}`);
+        if (file.length > 512 || !/^blocktemplates\/[A-Za-z0-9_/-]+\.(?:x|bmax)$/.test(file) || file.includes('//')) throw new Error('invalid_asset_path: use a world-local blocktemplates model');
+        if (!source.includes(`"${placeholder}"`)) throw new Error('template_asset_slot_changed');
+        replacements.set(placeholder, file);
+    }
+    // Simultaneous substitution preserves role order when filenames are swapped.
+    code = code.replace(/"(blocktemplates\/[A-Za-z0-9_/-]+\.(?:x|bmax))"/g, (quoted, file) => replacements.has(file) ? `"${replacements.get(file)}"` : quoted);
     if (input.saveSource) {
         const saveMarker = 'local info=s:inspect();';
         if (code.split(saveMarker).length !== 2) throw new Error('template_save_marker_changed');
         code = code.replace(saveMarker, 's:save();' + saveMarker);
     }
     if (Buffer.byteLength(code) > 65536) throw new Error('template_source_too_large');
-    return { code, requiredCapabilities: 'requiredCapabilities' in entry ? [...entry.requiredCapabilities] : [], metadata: { template: input.template, templateHash: hash, sceneName, palette: input.palette || {}, sourceSavedWhenCompleted: !!input.saveSource, worldSaved: false } };
+    return { code, requiredCapabilities: 'requiredCapabilities' in entry ? [...entry.requiredCapabilities] : [], metadata: { template: input.template, templateHash: hash, sceneName, palette: input.palette || {}, assets, sourceSavedWhenCompleted: !!input.saveSource, worldSaved: false } };
 }

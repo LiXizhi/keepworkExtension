@@ -15,6 +15,10 @@ construction groups, BoneBlocks and the authoring MovieBlock. A second MovieBloc
 loads that file with only animation-ID keys, so verification cannot borrow the
 source actor's bone keys. Source saving is opt-in and world saving is explicit.
 
+The source actor batches its seven bone poses and two animation-ID starts in
+one `keyframes` call; the template requires `keyframeBatches`. Keep ID starts in
+the corresponding bone-pose frames so idle/wave intervals remain explicit.
+
 ## Small geometry, full-size joints
 
 Keep visible geometry in named component groups and controls in another group.

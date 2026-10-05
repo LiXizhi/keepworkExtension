@@ -26,6 +26,14 @@ and spacing; leave some ground visible. Use `surface` for a flush path.
 
 ## Fast starting point
 
+For a small sunny flower border, choose `flower_border`: a 4 × 4 m patch with
+three native red/yellow flowers, one grass tuft, a visible bare-soil gap and a
+flush 1 m gravel approach. It uses four native plant placements rather than
+handmade voxel petals. Nine ground cells retain original-soil backups. Read
+[flower-border.lua](../examples/flower-border.lua) only to change the arrangement.
+Remove the flower/grass groups before restoring the soil beneath them. Native
+plant textures supply their colors; do not recolor them through ColorBlock APIs.
+
 For water-side planting, query packaged `pond_garden`: a 12 × 11 m garden with
 an irregular ~5 m pond, native reeds/lily pads and sparse native grass/flowers.
 The gravel approach and stone bank are flush surface replacements; the bed,

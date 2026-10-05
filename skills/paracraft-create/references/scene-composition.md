@@ -9,6 +9,14 @@ Select native scene materials and structural shapes using the starter palette in
 [voxel-art.md](voxel-art.md): fences for rails, stairs/slopes for steps and roof
 transitions, textured wood/stone for surfaces, leaves for trees, and glass/windows/
 doors for openings. Keep exportable BMax props in separate color-block groups.
+For a compact building shell, lazy `timber_cottage` uses a 5 x 5 m footprint,
+3 m walls, a 5.5 m gabled stair roof and a 1 x 2 m open native doorway. It mixes
+textured logs, tinted wool, glass panes, colored stairs/slabs and thin carpet over
+a flush timber floor. The interior is 3 x 3 m and unfurnished. Inspect front,
+rear/side and the entrance clearance; the whole-block walls are deliberately
+stylized, not a claim of realistic wall thickness. Read
+[timber-cottage.lua](../examples/timber-cottage.lua) only for geometry changes.
+
 For a small open garden structure, query `garden_pergola`: approximately 4.25 m
 across, 2.5 m visible beneath the beams and 2 m whole-carrier collision headroom,
 with flush native paving and native fence
@@ -33,6 +41,19 @@ details and a reusable BMax prop. Adapt its dimensions and group layout to the
 requested design; it is a technical sample, not a universal architecture style.
 
 ## Meter-based proportions
+
+For an interior material study, choose lazy `reading_corner`: a 4 × 4 m open
+cutaway room with 3 m walls, a native glass pane, flush timber floor and a thin
+3 × 2 m patterned native carpet. Reuse a verified 1.5 m bench and 0.875 m planter
+through its two asset slots at scale 1; it exports nothing. Load
+[reading-corner.lua](../examples/reading-corner.lua) only to revise the layout.
+Keep carpet cells clear of model carriers, and inspect the floor/rug contact and
+window orientation. The open front/right sides are intentional review cutaways.
+Set model `facing` explicitly for repeatable layouts: an omitted native model
+direction can come from the current main camera on older engines. With
+`modelDefaultFacing:true`, the library defaults it to zero radians. Allow a small gap between the
+transformed prop bounds and nearby occupied carpet cells; the reading corner
+uses a 0.125 m bench offset rather than relying on exact face contact.
 
 Treat each authored block as one real-world meter; the main player is approximately
 1.75 m tall. Unless the brief gives other dimensions, start at ordinary human scale:
@@ -118,3 +139,39 @@ example exports no new asset and does not save source or the world automatically
 Read [model-contact.lua](../examples/model-contact.lua) for a lantern resting on
 a 0.75 m table, using distinct carriers and existing bottom-pivot scale-1 exports.
 Check both capabilities first and inspect the contact in a fresh side view.
+For that existing arrangement, use lazy `tabletop_lantern` and supply its `table`
+and `lantern` asset roles instead of reading/copying the Lua. Native dependency
+preflight rejects missing files and waits for geometry before changing the floor.
+
+To compose a small outdoor scene, lazy `patio_cafe` reuses those table/lantern
+assets plus `garden_chair` and `terracotta_planter` exports. Supply its four
+`assetSlots` from completed same-world jobs. It places two tables/four chairs,
+two tabletop lanterns and three planters at scale 1, keeping a walkable front and
+using native planks, stone paving, white fence and roses. The 10 × 8 m terrace
+replaces ground at floor level and keeps original-soil backups. No new exports.
+Inspect chairs facing inward, seating/table clearance, each lamp's contact and
+the open entrance before calling the arrangement finished. Load
+[patio-cafe.lua](../examples/patio-cafe.lua) only when changing the composition.
+
+For two-person seating, lazy `garden_bench` provides a 1.5 m slatted bench with
+the same 0.4375 m seat height, a 0.9375 m back and open dark frames. Read
+[garden-bench.lua](../examples/garden-bench.lua) when changing its geometry;
+reuse its color-only model at scale 1 rather than stretching a single chair.
+
+Lazy `bench_garden` composes that bench and two existing planter assets in a
+5 × 6 m pocket garden. It uses named native paving, fence, flowers and sparse
+grass, with a flush path and open front; supply its two world-local asset roles.
+Read [bench-garden.lua](../examples/bench-garden.lua) only for layout changes.
+
+Lazy `garden_birdbath` adds a 0.75 m round bowl on a 0.6875 m stepped pedestal.
+Its recessed blue color surface suggests water but has no liquid simulation or
+transparency. Read [garden-birdbath.lua](../examples/garden-birdbath.lua) for
+hollow row-span geometry; inspect it from above as well as the side.
+
+Lazy `birdbath_garden` composes that birdbath and `garden_bench` exports in a
+7 x 7 m seating garden. Supply verified same-world `bench` and `bath` assets;
+it exports nothing. Native oak leaves make short hedges, clustered red/yellow
+flowers leave gaps between patches, and grass stays off flush paving. Keep the
+front approach open and verify prop scale/contact from an oblique view. The
+birdbath still uses decorative color water. Read
+[birdbath-garden.lua](../examples/birdbath-garden.lua) only for layout changes.

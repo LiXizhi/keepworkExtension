@@ -2,6 +2,7 @@
 local tableFile="blocktemplates/table.x"
 local lanternFile="blocktemplates/lantern.x"
 local s=createScene({name="model_contact_demo",dimensions={6,3,6},terrainDepth=1})
+s:requireModels({tableFile,lanternFile})
 s:group("floor");s:surface({position={0,0,0},dimensions={6,1,5},blockId=68})
 s:group("table");local tableRef=s:model({position={2,0,2},offset={0.375,0,0},filename=tableFile,scale=1})
 s:group("lantern");local lanternRef=s:model({position={3,0,2},offset={-0.5,0.75,0},filename=lanternFile,scale=1})

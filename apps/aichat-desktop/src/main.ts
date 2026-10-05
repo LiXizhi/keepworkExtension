@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import { autoUpdater } from 'electron-updater';
 import { TerminalSessionManager } from '../../../src/core/terminalSessions';
 const { NativeFiles, atomicJson } = require('./files.cjs');
+const { defaultBrainFolder } = require('./brainFolder.cjs');
+const { checkGit, installGit } = require('./gitSetup.cjs');
 const { RuntimeSupervisor } = require('./runtime.cjs');
 const { ENTRY, trustedPage, assertSender, externalUrl } = require('./security.cjs');
 let devUrl = !app.isPackaged ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
@@ -23,6 +25,42 @@ const terminals = new TerminalSessionManager();
 const terminalIds = new Set<string>();
 let settingsFile: string;
 let settings = { openAtLogin: false, theme: 'light' };
+let serviceBusy = false, switchingPage = false;
+function reloadPage() {
+  if (devUrl && trustedPage(win.webContents.getURL(), devUrl)) win.webContents.reloadIgnoringCache();
+  else void win.loadURL(devUrl || ENTRY).catch((e: Error) => dialog.showErrorBox('AIChat', e.message));
+}
+async function useLocalSource() {
+  if (switchingPage) return;
+  switchingPage = true;
+  try {
+    const result = await dialog.showOpenDialog(win, { title: '选择包含 AIChat.html 的本地源码文件夹', properties: ['openDirectory'] });
+    if (result.canceled) return;
+    const { startDevelopmentServer } = require('./dev-server.cjs');
+    const server = await startDevelopmentServer(result.filePaths[0]);
+    developmentServer?.close(); developmentServer = server; devUrl = server.url;
+    menu(); await win.loadURL(devUrl);
+  } catch (error) { dialog.showErrorBox('本地服务器', String(error)); }
+  finally { switchingPage = false; }
+}
+async function mcpAction(action: 'status' | 'restart') {
+  if (serviceBusy || disableDevMcp) return;
+  serviceBusy = true; menu();
+  try {
+    if (action === 'restart') {
+      await runtime.restart();
+      if (devUrl) reloadPage();
+    } else {
+      const health = await runtime.refresh();
+      await dialog.showMessageBox(win, { title: 'Keepwork MCP 状态', message: `Keepwork MCP: ${runtime.state.state}`,
+        detail: `地址：http://127.0.0.1:8089\n管理应用：${runtime.state.owner}\n版本：${health?.runtimeVersion || health?.version || '未知'}\nPID：${health?.pid || '—'}\n工作目录：${health?.workspaceRoot || '—'}${runtime.state.error ? '\n' + runtime.state.error : ''}`,
+        buttons: ['关闭', '打开 Dashboard'], defaultId: 0 }).then(answer => {
+          if (answer.response === 1) return shell.openExternal('http://127.0.0.1:8089/dashboard');
+        });
+    }
+  } catch (error) { dialog.showErrorBox('Keepwork MCP', String(error)); }
+  finally { serviceBusy = false; menu(); }
+}
 function titlebarColors(theme: string) {
   return theme === 'dark' ? { color: '#18181f', symbolColor: '#d4d4dc' } : { color: '#f2f3f7', symbolColor: '#1a1a2e' };
 }
@@ -51,6 +89,20 @@ function menu() {
     { type: 'separator' },
     { label: `MCP: ${runtime?.state.state || 'starting'} ${runtime?.state.version || ''} (${runtime?.state.owner || 'desktop'})`, enabled: false },
     ...(runtime?.state.error ? [{ label: String(runtime.state.error).slice(0, 100), enabled: false }] : []),
+    { label: 'Keepwork MCP Server', submenu: [
+      { label: '查看状态…', enabled: !serviceBusy && !disableDevMcp, click: () => { void mcpAction('status'); } },
+      { label: '打开 Dashboard', click: () => { void shell.openExternal('http://127.0.0.1:8089/dashboard').catch((e: Error) => dialog.showErrorBox('Keepwork MCP', e.message)); } },
+      { label: serviceBusy ? '正在操作…' : '重启 Keepwork MCP Server', enabled: !serviceBusy && !disableDevMcp, click: () => { void mcpAction('restart'); } },
+    ] },
+    { label: 'AIChat 服务器', submenu: [
+      { label: devUrl || ENTRY, enabled: false },
+      { label: '使用本地源码服务器…', click: () => { void useLocalSource(); } },
+      { label: '使用线上服务器', click: () => {
+        if (switchingPage) return;
+        developmentServer?.close(); developmentServer = undefined; devUrl = ''; menu(); reloadPage();
+      } },
+      { label: '重新加载（本地跳过缓存）', accelerator: 'CmdOrCtrl+R', click: reloadPage },
+    ] },
     { label: runtime?.state.pending ? 'MCP 更新将在退出并重新打开后生效' : `桌面更新: ${updateState}`, enabled: false },
     ...(updateError ? [{ label: `更新失败: ${updateError.slice(0, 100)}`, enabled: false }] : []),
     { label: '检查更新', click: () => { void checkUpdates(); } },
@@ -65,7 +117,7 @@ function menu() {
   applicationMenu = Menu.buildFromTemplate([
     { label: PRODUCT_NAME, submenu: items },
     { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-    { label: '视图', submenu: [{ label: '重新加载 AIChat', click: () => { void win.loadURL(devUrl || ENTRY).catch(() => {}); } }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
+    { label: '视图', submenu: [{ label: '重新加载 AIChat', click: reloadPage }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] },
   ]);
   Menu.setApplicationMenu(applicationMenu);
   if (process.platform !== 'darwin') win.setMenu(null);
@@ -93,14 +145,20 @@ function setupBridge() {
     }
     // Targets come from the main process, never from renderer-supplied URLs.
     if (method === 'openEntry') return shell.openExternal(devUrl || ENTRY);
-    if (method === 'reloadPage') { win.webContents.reload(); return; }
+    if (method === 'reloadPage') { reloadPage(); return; }
     if (method === 'menu') {
       if (!Number.isInteger(args.index) || args.index < 0 || args.index > 2) throw new Error('Invalid menu');
       applicationMenu.items[args.index]?.submenu?.popup({ window: win, x: 8 + args.index * 60, y: 34 });
       return;
     }
     if (method === 'roots') return files.roots();
+    if (method === 'checkGit') return checkGit();
+    if (method === 'installGit') return installGit();
     if (method === 'pickFolder') return chooseFolder();
+    if (method === 'defaultBrainFolder') {
+      if (typeof args.prepare !== 'boolean') throw new Error('Invalid folder request');
+      return defaultBrainFolder(files, app.getPath('documents'), args.prepare);
+    }
     if (method === 'revokeFolder') { clearTerminals(); return files.revoke(args.rootId); }
     if (method === 'status') return { version: app.getVersion(), mcp: runtime.state, shell: updateState, error: updateError };
     if (method === 'checkUpdates') { await checkUpdates(); return { mcp: runtime.state, shell: updateState, error: updateError }; }
@@ -200,6 +258,9 @@ else {
   app.on('before-quit', event => {
     if (quitting) return;
     event.preventDefault(); quitting = true; clearTerminals(); developmentServer?.close();
-    void runtime?.stop().finally(() => app.quit());
+    void (async () => {
+      try { await runtime?.restarting; await runtime?.starting; } catch { /* Finish shutdown after failed startup. */ }
+      await runtime?.stop();
+    })().finally(() => app.quit());
   });
 }

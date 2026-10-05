@@ -41,6 +41,31 @@ class RuntimeSupervisor {
     try { this.record = JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')); } catch { this.record = {}; }
   }
   save() { atomicJson(path.join(this.home, 'state.json'), this.record); }
+  async refresh() {
+    const health = await this.deps.probe();
+    this.state = { ...this.state,
+      state: !health ? 'stopped' : !health.compatible ? 'conflict' : this.child?.pid === health.pid ? 'running' : 'attached',
+      owner: health ? (this.child?.pid === health.pid ? 'desktop' : health.hostKind || 'external') : 'desktop',
+      version: health?.runtimeVersion, commit: health?.runtimeCommit,
+      error: health?.compatible ? undefined : this.state.error,
+    };
+    return health;
+  }
+  restart() {
+    if (this.restarting) return this.restarting;
+    this.restarting = (async () => {
+      if (this.starting) await this.starting;
+      const health = await this.refresh();
+      if (health && (!this.child || health.pid !== this.child.pid)) {
+        throw new Error(`MCP 由 ${this.state.owner} 管理，请在该应用中重启。桌面应用已重新检测连接。`);
+      }
+      await this.stop();
+      await this.start();
+      if (!['running', 'attached'].includes(this.state.state)) throw new Error(this.state.error || 'MCP 启动失败');
+      return this.state;
+    })().finally(() => { this.restarting = null; });
+    return this.restarting;
+  }
   directory(hash) {
     if (!/^[a-f0-9]{64}$/.test(hash || '')) throw new Error('Invalid runtime identity');
     return path.join(this.home, hash);
@@ -48,14 +73,23 @@ class RuntimeSupervisor {
   async stop() {
     this.stopping = true;
     const child = this.child; this.child = null;
-    if (child && child.exitCode === null) {
+    if (child && child.exitCode === null && child.signalCode == null) {
       const ended = once(child, 'exit').catch(() => {});
       child.kill(); await Promise.race([ended, delay(5000)]);
-      if (child.exitCode === null) child.kill('SIGKILL');
+      if (child.exitCode === null && child.signalCode == null) {
+        child.kill('SIGKILL');
+        await Promise.race([ended, delay(5000)]);
+        if (child.exitCode === null && child.signalCode == null) { this.child = child; throw new Error('MCP 未能停止，请稍后重试'); }
+      }
     }
     this.state = { ...this.state, state: 'stopped' };
   }
-  async start() {
+  start() {
+    if (this.starting) return this.starting;
+    this.starting = this.startRuntime().finally(() => { this.starting = null; });
+    return this.starting;
+  }
+  async startRuntime() {
     this.stopping = false;
     const existing = await this.deps.probe();
     if (existing) {

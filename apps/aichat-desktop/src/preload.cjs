@@ -49,8 +49,10 @@ if (process.isMainFrame) {
     } catch { /* Untrusted/offline documents never receive native chrome controls. */ }
   }, { once: true });
   contextBridge.exposeInMainWorld('aichatDesktop', Object.freeze({
-    version: 1, capabilities: Object.freeze({ files: true, terminal: true }),
+    version: 1, capabilities: Object.freeze({ files: true, terminal: true, defaultBrainFolder: true, gitSetup: true }),
+    checkGit: () => call('checkGit'), installGit: () => call('installGit'),
     roots: () => call('roots'), pickFolder: () => call('pickFolder'),
+    defaultBrainFolder: prepare => call('defaultBrainFolder', { prepare: prepare === true }),
     revokeFolder: rootId => call('revokeFolder', { rootId }),
     file: (op, args) => call('file', { ...args, op }),
     terminal: (op, args) => call('terminal', { ...args, op }),

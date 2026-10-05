@@ -5,13 +5,32 @@ const ts=require('typescript');
 require.extensions['.ts']=(module,file)=>module._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{
  compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}
 }).outputText,file);
-const {compileCreationTemplate,creationTemplateInfo}=require('../src/mcp/paracraftTemplates.ts');
+const {compileCreationTemplate,creationTemplateInfo,searchCreationTemplates}=require('../src/mcp/paracraftTemplates.ts');
 const {registerCreationTools}=require('../src/mcp/paracraftTools.ts');
 const hub=require('../src/core/paracraftClients.ts');
 const {McpServer}=require('@modelcontextprotocol/sdk/server/mcp.js');
 const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
 const {InMemoryTransport}=require('@modelcontextprotocol/sdk/inMemory.js');
 const identity={clientId:'template-test',worldPath:'test/',sessionId:3};
+
+test('template discovery pages metadata without reading source or scanning files',()=>{
+ const read=fs.readFileSync,list=fs.readdirSync;
+ fs.readFileSync=()=>{throw new Error('Discovery read source');};fs.readdirSync=()=>{throw new Error('Discovery scanned files');};
+ try{
+  const first=searchCreationTemplates();assert.equal(first.templates.length,5);assert.equal(first.nextOffset,5);
+  const names=[];let offset=0;
+  do{const page=searchCreationTemplates({offset,limit:10});names.push(...page.templates.map(t=>t.template));offset=page.nextOffset;}while(offset!==null);
+  assert.equal(names.length,first.total);assert.equal(new Set(names).size,names.length);assert.deepEqual(names,[...names].sort());
+  const classified=[];
+  for(const category of first.categories){const page=searchCreationTemplates({category,limit:10});assert.equal(page.nextOffset,null);classified.push(...page.templates.map(t=>t.template));}
+  assert.deepEqual(classified.sort(),names,'Missing or duplicated category membership');
+  const cat=searchCreationTemplates({category:'animals',query:'CAT'});assert.deepEqual(cat.templates.map(t=>t.template),['sitting_cat']);
+  const reused=searchCreationTemplates({query:'bench scale'});assert(reused.templates.every(t=>/bench/i.test(t.description)&&/scale/i.test(t.description)));
+  assert.equal(searchCreationTemplates({query:'no_such_subject'}).total,0);assert.equal(searchCreationTemplates({offset:999}).nextOffset,null);
+  for(const t of first.templates){assert.equal(t.content,undefined);assert.equal(t.templateHash,undefined);assert.equal(t.path,undefined);}
+  for(const options of [{category:'__proto__'},{category:'constructor'},{limit:11},{limit:.5},{offset:-1},{query:' '},{query:'x'.repeat(121)}])assert.throws(()=>searchCreationTemplates(options));
+ }finally{fs.readFileSync=read;fs.readdirSync=list;}
+});
 
 test('template requests compile deterministically and isolate scenes across requests/chats/worlds',()=>{
  const input={template:'bird',expectedIdentity:identity,requestId:'bird-1'};
@@ -24,11 +43,24 @@ test('template requests compile deterministically and isolate scenes across requ
  assert.match(compileCreationTemplate({...input,origin:[-12,5,10],saveSource:true},'chat-a').code,/,origin=\{-12,5,10\}/);
  assert(compileCreationTemplate({...input,saveSource:true},'chat-a').code.includes('s:save();local info='));
  const info=creationTemplateInfo('bird');assert.equal(info.assetCount,4);assert.equal(info.content,undefined);
+ const rabbit=creationTemplateInfo('hopping_rabbit');assert.equal(rabbit.assetCount,3);assert.deepEqual(rabbit.dimensions,[7,3,7]);
+ const cat=creationTemplateInfo('sitting_cat');assert.equal(cat.assetCount,2);assert.deepEqual(cat.dimensions,[7,3,7]);assert.deepEqual(cat.requiredCapabilities,['voxelBoxBatch','keyframeBatches']);
+ const person=creationTemplateInfo('mini_character');assert.deepEqual(person.requiredCapabilities,['keyframeBatches']);const personRun=compileCreationTemplate({...input,template:'mini_character',palette:{shirt:'#62898A'}},'chat-a');assert.match(personRun.code,/#62898A/);assert.match(personRun.code,/s:keyframes\("wave","character",frames\)/);
+ const catInput={...input,template:'sitting_cat',palette:{fur:'#B18C69'},saveSource:true};const catRun=compileCreationTemplate(catInput,'chat-a');assert.deepEqual(compileCreationTemplate(catInput,'chat-a'),catRun);assert.match(catRun.code,/#B18C69/);assert(!catRun.code.includes('#C2A67D'));assert(catRun.metadata.sourceSavedWhenCompleted);assert(!catRun.code.match(/createScene\(\{[^\n]+/)[0].includes(',origin='));
+ const rabbitRun=compileCreationTemplate({...input,template:'hopping_rabbit',palette:{fur:'#A68C72'}},'chat-a');assert.match(rabbitRun.code,/expectedMeters=\{0.25,0.3125,0.453125\}/);assert.match(rabbitRun.code,/rigidHop=true/);assert.match(rabbitRun.code,/#A68C72/);
+ assert.deepEqual(rabbit.requiredCapabilities,['voxelBoxBatch','keyframeBatches']);assert.match(rabbitRun.code,/s:keyframes\("rabbit",part.name,trackFrames\)/);assert(!rabbitRun.code.includes('s:keyframe('));
  const pond=creationTemplateInfo('pond_garden');assert.equal(pond.assetCount,1);assert.equal(pond.content,undefined);assert.deepEqual(pond.dimensions,[12,3,11]);
+ const pocket=creationTemplateInfo('pocket_pond');assert.equal(pocket.assetCount,0);assert.deepEqual(pocket.dimensions,[4,2,4]);assert.deepEqual(pocket.requiredCapabilities,['nativeBlockNames','sceneCameraPoints','terrainEditing']);
+ const door=creationTemplateInfo('doorway');assert.equal(door.assetCount,0);assert.deepEqual(door.requiredCapabilities,['doorAssemblies','terrainEditing','nativeBlockNames','sceneCameraPoints']);const doorRun=compileCreationTemplate({...input,template:'doorway'},'chat-a');assert.match(doorRun.code,/s:door\(\{position=\{1,0,1\},data=1\}\)/);assert(!doorRun.code.includes('pcall('));
+ const pocketRun=compileCreationTemplate({...input,template:'pocket_pond'},'chat-a');assert.match(pocketRun.code,/terrainDepth=2/);assert.match(pocketRun.code,/blockId="Still_Water"/);assert.match(pocketRun.code,/blockId="LilyPad",data=2/);assert(!pocketRun.code.includes('exportVoxelX'));assert(!pocketRun.code.includes('s:save();'));assert(!pocketRun.code.match(/createScene\(\{[^\n]+/)[0].includes(',origin='));
  const pergola=creationTemplateInfo('garden_pergola');assert.equal(pergola.assetCount,0);assert.deepEqual(pergola.dimensions,[8,4,8]);
  const picnic=creationTemplateInfo('picnic_table');assert.equal(picnic.assetCount,1);assert.deepEqual(picnic.dimensions,[8,3,6]);
  const parasol=creationTemplateInfo('garden_parasol');assert.equal(parasol.assetCount,1);assert.deepEqual(parasol.dimensions,[9,4,7]);
  const chair=creationTemplateInfo('garden_chair');assert.equal(chair.assetCount,1);assert.deepEqual(chair.dimensions,[6,3,6]);
+ const bench=creationTemplateInfo('garden_bench');assert.equal(bench.assetCount,1);assert.deepEqual(bench.dimensions,[7,3,6]);
+ const benchRun=compileCreationTemplate({...input,template:'garden_bench',palette:{timber:'#B58C65'}},'chat-a');assert.match(benchRun.code,/expectedMeters=\{1.5,0.9375,0.46875\}/);assert.match(benchRun.code,/seatMeters=0.4375/);
+ const bath=creationTemplateInfo('garden_birdbath');assert.equal(bath.assetCount,1);assert.deepEqual(bath.dimensions,[6,3,6]);
+ const bathRun=compileCreationTemplate({...input,template:'garden_birdbath',palette:{water:'#6DA8B1'}},'chat-a');assert.match(bathRun.code,/expectedMeters=\{0.75,0.6875,0.75\}/);assert.match(bathRun.code,/decorativeWater=true/);assert.match(bathRun.code,/#6DA8B1/);
  const cafe=creationTemplateInfo('bistro_table');assert.equal(cafe.assetCount,1);assert.deepEqual(cafe.requiredCapabilities,['voxelBoxBatch']);
  const plant=creationTemplateInfo('terracotta_planter');assert.equal(plant.assetCount,1);assert.deepEqual(plant.requiredCapabilities,['voxelBoxBatch']);
  const lantern=creationTemplateInfo('patio_lantern');assert.equal(lantern.assetCount,1);assert.deepEqual(lantern.requiredCapabilities,['voxelBoxBatch']);
@@ -96,6 +128,42 @@ test('template requests compile deterministically and isolate scenes across requ
  for(const name of ['../examples/bird.lua','__proto__','constructor','missing'])assert.throws(()=>creationTemplateInfo(name),/unknown_template/);
 });
 
+test('cottage keeps native materials, meter dimensions and automatic placement without implicit persistence',()=>{
+ const info=creationTemplateInfo('timber_cottage');
+ assert.deepEqual(info.dimensions,[7,6,8]);assert.equal(info.assetCount,0);assert.equal(info.writesAssets,false);
+ assert.deepEqual(info.requiredCapabilities,['doorAssemblies','terrainEditing','nativeBlockNames','sceneCameraPoints']);
+ const input={template:'timber_cottage',expectedIdentity:identity,requestId:'cottage',palette:{wall:'#D9D0B9',roof:'#6C827C'}};
+ const run=compileCreationTemplate(input,'chat');assert.deepEqual(compileCreationTemplate(input,'chat'),run);
+ assert.match(run.code,/#D9D0B9/);assert.match(run.code,/#6C827C/);
+ for(const material of ['Oak_Wood_Planks','Oak_Wood','White_Wool','GlassPane','White_Carpet','ColorBlock_Stairs','ColorBlock_Slab'])assert(run.code.includes('"'+material+'"'));
+ assert.match(run.code,/s:door\(\{position=\{3,0,2\},data=1,open=true\}\)/);
+ assert.match(run.code,/houseWidth=5,houseDepth=5/);assert.match(run.code,/ridgeHeight=5\.5,doorHeight=2/);
+ assert.match(run.code,/detail=\{eye=s:cameraPoint\(\{3,1\.8,0\}\)/);
+ assert.match(run.code,/s:surface/);assert.match(run.code,/terrainDepth=1/);
+ assert(!run.code.includes('exportVoxelX'));assert(!run.code.includes('s:save();'));assert(!run.code.includes('pcall('));
+ assert(!run.code.match(/createScene\(\{[^\n]+/)[0].includes(',origin='));
+});
+
+test('reuse templates require closed world-local asset roles and simultaneous filename substitution',()=>{
+ const info=creationTemplateInfo('tabletop_lantern');assert.equal(info.assetCount,0);assert.equal(info.writesAssets,false);assert.equal(info.content,undefined);assert.deepEqual(Object.keys(info.assetSlots),['table','lantern']);
+ const bath=creationTemplateInfo('birdbath_garden');assert.deepEqual(bath.dimensions,[7,3,7]);assert.equal(bath.writesAssets,false);assert.deepEqual(Object.keys(bath.assetSlots),['bench','bath']);
+ const bathRun=compileCreationTemplate({template:'birdbath_garden',expectedIdentity:identity,requestId:'bath',assets:{bench:'blocktemplates/b.x',bath:'blocktemplates/w.x'},palette:{rail:'#FFFFFF'}},'chat');assert.match(bathRun.code,/blocktemplates\/b.x/);assert.match(bathRun.code,/blocktemplates\/w.x/);assert(!bathRun.code.includes('exportVoxelX'));
+ const cafe=creationTemplateInfo('patio_cafe');assert.equal(cafe.assetCount,0);assert.deepEqual(cafe.dimensions,[10,3,8]);assert.deepEqual(Object.keys(cafe.assetSlots),['table','chair','plant','lantern']);
+ const cafeRun=compileCreationTemplate({template:'patio_cafe',expectedIdentity:identity,requestId:'cafe',assets:{table:'blocktemplates/t.x',chair:'blocktemplates/c.x',plant:'blocktemplates/p.x',lantern:'blocktemplates/l.x'},palette:{rail:'#FFFFFF'}},'chat');assert.match(cafeRun.code,/blockId=267,color=rail/);assert.match(cafeRun.code,/blockId=115/);assert(!cafeRun.code.includes('exportVoxelX'));
+ const nook=creationTemplateInfo('bench_garden');assert.equal(nook.assetCount,0);assert.deepEqual(nook.dimensions,[5,3,6]);assert(nook.requiredCapabilities.includes('nativeBlockNames'));
+ const nookRun=compileCreationTemplate({template:'bench_garden',expectedIdentity:identity,requestId:'nook',assets:{bench:'blocktemplates/b.x',plant:'blocktemplates/p.x'}},'chat');assert.match(nookRun.code,/blockId="StoneBrick"/);assert.match(nookRun.code,/blockId="Red_Rose"/);assert(!nookRun.code.includes('exportVoxelX'));
+ const base={template:'tabletop_lantern',expectedIdentity:identity,requestId:'reuse'};
+ assert.throws(()=>compileCreationTemplate(base,'chat'),/missing_asset_role: table/);
+ assert.throws(()=>compileCreationTemplate({...base,assets:{table:'blocktemplates/t.x'}},'chat'),/missing_asset_role: lantern/);
+ assert.throws(()=>compileCreationTemplate({...base,assets:{extra:'blocktemplates/t.x'}},'chat'),/unknown_asset_role/);
+ for(const file of ['../outside.x','blocktemplates/../outside.x','C:/outside.x','blocktemplates/a.x"; error(1)','blocktemplates//a.x','https://example.com/a.x'])assert.throws(()=>compileCreationTemplate({...base,assets:{table:file,lantern:'blocktemplates/l.x'}},'chat'),/invalid_asset_path/);
+ const assets={table:'blocktemplates/lantern.x',lantern:'blocktemplates/table.x'},one=compileCreationTemplate({...base,assets},'chat');
+ assert.match(one.code,/local tableFile="blocktemplates\/lantern.x"/);assert.match(one.code,/local lanternFile="blocktemplates\/table.x"/);
+ assert.equal(compileCreationTemplate({...base,assets:{lantern:assets.lantern,table:assets.table}},'chat').code,one.code);
+ assert.deepEqual(one.requiredCapabilities,['modelOffset','modelContactPlacement','modelDependencies']);assert.match(one.code,/s:requireModels\(\{tableFile,lanternFile\}\)/);assert(!one.code.includes('exportVoxelX'));
+ assert.throws(()=>compileCreationTemplate({...base,template:'bird',assets},'chat'),/unknown_asset_role/);
+});
+
 test('named RGB palette swaps are simultaneous and cannot inject code or unknown roles',()=>{
  const input={template:'bird',expectedIdentity:identity,requestId:'palette'};
  const a=compileCreationTemplate({...input,palette:{body:'#695747',head:'#66797a'}},'chat-a');
@@ -120,6 +188,9 @@ test('required template capabilities reject older or changed worlds before mutat
    if(caps.voxelBoxBatch&&caps.identity.sessionId===identity.sessionId){const[mutation]=await hub.pollJobs(identity.clientId,2000);assert.equal(mutation.request.action,'run_code');hub.completeJob(identity.clientId,mutation.jobId,{ok:true,result:{ok:true,jobId:'required-one'}});assert(!(await pending).isError);}
    else{const result=await pending;assert(result.isError);assert.match(result.content[0].text,caps.voxelBoxBatch?/world_session_changed/:/unsupported_capability: voxelBoxBatch/);assert.equal((await hub.pollJobs(identity.clientId,0)).length,0);}
   }
+  const pending=client.callTool({name:'paracraft_cli',arguments:{action:'run_template',clientId:identity.clientId,chatSessionId:'cap-chat',params:{...input,template:'hopping_rabbit',requestId:'batch-cap'}}});
+  const[read]=await hub.pollJobs(identity.clientId,2000);assert.equal(read.request.action,'get_creation_capabilities');hub.completeJob(identity.clientId,read.jobId,{ok:true,result:{ok:true,identity,voxelBoxBatch:true}});
+  const rejected=await pending;assert(rejected.isError);assert.match(rejected.content[0].text,/unsupported_capability: keyframeBatches/);assert.equal((await hub.pollJobs(identity.clientId,0)).length,0);
  }finally{hub.unregisterClient(identity.clientId);await client.close();await server.close();}
 });
 
@@ -130,6 +201,10 @@ test('single MCP tool translates template to native run_code without losing owne
  const call=(action,params)=>client.callTool({name:'paracraft_cli',arguments:{action,clientId:identity.clientId,chatSessionId:'template-chat',petId:'detail',params}});
  try{
   assert.equal((await client.listTools()).tools.length,1);
+  const animals=JSON.parse((await call('template_info',{category:'animals',limit:2})).content[0].text);
+  assert.equal(animals.templates.length,2);assert.equal(animals.nextOffset,2);
+  for(const params of [{template:'bird',category:'animals'},{limit:11},{offset:-1},{category:'missing'}])assert.equal((await call('template_info',params)).isError,true);
+  assert.equal((await hub.pollJobs(identity.clientId,0)).length,0,'Discovery forwarded native work');
   const info=JSON.parse((await call('template_info',{template:'butterfly'})).content[0].text);
   for(let i=0;i<2;i++){
    const pending=call('run_template',{template:'butterfly',templateHash:info.templateHash,expectedIdentity:identity,requestId:'recover-same',saveSource:true});

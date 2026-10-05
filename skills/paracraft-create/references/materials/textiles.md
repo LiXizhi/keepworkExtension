@@ -31,4 +31,7 @@ White_Wool 133, White_Carpet 234 and SoilCarpet 279 support uniform
 `color="#RRGGBB"`; omit `color` for fixed textured variants that do not support
 painting. Never pack color data manually. Wool can suit world-scene cushions,
 fabric walls or banners, but do not export it as character/BMax body geometry.
+Lazy `reading_corner` demonstrates a patterned White_Carpet rug using uniform
+RGB roles over a flush wooden floor. Native carpet is already thin: do not raise
+the floor by a block to support it or create a one-meter-thick wool rug.
 

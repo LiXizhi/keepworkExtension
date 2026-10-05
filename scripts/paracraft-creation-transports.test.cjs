@@ -29,6 +29,8 @@ test('authenticated Streamable HTTP and real stdio return MCP images through one
         assert.equal(deniedLaunch.status,401);
         const clientId = 'transport-image';
         await hub.registerClient({ clientId, kpProjectId: 987654, worldEntered: true });
+        const idleId = 'transport-idle-desktop';
+        await hub.registerClient({ clientId: idleId, worldEntered: false });
         const identity = { clientId, worldPath: 'test/', sessionId: 4 };
         const bootstrap = `const fs=require('node:fs'),os=require('node:os'),ts=require('typescript');
 os.homedir=()=>${JSON.stringify(home)};
@@ -41,6 +43,17 @@ require(${JSON.stringify(path.resolve(__dirname, '../src/mcp/stdio.ts'))}).start
             const client = new Client({ name: 'creation-transport-test', version: '1' });
             try {
                 await client.connect(transport);
+                const local=await client.callTool({name:'paracraft_cli',arguments:{action:'launch',params:{waitSeconds:0}}});
+                const startup=JSON.parse(local.content[0].text);
+                assert.ok(!local.isError);assert.equal(startup.target,'client');assert.equal(startup.clientId,idleId);
+                assert.equal(startup.state,'ready');assert.equal(startup.reused,true);
+                const creation=client.callTool({name:'paracraft_cli',arguments:{action:'run_command',clientId:idleId,
+                    params:{world:{operation:'create',name:'雪山 村庄'}}}});
+                const [worldJob]=await hub.pollJobs(idleId,5000);
+                assert.equal(worldJob.request.action,'run_command');
+                assert.deepEqual(worldJob.request.params.world,{operation:'create',name:'雪山 村庄'});
+                hub.completeJob(idleId,worldJob.jobId,{ok:true,result:{ok:true,status:'created',worldPath:'local/雪山 村庄/'}});
+                assert.ok(!(await creation).isError);
                 const launched=await client.callTool({name:'paracraft_cli',arguments:{action:'launch',params:{projectId:987654,waitSeconds:0}}});
                 const launch=JSON.parse(launched.content[0].text);
                 assert.ok(!launched.isError);assert.equal(launch.state,'ready');assert.equal(launch.clientId,clientId);assert.equal(launch.reused,true);
@@ -59,6 +72,7 @@ require(${JSON.stringify(path.resolve(__dirname, '../src/mcp/stdio.ts'))}).start
             } finally { await client.close(); }
         }
         hub.unregisterClient(clientId);
+        hub.unregisterClient(idleId);
     } finally {
         if (server) await server.close();
         os.homedir = oldHome; require.extensions['.ts'] = oldLoader;

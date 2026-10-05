@@ -162,3 +162,32 @@ It never switches unrelated clients. A pending result contains `launchId`; poll
 returns `clientId`, then fetch world capabilities. Pending launches are shared
 across HTTP/stdio and chats; registration deadline is 60 seconds. Saving or editing
 the opened project remains a separate operation.
+## World-local creation memory
+
+### Client startup and local worlds
+
+`launch` now permits omitted projectId: `{action:"launch",params:{waitSeconds:15}}`
+starts through `paracraft://protocol="paracraft" debug="main"`, or reuses a
+registered idle desktop without a pending project. It supplies no account token.
+The response has target=client and is ready on client registration, even before
+world entry. Supplying projectId retains project startup and target=project, which
+requires the matching project to enter. Both modes share hub-owned pending launches;
+poll launch_status by launchId. Existing entered worlds are not switched by startup.
+
+Use `run_command` params `{world:{operation:"status"}}`, then create/open/save
+with the structured world arguments from the engine's world-management.md.
+`manage_world` is a frontend workflow name, not a CLI action. Local lifecycle
+does not require sign-in; preserve current account/native permission checks.
+Named worlds resolve under the client's configured default save root; retain
+returned worldPath. Follow the packaged skill's client-startup.md, local-worlds.md
+and login.md subguides for exact calls, asynchronous entry and optional `/signin`.
+
+The gateway forwards native `world_docs` and `analyze_world`; action schemas remain
+lazy through `paracraft_cli({action:"help",params:{action:"world_docs"}})`.
+world_docs requires expectedIdentity and init/update; updates supply files with
+path, managed-section content and full expectedContent from world_files reads.
+It writes AGENTS.md or direct docs/*.md children and never saves native world blocks.
+analyze_world requires expectedIdentity, optional kind/bounds/cursor/view, and returns
+saved/live objects plus world_object refs for existing read_scene_object details.
+Engine capability flags are worldDocuments, worldAnalysis, movieSequences and
+cameraKeyframes. See [Skill workflow and validation](paracraft-creation-skill.md#world-memory-and-native-films).

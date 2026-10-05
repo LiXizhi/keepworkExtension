@@ -4,6 +4,9 @@ These names/IDs come from Paracraft `config/Aries/creator/block_types.xml`.
 They are not Minecraft numeric IDs. Check `block_types.names[name]` and
 `block_types.get(id)` on the installed client: extensions can change the palette.
 Use one relevant category below; do not load the entire registry into a prompt.
+If capabilities include `nativeBlockNames:true`, prefer the exact palette name
+in `blockId`, for example `blockId="Rose"`, over memorizing a numeric ID.
+Names are case-sensitive native registry entries; older clients require verified IDs.
 Native textures/models are preferred for ordinary world vegetation and fabrics.
 Custom miniature color voxels remain useful for unusual species or art direction.
 BMax/character visible geometry still uses color voxels only, not these materials.

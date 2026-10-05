@@ -34,10 +34,12 @@ chats and transports. Do not close other clients or switch their worlds to satis
 startup. `protocol_launch_failed` means the installed URL handler needs attention.
 Opening a project does not authorize edits or saving that world.
 
-For a local test/art world, discover `manage_world` and read the engine-owned
-`world-management.md`. Names may contain spaces; native `open_world` paths take
-no shell quotes. Wait for actual entered status, then refresh creation identity.
-`open_requested` only acknowledges the request, and saving remains explicit.
+For client startup without a project ID, read [client-startup.md](client-startup.md)
+and use `launch` with empty params. For a named local world read
+[local-worlds.md](local-worlds.md) and engine-owned `world-management.md`:
+the action is `run_command` with `params.world`, not `manage_world`.
+For optional sign-in read [login.md](login.md). Local creation/loading/saving
+works without requiring login; preserve the current account state.
 
 1. Call `clients` to select the intended world. Ask only if several clients are
    open and the user's context does not establish which one to use.
@@ -58,6 +60,15 @@ interrupt someone else's task. Deadlines default to 120 seconds, up to 600.
 After a transport timeout, recover the identical request ID/source and poll the
 existing job; never repeat a mutation with a fresh ID just because its response
 was lost. After world reopen, rediscover identity and inspect before resuming.
+
+HTTP and stdio share the singleton client hub, but their running gateway code
+can have different build ages. Engine capabilities describe the client, not the
+gateway's packaged template catalog. If HTTP returns `unknown_template` while a
+fresh stdio gateway recognizes it, inspect the gateway/service version; do not
+interpret that as missing native engine support or repeat a creation request.
+On-demand skill reads may already reflect updated files. Until the installed
+service is refreshed, use supported `run_code` with the relevant reviewed Lua
+example and current native capabilities, or the current stdio gateway.
 
 Keep one chat/pet context through sequential revisions rather than creating a new
 pet for every script. Use unique request IDs for new edits; chat identity stays
@@ -81,8 +92,17 @@ its tool catalog. Read this skill locally or with `paracraft_cli` action `skill`
 
 ## Run a packaged design without copying source
 
-Load the relevant guide to choose a design: moving objects, animals or vegetation.
-`template_info` returns only that template's description, dimensions, asset count
+Discover a few candidates with `template_info` using, for example,
+`params:{category:"animals",query:"tail",limit:3}`. Categories are `architecture`,
+`gardens`, `furniture`, `animals`, `characters` and `moving_objects`; English
+query words match names/descriptions together. Discovery returns metadata only,
+defaults to five results (maximum ten), and uses `offset:nextOffset` for another
+page. It reads no Lua files. Omit filters for a small first page, not a full dump.
+Choose a name and call `template_info` with only `params:{template:"sitting_cat"}`.
+If `help` for `template_info` lacks category/query fields, that connection has an
+older gateway: choose a name from the relevant guide and use the named lookup,
+or reconnect to the updated runtime. Do not resend a creation to refresh discovery.
+That returns only the template's description, dimensions, asset count
 and `templateHash`; it does not return Lua or enumerate other templates.
 It also lists named palette roles with uniform `#RRGGBB` defaults. Pass a partial
 `palette` to `run_template` to override only those roles; unknown roles and invalid
@@ -92,6 +112,16 @@ resume its named scene/groups with `run_code` rather than duplicating the design
 Keep the same request/args
 when recovering a transport timeout.
 Use `help` with `params.action:"run_template"` for the current schema.
+
+Templates with `assetSlots` reuse existing world-local exports. Pass only those
+named roles in `assets`, for example `tabletop_lantern` needs
+`assets:{table:"blocktemplates/my_table.x",lantern:"blocktemplates/my_lantern.x"}`.
+Use completed jobs' artifact paths from this same world; no Lua copy or new export
+is needed. Missing/unknown roles and invalid paths fail before dispatch. Required
+capabilities are checked; native `requireModels` verifies every file and waits for
+renderable assets before the template's first block write. `assetCount:0` means
+no exports, not that the template performs no world edits. Source/world saving
+remain explicit, and captures/results retain the normal world/chat identity.
 
 ```json
 {"action":"template_info","params":{"template":"bird"}}
@@ -133,6 +163,14 @@ For example, `petId:"detail"` creates/reuses a second reference when scouting;
 `get_scene_info` with `anchor:"pet"` and `camera_capture` with `nearPet:true` use
 that selected reference. No new MCP tools are needed. Explicit eye/lookat cameras
 remain independent of pet movement.
+
+In a resumed scene, `scene:petReference()` (desktop `scenePetReferences`) ensures
+the chat's own pet without finding a new site or changing the fixed origin.
+Use its returned world position for close reference views. `pet_busy` also covers
+another native/UI controller running on that pet; wait for its task rather than
+replacing the controller or stopping it. Read [pet-context-review.lua](../examples/pet-context-review.lua) for this
+small review step. Keep the same chat identity when alternating HTTP and stdio;
+use different identities only for genuinely separate chats.
 
 Wait for your active job to settle before submitting the next edit; overlapping
 submissions in the same chat return `creation_busy`. A chat cannot accidentally

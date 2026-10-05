@@ -7,6 +7,15 @@ from PIL import Image, ImageChops
 
 report_path = Path(sys.argv[1])
 report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+progress_path = report_path.with_name("capture-progress.json")
+if progress_path.exists():
+    progress = json.loads(progress_path.read_text(encoding="utf-8-sig"))
+    assert progress["state"] == "completed" and progress["verified"], "Current capture review is unverified"
+    assert report.get("reviewId") == progress["reviewId"], "Report belongs to an earlier capture review"
+    assert len(progress["images"]) == len(report["images"]), "Report frame count differs from current review"
+    for current, saved in zip(progress["images"], report["images"]):
+        assert current["poseVerified"] and current["file"] == saved["file"], "Frame is unverified or belongs to another review"
+        assert current["metadata"]["captureId"] == saved["metadata"]["captureId"], "Frame capture identity differs"
 frames, repeats = [], {}
 for entry in report["images"]:
     metadata = entry["metadata"]

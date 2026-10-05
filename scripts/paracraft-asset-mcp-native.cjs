@@ -2,6 +2,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const http=require('node:http');
+const {randomUUID}=require('node:crypto');
 const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
 const {StdioClientTransport}=require('@modelcontextprotocol/sdk/client/stdio.js');
 const [worldPath,sourceArg,outArg]=process.argv.slice(2);
@@ -9,6 +10,12 @@ assert(worldPath&&sourceArg&&outArg,'Usage: node scripts/paracraft-asset-mcp-nat
 const source=JSON.parse(fs.readFileSync(sourceArg,'utf8')),out=path.resolve(outArg);
 const spec=source.result.animation.actors[0];assert(spec.embedded&&source.result.clips);
 fs.mkdirSync(out,{recursive:true});
+const evidence={reviewId:randomUUID(),identity:source.identity,state:'starting',verified:false,images:[]};
+function checkpoint(update={}){
+ Object.assign(evidence,update);const file=path.join(out,'capture-progress.json');
+ fs.writeFileSync(file+'.tmp',JSON.stringify(evidence,null,2));fs.renameSync(file+'.tmp',file);
+}
+checkpoint();
 function native(port,action,params={}){
  const body=JSON.stringify({v:1,action,params});
  return new Promise((resolve,reject)=>{
@@ -31,29 +38,38 @@ function native(port,action,params={}){
   assert(/^[\w-]+$/.test(source.result.name));
   const code=`local C=commonlib.gettable("MyCompany.Aries.Game.Code.Creation");local w=C.World:new():Init({});assert(w.identity.worldPath==${JSON.stringify(worldPath)} and w.identity.sessionId==${identity.sessionId});local function read(name) local f=ParaIO.open(w.identity.worldPath.."creation/${source.result.name}/"..name,"r");assert(f:IsValid());local s=f:GetText(0,-1);f:close();return s end;local manifest=read("manifest.json");local d=commonlib.Json.Decode(manifest);local cells={};for key,m in pairs(d.cells) do local actual=w:Fingerprint(w:Snapshot(m.position));assert(actual==m.fingerprint,"stale scene member");cells[#cells+1]=key.."="..actual end;table.sort(cells);return {members=ParaMisc.md5(table.concat(cells,"\\n")),manifest=ParaMisc.md5(manifest),source=ParaMisc.md5(read("source.lua"))}`;
   const persistedBefore=(await native(selected.nplPort,'run_npl_code',{code})).result;
-  const images=[],started=Date.now();
+  const missing=await client.callTool({name:'paracraft_cli',arguments:{action:'camera_capture',clientId,
+   chatSessionId:'rsi-template-native',params:{expectedIdentity:identity,asset:{filename:source.result.clips.filename,animId:999}}}});
+  assert(missing.isError);assert(missing.content.every(item=>item.type!=='image'));
+  assert.match(missing.content.find(item=>item.type==='text').text,/asset_animation_missing/);
+  fs.writeFileSync(path.join(out,'missing-animation.json'),JSON.stringify({verified:true,isError:true,imageReturned:false},null,2));
+  const images=evidence.images,started=Date.now();checkpoint({state:'capturing',persistedBefore});
   const cases=[{id:0,time:0},{id:0,time:0.5},{id:1,time:0},{id:1,time:0.5},{id:1,time:1},{id:1,time:1.5},{id:1,time:2},{id:1,time:0.5,repeat:1},{id:1,time:0.5,repeat:2},{id:1,time:0.5,yaw:0.5},{id:1,time:0.5,yaw:Math.PI/2}];
   for(const pose of cases){
    const asset={filename:source.result.clips.filename,animId:pose.id,timeSeconds:pose.time,...(pose.yaw===undefined?{}:{yaw:pose.yaw})};
    const result=await raw('camera_capture',{expectedIdentity:identity,asset});
    const metadata=JSON.parse(result.content.find(c=>c.type==='text').text),image=result.content.find(c=>c.type==='image');
    assert(image&&image.mimeType==='image/png'&&metadata.isolated&&!metadata.base64);
+   const file=path.join(out,`id${pose.id}-${pose.time}${pose.yaw===undefined?'':'-yaw'+pose.yaw.toFixed(2)}${pose.repeat?'-repeat'+pose.repeat:''}.png`);
+   fs.writeFileSync(file,Buffer.from(image.data,'base64'));
+   const frame={file,metadata,requestedPose:pose,poseVerified:false};images.push(frame);checkpoint();
    assert.equal(metadata.worldPath,worldPath);assert.equal(metadata.sessionId,identity.sessionId);assert.equal(metadata.asset.scale,1);
+   assert.equal(metadata.asset.animationVerified,true);assert.deepEqual(metadata.asset.animationIds,[0,1]);assert.equal(metadata.asset.animationCount,2);assert.equal(metadata.asset.animationIdsTruncated,false);
    metadata.asset.meters.forEach((n,i)=>assert(Math.abs(n-spec.expectedMeters[i])<0.001));
    const clip=source.result.clips.clips.find(c=>c.id===pose.id);
    const expected=spec.rotationKeys.find(k=>Math.abs(k.time-clip.startSeconds-pose.time)<0.0001).rotation;
    const bone=metadata.asset.bones.find(b=>b.name===spec.bone);assert(bone);
    assert(Math.abs(bone.rotation.reduce((sum,n,i)=>sum+n*expected[i],0))>0.9999,'Independent clip pose differs: '+JSON.stringify(pose));
    const root=metadata.asset.bones.find(b=>b.name==='root');assert(root&&Math.abs(root.rotation[3])>0.9999,'Root unexpectedly moved');
-   const file=path.join(out,`id${pose.id}-${pose.time}${pose.yaw===undefined?'':'-yaw'+pose.yaw.toFixed(2)}${pose.repeat?'-repeat'+pose.repeat:''}.png`);
-   fs.writeFileSync(file,Buffer.from(image.data,'base64'));images.push({file,metadata});
+   frame.poseVerified=true;checkpoint();
   }
   const after=(await call('get_scene_info')).result;
   assert.deepEqual(after.player.position,before.player.position);assert.equal(after.player.facing,before.player.facing);assert.deepEqual(after.camera,before.camera);
   const persistedAfter=(await native(selected.nplPort,'run_npl_code',{code})).result;assert.deepEqual(persistedAfter,persistedBefore);
   const cleanupCode=`local C=commonlib.gettable("MyCompany.Aries.Game.Code.Creation");assert(not C.AssetCapture.pending);local names=${'{'+images.map(i=>JSON.stringify(i.metadata.captureId)).join(',')+'}'};for _,name in ipairs(names) do assert(not CommonCtrl.GetControl(name),"capture UI leaked") end;return {cleaned=#names};`;
   const cleanup=(await native(selected.nplPort,'run_npl_code',{code:cleanupCode})).result;
-  fs.writeFileSync(path.join(out,'report.json'),JSON.stringify({identity,images,captureMs:Date.now()-started,persistedBefore,persistedAfter,cleanup,playerUnchanged:true,cameraUnchanged:true},null,2));
+  fs.writeFileSync(path.join(out,'report.json'),JSON.stringify({reviewId:evidence.reviewId,identity,images,captureMs:Date.now()-started,persistedBefore,persistedAfter,cleanup,playerUnchanged:true,cameraUnchanged:true},null,2));
+  checkpoint({state:'completed',verified:true});
   console.log('PASS isolated assets: both native clip IDs, eleven PNGs, correct poses/scale, clean controls, unchanged scene/player/camera');
  }finally{await client.close();}
-})().catch(e=>{console.error(e.message);process.exitCode=1;});
+})().catch(e=>{checkpoint({state:'failed',verified:false,error:String(e.message).slice(0,4096)});console.error(e.message);process.exitCode=1;});

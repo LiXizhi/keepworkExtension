@@ -7,16 +7,19 @@ import { readInstance, readToken } from '../core/config';
 import { currentRequest } from './context';
 import { recordCall } from './sessions';
 import { readCreationGuide } from './paracraftGuide';
-import { compileCreationTemplate, creationTemplateInfo } from './paracraftTemplates';
+import { compileCreationTemplate, creationTemplateInfo, creationTemplateCategories, searchCreationTemplates } from './paracraftTemplates';
 import { summarizeCreationJob } from './paracraftJobResult';
 
 export interface ParacraftTransport { port: number; viaHub?: boolean }
 
 const launchSchemas = {
-    launch: z.object({ projectId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), waitSeconds: z.number().min(0).max(20).default(15) }).strict(),
+    launch: z.object({ projectId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), waitSeconds: z.number().min(0).max(20).default(15) }).strict(),
     launch_status: z.object({ launchId: z.string().min(1), waitSeconds: z.number().min(0).max(20).default(0) }).strict(),
 };
-const templateInfoSchema = z.object({ template: z.string().min(1) }).strict();
+const templateInfoSchema = z.object({ template: z.string().min(1).optional(),
+    category: z.enum(creationTemplateCategories).optional(), query: z.string().trim().min(1).max(120).optional(),
+    offset: z.number().int().min(0).max(10000).optional(), limit: z.number().int().min(1).max(10).optional(),
+}).strict().refine(args => !args.template || Object.keys(args).length === 1, 'Choose one template or a discovery query');
 // A crashed or test hub may leave a discovery record behind. Do not send a
 // mutation to that dead port or retry it; choose the configured hub before I/O.
 function hubPort(runtime: ParacraftTransport): number {
@@ -78,14 +81,16 @@ const identity = z.object({ clientId: z.string(), worldPath: z.string(), session
 const client = { clientId: z.string().min(1) };
 const job = { ...client, expectedIdentity: identity, requestId: z.string().min(1).max(128), timeoutSeconds: z.number().min(1).max(600).optional() };
 export const creationSchemas = {
+    world_docs: z.object({ ...client, expectedIdentity: identity, operation: z.enum(['init', 'update']), files: z.array(z.object({path:z.string().min(1),content:z.string().max(524288),expectedContent:z.string().optional(),create:z.boolean().optional()}).strict()).min(1).max(32).optional() }).strict(),
+    analyze_world: z.object({ ...client, expectedIdentity: identity, kind:z.enum(['code','movie','sign','module']).optional(), bounds:z.object({min:vector,max:vector}).strict().optional(), cursor:z.string().optional(), view:z.enum(['auto','summary','objects']).optional() }).strict(),
     get_scene_info: z.object({ ...client, anchor: z.enum(['player', 'pet', 'camera']).optional() }).strict(),
     query_scene: z.object({ ...client, chunkX: z.number().int().min(-4096).max(4095), chunkZ: z.number().int().min(-4096).max(4095), cursor: z.string().optional() }).strict(),
-    read_scene_object: z.object({ ...client, details: z.boolean().optional(), detailOffset: z.number().int().min(0).max(1000000).optional(), ref: z.object({ worldSession: z.string(), kind: z.enum(['block', 'entity']), position: vector.optional(), id: z.string().optional() }) }).strict(),
+    read_scene_object: z.object({ ...client, details: z.boolean().optional(), detailOffset: z.number().int().min(0).max(1000000).optional(), ref: z.object({ worldSession: z.string(), kind: z.enum(['block', 'entity', 'world_object']), position: vector.optional(), id: z.string().optional() }) }).strict(),
     get_creation_capabilities: z.object(client).strict(),
     read_official_wiki: z.object({ ...client, path: z.string() }).strict(),
     find_build_site: z.object({ ...job, dimensions: vector, clearance: z.number().int().min(0).max(8).optional(), radius: z.number().int().min(1).max(128).optional(), exclude: z.array(vector).max(100).optional() }).strict(),
     run_code: z.object({ ...job, code: z.string().min(1).max(65536), scene: z.record(z.string(), z.unknown()).optional() }).strict(),
-    run_template: z.object({ ...job, template: z.string().min(1).max(64), templateHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), origin: z.tuple([z.number().int(), z.number().int(), z.number().int()]).optional(), palette: z.record(z.string(), z.string().regex(/^#[a-fA-F0-9]{6}$/)).optional(), saveSource: z.boolean().default(false) }).strict(),
+    run_template: z.object({ ...job, template: z.string().min(1).max(64), templateHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), origin: z.tuple([z.number().int(), z.number().int(), z.number().int()]).optional(), palette: z.record(z.string(), z.string().regex(/^#[a-fA-F0-9]{6}$/)).optional(), assets: z.record(z.string(), z.string().min(1).max(512)).optional(), saveSource: z.boolean().default(false) }).strict(),
     code_job: z.union([
         z.object({ ...client, expectedIdentity: identity, jobId: z.string().min(1).max(128), operation: z.enum(['status', 'cancel']).default('status'), resultDetail: z.enum(['summary', 'full']).default('summary') }).strict(),
         z.object({ ...client, expectedIdentity: identity, requestId: z.string().min(1).max(128), operation: z.enum(['status', 'cancel']).default('status'), resultDetail: z.enum(['summary', 'full']).default('summary') }).strict(),
@@ -94,6 +99,8 @@ export const creationSchemas = {
     camera_capture: z.object({ ...client, expectedIdentity: identity, moviePosition: vector.optional(), timeSeconds: z.number().min(0).max(600).optional(), eye: vector.optional(), lookat: vector.optional(), nearPet: z.boolean().optional(), nearPlayer: z.boolean().optional(), view: z.enum(['orbit', 'overhead', 'forward', 'front']).optional(), offset: vector.optional(), targetOffset: vector.optional(), assembly: z.object({moviePosition:vector,timeSeconds:z.number().min(0).max(600),actors:z.array(z.string().min(1).max(64)).min(1).max(16).optional(),yaw:z.number().min(-Math.PI*2).max(Math.PI*2).optional(),elevation:z.number().min(-1.4).max(1.4).optional(),distanceMeters:z.number().min(0.01).max(1000).optional(),size:z.union([z.literal(128),z.literal(256),z.literal(512),z.literal(1024)]).optional()}).strict().optional(), asset: z.object({filename:z.string().min(1).max(512),animId:z.number().int().min(0).max(65535).optional(),timeSeconds:z.number().min(0).max(600).optional(),yaw:z.number().min(-Math.PI*2).max(Math.PI*2).optional(),elevation:z.number().min(-1.4).max(1.4).optional(),distanceMeters:z.number().min(0.01).max(1000).optional(),size:z.union([z.literal(128),z.literal(256),z.literal(512),z.literal(1024)]).optional()}).strict().optional() }).strict(),
 };
 const descriptions: Record<keyof typeof creationSchemas, string> = {
+    world_docs: 'Initialize or update world AGENTS.md and flat docs/*.md managed sections. Updates use expectedContent from world_files reads. Preserves user text; does not save the native world.',
+    analyze_world: 'Index saved and live code blocks, movies, signs and smart modules without loading regions or executing code. Default auto summarizes inventories above 50 objects; summary forces grouping, objects returns pages of 50. Follow the summary cursor with view objects and the same filters to expand. Inspect world_object refs for details. Terrain remains unverified.',
     get_scene_info: 'Read world, player, pet and camera positions without loading terrain.',
     query_scene: 'Read paginated exposed surfaces in one loaded chunk column; not proof of full-volume clearance.',
     read_scene_object: 'Read a session-scoped scene reference. Set details for miniature voxels, models, bones and paginated movie keyframes.',
@@ -130,7 +137,7 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
                 result = { content: [{ type: 'text', text: JSON.stringify(readCreationGuide(args.path)) }] };
             } else if (action === 'template_info') {
                 const args = templateInfoSchema.parse(params);
-                result = { content: [{ type: 'text', text: JSON.stringify(creationTemplateInfo(args.template)) }] };
+                result = { content: [{ type: 'text', text: JSON.stringify(args.template ? creationTemplateInfo(args.template) : searchCreationTemplates(args)) }] };
             } else if (action === 'help') {
                 const args = z.object({ action: z.string().optional() }).strict().parse(params);
                 const schema = creationSchemas[args.action as keyof typeof creationSchemas] || launchSchemas[args.action as keyof typeof launchSchemas] || (args.action === 'template_info' ? templateInfoSchema : undefined);
@@ -138,7 +145,7 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
                 if (args.action && !actions.includes(args.action)) throw new Error('unsupported_action');
                 const details = args.action ? {
                     action: args.action,
-                    description: descriptions[args.action as keyof typeof descriptions] || (args.action === 'template_info' ? 'Read one packaged template description, dimensions, asset writes and source hash without returning its Lua.' : args.action === 'launch' ? 'Reuse the requested desktop world or open its installed paracraft URL protocol. Requires no clientId. Poll launch_status if waiting; never repeat a launch after a transport timeout.' : args.action === 'launch_status' ? 'Wait for the requested desktop world to register. Returns clientId only once worldEntered is true.' : undefined),
+                    description: descriptions[args.action as keyof typeof descriptions] || (args.action === 'template_info' ? 'Read one named template with source hash, or discover up to ten metadata-only candidates by category/query with pagination. Source is loaded only for a selected name.' : args.action === 'launch' ? 'Omit projectId to start/reuse an idle desktop for local worlds; supply projectId to enter that project. No clientId or login token required. Poll launch_status if waiting; never repeat a launch after a transport timeout.' : args.action === 'launch_status' ? 'Poll a launch. target=client becomes ready on desktop registration; target=project requires matching world entry. ready returns clientId.' : undefined),
                     inputSchema: schema ? z.toJSONSchema(schema, { io: 'input' }) : undefined,
                     usage: args.action === 'skill' ? { action: 'skill', params: { path: 'SKILL.md' } }
                         : args.action === 'clients' ? { action: 'clients' }
@@ -189,6 +196,13 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
                     const x = a as Record<string, unknown> | undefined, y = b as Record<string, unknown> | undefined;
                     return !!x && !!y && x.clientId === y.clientId && x.worldPath === y.worldPath && x.sessionId === y.sessionId;
                 };
+                if (action === 'world_docs' || action === 'analyze_world') {
+                    const response = await paracraftRequest(runtime, clientId, 'get_creation_capabilities');
+                    const capabilities = (response.body as {result?: Record<string, unknown>})?.result;
+                    const capability = action === 'world_docs' ? 'worldDocuments' : 'worldAnalysis';
+                    if (!capabilities?.[capability]) throw new Error(`unsupported_capability: ${capability}; update the Paracraft engine`);
+                    if (!sameIdentity(capabilities.identity, params.expectedIdentity)) throw new Error('world_session_changed; discover and read world instructions again');
+                }
                 if (action === 'screenshot') {
                     const before = await paracraftRequest(runtime, clientId, 'get_creation_capabilities');
                     const identityNow = (before.body as { result?: { identity?: unknown } })?.result?.identity;

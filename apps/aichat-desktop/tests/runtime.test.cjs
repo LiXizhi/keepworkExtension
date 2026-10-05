@@ -71,3 +71,46 @@ test('corrupt update bytes never replace the installed runtime', async t => {
   assert.equal(supervisor.record.current, 'c'.repeat(64)); assert.equal(supervisor.record.pending, undefined);
   assert.deepEqual(fs.readdirSync(home), []);
 });
+
+test('restart rejects external ownership and refreshes current status without stopping it', async () => {
+  const supervisor = new RuntimeSupervisor('unused', '', '0.1.0', {
+    probe: async () => ({ compatible: true, hostKind: 'vscode-extension', pid: 42, runtimeVersion: '2.0.0' }),
+    spawn: () => assert.fail('must not spawn'),
+  });
+  supervisor.stop = () => assert.fail('must not stop external server');
+  await assert.rejects(supervisor.restart(), /vscode-extension/);
+  assert.equal(supervisor.state.state, 'attached');
+  assert.equal(supervisor.state.version, '2.0.0');
+});
+
+test('restart coalesces clicks and waits for owned shutdown before starting', async () => {
+  const supervisor = new RuntimeSupervisor('unused', '', '0.1.0', { probe: async () => ({ compatible: true, pid: 7 }) });
+  supervisor.child = { pid: 7 };
+  const calls = [];
+  supervisor.stop = async () => { calls.push('stop'); await new Promise(resolve => setImmediate(resolve)); calls.push('stopped'); };
+  supervisor.start = async () => { calls.push('start'); supervisor.state = { state: 'running', owner: 'desktop' }; };
+  const first = supervisor.restart();
+  assert.equal(supervisor.restart(), first);
+  await first;
+  assert.deepEqual(calls, ['stop', 'stopped', 'start']);
+  assert.equal(supervisor.restarting, null);
+});
+
+test('restart starts an offline service and reports failed readiness', async () => {
+  const supervisor = new RuntimeSupervisor('unused', '', '0.1.0', { probe: async () => null });
+  supervisor.stop = async () => {};
+  supervisor.start = async () => { supervisor.state = { state: 'error', error: 'fixture startup failed' }; };
+  await assert.rejects(supervisor.restart(), /fixture startup failed/);
+  assert.equal(supervisor.restarting, null);
+});
+
+test('stop accepts signal-based child exit before a subsequent restart', async () => {
+  const supervisor = new RuntimeSupervisor('unused', '', '0.1.0');
+  const child = new EventEmitter(); child.exitCode = null; child.signalCode = null;
+  let kills = 0;
+  child.kill = () => { kills++; child.signalCode = 'SIGTERM'; child.emit('exit', null, 'SIGTERM'); };
+  supervisor.child = child;
+  await supervisor.stop();
+  assert.equal(kills, 1);
+  assert.equal(supervisor.child, null);
+});

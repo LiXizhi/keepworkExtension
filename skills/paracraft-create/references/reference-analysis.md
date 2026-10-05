@@ -35,12 +35,18 @@ unresolved differences. A record supports resuming; it is not visual evidence.
 When unsure how to represent a subject economically, search online for Minecraft
 build photos, templates or schematics as temporary visual references. Learn the
 structural trick: silhouette, negative space, stair/slab/rail combinations and how
-few blocks imply a complex detail. Do not copy/download those references into this
+few blocks imply a complex detail. For example, a stair can suggest a chair, a
+fence can suggest a slender support, and a slab can suggest a thin ledge; choose
+the verified Paracraft equivalent and check its appearance in the actual scene.
+Do not copy/download those references into this
 skill or its templates, or add external build catalogs to the skill. Borrow the
 construction technique rather than importing an entire schematic. Adapt the idea
 to verified Paracraft names/IDs and meter scale; Minecraft numerical IDs and
 schematic formats do not map directly. Block out the borrowed silhouette with a
 small number of blocks and inspect it in a fresh screenshot before adding detail.
+Borrow proportions and shape cues, not the reference's block count: rescale the
+design to its intended dimensions in meters so a Minecraft example does not turn
+ordinary furniture or a small building into an oversized Paracraft object.
 Prefer a compact native-block solution, then use miniature color voxels or Paracraft
 BMax when native shapes cannot express the requested result. Do not force every
 subject onto a whole-meter grid or inflate its size for detail.

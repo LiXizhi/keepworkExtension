@@ -1,0 +1,21 @@
+// Read-only HTTP MCP acceptance against the already-running singleton hub.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
+const {StreamableHTTPClientTransport}=require('@modelcontextprotocol/sdk/client/streamableHttp.js');
+const [sourceFile,outArg]=process.argv.slice(2);assert(sourceFile&&outArg,'Usage: CURRENT_NATIVE_REPORT OUTPUT');
+const source=JSON.parse(fs.readFileSync(sourceFile)),out=path.resolve(outArg);fs.mkdirSync(out,{recursive:true});
+(async()=>{const client=new Client({name:'http-paracraft-acceptance',version:'1'});await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:8089/mcp')));
+const raw=(action,params={})=>client.callTool({name:'paracraft_cli',arguments:{action,clientId:source.identity.clientId,chatSessionId:'rsi-http-078',petId:'review',params}});
+const call=async(action,params={})=>{const r=await raw(action,params);assert(!r.isError,r.content.find(c=>c.type==='text')?.text);return JSON.parse(r.content.find(c=>c.type==='text').text);};
+try{const tools=(await client.listTools()).tools.filter(t=>t.name.startsWith('paracraft_'));assert.deepEqual(tools.map(t=>t.name),['paracraft_cli']);assert(JSON.stringify(tools[0].inputSchema).length<1200);
+const resources=(await client.listResources()).resources.filter(r=>r.uri.includes('paracraft-create'));assert.equal(resources.length,1);assert(resources[0].uri.endsWith('/SKILL.md'));
+const root=await call('skill'),guide=await call('skill',{path:'references/persistence.md'});assert(root.content&&guide.content);assert(!root.files&&!guide.files);assert(guide.content.includes('creationModelReferences'));
+const cap=(await call('get_creation_capabilities')).result;assert.deepEqual(cap.identity,source.identity);assert(cap.creationModelReferences);
+const template=await raw('template_info',{template:'sitting_cat'});const templateText=template.content.find(c=>c.type==='text')?.text;
+const before=(await call('get_scene_info')).result;
+const start=Date.now()/1000;const capture=await raw('camera_capture',{expectedIdentity:source.identity,...source.result.detail});assert(!capture.isError,capture.content.find(c=>c.type==='text')?.text);
+const pixels=capture.content.find(c=>c.type==='image'),metadata=JSON.parse(capture.content.find(c=>c.type==='text').text);assert(pixels&&pixels.mimeType==='image/jpeg');assert.equal(metadata.sessionId,source.identity.sessionId);assert.equal(metadata.base64,undefined);assert(!metadata.cached);assert(metadata.timestamp>=start-5);
+fs.writeFileSync(path.join(out,'http-detail.jpg'),Buffer.from(pixels.data,'base64'));
+const after=(await call('get_scene_info')).result;assert.deepEqual(after.player,before.player);assert.deepEqual(after.camera,before.camera);
+const result={passed:true,toolNames:tools.map(t=>t.name),resourceUris:resources.map(r=>r.uri),gatewaySchemaBytes:JSON.stringify(tools[0].inputSchema).length,singleGuideOnly:true,currentGuide:true,identity:cap.identity,modernTemplateAvailable:!template.isError,templateResponse:templateText,metadata,nativeImage:true,playerAndMainCameraUnchanged:true};fs.writeFileSync(path.join(out,'report.json'),JSON.stringify(result,null,2));console.log('PASS live HTTP MCP: one Paracraft gateway/root, lazy current guide and fresh native image; modern template available='+result.modernTemplateAvailable);
+}finally{await client.close();}})().catch(e=>{console.error(e.message);process.exitCode=1;});

@@ -81,6 +81,11 @@ registry names/IDs from the installed engine instead of guessing Minecraft IDs.
 
 ## One color format
 
+For world steps and bench backs, prefer the geometric half-grid helper when
+`nativeHalfBlocks` is available; see [half-blocks.md](half-blocks.md). Native
+straight stairs use data 1..4, not a default data=0. General helper rotation
+without half-grid conversion rotates positions, not native orientation data.
+
 Use `color="#RRGGBB"` consistently for every paintable block, including plain
 color cubes, fences, walls, stairs, slabs, slopes and tinted panes. The creation
 library converts RGB to each block's native representation. You do not need to
@@ -92,7 +97,7 @@ own material; omit `color` when the selected block does not support painting.
 scene:group("railings")
 scene:line({from={2,1,1},to={10,1,1},blockId=267,color="#aa7744"})
 scene:group("entrySteps")
-scene:line({from={5,0,0},to={8,0,0},blockId=280,color="#aa7744",data=0})
+scene:line({from={5,0,0},to={8,0,0},blockId=280,color="#aa7744",data=3}) -- high half at +Z
 scene:group("roofTrim")
 scene:block({position={1,7,1},blockId=282,color="#338899",data=0})
 ```
@@ -115,6 +120,21 @@ A raw lower-door placement does not automatically reproduce `ItemDoor:TryCreate`
 upper-window placement. Verify support-dependent windows, doors, foliage and
 fence joins after all neighboring blocks are present. Use named groups and helper
 replacement/removal so revisions retain bounds, stale checks and undo behavior.
+
+With `doorAssemblies`, prefer `scene:door({position={x,y,z},data=1,open=false})`
+in a named entrance group. It checks solid support and both cells, writes the
+native lower/upper pair as one undo command, and accepts `replace=true` for an
+explicit revision. Orientation is the native vertical data 1..4; inspect from
+the intended approach rather than inferring orientation from the main camera.
+For a doorway approached along Z, use data 1 or 2: the closed panel spans X
+and the open panel folds along Z. For an approach along X, use data 3 or 4;
+the closed panel spans Z and the open panel folds along X. The two values in
+each pair place the opened panel on opposite sides; preserve the same value
+when toggling closed/open. Inspect the visible panel as well as collision flags:
+an open native ID can be passable while its chosen direction looks crosswise.
+Lazy `doorway` demonstrates closed/open 1 x 2 m doors and a flush timber floor;
+read [doorway.lua](../examples/doorway.lua) only for layout changes. Engines
+without this capability can use the explicit two-cell assembly described above.
 
 For native flowers/grass, terrain/water and wool/carpet name-to-ID palettes with
 appearance and habitat notes, read [world-materials.md](world-materials.md).

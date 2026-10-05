@@ -5,6 +5,9 @@ Native world vegetation; BMax/character geometry remains color voxels only.
 These are sparse alpha-cutout grass/crossed-plane plant models, not solid cubes.
 Their texture provides the silhouette; the occupied cell is not a full green box.
 Place at local y=0 on supporting ground (ground surface is y=-1).
+A native flower/grass cell can already show several stems or blades. Plan density
+by the rendered clump, not by treating each cell as one literal flower; inspect a
+small border before multiplying it across a garden.
 
 | Registry name | ID | Appearance and useful habitat |
 |---|---:|---|

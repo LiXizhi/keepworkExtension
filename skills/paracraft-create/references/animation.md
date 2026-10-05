@@ -1,5 +1,8 @@
 # Animation authoring
 
+For multi-set films, cameras and master/child MovieBlock sequences, read
+[filmmaking.md](filmmaking.md). The actor-clip workflow below also supports those shots.
+
 Create a MovieBlock inside the scene's reserved control area. Add an actor from a
 verified BMax with a separate preview position and scale. Helper times are seconds;
 the native timeline stores milliseconds. Key values must use the documented native
@@ -59,3 +62,10 @@ three-second timeline. Review each clip independently after export and reload.
 Native `.x` export requires the installed ParaX exporter; discover availability
 before promising it. If missing, retain the editable rig/movie and report the
 specific unavailable export capability.
+
+For root-bone squash/stretch, use dimensionless XYZ `scale` keys and keep the
+model instance at scale 1. Inspect both the smallest and largest poses, plus an
+intermediate time. Desktop assembly feedback frames the maximum linear root
+scale/translation range; it does not resize the player view or establish the
+posed bounds of a deforming multi-bone rig. Large root scaling is a deliberate
+animation choice, not a substitute for correctly sized source geometry.

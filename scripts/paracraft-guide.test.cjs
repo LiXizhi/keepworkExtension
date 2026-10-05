@@ -45,7 +45,8 @@ test('one CLI and one root skill, with schemas and references loaded on demand',
     assert.ok(help.inputSchema.properties.code && help.inputSchema.properties.expectedIdentity);
     const launchHelp = JSON.parse((await call('help', {action:'launch'})).content[0].text);
     assert.ok(launchHelp.inputSchema.properties.projectId);
-    assert.ok(!launchHelp.inputSchema.required.includes('waitSeconds'));
+    assert.ok(!launchHelp.inputSchema.required?.includes('waitSeconds'));
+    assert.ok(!launchHelp.inputSchema.required?.includes('projectId'));
     assert.equal((await call('launch',{projectId:'530 & calc'})).isError,true);
     assert.equal((await call('skill', {path:'../../package.json'})).isError, true);
     assert.equal((await call('not_an_action')).isError, true);

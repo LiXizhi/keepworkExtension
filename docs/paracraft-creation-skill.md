@@ -1,10 +1,73 @@
 # Paracraft art creation with MCP
 
+Common native mechanisms now route through
+[mechanisms.md](../skills/paracraft-create/references/mechanisms.md), with focused
+subguides for pressure plates, buttons, levers and wiring. They cover native
+registry names, mount metadata, pulse versus persistent state, collision-triggered
+release, signal routing and input/output/reset acceptance. Guidance is grounded in
+the native block implementations; it does not introduce a new engine API or claim
+runtime acceptance of the illustrative circuit. Mechanism state and connections
+are recorded in the world's direct `docs/mechanisms.md` when appropriate.
+
+Engines advertising nativeHalfBlocks now accept half-grid batches that classify
+each carrier into native full blocks, six slab orientations or native stair
+variants including corners, inner corners, inverted and sideways shapes.
+The [half-block guide](../skills/paracraft-create/references/half-blocks.md) lets
+the AI describe tread/high-half geometry instead of camera-relative direction
+numbers. Textured size=1/2 shape calls use the same converter; ordinary ColorBlock
+microvoxels retain their exportable form unless opted in. Unsupported textured
+masks fail without a partial write, while uniform color partial masks use existing
+microvoxels. Supported materials and collision/visual review are documented there.
+Opt-in acceptance: `PARACRAFT_TEST_PORT=8100 node scripts/paracraft-half-blocks-native.cjs OUTPUT`
+against an entered CreationAcceptance_HalfBlocks* disposable world. It verifies
+four directions, paired benches, slabs, preserved color carriers, failed-batch
+isolation, manifest resume, native undo/redo and fresh independent screenshots.
+
+Lifecycle subguides are loaded on demand: client-startup.md for desktop startup
+with/without a project ID, local-worlds.md for named anonymous/signed-in local
+create/open/save, and login.md for optional native sign-in. `launch` may omit
+projectId; its target=client readiness means registration, while target=project
+still requires matching world entry. Local lifecycle calls use `run_command`
+with params.world; the frontend's manage_world name is not a gateway action.
+
+The canonical skill now routes natural landscapes to
+[terrain-biomes.md](../skills/paracraft-create/references/terrain-biomes.md) and
+villages/city streets to
+[settlements-roads.md](../skills/paracraft-create/references/settlements-roads.md).
+These guides cover continuous deterministic relief, mountains, dunes, snowfields,
+plains, habitat transitions, connected roads and terrain-aware building placement.
+They use existing CLI creation/inspection actions; no new biome action or packaged
+landscape template is claimed. Authored biome appearance is distinct from native
+generator settings. Flat scouting, loaded cells, terrainDepth and bounded-volume
+limits still apply. Large work uses inspected adjacent regions with stable origins
+and explicit shared-cell ownership.
+
+World continuation records go directly in docs/terrain.md, docs/settlements.md and
+docs/roads.md when relevant, linked from the world's docs/README.md. Keep seed,
+absolute region bounds, height/water/snowline parameters, road connections and
+generator/manifest paths. Source stays under creation/<name>/ and exports under
+blocktemplates/. Existing world_docs expected-content checks and separate native
+save semantics remain in force. Guide/link and exact-copy package checks cover
+distribution; live landscape generation and visual acceptance require a separate
+disposable-world run.
+
 The shared Keepwork MCP server exposes creation capabilities, scouting, source
 execution, job status/cancellation, official engine documentation, scene reads,
 fresh screenshots and independent camera captures. Use only `paracraft_cli({action,clientId?,params?})`; discover worlds with
 `{action:"clients"}`. `{action:"help"}` lists actions and
 `{action:"help",params:{action:"run_code"}}` loads one action schema.
+
+Discover candidates through the same `template_info` action with a category/query
+and `limit` (default five, maximum ten). `offset:nextOffset` reads another page.
+This returns curated metadata without reading any Lua; named lookup loads only
+the selected source/hash. Categories cover architecture, gardens, furniture,
+animals, characters and moving objects. No new MCP tools/resources are advertised.
+
+Extension and Local Helper builds copy the same canonical skill into their own
+output. Successful rebuilds replace only the generated skill subtree, so removed
+guides cannot survive as obsolete bundled files; failed builds keep the previous
+successful copy. Canonical-source overlap and linked output directories are
+rejected. Validate this with `node --test scripts/creation-skill-build.test.mjs`.
 
 Packaged templates can run without copying Lua: query `template_info` for one
 of `desk_fan`, `compact_car`, `rowing_boat`, `light_aircraft`, `butterfly` or `bird`, then `run_template` with its hash, world
@@ -245,3 +308,39 @@ Template metadata includes `requiredCapabilities` only for examples that require
 a newer helper. The single gateway checks those flags and exact world identity
 before dispatching source. Missing capability or changed session sends no
 construction request; templates with sequential fallbacks incur no extra read.
+## World memory and native films
+
+The Skill now reads the selected world's AGENTS.md at every task start and world
+switch. Before the first edit, missing files are initialized via `world_docs`;
+analysis-only tasks remain read-only. Detailed documents live directly under world
+docs/ (README, codeblocks, movies, signs, modules, changes), not docs/paracraft/.
+Updates preserve user text outside managed sections and use expectedContent.
+Failed document writes never justify replaying scene edits. Native saving remains
+explicit; docs identify unsaved changes that a new session must verify.
+
+`analyze_world` defaults to grouped counts and examples above 50 matching objects;
+`view:"summary"` forces a compact overview and `view:"objects"` expands paginated
+details through the returned cursor. Large code/sign documentation groups inspected
+objects by purpose, module or area and links focused notes directly under docs/.
+It avoids copying every source or sign and explicitly records sampling/coverage.
+
+`analyze_world` is a paginated saved/live object index. Core objects are code blocks,
+MovieBlocks, signs and third-party smart modules, including AgentSign provenance,
+versions, dependencies and connected code. Unloaded region XML is parsed without
+loading entities or running code. Inspect returned world_object refs via existing
+read_scene_object. Scope/coverage and inferred relationships are labeled.
+
+The lazy filmmaking guide covers same-world sets, reusable actors, camera tracks,
+native master/child movie sequences, continuous playback and editable delivery.
+Engine helpers cameraKeyframes, movieSequence and playMovie are capability gated.
+Both products continue packaging the canonical Skill; no extra MCP tools/resources.
+
+Validation: `node --test scripts/paracraft-world-memory.test.cjs` plus guide/build
+and scene/transport regressions. In a disposable CreationAcceptance_WorldMemory_*
+world run `paracraft-world-memory-native.cjs OUTPUT`, then
+`paracraft-world-memory-reopen-native.cjs OUTPUT`, then
+`paracraft-film-playback-native.cjs OUTPUT`. Set PARACRAFT_TEST_PORT when needed.
+The reopen runner deliberately saves the fixture and leaves its final camera
+revision unsaved; the playback runner verifies all three shots and camera recovery.
+Native reports and fresh screenshots are written to OUTPUT. The test geometry is
+a technical fixture, not a finished animated story.

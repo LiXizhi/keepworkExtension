@@ -8,9 +8,39 @@ require.extensions['.ts'] = (m, f) => m._compile(ts.transpileModule(fs.readFileS
 const {createParacraftLauncher, desktopProtocolUrl, openDesktopProtocol} = require('../src/core/paracraftLaunch.ts');
 
 test('protocol grammar rejects shell/URL injection', async () => {
+  assert.equal(desktopProtocolUrl(), 'paracraft://protocol="paracraft" debug="main"');
   assert.equal(desktopProtocolUrl(530), 'paracraft://cmd/loadworld 530 debug="main"');
   for (const id of [0,-1,1.1,Infinity,'530','530 & calc',Number.MAX_SAFE_INTEGER+1]) assert.throws(() => desktopProtocolUrl(id));
   await assert.rejects(openDesktopProtocol('https://example.com'), /invalid_protocol_url/);
+});
+
+test('client-only startup reuses an idle desktop without requiring a world or login', async () => {
+  let opened=0;
+  const launcher=createParacraftLauncher(async()=>[
+    {clientId:'wasm',platform:'wasm',worldEntered:false},
+    {clientId:'occupied',worldEntered:true},
+    {clientId:'entering-project',worldEntered:false,kpProjectId:530},
+    {clientId:'idle',worldEntered:false},
+  ],async()=>opened++);
+  const result=await launcher.launch();
+  assert.equal(result.target,'client');assert.equal(result.state,'ready');
+  assert.equal(result.clientId,'idle');assert.equal(result.reused,true);assert.equal(opened,0);
+  assert.equal(result.initialClientIds,undefined);
+});
+
+test('client-only launches coalesce and await new registration without switching existing worlds', async () => {
+  let clients=[{clientId:'existing',worldEntered:true}],opened=[];
+  const launcher=createParacraftLauncher(async()=>clients,async url=>opened.push(url));
+  const [a,b]=await Promise.all([launcher.launch(),launcher.launch()]);
+  assert.equal(a.launchId,b.launchId);assert.equal(a.state,'waiting');
+  assert.deepEqual(opened,[desktopProtocolUrl()]);
+  clients.push({clientId:'wasm',platform:'wasm',worldEntered:false});
+  assert.equal((await launcher.status(a.launchId)).state,'waiting');
+  clients.push({clientId:'new-desktop',worldEntered:false});
+  const result=await launcher.status(a.launchId);
+  assert.equal(result.state,'ready');assert.equal(result.clientId,'new-desktop');
+  assert.equal(result.target,'client');assert.equal(result.initialClientIds,undefined);
+  assert.equal(clients[0].worldEntered,true);
 });
 test('reuse a ready desktop, not WASM or an entering/other world', async () => {
   let opened=0;

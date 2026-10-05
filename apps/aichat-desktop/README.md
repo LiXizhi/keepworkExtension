@@ -50,6 +50,20 @@ or `keepwork.com/chat` for the published app. Click it to open the configured en
 the external browser; the adjacent refresh icon reloads the current desktop page.
 macOS retains its normal system application menu and traffic-light window controls.
 
+The **文件** menu (also available in the tray) includes **Keepwork MCP Server**:
+**查看状态** probes the live service and displays ownership, version, PID and workspace;
+**打开 Dashboard** opens `http://127.0.0.1:8089/dashboard` in the browser;
+**重启 Keepwork MCP Server** restarts the desktop-owned runtime or starts it if offline.
+Services owned by VS Code or Local Helper must be restarted in their owning app; the
+status is refreshed and an explanation is shown. Repeated restart clicks are coalesced.
+
+**AIChat 服务器 → 使用本地源码服务器…** selects a folder containing `AIChat.html`
+and serves it on loopback, without a website build. **使用线上服务器** returns to the
+published entry. This selection applies to the current app session. Local pages reload
+without cache via the refresh icon, menu or Ctrl/Cmd+R, and automatically after a successful
+MCP restart. Local source changes are read directly from disk. Only the selected entry
+gets the desktop bridge; Dashboard and embedded pages do not gain native privileges.
+
 - Single application instance; closing hides the window without suspending it. Tray/menu
   **打开 KeepWork 第二大脑** restores it. **退出** closes native terminals and desktop-owned MCP only.
 - Login startup is off by default and optional in the application menu.

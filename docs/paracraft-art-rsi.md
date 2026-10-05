@@ -2,7 +2,7 @@
 
 Target: improve beautiful Minecraft-like editable scenes, props, animated small
 animals (dedicated on-demand guide), characters and moving fans/cars/aircraft/boats,
-plus trees and flowers. Retain one MCP tool and one root skill. Completed: **49/100**.
+plus trees and flowers. Retain one MCP tool and one root skill. Completed: **100/100**.
 
 A round must change maintained skill/template/CLI behavior and provide relevant
 verification. Native code success does not count as visual quality: inspect fresh
@@ -1711,3 +1711,1070 @@ Evidence out/rsi/055/overlap-native-result.json, final-native-check.json,
 volume-regression.json and report.json/detail.jpg. Captures leave player/main
 camera unchanged and CRenderTarget count zero. No world save, 530 edits or release.
 Goal active 55/100.
+
+## Round 056 — dependency-backed lazy composition templates
+
+run_template accepts named world-local assets only for the selected template's
+declared assetSlots. tabletop_lantern reuses two existing scale-1 exports, with
+no new mesh export. Role/path validation rejects missing roles, unknown roles,
+traversal/absolute/URL/code-injection paths before dispatch. Simultaneous quoted
+filename substitution avoids cascading swapped roles. Requirements include
+modelOffset/modelContactPlacement/modelDependencies; one MCP tool/root skill
+remain advertised. Native requireModels checks every path before loading, then
+cooperatively waits for renderable models before the first floor write; duplicate
+files load once. Lazy guides/wiki cover the input and saving semantics.
+
+Eight template/guide tests and TypeScript pass. Native seven dependency checks
+prove missing/invalid/dense-array/limit rejection before loading and duplicate
+asset reuse with no block writes. Fresh stdio run_template creates creation-36
+without coordinates; retry recovers that job. Native checks prove 32 current
+members, 30 floor backups and exact zero tabletop contact gap. Missing dependency
+creation-37 fails before any scene has writes/cells. Structured template request
+is 486 bytes, compared with its 1,187-byte base Lua source (not a token/speed
+benchmark). Lua serializes empty artifacts as {}, so verifier checks key count.
+
+Fresh world screenshots fail while the test window is minimized. Verified live
+IsIconic=true, native viewport count 2 and capture target count 0; CLI
+bring_to_front reports success but does not restore it. Asked user to restore the
+disposable test window; no new source submission, renderer restart or cached-image
+fallback. Recovered original creation-36 for observation. World-image review is
+pending window restoration; no claim of fresh visual acceptance for this round's
+infrastructure. Evidence out/rsi/056/native-dependencies.json, native-check.json,
+reuse-report.json, missing-result.json, capture-diagnostics/window-state/tail-log.
+Bundled CLI rebuilt; modern schema verified in fresh stdio, running old HTTP MCP
+daemon not restarted. No world save, project 530 edits or deployment.
+Goal active 56/100.
+
+Subsequent observation resolved the window limitation: the existing native
+IsWindowMaximized setter, reapplied with its current value, restores the minimized
+window without changing its maximized mode. Read-only Win32 check confirms
+IsIconic=false. Both fresh world images of the original creation-36 now succeed
+through MCP (out/rsi/056/review/mcp-report.json). No rebuild was submitted.
+
+## Round 057 — compose a human-scale café terrace from reused props
+
+Added lazy patio_cafe with four required asset roles and no exports: two round
+tables, four inward-facing slatted chairs, two contacting tabletop lanterns and
+three topiary planters at scale 1. Native plank border, stone inset, white colored
+fence and roses complement the color-only models. A 10 × 8 m floor replaces ground
+and retains 80 original-soil backups. Source/manifest saving remains explicit.
+Eight guide/template checks cover role routing, native materials and no exports.
+
+Creation-38 auto-scouts, duplicate request recovers the same job and finishes.
+After restoring the minimized window with the supported native setting API,
+fresh overview/detail images reveal an actual art error: ID 112 is Oak_Wood_Stairs,
+not Rose. Verified live names: Rose/Red_Rose=115. Corrected the generator to 115
+and revised only those four owned flower cells at the established origin.
+Initial revision creation-39 had a missing return-table brace and failed compilation
+before writes; corrected creation-40 succeeds and saves the canonical generator.
+Original failed request is retained; no automatic mutation retry/new relocation.
+
+Final native checks prove 105 current members: 80 floor backups, 11 reused model
+instances, 10 native fence blocks and four correct roses. All model dimensions
+match their expected meter bounds at scale 1; no stale fingerprints. Inspected
+fresh matching views after revision: stairs gone, roses present, chairs face
+tables, lamps rest on tops, planters frame the open front. Evidence
+out/rsi/057/native-check.json and revision-corrected/report.json/overview.jpg.
+Capture target count remains zero; no world save, 530 edits or deployment.
+Goal active 57/100.
+
+## Round 058 — restore minimized Windows clients before fresh visual review
+
+BringToFront now reapplies the current native IsWindowMaximized mode before
+BringWindowToTop, using the established settings API. It preserves the mode and
+reports exceptions; no job or screenshot callback registries are reloaded.
+Five native isolated checks cover both modes, ordering and read/restore/front
+failures. Live CLI action plus fresh MCP overview verifies stationary player and
+main camera, the same world session and no creation submission. Visually inspected
+the café image. Earlier minimized-to-restored native evidence remains in round 056.
+Updated lazy visual review, authoritative scene inspection and topic index.
+Eight final guide/template tests pass after round 057's rose correction; bundled
+CLI rebuilt. Evidence out/rsi/058/native-regression.json, report.json, overview.jpg.
+No world save, project 530 changes or deployment. Goal active 58/100.
+
+## Round 059 — resolve native block names instead of memorizing numeric IDs
+
+Creation shape helpers now accept exact installed registry names through blockId,
+including registered aliases, while retaining numeric IDs and uniform RGB.
+Resolution runs before scouting/progress or shape expansion. Capability
+nativeBlockNames advertises support; older clients use verified IDs. Lazy material
+guide and authoritative creation wiki describe the contract. Eighteen native
+read-only checks validate names, aliases, numeric IDs, invalid inputs and actual
+Rose/fence shape planning through the native color encoder. The first test fixture
+called the Atomic wrapper without its job environment; isolated Atomic in the
+fixture and reran successfully, without changing production rollback semantics.
+Evidence out/rsi/059/native-regression.json. No world writes, save or deployment.
+Goal active 59/100.
+
+## Round 060 — reject miniature requests that silently discard native shapes
+
+Fractional geometry previously accepted a colored fence/stair ID but emitted
+color-only miniature voxels, silently ignoring that shape. Resolve and validate
+the requested material before scouting: fractions require ColorBlock, while
+whole native blocks retain their shape/color behavior. Authoritative wiki explains
+the distinction. Eight native read-only checks cover numeric/named fence and rose
+rejection, 1/512 ColorBlock acceptance and whole fence compatibility.
+Evidence out/rsi/060/native-regression.json. No world writes or save.
+Goal active 60/100.
+
+## Round 061 — reusable human-scale slatted garden bench
+
+Added lazy garden_bench: 1.5 m wide, 0.9375 m high, seat at 0.4375 m, timber
+slats with narrow dark end frames, four feet and a lower brace. Color-only
+1/32 geometry is batched, exported once and independently instanced at scale 1.
+First live creation-41 failed before any writes: my test hotpatch wrapped the
+two-argument shape method with the one-options Atomic adapter. Corrected the
+runtime-only adapter to the existing production pattern; no production adapter
+change. Expanded round 059's positive planner tests to exercise the real Atomic
+wrapper; all 18 pass. Creation-42 then auto-scouts and completes (duplicate
+recovery tested). Native checks verify 40 members, 35 original-soil backups,
+four miniature carriers and no stale members; failed-41 has zero cells/writes.
+
+Independent reload found actual depth 0.46875 m versus an erroneous 0.5 m
+declaration. Corrected the template and used source-only creation-43 to persist
+the canonical generator and return corrected bounds at the same origin, with
+no geometry rebuild or new export. Three fresh PNGs verify exact dimensions,
+scale 1, stable pixels and no clipping; visually inspected the open slats/frames.
+Fresh world images keep player/main camera stationary. Eight guide/template
+tests and bundled CLI build pass. Evidence out/rsi/061/native-check.json,
+metadata-corrected/latest-job.json, feedback-corrected/report.json/prop-0.png.
+No world save, project 530 changes or deployment. Goal active 61/100.
+
+## Round 062 — named native materials around reused pocket-garden seating
+
+Added lazy bench_garden, 5 × 6 m with one verified bench and two existing topiary
+assets, three pale native fence blocks, sparse native roses/yellow flowers/grass
+and a flush stone path within grass. Both dependencies preflight before writes;
+requires nativeBlockNames and model capabilities, no new exports. Creation-44
+auto-scouts and completes; duplicate request recovers it. Native checks prove
+44 unmodified members, 30 original-ground backups and exact expected native IDs
+resolved from names. Eight guide/template tests cover new bench dimensions and
+nook role routing/materials/no exports. Bundled CLI rebuilt.
+
+First quick overview includes the temporary scouting overlay; recovered the
+same job for fresh images after its normal 10-second lifetime. Inspected clean
+overview: bench against pale back rail, planters framing paving and open front,
+native plants in side grass. No rebuild or camera/player relocation requested.
+Evidence out/rsi/062/native-check.json and review/mcp-report.json/mcp-overview.jpg.
+No world save, project 530 changes or deployment. Goal active 62/100.
+
+## Round 063 — material preflight before expensive helper expansion
+
+Shape helpers now validate RGB and native painting/data encoding before progress,
+site revalidation and geometry expansion. Previously unsupported flower coloring
+or malformed input could allocate a large valid shape before failing. Native
+read-only checks verify six invalid palette/data requests fail before progress
+and two valid native requests reach it; all 18 named-block and eight miniature
+material checks also pass with the production-shaped Atomic adapter.
+Authoritative creation wiki describes preflight. Evidence
+out/rsi/063/native-regression.json. No world writes or save. Goal active 63/100.
+
+## Round 064 — hollow human-scale birdbath with a recessed basin
+
+Added lazy garden_birdbath: 0.75 m diameter, 0.6875 m high, narrow column,
+stepped base and raised hollow circular rim. Batched 1/32 color-only row spans
+keep the blue decorative surface recessed; no native liquid/transparency claims.
+Creation-45 auto-scouts, duplicate request recovers it, exports once and creates
+a scale-1 instance. Native checks prove 35 unmodified members, 30 original-soil
+backups and four miniature carriers. Independent reload at elevated view confirms
+exact bounds; three fresh PNGs are nonempty, stable and unclipped. Visually
+inspected the open ring, recessed blue surface and pedestal. Fresh world images
+preserve player/main camera. Eight guide/template tests cover routing, palette
+and decorative-water metadata. Bundled CLI built; evidence
+out/rsi/064/native-check.json and feedback/report.json/prop-0.png.
+No world save, project 530 changes or deployment. Goal active 64/100.
+
+Batch follow-up: all 13 CreationSceneRegression cases pass with the new preflight,
+TypeScript noEmit and both repository diff checks pass. Skill validator passes.
+Recent native logs saved to out/rsi/064/tail-log.json. HTTP MCP daemon remains
+the older live schema; fresh stdio clients tested the rebuilt templates through
+the same singleton hub. Modern HTTP-template acceptance is still outstanding.
+
+## Round 065 — revise contacting models without clearing their neighbors
+
+Read-only native probe reproduces entity_obstruction when checking the lantern's
+carrier beside its own table. Removal now scopes an exemption to owned model
+carriers whose original was air. Each CheckCell rebuilds the unchanged owned-model
+set so newly modified neighbors lose the exemption; foreign models/entities,
+edit permissions, locked cells and stale target checks remain. Context clears
+after success/failure, including snapshot errors. Capability modelContactRemoval
+and lazy persistence/native wiki document the boundary.
+
+Creation-46 resumes the original scene, tests simulated foreign obstruction and
+manual-neighbor fingerprint change before writes, then deletes/recreates just
+the contacting lantern. Native verification proves 32 unmodified members and
+unchanged table; saves original generator plus current manifest. Fresh detail
+image shows the same tabletop contact at the fixed origin. Native test adapter
+removed; all 13 scene regressions pass. Evidence out/rsi/065/before-probe.json,
+capabilities.json and revision/latest-job.json/report.json/detail.jpg.
+No world save, project 530 changes or deployment. Goal active 65/100.
+
+## Round 066 — small rabbit with grounded paws, tilting ears and an explicit hop
+
+Added lazy hopping_rabbit, 0.453125 m long and about 0.46875 m to upright ear
+tips. Color-only 1/64 body/head/haunches, cream paws/tail, pink muzzle/ear centers,
+two separate pivoted ear meshes; three scale-1 assets and an editable MovieBlock.
+Idle spans 0–2 s; the whole-animal toy-like hop spans 2–4 s with 0.125 m apex.
+No skinned leg gait or embedded clip claims. Animal guide routes lazily to source.
+
+Initial creation-47 fails on root bone readiness after geometry has loaded.
+Bone keyframe preflight now waits cooperatively for native skeleton children,
+retaining bounded failure/cancellation and unknown-name rejection before tracks.
+Three native tests cover delayed readiness, 500-check missing skeleton limit and
+cancellation. Persisted the known failed scene and repaired only its MovieBlock
+at the fixed origin in creation-48, reusing its mesh exports.
+
+Pixels then reveal disconnected floating paws. Pure source planning proves the
+gap (2480/2650 connected voxels); added short front legs/haunches, positioned eyes
+against the head. Final all 3038 body voxels connect by faces and four paw bases
+touch y=0. Creation-49 revises body/movie at the same origin; ear assets stay.
+Uses a new body filename to avoid native cached old geometry. Corrected canonical
+generator and manifest saved. Nine native frames prove scale, final ear rotations,
+joint offsets, 0.125 m apex and grounded/looped endpoints; source/member/manifest
+hashes unchanged by capture. Eight isolated PNGs prove stable/unclipped feedback;
+visually inspected rest and motion poses. Fresh stdio template creation-50 now
+succeeds from new filenames with asynchronous skeleton loading and duplicate
+request recovery, without the repair adapter.
+
+Eight guide/template tests, skill validation and bundled CLI build pass.
+Evidence out/rsi/066/bone-ready-regression.json, connectivity-before/after.json,
+hop-check.json, body-corrected/report.json, assembly-corrected/report.json and
+fresh/mcp-report.json. No world save, 530 changes or deployment. Goal active 66/100.
+
+## Round 067 — author the rabbit's 33 poses in three native batches
+
+Rabbit generator now builds one keyframes batch per actor, reducing 33 individual
+helper calls/snapshots/undo commands to three while retaining the same 11 poses
+per actor. Capability keyframeBatches gates the template on older engines; a MCP
+test proves rejection before mutation when batching support is missing.
+Creation-51 revises only the fresh round-066 scene's MovieBlock at the fixed
+origin, reusing all three assets and saving the canonical generator. Read-only
+native snapshots compare every authored actor/bone time and key value identically.
+The native range track's cached slot zero differs; it is not an authored key and
+is excluded explicitly, with original raw evidence retained. Initial snapshot
+fetch returned health instead of execution; switched the verifier to the existing
+native HTTP request contract with explicit Content-Length. No mutation occurred
+until before-snapshot was validated. Recovering the saved job never replays writes.
+
+Nine native frames reconfirm part scales, joints and final ear rotations; eight
+isolated PNGs pass margin/stability checks and the rest pose was visually inspected.
+Source/manifest/member hashes stay fixed during captures. Eight guide/template
+tests and bundled CLI build pass. Evidence out/rsi/067/revision/track-check.json,
+authored-before/after.json, report.json and assembly/report.json/image-check.json.
+No geometry exports, world save, 530 changes or deployment. Goal active 67/100.
+
+Batch verification: 13 scene regressions, TypeScript noEmit, skill validation and
+both diff checks pass. All created/repaired jobs are terminal; no process remains
+pending. Remaining work includes further species/scene composition, integrated
+revision/undo acceptance and current HTTP MCP daemon verification before the
+100-round completion audit. Existing daemon PID 9608 still predates newer schemas.
+
+## Round 068 — invalid native HTTP POST cannot silently become health
+
+Reproduced standard fetch returning health for a valid read-only command, with
+and without explicit length: the installed native HTTP parser did not deliver
+its JSON body. The endpoint previously treated this as missing action and replied
+successfully with health. POST now returns invalid_json_body, missing_action or
+invalid_params as appropriate; GET-without-action remains health and explicit
+query aliases retain compatibility. This does not claim the older C++ parser
+now supports fetch bodies; bundled CLI/Keepwork transport remains the usable path.
+
+Eleven native decoder checks and six live HTTP cases verify canonical command
+execution with matching request ID, GET health, bad JSON/envelopes and explicit
+fetch failure with no false health. Page hot-refresh picks up the change without
+resetting jobs or restarting the engine. Documented native limitation and indexed
+the endpoint. Evidence out/rsi/068/fetch-probe.json, native-regression.json,
+http-report.json. No scene mutations, world save, 530 edits or deployment.
+Goal active 68/100.
+
+## Round 069 — grounded sitting tabby with tail idle
+
+Added lazy sitting_cat: two color-only scale-1 meshes, pointed pink-centered ears,
+cream paws/muzzle, green eyes, tabby markings and a dark-tipped curved tail. Body
+bounds are 0.21875 x 0.453125 x 0.328125 m; total length including the tail is
+about 0.59 m. Body remains fixed while root-bone tail yaw alternates +/-0.35
+radians in an editable two-second MovieBlock. No walking, skinning or embedded
+animation claim. Batched boxes and keyframes keep execution compact.
+
+Read-only planning verifies 2,413 connected body voxels and four grounded paws.
+Native creation-52 completes through fresh stdio MCP with automatic placement
+and duplicate-request recovery. Six seek times verify native scales, dimensions,
+rotations and joint offsets. Eight independent assembly PNGs show rest and both
+tail extremes; decoded images are nonempty, unclipped and repeatably stable.
+Source/manifest/member hashes and player/main camera remain unchanged by captures.
+Eight guide/template tests, TypeScript, skill validation and bundled build pass.
+Evidence out/rsi/069/body-planning.json, request.json, build/report.json and
+assembly/report.json. Source and two world-local .x assets explicitly saved;
+no world save, project 530 edits or deployment. Goal active 69/100.
+
+## Round 070 — reuse props in a native birdbath seating garden
+
+Added lazy birdbath_garden with two required same-world asset roles, bench and
+bath. Its 7 x 7 m composition uses a 1.5 m bench, 0.75 m decorative birdbath,
+native oak-leaf low hedges, red/yellow flower clusters and sparse grass. Flush
+stone paving leaves an open front approach and keeps planting away from paths.
+Dependency preflight runs before floor edits; two scale-1 instances reuse existing
+exports. Guide explains composition, asset provenance and decorative water.
+
+Fresh stdio MCP completes creation-53 with automatic placement and duplicate
+recovery. Native inspection verifies 72 unchanged members: 49 ground backups,
+two model carriers, five fences, six leaf blocks, six flowers and four grass
+plants; artifacts remain empty. Overview/detail screenshots show floor level,
+readable prop separation and open entrance; neighboring acceptance fixtures are
+visible in the background and are not part of this garden. Capture hashes,
+player and main camera remain stable. Eight guide/template tests, TypeScript,
+skill validation and bundled build pass. Evidence out/rsi/070/request.json,
+build/report.json and native-check.json. No new assets, world save, 530 changes
+or deployment. Goal active 70/100.
+
+## Round 071 — scoped repaving preserves original soil and fixtures
+
+Added a reusable native acceptance runner for changing only a garden's 16 paved
+floor cells to named Oak_Wood_Planks. The script resumes the saved scene at its
+fixed origin, retains the original ground group, compares first-soil snapshots
+and every unrelated member, and saves the full amended generator. Persistence
+guidance now describes repaving owned cells without removing the entire garden.
+
+Creation-54 passed origin/soil/fixture assertions and saved the revision, then
+failed in result formatting because getfenv is unavailable in normal CodeBlock
+source. Retained its failed handle and replaced that diagnostic lookup with
+ordinary scene inspection and computed views. Explicit repair creation-55
+completes; repeats recover the saved job instead of making another mutation.
+No hidden native authority is required by the revision code. Existing-job native
+captures show flush wooden paving, unchanged bench/bath/hedges/flowers and open
+approach. Capture hashes and player/main camera stay fixed. Build, skill validator
+and diff check pass. Evidence out/rsi/071/revision/latest-job.json (known failure)
+and revision-fixed/latest-job.json/report.json/detail.jpg. No exports, world save,
+project 530 edits or deployment. Goal active 71/100.
+
+## Round 072 — restore/repaint cycle with first-soil verification
+
+Added a linked floor-restore-cycle example and a scoped MCP revision runner with
+persisted request/job recovery. It restores all 49 ground members to their first
+native snapshots, repaints the same floor, compares original backups and every
+unrelated fixture, and saves the still-valid full generator with its manifest.
+Guide explains that removal restores the entire named floor group, so independent
+paths/floors should use separate groups. It is explicitly an existing-scene patch.
+
+Creation-56 completed restoration/repainting/assertions and saving, then failed
+at camera coordinate generation: strict toWorld rejected an outside-bound eye.
+Retained the failure; corrected camera conversion from two valid interior points.
+Explicit repair creation-57 completes with all restoration flags true and no
+stale members. Fresh captures match the wooden garden; source/member/manifest
+hashes and player/main camera stay fixed. Three lazy-guide checks, skill validator
+and build pass. Evidence out/rsi/072/cycle/latest-job.json (known failure) and
+cycle-fixed/latest-job.json/report.json. No new exports, world save, 530 edits or
+deployment. Goal active 72/100.
+
+## Round 073 — read-only outside-footprint camera coordinates
+
+Added Scene:cameraPoint and sceneCameraPoints capability after the round-72
+strict-toWorld failure. It validates finite three-component local coordinates,
+checks the world session and converts with native block coordinates without
+writes. position/toWorld continue to enforce construction bounds. Updated the
+engine wiki/indexes and linked a compact read-only saved-scene review example;
+older engines retain the two-interior-point conversion fallback.
+
+Fifteen native checks cover fractional/negative/outside coordinates, malformed,
+NaN/infinite/oversized vectors, session failure, unchanged strict edit bounds
+and an existing scene. Creation-58 generates outside-bound camera coordinates
+without source/manifest/block edits. Native captures reproduce both previous
+views within 0.00002 engine units; source/member/manifest hashes, player and main
+camera remain fixed. Three guide tests, 13 scene regressions, skill validation,
+build and diff checks pass. Evidence out/rsi/073/native-check.json,
+camera-check.json and review/report.json. No exports, world save, project 530
+changes or deployment. Goal active 73/100.
+
+## Round 074 — real floor undo/redo and manual-edit protection
+
+Added a scoped native floor-undo regression and documented the observed manifest
+behavior after undo. During active creation-59, one owned wooden path cell is
+repainted to stone, capturing the actual native command through an instance-local
+World.Commit wrapper. Command Undo restores wood and exposes stale membership;
+Redo restores stone and its expected fingerprint. A simulated later edit causes
+undo conflict and remains untouched. The test then restores the original wooden
+cell through the helper, keeps its first-soil backup, and removes the local hook.
+Two native commands remain registered through the ordinary undo manager; this
+does not claim a UI keyboard undo test or history reset.
+
+Seven checks pass; fresh capture matches the prior garden. Final source, manifest
+and member hashes are exactly identical to the round-73 baseline, with unchanged
+player/main camera. Skill and native wiki explain inspection/reconciliation after
+undo rather than bypassing stale fingerprints. Three lazy-guide checks, build
+and skill validation pass. Evidence out/rsi/074/review/report.json and
+undo-check.json. No exports, world save, 530 changes or deployment.
+Goal active 74/100.
+
+## Round 075 — batched human poses and standalone embedded clips
+
+Updated mini_character to author seven arm rotations plus idle/wave ID starts in
+one keyframes call instead of nine calls; template requires keyframeBatches.
+Fresh automatic creation-60 exports a 1.75 m two-bone character and independent
+embedded clips. Native track audit verifies seven exact times and ID 0 at 0 ms,
+ID 1 at 1000 ms. Seven seek times independently verify native right-arm poses,
+dimensions/scale and absence of external bone keys on the reloaded clip actor.
+
+Assembly verification exposed missing blocksize in the human template result,
+then a verifier incorrectly expecting rigid rotation framing for a two-bone
+skinned asset. Added native unit metadata, fail-fast report validation and the
+appropriate conservative rest-sphere framing check. Metadata/source-only
+creation-61 repairs the same scene without geometry/export repetition. Eight
+isolated PNGs pass margin/repeat checks; inspected rest and peak-wave images
+show attached arm and recognizable clothing/face. Hashes and player/main camera
+remain stable during capture. Eight guide/template checks, TypeScript and skill
+validation pass. Evidence out/rsi/075/track-check.json, metadata/report.json and
+assembly-fixed/report.json. No world save, 530 edits or deployment.
+Goal active 75/100.
+
+## Round 076 — mixed scenes survive two explicit save/reopen cycles
+
+Added multi-scene persistence and fresh-session review runners. The lifecycle
+journal records save/open phases before dispatch and recovers completed reads
+without repeating world mutations. First reopening briefly reported a stale
+floor member while terrain finished loading; later native reads matched exactly.
+Added bounded read-only readiness observations and recovered that first cycle,
+then completed the second. Guide distinguishes entered status from ready scene
+snapshots and preserves exact comparisons rather than refreshing fingerprints.
+
+Disposable world sessions 8 -> 10 -> 12 retain garden, cat, rabbit and human:
+93 members, 19 groups, 49 first-ground backups, two BoneBlocks, four MovieBlocks,
+seven actor time-series inventories and seven exported asset files. Source/manifest/member,
+soil/track/asset hashes and fixed origins/dimensions match after both cycles.
+Fresh-session read-only jobs reopen native movies; 22 seek times verify native
+poses/scales/joints and independent human animation IDs. Twenty-four isolated
+PNGs pass decoded margin/stability checks; inspected cat tail, rabbit and wave
+frames. Old session-8 creation and capture requests reject without writes/images.
+Re-running the completed lifecycle performs only observations. Eight guide/template
+checks, skill validation and bundled build pass. Evidence out/rsi/076/persistence,
+old-identity-check.json and garden/cat/rabbit/character reports and assembly folders.
+Explicit local world saves occurred; no new exports, project 530 edits, login,
+publishing or deployment. Goal active 76/100.
+
+Coverage limit: the garden review result does not list its two reused prop files,
+so this audit proves their native carrier XML survived, but does not compare their
+binary hashes. Next audit should discover model dependencies from native members
+rather than relying only on result metadata. Older HTTP daemon still needs current
+gateway/template acceptance; no full 100-round completion claimed.
+
+## Round 077 — native reused-model references and complete asset persistence
+
+Added creationModelReferences and inspect().models with actual native filenames,
+absolute carriers, scale/facing, local-meter offsets, readiness/availability and
+stale state, ordered deterministically. Empty inspection now checks its world
+session. It performs no writes or asset waiting; unavailable members stay explicit.
+Seven native checks verify two ready scale-1 props, 0.25 m bench offset, stable
+ordering, copied positions, missing entities and expired-session rejection.
+
+Persistence audit now discovers model files from native BlockModel entities
+rather than relying on result metadata. Two further explicit local save/reopen
+cycles, sessions 12 -> 14 -> 16, preserve all 93 members/19 groups/49 backups,
+bone/movie tracks and now all nine asset hashes, including the previously omitted
+bench and birdbath. Fresh-session garden review returns both references and fresh
+captures with unchanged source/member/manifest hashes and player/main camera.
+Updated engine wiki/indexes and lazy persistence guide. Three guide checks,
+13 scene regressions, build, skill validation and diff checks pass. Evidence
+out/rsi/077/model-reference-check.json, persistence/report.json,
+model-assets-check.json and garden/report.json. No new exports, project 530
+changes or deployment. Goal active 77/100.
+
+## Round 078 — live HTTP gateway and build-age diagnosis
+
+Added read-only live Streamable HTTP MCP acceptance and connection guidance for
+HTTP/stdio gateways with different build ages. Against the existing 8089 daemon,
+verified one Paracraft gateway, one root resource, a 470-byte gateway schema,
+single-file on-demand skill reads reflecting current model-reference guidance,
+current native capabilities/world identity, and a fresh native JPEG with timestamp,
+camera/session/chat/pet metadata. Image bytes are saved separately and excluded
+from report/log output. Player and main camera remain unchanged.
+
+The old HTTP daemon rejects sitting_cat as unknown_template, while the fresh
+stdio catalog supports it. Guidance distinguishes gateway template availability
+from native engine capabilities and describes reviewed run_code/current stdio
+as usable paths until the installed service refreshes. This is an explicit
+remaining limitation, not a claim that updated HTTP templates are accepted.
+Inspected the HTTP garden JPEG. Three lazy-guide checks, build, skill validation
+and diff check pass. Evidence out/rsi/078/http/report.json/http-detail.jpg.
+No scene mutations, saves, exports, project 530 changes or deployment.
+Goal active 78/100.
+
+## Round 079 — session-pet references and live dual-transport isolation
+
+Added desktop scenePetReferences and scene:petReference() to ensure and inspect
+the current chat's pet without changing its fixed scene origin. Updated native
+wiki/indexes and the lazy connection guide; a small resumed-scene example creates
+no blocks, saves or exports. Real HTTP and stdio clients share the same hub and
+world session 16, with separate jobs creation-67/68 and separate pets.
+
+Verified both jobs running concurrently, same-chat creation_busy, duplicate-ID
+recovery and cross-chat cancellation rejection. Seven native visibility checks
+cover capture leasing, activity during a lease, overlapping capture refusal,
+latest-active restoration, unchanged pet positions and ordinary entity visibility.
+Fresh MCP JPEGs reviewed: each shows only its own pet. Recovered the same completed
+handles for further capture checks without repeating jobs. Source/manifest/member
+hashes, player and main camera remain unchanged; all groups have zero stale cells.
+Three guide checks, skill validation and build pass. Evidence
+out/rsi/079/two-chat/{jobs.json,report.json,a.jpg,b.jpg}. No world saves, exports,
+project 530 changes or deployment. Goal active 79/100.
+
+## Round 080 — preserve unrelated native tasks on an existing pet
+
+Reproduced a controller-ownership bug using a real native Copilot waiting task:
+PetPosition checked only the chat-owned controller and then replaced the existing
+entity's different controller attachment. The native regression restores its own
+test task/controller even when the assertion fails. Added a check of the actual
+entity.copilot before any controller replacement; a running task now yields
+pet_busy, retaining its attachment, running task and position.
+
+Five native checks pass after the fix; before.json records the original failure.
+Eight standalone world adapter checks cover routes, unknown terrain, swept
+clearance, cancellation, drag release and water fingerprints. Recovered the same
+round-79 jobs for live HTTP/stdio visibility and unchanged-scene/player/camera
+checks after native World reload. Three guide checks, skill validation, build and
+focused diff checks pass; tail_log captured through the CLI. Updated the engine
+wiki and lazy connection guide. Evidence out/rsi/080/{before.json,after.json,
+tail-log.json} and refreshed out/rsi/079/two-chat/report.json. No world saves,
+exports, project 530 changes or deployment. Goal active 80/100.
+
+## Round 081 — stop navigation when a native task takes over mid-route
+
+Reproduced a second ownership race: a real native waiting task starts after the
+first checked movement step, but navigation previously continues to its endpoint.
+Added CheckPetBusy throughout travel and dragging pauses, sharing the existing
+initial controller check. A takeover now stops scouting with pet_busy at exactly
+the takeover position and leaves the other native task/controller intact.
+
+Four native checks prove current position equals the takeover position, differs
+from destination, and task/controller survive. This route rises four blocks;
+it stops after the first 0.2-block step. Test restores only its own fixture position
+and stops only its own waiting task. Original failure and corrected coordinates
+are in out/rsi/081/{before.json,after.json}. The initial five-check busy regression
+also passes. Eight world adapter regressions, three guide checks, skill validation,
+build and focused diff checks pass. Recovered live HTTP/stdio round-79 handles
+still verify single-pet fresh captures and unchanged scene/player/main camera.
+Updated wiki/CODEMAP and lazy placement guide. No world saves, exports, project
+530 changes or deployment. Goal active 81/100.
+
+## Round 082 — compact native flower border with flush soil and sparse clumps
+
+Added lazy flower_border template/example: 4 x 4 m, a one-meter gravel approach,
+an irregular five-cell bare-earth bed, two rose cells, one dandelion cell and one
+grass cell. Native model textures supply the silhouettes/colors; no handmade
+voxel petals or exported files. Updated vegetation routing and plant guidance:
+one native cell may render multiple stems, so density follows visible clumps.
+The default template saves nothing; this disposable-world test explicitly saves
+its generator/manifest only, not the world.
+
+Real stdio MCP automatically selects a site and completes creation-69 in session
+16, with duplicate-request recovery. Native inspection confirms 13 unchanged
+members in four groups, nine original-grass backups, exact named native IDs,
+flush floor at origin Y-1 and supporting ground beneath every plant. Initial
+views contained the temporary site overlay; recovered the same completed job
+after its normal ten-second expiration and reviewed clean MCP/native overview
+and detail views. Flowers remain readable with a deliberate soil gap; no raised
+road. Capture source/manifest/member hashes, player/facing and main camera match.
+Eight guide/template checks, skill validation and build pass. Evidence
+out/rsi/082/border/{request.json,report.json,native-material-check.json,
+mcp-report.json,mcp-overview.jpg,mcp-detail.jpg}. No exports, world save,
+project 530 changes or deployment. Goal active 82/100.
+
+## Round 083 — clean fresh captures while a temporary site preview is live
+
+Creation-owned overlays now register their lifetime and participate in the
+existing authoring capture lease. Captures hide their bounds without changing
+selection; cleanup restores original visibility only for live current-world
+overlays. New previews created mid-capture stay hidden until completion. Destroy
+is idempotent, and expired/deleted previews or old-world callbacks cannot revive
+overlays. Preview visibility survives development method reloads.
+
+Real MCP images of the same native flower border show the previous cyan site box
+and the corrected clean frame: cyan pixels 9933 -> 0. The live preview returns
+after capture; an invalid camera request also releases the lease and restores it.
+Native checks preserve user selection, player and main camera. Standalone lifecycle
+checks cover initially hidden previews, new previews, expiry/double cleanup and
+world switching. Authoring regressions and recovered HTTP/stdio dual-chat capture
+checks pass. Three guide checks, skill validation, build and focused diff checks
+pass; CLI tail_log retained. Updated wiki/CODEMAP and lazy visual-review guidance.
+Evidence out/rsi/083/preview/{report.json,pixel-check.json,before.jpg,after.jpg}.
+No scene writes, saves, exports, project 530 changes or deployment. Goal active 83/100.
+
+## Round 084 — native textile/glazing reading corner and fixed model directions
+
+Added lazy reading_corner: a 4 x 4 m open cutaway with 3 m cream walls, one native
+glass pane, flush wood floor and thin two-tone native White_Carpet rug. Two asset
+slots reuse the existing color-only 1.5 m bench and 0.875 m planter at scale 1;
+no exports. First native run creation-70 failed during bench placement: native
+camera-derived facing expanded its bounds into nearby carpet cells. Inspected
+the failed scene/asset, retained the failed handle and its 43 completed members,
+and fixed explicit facing plus a 0.125 m local bench offset.
+
+Saved the valid partial manifest for an explicit same-origin repair, creation-71.
+Only two models are added; all 43 previous member fingerprints remain unchanged.
+Saved the complete corrected generator, not merely a repair patch. Fresh full
+auto-scouted creation-72 then succeeds and recovers duplicate requests. Both
+scenes have 45 members/six groups, 16 first-ground backups, six correctly
+supported carpet cells, one native window and two ready models at measured
+design sizes. Reviewed overview/detail captures: readable glazing, thin floor
+textiles and grounded bench/plant; source/member/manifest and player/main camera
+remain stable during captures. Eight guide/template checks, skill validation,
+build and diff checks pass. Guidance now calls for explicit model directions and
+small gaps at occupied cells. Evidence out/rsi/084/corner, repair, fresh and
+native-material-check.json. Explicit local generator/manifest saves only;
+no world saves, exports, project 530 changes or deployment. Goal active 84/100.
+
+## Round 085 — camera-independent default model direction
+
+Scene:model now sets omitted facing to zero radians instead of inheriting native
+camera placement direction. modelDefaultFacing advertises the change; explicit
+facing/pitch/roll remain supported and finite-angle checks precede carrier writes.
+Existing models are not refreshed/reoriented. Updated official wiki/topic index
+and lazy composition/persistence guidance, with a two-instance direction example.
+
+Native automatic creation-73 completes in the cluttered disposable world after
+checked travel, placing two ready scale-1 benches with native facing 0 and pi.
+Fresh overview/detail views inspected; 26 members/three groups remain current,
+and source/manifest/member hashes plus player/main camera match during captures.
+Ten instance-only angle/preflight checks and seven existing offset checks pass.
+Read-only native checks confirm both previous reading corners' material/layout,
+scale and explicit directions remain intact. Live HTTP MCP fresh capture still
+works via the single gateway/root; its older template catalog remains an explicit
+limitation. Three guide checks, skill validation, build and focused diff checks
+pass. Evidence out/rsi/085/{direction/report.json,angle-check.json,offset-check.json,
+existing-models-check.json,http/report.json}. Test explicitly saves source/manifest;
+no world saves, exports, project 530 changes or deployment. Goal active 85/100.
+
+## Round 086 — meter-scale trotting dog and cold-asset readiness
+
+Lazy trotting_dog builds a 0.55 m long, 0.44 m tall floppy-eared dog from
+color-only geometry, with three reusable ParaX meshes and six MovieBlock actors.
+Thirteen explicit keys per actor provide idle and an in-place diagonal rigid-leg
+trot with tail motion. Legs use design-meter bone translations; the gait has no
+knee IK, forward travel or embedded clip IDs. Conservative toe lift leaves small
+stance gaps, disclosed in the animal guide. Generator and native parts remain editable.
+
+Initial creation-74 failed on an older hot-loaded keyframe adapter's missing B
+binding; repair-75 exposed cold requireModels polling without starting asset loading.
+Fixed runtime adapter binding and production requireModels with native LoadAsset,
+valid-handle preflight and cooperative readiness checks. Terminal failures remain
+in out/rsi/086/{dog,repair}; creation-76 repairs only the movie at the original
+origin, reusing all existing meshes and construction groups. Full corrected source
+is saved, rather than the repair wrapper. Fresh automatic creation-77 also passes.
+
+Actual assembly captures found frame drift during root translation. Single-root
+framing now includes the linear translation key range alongside its rotation
+envelope. Native seven framing checks and 18 assembly checks pass. This does not
+claim fixed framing for actor travel, animated scaling or multi-bone deformation.
+Nine dependency checks cover cold-start invocation, invalid handles, full-path
+preflight and duplicate files. A unique never-rendered native model starts unloaded,
+then becomes renderable through a helper-only job (creation-78); its temporary
+probe file is removed after verification, with no scene saves/writes.
+
+Eleven fresh isolated MCP PNGs cover rest, intermediate and extreme poses. Native
+dimensions, scale-1 joints and 13 rotation keys are verified; actual captured
+translations and rotated foot corners prove meter-based lift, planted rest feet,
+diagonal synchronization and no floor penetration, including time 1.125 between
+keys. PNGs are nonempty/unclipped, repeated fixed poses match, and auto camera,
+source/manifest/member fingerprints plus player/main camera remain stable.
+Rest and mid-trot images reviewed. Eight guide/template checks, skill validation,
+build and focused diff checks pass. Evidence out/rsi/086/{repair-cold/report.json,
+fresh/report.json,fresh-assembly/report.json,fresh-assembly/foot-check.json,
+fresh-assembly/image-check.json,dependency-check.json,cold-preflight,framing-check.json}.
+Explicit local source/manifest saves and three asset exports per full dog fixture;
+no world saves, project 530 changes or deployment. Goal active 86/100.
+
+## Round 087 — stable root-scale animation feedback
+
+Native creation-79 reuses the existing color-only plant asset in an automatically
+scouted 4x3x4 site, with one editable MovieBlock and five root-scale keys. Instance
+scale stays 1; the deliberate squash/stretch peaks at [1.15,1.5,1.15]. No assets
+are re-exported and no terrain is modified. Before the fix, actual isolated seeks
+changed automatic camera distance from 6.82081 m to 8.36876 m; the acceptance
+script rejected drift after capturing all frames (out/rsi/087/before PNGs).
+
+AssemblyCapture now reads native root scaling tracks and Framing uses each axis's
+maximum absolute key scale for its conservative sphere. Combined rotation,
+translation and linear root scaling have stable framing; actor travel/scaling and
+multi-bone deformations retain their documented limits. Nine native geometry checks
+include anisotropic scale extrema and scale-only envelope selection. Native and
+MCP captures prove eight actual scale poses match intended keys at instance scale
+1, with constant camera parameters, unclipped opaque PNGs and repeated-pose pixel
+identity. Peak plant pose inspected. Source/manifest/member hashes, player and main
+camera remain unchanged during capture. Three guide checks, skill validation,
+build and focused diff checks pass. Updated native wiki/CODEMAP and lazy animation
+guidance. Evidence out/rsi/087/{pulse/report.json,after/report.json,after/image-check.json,
+scale-check.json,framing-check.json,tail-log.json}. Source/manifest save explicit in
+native fixture; no world saves, new exports, project 530 changes or deployment.
+Goal active 87/100.
+
+## Round 088 — retain failed capture evidence without false approval
+
+Assembly acceptance now atomically checkpoints each PNG's world/session,
+timestamp, camera and native pose metadata before comparing expected poses.
+Progress uses a unique review ID and records partial pose verification separately
+from overall review success. Failures retain their images and bounded error,
+with verified=false. Pixel validation rejects incomplete reviews and completed
+reports whose review ID differs from the current progress record, so an earlier
+green report cannot conceal a failed rerun. Image bytes stay in PNGs/native MCP
+image content, not textual progress or logs. Lazy visual-review guidance teaches
+these distinctions and fresh recapture without scene rebuilds.
+
+Actual native fault injection changes only a local expected anchor, then requests
+a fresh MCP frame: Wrong pose anchor rejects it, but its decodable PNG and metadata
+remain present with poseVerified=false. A previous valid report deliberately left
+in that directory is rejected as unverified. A separately mismatched review ID is
+also rejected. Eight fresh correct frames pass all native/PNG checks and are marked
+completed/verified. Failure and success member/source/manifest hashes and player
+and main-camera baselines match; native checks confirm all nine temporary capture
+controls/UI objects are removed and no capture remains pending. Three guide checks,
+skill validation and focused diff checks pass. Evidence out/rsi/088/{failure,
+success/report.json,success/capture-progress.json,evidence-check.json,cleanup-check.json,
+tail-log.json}. Read-only captures of creation-79; no new jobs, source/world saves,
+exports, project 530 changes or deployment. Goal active 88/100.
+
+## Round 089 — compact native flush-water garden
+
+Lazy pocket_pond adds a 4x4 m world garden without miniature geometry or exports:
+2x2 m native Still_Water at local y=-1, four StoneBrick bed cells at y=-2,
+horizontal LilyPad data 2, Fern/TallGrass/Yellow_Flower on grass banks and a
+one-meter flush gravel path. It preserves 12 first-ground backups and requires
+terrainEditing plus named-block/camera support. The ground-water guide routes
+to this selected compact design rather than generating the larger bench garden.
+Template tests cover native names/orientation, bounds/terrain capability,
+automatic placement and no default save/export. Native wiki and indexes updated.
+
+Automatic creation-80 completes via fresh stdio MCP, duplicate request recovers
+the same job, and native/stdio overview/detail captures are reviewed. Native
+read-only acceptance confirms 16 current members/four groups, four water cells,
+four solid bed cells, eight closed bank faces and no escaped water in the
+footprint after native updates. All 12 backups are original grass (eight) or dirt
+(four), path cells have no raised floor above, pad lies horizontally over actual
+water and bank plants have solid support. Capture source/manifest/member hashes
+and player/main camera remain stable. Eight guide/template checks, skill validation,
+build and focused diff checks pass. Evidence out/rsi/089/{pond/report.json,
+pond/full-job.json,pond/mcp-report.json,pond-check.json,tail-log.json}. Source/manifest
+save explicit in fixture; no world saves, asset exports, project 530 changes or
+deployment. Native water depth is one design meter. Goal active 89/100.
+
+## Round 090 — same-site pond reshape with verified soil restoration
+
+Ground-water guidance now gives the owned-pond revision order: resume at its
+fixed origin, remove aquatic decorations before the basin, restore omitted soil
+cells, preserve unrelated groups and save the complete revised generator. The
+native revision harness applies this to creation-80's square pond without new
+scouting or relocation. Creation-81 first checks all nine removed aquatic/basin
+members against their original native snapshot fingerprints, then rebuilds a
+three-cell L-shaped water surface and solid bed. Seven existing path/planting
+members keep their fingerprints. The unused corner returns to original Grass
+and Dirt; the remaining pond has 14 current members and ten ground backups.
+
+Extended read-only native pond acceptance verifies the notched shape, three
+water/bed cells, eight closed bank faces, horizontal pad, flush path and restored
+unused soil. Fresh overview/detail images inspected; source/member/manifest
+hashes and player/main camera remain stable during capture. A save-only correction
+(creation-82) fixes a harness metadata substitution that initially landed in the
+embedded generator rather than the result; exact saved source bytes now match
+the complete canonical L-pond generator, followed by fresh readonly recapture of
+the original completed revision job. No geometry is repeated for this correction.
+Eight guide/template checks, skill validation, script syntax and focused diff
+checks pass. Evidence out/rsi/090/{revision/report.json,revision/request.json,
+revision/latest-job.json,pond-check.json,source-fix,source-check.json,tail-log.json}.
+Explicit source/manifest saves only; no world saves, exports, project 530 changes
+or deployment. Goal active 90/100.
+
+## Round 091 — native compound doors with two-cell undo
+
+Scene:door adds supported native wooden assemblies: closed 232/108 or open
+233/109, integral local position, vertical orientation 1..4, solid ground,
+occupied-target refusal and explicit replacement. Both cells fit/check before
+writing and enter one native undo command. Ordinary shapes and doors share the
+same first-write site revalidation, preserving automatic replacement before
+construction and fixed origin thereafter. doorAssemblies and the geometry list
+advertise it without adding MCP tools. Lazy doorway demonstrates two 1x2 m doors,
+native timber frames, a tinted pane and a flush wood floor; skill/wiki/indexes
+document native directions, native-pair fallback and the helper.
+
+Initial creation-83 stops at a fixture-only pcall unavailable in normal CodeBlock
+globals, after placing timber/floor. Removed test logic from the public generator
+and moved rejection checks into native regression. Twelve rejected-input/support/
+upper-occupancy cases leave every member and the empty lower target unchanged.
+Partial source/manifest saved explicitly; creation-84 adds only the missing doors
+at the existing origin. It completes, but its recorded result reports one pane
+stale: native GlassPane template changes selector 0 to 2 as adjacent door geometry
+appears. Verified template selectors 0..11 and extended existing derived-state
+normalization to panes while retaining tint/ID and unknown selector changes as
+conflicts. 85 native color/selector checks pass. Historical job results stay
+unchanged; read-only review creation-85 verifies current scene and fresh images.
+
+Native opening/replacement test proves one command with two changes, two-cell
+undo/redo, final closed restoration and current neighboring pane. Fresh automatic
+creation-86 has 31 current members/three groups; first-edit-door creation-87 also
+passes. Repaired and fresh native views inspected. Capture hashes plus player/
+main camera remain stable, and saved complete generator bytes match canonical.
+18 native name checks, 13 scene regressions, eight guide/template checks, skill
+validation, build and diff checks pass. Evidence out/rsi/091/{doorway,repair,review,
+fresh/report.json,first/report.json,preflight-check.json,undo-check.json,color-check.json,
+names-check.json,tail-log.json}. Explicit source/manifest saves; no world saves,
+exports, project 530 changes or deployment. Goal active 91/100.
+
+## Round 092 — compact native timber cottage with flush circulation
+
+Added lazy timber_cottage: a 5x5 m unfurnished shell, 3 m walls, 3x3 m clear
+interior, 5.5 m ridge and 1x2 m native entrance. Native timber, tinted wool,
+glass panes, colored stairs/slabs, carpet and flowers give recognizable form
+with 122 members in nine groups. Floor/path replace 27 original grass cells
+with retained backups. No miniature exports or implicit persistence. Scene
+composition routes to this example without expanding the root/tool catalog.
+
+Creation-88 builds at an automatically scouted fixed origin. Read-only native
+acceptance verifies all fingerprints/materials, twelve timber post cells, clear
+interior/approach, native passable two-cell entrance, 28 roof stair directions and
+seven lower-slab ridge cells. Initial entrance camera was half a block off center;
+creation-89 corrects views at the same origin without rebuilding. Overview/detail/
+side screenshots reviewed; door collision permits passage, but broadside door
+appearance is not claimed to be a visually verified swing direction. The review
+fixture accidentally saved its repair wrapper after saving canonical source;
+save-only correction removes that second save. Exact saved source bytes now match
+the complete corrected generator, with fresh readonly recapture afterwards.
+
+Nine guide/template checks, skill validation, build and focused diff checks pass.
+Native capture hashes and player/main camera remain unchanged. Wiki/indexes link
+the native cottage acceptance. Evidence out/rsi/092/{cottage/full-job.json,
+cottage/mcp-report.json,review/report.json,cottage-check.json,source-fix,
+source-check.json,tail-log.json}. Explicit source/manifest saves only; no world
+saves, exports, project 530 changes or deployment. Goal active 92/100.
+
+## Round 093 — retain explicit full generators through later scene saves
+
+Scene:save now promotes a supplied generator to the same object's default source
+only after source and manifest writes succeed. This prevents a later no-argument
+save from overwriting complete generators with short repair wrappers. New resumed
+objects still require explicit complete source. Persistence guidance and native
+wiki explain that scope and partial file effects; indexes link the regression.
+
+Four native fake-writer checks verify explicit/implicit retention, optimistic
+file preconditions, source-write rejection, manifest-write partial effects and
+successful recovery without replacing the retained default on failure. A real
+save-only CodeBlock job repeats the formerly failing cottage sequence: complete
+generator saved explicitly then save() again. Exact native saved source bytes
+match canonical; 122 members and fixed origin match round 092. Fresh readonly
+captures retain source/member/manifest hashes and player/main camera. Thirteen
+scene lifecycle checks, three lazy-guide checks, skill validation and focused
+diff checks pass. Evidence out/rsi/093/{source-regression.json,source.lua,
+native/report.json,native/latest-job.json,source-check.json}. Explicit source/
+manifest writes only; no geometry changes, asset exports, world saves, project
+530 changes or deployment. Goal active 93/100.
+
+## Round 094 — door approach axes verified in native views
+
+Resolved round 092's crosswise opened panel: native DoorWood closed data 3/4
+spans Z and is intended for passage along X, while the cottage approaches along
+Z. Data 1/2 instead closes across X and opens along Z. Updated cottage/doorway
+examples to data 1, and lazy voxel guidance plus engine wiki document both pairs,
+opposite opened offsets and preservation of direction while toggling. Eight
+native template checks validate matching upper/lower models, facing and all
+opened offsets without editing the world.
+
+Same-origin cottage revision changes only its two entrance cells; 120 other
+members preserve fingerprints, original soil backups remain, complete saved
+generator bytes match canonical and read-only cottage acceptance passes all
+122 members. Fresh entrance screenshot now shows the edge-on side panel and
+clear interior. Fresh automatic doorway construction through the one stdio MCP
+tool demonstrates closed panel across the opening and open panel at its side;
+detail images reviewed. Native capture hashes and player/main camera remain
+unchanged. Nine guide/template checks, skill validation, build and focused diff
+checks pass. Evidence out/rsi/094/{direction-check.json,cottage-check.json,
+revision-check.json,revision/report.json,doorway/full-job.json,doorway/report.json}.
+Explicit source/manifest saves; no exports, world saves, project 530 changes or
+deployment. Goal active 94/100.
+
+## Round 095 — persistence includes restored, no-longer-owned terrain
+
+Mixed-scene persistence harness accepts at most 200 integral local probe cells,
+checks loaded terrain and manifest bounds, and compares their exact native
+fingerprints across save/reopen. This covers restored cells omitted from current
+membership. Lazy persistence guidance explains why owned members alone cannot
+prove removed pond corners were restored. Snapshot schema stays unchanged for
+older journals without probes; completed journals can perform current-session
+read-only comparison without repeated save/open operations.
+
+Seven scenes complete two explicit save/reopen cycles, sessions 16->18->20:
+cottage, L-pond, native flower border, reading corner, dog, scaled plant animation
+and two-bone human. Exact comparison covers 213 members, 33 groups, 62 first-ground
+backups, two bones, four movies, nine actor inventories/tracks, two reused model
+carriers, seven assets and two restored pond-corner layers. Reopened native
+cottage/pond checks pass; fresh views and seven human clip-time frames pass.
+
+A negative harness test inadvertently repeats two cottage save/reopen cycles:
+duplicate scene names overwrote probe configuration, hiding an out-of-bounds
+probe. Preserve that failed evidence; add upfront duplicate-name refusal.
+Four corrected fractional/count/bounds/duplicate tests reject before save/open
+checkpoints. Session is now 24. Read-only recheck of the complete seven-scene
+baseline passes in that current session, followed by fresh cottage/pond/human
+reviews with new identities. Current pond screenshot confirms restored notch,
+flush path and containment; source/member/manifest hashes and player/main camera
+stay unchanged during capture. Three guide checks, skill validation, script syntax
+and focused diff checks pass. Evidence out/rsi/095/{persistence/report.json,
+persistence/readonly-recheck.json,summary.json,probe-rejection-check.json,
+reopened-native-check.json,current-cottage,current-pond,current-character,tail-log.json}.
+Explicit disposable-world saves only; no rebuilding, exports, project 530 changes
+or deployment. Goal active 95/100.
+
+## Round 096 — reject nonexistent independent asset animation IDs
+
+Isolated AssetCapture inspects the loaded native strAnimIds before posing. It
+rejects missing requested IDs instead of allowing an engine fallback pose, and
+reports verified animation ID metadata with a sorted list capped at 32, total
+count and truncation flag. Unavailable native inspection explicitly reports an
+unsupported capability; malformed/bounded metadata is rejected. This uses the
+existing camera_capture action and native metadata without adding MCP tools or
+requiring FFI. Visual guidance and engine wiki/indexes document the contract.
+
+26 native capture checks pass, including unique/sorted IDs, bounded output,
+requested IDs beyond the returned page, missing IDs, unavailable metadata and
+malformed values. After round 095's world reopen, the exported 1.75 m human .x
+loads independently at scale 1 through stdio MCP; 11 neutral PNG captures cover
+both native idle/wave IDs, seven clip times, two extra yaw angles and repeated
+fixed poses. Final bone rotations match source keys; pixel checks prove nonempty
+opaque images, margins and identical repeated frames. Raised-arm image inspected.
+ID 999 fails with no image. Source/member/manifest/player/camera remain unchanged;
+all eleven controls plus failed-capture resources are cleaned, pending false.
+Three guide checks, skill validation, script syntax and focused diff checks pass.
+Evidence out/rsi/096/{asset-regression.json,asset/report.json,asset/image-check.json,
+asset/missing-animation.json,cleanup-check.json,tail-log.json}. No edits, exports,
+world saves, project 530 changes or deployment. Goal active 96/100.
+
+## Round 097 — cheap metadata-only template discovery inside the existing tool
+
+template_info supports a named lookup or a small discovery page: six curated
+categories, case-insensitive AND query words, stable name ordering, default five/
+maximum ten entries and offset/nextOffset. Discovery reads no source or directory
+and returns neither hashes nor file paths; selected named lookup preserves the
+existing source/hash behavior. Root/connection guidance and Keepwork documentation
+route to this without new actions, tools, resources or skill files. Reuse roles,
+asset writes and required capabilities remain visible before choosing a design.
+
+Ten guide/template checks pass, including complete unique category coverage,
+zero filesystem reads/scans, pagination, filters/empty results, prototype names,
+invalid pages, mixed named/search refusal and no native jobs during discovery.
+Build and skill validation pass. Real fresh stdio MCP verifies one Paracraft tool,
+one root resource, three categories' pages, cat search, selected source hash and
+native world session 24. Seven-scene read-only baseline remains exact.
+
+Directly invoked Codex's actual installed paracraft_cli for clients/capabilities
+and isolated exported wave capture: native image arrives inline, verified IDs
+0/1 and height 1.75 m. Its persistent gateway still has the older named-only
+template_info schema; new discovery is verified on the current built stdio
+runtime, and guidance gives named lookup/reconnect fallback. No daemon restart
+or bypass of the previous approval block. Evidence out/rsi/097/{discovery-report.json,
+codex-direct-metadata.json,codex-direct.png}, plus 095/persistence/readonly-recheck.json.
+Focused diff checks pass. No creation, exports, world saves, project 530 changes
+or deployment. Goal active 97/100.
+
+## Round 098 — asset review failures retain fresh evidence
+
+Independent asset acceptance now atomically checkpoints a unique review ID,
+world identity, current state and frame metadata. PNGs plus requested/native pose
+information are saved before pose assertions, then each frame is marked verified
+only after checks pass. Errors keep partial frames unverified with bounded text;
+final reports bind to the review ID. No image bytes enter text/progress logs.
+The pixel checker also matches frame counts, verified status, filenames and
+native capture IDs against the current completed progress record. Lazy visual
+guidance explains why an older successful report cannot approve a new failure.
+
+Wrong expected idle rotation is injected only in a local test report. The native
+world/model are untouched; one failed PNG and its metadata remain, marked false.
+A previous eleven-frame success copied into that directory is rejected as
+unverified. Fresh correct eleven-frame review then passes native idle/wave poses,
+scale, ID checks, cleanup, pixel margins/background and repeated-pose stability;
+side wave image inspected. Four additional proof tests reject frame-count,
+verification, filename and capture-ID mismatches. Earlier eight-frame assembly
+evidence remains compatible. Source/member/manifest/player/camera stay stable;
+seven-scene read-only baseline passes and pending/asset control count is zero.
+Three guide checks, skill validation, script syntax and diff checks pass.
+Evidence out/rsi/098/{failure/capture-progress.json,failure-check.json,
+success/report.json,success/capture-progress.json,success/image-check.json,
+evidence-check.json,cleanup-check.json}. No mutations, exports, world saves,
+project 530 changes or deployment. Goal active 98/100.
+
+## Round 099 — exact bundled skills without obsolete subfiles
+
+Shared creation-skill build plugin synchronizes its generated subtree exactly
+instead of overlay-copying and retaining removed guides. Before recursive removal,
+physical build root and target confinement are checked; linked parents/targets
+and canonical-source overlap are refused. Failed compile results retain the last
+successful skill copy, and unrelated build files remain untouched. Keepwork
+documentation records the behavior and test command.
+
+Four packaging tests pass: exact content/obsolete-file removal, failed-build
+preservation, source-overlap refusal and linked-directory protection. Current
+extension and Local Helper builds succeed; both contain exactly the canonical
+65 skill files with matching SHA-256 values. A temporary CLI/skill copy outside
+the checkout serves root, animal guidance, cottage source and template metadata
+through real stdio MCP, with one Paracraft tool and one root resource. Development
+NODE_PATH supplies external dependencies for this skill-relocation check; it does
+not claim installer/native-dependency acceptance. Temporary artifacts removed.
+
+Native audit checks fourteen creation-module dependencies, official creation/
+scene-inspection registry pages and compiled-path/wiki coverage in three redist
+manifests. This verifies rules, not release compilation or deployment. Evidence
+out/rsi/099/{package-report.json,native-package-coverage.json}; tests and focused
+diff checks pass. No client edits, exports, world saves, project 530 changes,
+version bumps, daemon restarts or deployment. Goal active 99/100.
+
+## Round 100 — asset readiness before animation inspection
+
+Independent asset capture now waits for loading, validates renderable model
+bounds, then inspects animation IDs. A loaded empty export reports
+asset_geometry_empty instead of a misleading animation-inspection failure.
+The lazy visual guide and authoritative native scene-inspection wiki explain the
+repair path. Native capture regression adds unloaded, empty and flat nonempty
+cases; all 29 checks pass. Empty bounds never trigger animation inspection.
+
+Fresh real stdio MCP feedback verifies both exported idle/wave IDs in eleven
+frames, exact requested poses, a 1.75 m character at scale 1, repeated-pose
+stability and unclipped neutral-background pixels. Wave image inspected: readable
+human silhouette and raised arm, still a simple two-bone example rather than a
+complete walking rig. Source, manifest, members, player and main camera remain
+unchanged; capture controls clean up and pending is false in world session 24.
+
+Final broad checks exposed two old test loaders that did not load the launch
+module imported by the shared client hub. Updated those test loaders to handle
+their TypeScript dependencies; production imports are unchanged. The original
+failed run is retained. All 31 Node MCP/CLI/packaging tests now pass, including
+authenticated HTTP, stdio, poll images, request recovery, lazy discovery and
+one advertised Paracraft tool/root resource. Standalone Lua checks pass: geometry/
+scouting 9, scene/terrain/rollback 13 and routes/cancellation/dragging 8.
+
+Both product builds succeed and exactly match all 65 canonical skill files by
+SHA-256. Skill validation and both repository diff checks pass. Seven persisted
+scenes still match the reopened baseline through a read-only recheck; no repeat
+save/open. Evidence out/rsi/100/{asset-regression.json,node-tests-before.tap,
+node-tests.tap,asset/report.json,asset/image-check.txt,cleanup-check.json,
+package-report.json,tail-log.json} and 095/persistence/readonly-recheck.json.
+No new construction, export, world save, project 530 change, version bump,
+daemon restart or release deployment.
+
+## Completion audit and practical limits
+
+All 100 numbered rounds contain a maintained improvement and its verification.
+The delivered workflow retains one advertised Paracraft CLI tool and one root
+skill, with category discovery and guides/templates loaded on demand. Native
+material architecture, restored terrain, miniature props, independent BMax/ParaX
+assets, characters, animals, moving assemblies and vegetation are covered by the
+rounds above. Round 95 supplies the final multi-scene save/reopen evidence;
+rounds 96–100 verify independent animation feedback and packaging. Round 97 also
+invokes the actual Codex tool and receives native image content.
+
+The persistent running gateway still has the older named-only template_info
+schema. Category discovery is verified in the newly built stdio runtime; use
+named lookup until reconnecting to an updated runtime. No blocked restart was
+bypassed. These are development builds and native acceptance results, not a
+Marketplace release or installer acceptance. AIChat/live WASM acceptance remains
+outside this first release.
+
+Visual examples demonstrate editable representations, not universal motion
+quality. The human wave uses two bones; the dog example has rigid legs without
+IK. Fox binding fixtures use enlarged technical construction carriers and a
+normalized meter-scale exported asset; do not treat that scaffold as a normal
+scene-scale example. These limits remain documented in the relevant lazy guides.
+Temporary Minecraft references inform economical construction; external
+schematics/images/catalogs are not bundled into this skill.

@@ -29,11 +29,18 @@ occupied ground. Unknown terrain is not empty terrain.
 
 Dragging pauses the pet; release causes route revalidation. Cancellation stops
 where it is rather than snapping to the destination. If the pet is busy with an
-unrelated task, wait. Site validity is checked again before helper writes. Before
+unrelated task, wait. A task that starts during travel or a drag pause also stops
+scouting with `pet_busy` at the current position; inspect the job and wait for that
+task without cancelling it. Site validity is checked again before helper writes. Before
 construction it may be replaced automatically; once construction has begun,
 conflicts must be inspected in place. Resumed scenes retain their saved frame.
 
 ## Flush floors, roads and pools
+
+For large relief or non-level ground, read [terrain-biomes.md](terrain-biomes.md).
+The flat-site scout does not reshape hills, and `surface` always targets the
+fixed ground plane; neither is a terrain-following road generator. Village and
+street layout guidance is in [settlements-roads.md](settlements-roads.md).
 
 The fixed scene origin is the first empty cell above the selected terrain. Thus
 local y=0 is air, and local y=-1 is the existing supporting floor. Putting a road

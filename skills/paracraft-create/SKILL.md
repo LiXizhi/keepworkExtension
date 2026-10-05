@@ -1,9 +1,9 @@
 ---
 name: paracraft-create
-description: Create or reconstruct editable Paracraft voxel scenes, props and BoneBlock characters with MovieBlock animation using Keepwork MCP. Use for procedural world building, reference-image reconstruction, miniature voxels, BMax/ParaX assets and screenshot-driven revisions.
+description: Start Paracraft clients and create, load or save named local worlds with optional sign-in through Keepwork MCP. Create and revise editable terrain, biomes, villages, city roads, scenes, characters, animated films and working native mechanisms (常用机关：压力板、按钮、拉杆、导线); analyze world objects and maintain world-local documentation.
 ---
 
-# Paracraft art creation
+# Paracraft creation
 
 Turn a description or reference into editable native art, then inspect the result
 in Paracraft. Use `createScene` through Keepwork MCP; keep the generator source,
@@ -37,6 +37,17 @@ See [scene-composition.md](references/scene-composition.md) for size anchors and
 
 ## Start and resume
 
+Load lifecycle subguides before art creation when needed:
+- [client-startup.md](references/client-startup.md): start/reuse the corresponding
+  desktop client, with or without an online project ID.
+- [local-worlds.md](references/local-worlds.md): create a named local world,
+  load/reopen it and save native world data, including anonymous local work.
+- [login.md](references/login.md): optional native sign-in when the user requests
+  it or an online operation needs it; local creation does not require sign-in.
+
+Use the real `run_command` action with `params.world` for local lifecycle operations;
+`manage_world` is a workflow label in older docs, not a callable CLI action.
+
 Read [connection.md](references/connection.md) for tool discovery, desktop project
 launching through `paracraft://`, and job handling.
 Retain a chat identity from CLI action `context`; pass `chatSessionId` on subsequent
@@ -44,6 +55,25 @@ calls and use `petId` for named viewpoints. Run edits sequentially within that c
 Discover clients, select the intended world, fetch its capabilities and read the
 engine-owned `creation.md`. Bind every mutation and capture to that returned world
 identity. Do not reuse a session ID after reopening a world, even at the same path.
+
+**Before each task and after every world switch, read that world's `AGENTS.md`
+through `world_files`, then follow its relevant `docs/` links.** This includes
+existing hand-built worlds. If it is absent, a read-only analysis stays read-only;
+before the first edit use `world_docs` `init`, then read the resulting instructions.
+Use [world-memory.md](references/world-memory.md) for initialization, optimistic
+updates and saved-versus-unsaved state. Keep detailed documents directly in
+`docs/XXX.md`, never a `docs/paracraft/` subtree. After effective edits, update the
+relevant docs and change record; documentation writes do not save the native world.
+Native world saving still requires an explicit user request.
+
+For understanding or resuming an existing world, use
+[world-analysis.md](references/world-analysis.md). Start with code blocks, movie
+blocks, signs and third-party smart modules and their relationships. Models and
+terrain provide context. Read current native objects before editing; old docs,
+saved XML and unsaved work recorded by an earlier session may disagree.
+For many code blocks or signs, summarize by purpose, module or area with counts
+and important entry points. Read full content only for relevant objects; keep
+world overview pages concise and link detailed notes directly under `docs/`.
 
 Do not ask for construction coordinates. Derive dimensions from the design,
 including model previews and movie controls; let the pet scout automatically.
@@ -54,8 +84,8 @@ On resume, inspect the saved scene and stale members before changing anything.
 Keep the chosen origin fixed. Use named-group revisions rather than rebuilding
 unrelated art. Persist the final generator when saving is in scope.
 
-For unfamiliar shapes, search Minecraft build images, templates or schematics
-when useful and borrow economical ways to suggest complex forms with few blocks.
+When unsure how to build an object, search Minecraft build images, templates or
+schematics as needed and borrow ways to express complex forms with few blocks.
 Keep external references out of this skill; if native shapes still fall short,
 use Paracraft BMax or miniature color voxels. See
 [reference-analysis.md](references/reference-analysis.md).
@@ -96,8 +126,18 @@ Choose native IDs by appearance and habitat, not Minecraft numeric IDs. For
 plants, ground/water or textiles, load only the relevant palette in
 [world-materials.md](references/world-materials.md).
 
+For stair direction, half-height surfaces, entrances, bench backs and roof steps,
+load [half-blocks.md](references/half-blocks.md). Prefer half-grid solid geometry
+with `halfBlocks` when nativeHalfBlocks is available; the engine derives native
+slab/stair direction. Keep default color microvoxels for BMax/character exports.
+
 For animated small animals, load [animals.md](references/animals.md); verify
 standalone geometry and actual poses before claiming a completed animation.
+
+For an animated film with multiple sets/shots, load [filmmaking.md](references/filmmaking.md).
+Use native camera tracks and a master MovieBlock sequence, document controlling
+code and playback entry, and retain editable child movies. A still image does
+not establish successful continuous playback.
 
 For human characters at realistic scale, load [characters.md](references/characters.md).
 
@@ -107,11 +147,34 @@ For boats and waterside previews, load [boats.md](references/boats.md).
 For airplanes and propeller assemblies, load [aircraft.md](references/aircraft.md).
 
 For an existing packaged design, use `template_info` and `run_template` to avoid
-copying its Lua into the chat. See [connection.md](references/connection.md).
+copying its Lua into the chat. Discover a short page with
+`template_info` params `{category:"animals",limit:3}`, then inspect one name.
+See [connection.md](references/connection.md).
 
 For trees, flowers and grass, load [vegetation.md](references/vegetation.md) and
 only its selected template. Reuse deterministic generators rather than writing
 individual placements or returning full member lists after each edit.
+
+For natural landscapes (自然地貌), mountains/ranges, deserts/dunes, snowy mountains,
+snowfields, plains, forests, rivers or mixed Biomes, load
+[terrain-biomes.md](references/terrain-biomes.md). Plan continuous relief and habitat
+transitions before vegetation. Distinguish authored biome appearance from native
+world-generator biome settings; discover actual engine support before changing the
+latter. Automatic scouting still requires a level site; it does not generate terrain.
+
+For hamlets, villages, towns, city streets or roads (村落、村庄、城市马路), load
+[settlements-roads.md](references/settlements-roads.md), together with the terrain
+guide when relief matters. Lay out connected routes and building entrances before
+building details. Keep terrain, infrastructure and buildings editable by region,
+and record their coordinates, seed and generator paths in the world's direct `docs/`.
+
+For common interactive mechanisms (常用机关), load
+[mechanisms.md](references/mechanisms.md), then only the relevant subguides:
+[pressure plates](references/pressure-plates.md), [buttons](references/buttons.md),
+[levers](references/levers.md) and [wiring](references/wiring.md).
+Use functional native blocks and verify input, signal propagation, output and reset.
+Keep circuitry in the editable world; a decorative model or a powered-state
+screenshot alone does not establish working behavior.
 
 ## Operational invariants
 

@@ -20,7 +20,7 @@ class NativeFiles {
     this.grants = this.grants.filter(g => typeof g.id === 'string' && path.isAbsolute(g.path || ''));
   }
   roots() { return this.grants.map(g => ({ ...g })); }
-  // Only the native dialog may call this. Never exposed as a renderer operation.
+  // Native dialog or explicit fixed MyBrain preparation only; no arbitrary renderer path.
   grant(selected) {
     const real = fs.realpathSync(selected);
     if (!fs.statSync(real).isDirectory()) throw new Error('Select a directory');

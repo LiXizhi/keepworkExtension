@@ -39,6 +39,34 @@ verification ends so the chat can edit sequentially.
 
 ## Standalone asset gate
 
+Lazy `trotting_dog` is a small floppy-eared dog, about 0.55 m nose-to-rump and
+0.44 m tall, with cream muzzle/paws and a colored collar. Three color-only assets
+are reused by the body, four rigid legs and a tail. Its MovieBlock has a one-second
+idle and two-second trot in place, with diagonal leg phases and conservative
+toe clearance between keys. Stance feet lift slightly; this is a stylized gait.
+Verify rest, intermediate and extreme foot corners as well as
+hip/tail contact. It has no knees, forward travel, terrain IK or embedded clip IDs.
+Read [trotting-dog.lua](../examples/trotting-dog.lua) only for geometry changes.
+
+Lazy `sitting_cat` is a small seated tabby with pointed pink-centered ears,
+pale front legs/paws, muzzle, green eyes, side stripes and a curved dark-tipped
+tail. It is about 0.59 m including the tail and 0.45 m to ear tips. Two rigid
+color-only assets and a two-second tail-yaw idle retain editable MovieBlock keys;
+the body stays grounded. This is not a walking/skinned cat or one embedded clip.
+Verify both tail extremes and joint contact from side/rear views. Read
+[sitting-cat.lua](../examples/sitting-cat.lua) only when changing geometry.
+
+Lazy `hopping_rabbit` is about 0.45 m nose-to-tail and 0.47 m to ear tips.
+Four cream paws, rounded head/haunches, small tail, pink muzzle and separate
+upright ears establish its silhouette. Three color-only meshes retain editable
+MovieBlock keys: idle spans 0–2 seconds and a toy-like rigid hop spans 2–4 seconds,
+with a 0.125 m apex at 2.5 seconds. Ears tilt independently; the legs do not bend.
+Its three actor batches retain 33 poses while using three `keyframes` calls,
+avoiding a MovieBlock snapshot/undo command for each individual frame.
+This is not a skinned gait or one file with embedded clip IDs. Verify grounded
+start/end, hop apex and unchanged ear joint offsets. Load
+[hopping-rabbit.lua](../examples/hopping-rabbit.lua) only for geometry changes.
+
 Packaged `idle_fox` uses 1/64 m color voxels for a stylized young fox, approximately
 0.75 m from nose to tail and 0.44 m to ear tips. Pointed ears, cream muzzle/chest,
 four separated dark paws and a cream-tipped bushy tail define its silhouette.

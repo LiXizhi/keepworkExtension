@@ -39,9 +39,13 @@ local keys={{time=0,rotation={0,0,0,1}},{time=0.5,rotation={0,0,-0.02617695,0.99
     {time=1,rotation={0,0,0,1}},{time=1.5,rotation={0,0,-0.90630779,0.42261826}},
     {time=2,rotation={0,0,-0.79335334,0.60876143}},{time=2.5,rotation={0,0,-0.90630779,0.42261826}},
     {time=3,rotation={0,0,0,1}}}
-for _,key in ipairs(keys) do s:keyframe("wave","character",key.time,{bones={right_arm={rotation=key.rotation}}}) end
-s:keyframe("wave","character",0,{anim=0})
-s:keyframe("wave","character",1,{anim=1})
+local frames={}
+for _,key in ipairs(keys) do
+    local values={bones={right_arm={rotation=key.rotation}}}
+    if key.time==0 then values.anim=0 elseif key.time==1 then values.anim=1 end
+    frames[#frames+1]={seconds=key.time,values=values}
+end
+s:keyframes("wave","character",frames)
 s:seek("wave",0)
 local clipsFile="blocktemplates/"..s.name.."_clips.x"
 local clips=s:exportVoxelX(clipsFile,{"body","right_arm"},{rig="controls",pivot={2.4375,0,2.25},
@@ -56,7 +60,7 @@ local info=s:inspect();local groups={}
 for name,g in pairs(info.groups) do local stale=0;for _,m in ipairs(g.members) do if m.stale then stale=stale+1 end end;groups[name]={cells=#g.members,stale=stale,bounds=g.bounds} end
 local base=s:toWorld({8,0,3});local one=s:toWorld({9,0,3});local unit=one[1]-base[1]
 local function view(p) return {base[1]+p[1]*unit,base[2]+p[2]*unit,base[3]+p[3]*unit} end
-return {name=s.name,origin=s.origin,groups=groups,exported=exported,clips=clips,
+return {name=s.name,origin=s.origin,groups=groups,blocksize=unit,exported=exported,clips=clips,
     overview={eye=view({2,2,-4}),lookat=view({0,0.95,0})},
     detail={eye=view({2.5,2.4,-3}),lookat=view({0,0.95,0})},
     portrait={eye=view({-1.7,1.3,-2.7}),lookat=view({0,0.95,0})},
