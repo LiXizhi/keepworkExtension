@@ -7,8 +7,9 @@ import * as path from 'node:path';
 import { HarnessAdapter } from './codexHarness';
 import { cacheValue } from './acpHarness';
 import { CliLaunch, resolveAgentCli, stopCli } from './agentCliProcess';
+import { unsupportedModeMethod } from './agentModes';
 
-type Thread = { id: string; cwd: string; roots: string[]; turns: any[]; native: boolean; model?: string; mcpServers?: any[]; aichatInstructions?: string };
+type Thread = { id: string; cwd: string; roots: string[]; turns: any[]; native: boolean; planMode?: boolean; model?: string; mcpServers?: any[]; aichatInstructions?: string };
 type Run = { id: string; items: any[]; cancelled?: boolean; messageId?: string; timer: NodeJS.Timeout };
 type Connection = { child: ChildProcessWithoutNullStreams; ready: Promise<any>; pending: Map<string, any>; run?: Run; permissions: Map<string, any>; models: any[] };
 const rejected = (message: string) => Object.assign(new Error(message), { rpcRejected: true });
@@ -121,7 +122,7 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
             if (m.request?.subtype === 'can_use_tool' && c.run) {
                 c.permissions.set(m.request_id, m.request);
                 const questions = m.request.tool_name === 'AskUserQuestion' ? (m.request.input?.questions || []).map((q: any, i: number) => ({ ...q, id: String(i) })) : undefined;
-                this.emit('request', { id: m.request_id, method: questions ? 'item/tool/requestUserInput' : 'item/commandExecution/requestApproval', params: { threadId: thread.id, command: `${m.request.tool_name}\n${JSON.stringify(cacheValue(m.request.input))}`, ...(questions ? { questions } : {}) } });
+                this.emit('request', { id: m.request_id, method: questions ? 'item/tool/requestUserInput' : 'item/commandExecution/requestApproval', params: { threadId: thread.id, readOnly: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'].includes(m.request.tool_name), requiresUserDecision: m.request.tool_name === 'ExitPlanMode', command: `${m.request.tool_name}\n${JSON.stringify(cacheValue(m.request.input))}`, ...(questions ? { questions } : {}) } });
             } else this.write(c, { type: 'control_response', response: { subtype: 'error', request_id: m.request_id, error: 'Client control method unsupported' } });
             return;
         }
@@ -179,6 +180,15 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         if (p.mcpServers) thread.mcpServers = p.mcpServers;
         if (p.aichatInstructions) thread.aichatInstructions = p.aichatInstructions;
         await this.boot(thread); const c = this.connections.get(thread.id)!;
+        if (method === 'thread/mode/set') {
+            try { await this.control(c, { subtype: 'set_permission_mode', mode: p.mode === 'plan' ? 'plan' : 'default' }); }
+            catch (error) {
+                if (!thread.planMode && unsupportedModeMethod(error)) return { nativePlan: false };
+                throw error;
+            }
+            thread.planMode = p.mode === 'plan'; this.save(thread);
+            return { nativePlan: p.mode === 'plan' };
+        }
         if (method === 'thread/resume') return { thread };
         if (method === 'turn/interrupt') { if (c.run) c.run.cancelled = true; await this.control(c, { subtype: 'interrupt' }); return {}; }
         if (method !== 'turn/start') throw rejected('Unsupported Claude harness method');

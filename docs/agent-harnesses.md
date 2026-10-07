@@ -135,14 +135,25 @@ then reconnects, so older runtime stream failures do not require clicking Stop.
 All three adapters share automatic CLI discovery (see below). `KEEPWORK_CODEX_PATH`
 can explicitly select a native executable or JavaScript entry. Processes are hidden and shell-free.
 Existing Codex configuration supplies authentication and managed requirements.
-AIChat explicitly requests Full Access with `approvalPolicy: "never"` on thread
-creation/resumption and every turn, including pre-existing AIChat threads. The
-installed protocol uses `sandbox: "danger-full-access"` on thread calls and
-`sandboxPolicy: {type: "dangerFullAccess"}` on turns. App Server validates managed
-restrictions; rejection is surfaced without retrying a bypass. Routine tool approvals are automatically accepted across
-all adapters; explicit plan decisions and user-input questions remain interactive. User-input questions remain interactive. Selected roots define
-working directory and reference mapping, not a sandbox boundary under Full Access.
-Installation and updates remain user-controlled. See the [App Server documentation](https://learn.chatgpt.com/docs/app-server).
+AIChat supplies `mode: craft|ask|plan` at creation and on every turn; omitted mode
+retains the session choice (legacy sessions default to Craft). `/health` advertises
+`agentModeApi: "v1"`. Craft requests Full Access with `approvalPolicy: "never"`
+and automatically accepts normalized permission requests. Ask uses read-only
+Codex sandbox plus `on-request`, and keeps native approvals interactive for all
+providers. Plan uses read-only/never, permits classified read/search requests,
+and rejects mutations and execution-plan approvals. Questions stay interactive.
+The internal `thread/mode/set` adapter operation negotiates Codex collaboration
+presets, Claude `set_permission_mode`, or ACP `session/set_mode` / mode config
+options before submitting a prompt. Native errors never replay a prompt or bypass
+policy. Missing native planning uses AIChat planning instructions; background
+workspace writes are blocked in Plan. Returning to Craft resets native planning.
+Mode is persisted and used for resume. App Server still validates managed restrictions.
+Selected roots define working directory/reference mapping under Full Access.
+Installation and updates remain user-controlled. Protocol sources:
+[Codex App Server](https://learn.chatgpt.com/docs/app-server),
+[ACP session modes](https://agentclientprotocol.com/protocol/v1/session-modes),
+[Claude permissions](https://code.claude.com/docs/en/agent-sdk/permissions).
+Offline mode coverage: `node --test scripts/agent-modes.test.cjs`.
 
 Transient provider retry errors clear when item output resumes; pending requests
 keep their waiting state even during retry. Raw command results and exit codes

@@ -16,7 +16,7 @@ test('Claude streamed text is reconciled with final blocks without duplicate con
 });
 test('Claude approval decline, user answers, interruption and process crash produce observable states',async t=>{
  const {manager,dir,owner}=setup(t);const s=await manager.create(owner,{backend:'claude',conversationId:'x',roots:[dir]});
- await manager.turn(s.id,owner,{requestId:'deny',text:'permission'});let snap=await wait(manager,s,owner,'waiting');
+ await manager.turn(s.id,owner,{requestId:'deny',text:'permission',mode:'ask'});let snap=await wait(manager,s,owner,'waiting');
  assert.ok(!snap.pending[0].params.command.includes('SECRET_NOT_IN_CACHE'));
  manager.respond(s.id,owner,{id:snap.pending[0].id,decision:'decline'});assert.equal((await wait(manager,s,owner)).status,'failed');
  await manager.turn(s.id,owner,{requestId:'question',text:'question'});snap=await wait(manager,s,owner,'waiting');

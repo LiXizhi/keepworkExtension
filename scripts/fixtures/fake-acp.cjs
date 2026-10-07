@@ -1,7 +1,9 @@
 const readline = require('node:readline');
 const fs = require('node:fs');
-let currentModel = 'fixture', effort = 'medium';
+let currentModel = 'fixture', effort = 'medium', mode = 'code';
+const modes = () => ({ currentModeId: mode, availableModes: ['code', 'ask', 'plan'].map(id => ({ id, name: id })) });
 const config = () => [
+  ...(process.argv.includes('--mode-config') ? [{id:'mode-config',category:'mode',type:'select',currentValue:mode,options:modes().availableModes.map(m=>({value:m.id,name:m.name}))}] : []),
   {id:'model-config',category:'model',type:'select',currentValue:currentModel,options:[{group:'models',name:'Models',options:[{value:'fixture',name:'Fixture model'},{value:'fast',name:'Fast model'}]}]},
   ...(currentModel==='fixture'?[{id:'reasoning-effort',category:'thought_level',type:'select',currentValue:effort,options:[{value:'low',name:'Light'},{value:'medium',name:'Balanced'},{value:'high',name:'Deep'}]}]:[])
 ];
@@ -20,11 +22,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(m.method==='initialize') return reply(m.id,{protocolVersion:1,agentCapabilities:{loadSession:!process.argv.includes('--no-load')},authMethods:[{id:'cli',name:'CLI login'}]});
  if(m.method==='session/new') {
    if(process.argv.includes('--auth-required')) return send({id:m.id,error:{code:-32000,message:'Authentication required'}});
-   return reply(m.id,process.argv.includes('--config-options')?{sessionId:'same-thread',configOptions:config()}:{sessionId:'same-thread',models:{currentModelId:'fixture',availableModels:[{modelId:'fixture',name:'Fixture model'}]}});
+   return reply(m.id,{...(process.argv.includes('--modes') ? {modes:modes()} : {}), ...(process.argv.includes('--config-options')?{sessionId:'same-thread',configOptions:config()}:{sessionId:'same-thread',models:{currentModelId:'fixture',availableModels:[{modelId:'fixture',name:'Fixture model'}]}})});
  }
+ if(m.method==='session/set_mode') {mode=m.params.modeId;return reply(m.id,{});}
  if(m.method==='session/set_model'&&process.argv.includes('--config-options'))return send({id:m.id,error:{code:-32601,message:'Use session/set_config_option'}});
  if(m.method==='session/set_config_option') {
    if(m.params.configId==='model-config'){currentModel=m.params.value;effort='medium';}
+   else if(m.params.configId==='mode-config')mode=m.params.value;
    else if(m.params.configId==='reasoning-effort'&&currentModel==='fixture')effort=m.params.value;
    else return send({id:m.id,error:{code:-32602,message:'Incorrect config ID'}});
    update({sessionUpdate:'config_option_update',configOptions:config()});return reply(m.id,{configOptions:config()});

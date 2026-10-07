@@ -165,11 +165,23 @@ npm run mcp --prefix apps/vscode-extension     # stdio MCP for Cursor
 - On Windows, use normal `az login --tenant <tenant-id> --allow-no-subscriptions` so Web Account Manager can satisfy MFA and Security Defaults. Do not use device-code login when the tenant blocks device code with `AADSTS530035`.
 - `npm run compile --prefix apps/vscode-extension` and `npm run package --prefix apps/vscode-extension` both run `npm version patch --no-git-tag-version`; they mutate the VS Code app's `package.json` and `package-lock.json`. Do not invoke either merely to validate an already-built release, and never run them twice for the same intended version. Use `npm run compile:only --prefix apps/vscode-extension` for a non-versioning check.
 - `npm run package --prefix apps/vscode-extension` creates `apps/vscode-extension/keepwork-<version>.vsix`. Before publishing, verify that the app manifest version and VSIX filename match the intended release.
-- Publish the existing artifact without another build or version bump:
+- Publish the existing artifact without another build or version bump. If Marketplace publishing times out, retry with HTTP proxy variables temporarily cleared for the `vsce` process; the example saves and restores the current PowerShell process values even if publishing fails:
 
   ```powershell
   $env:PATH = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin;' + $env:PATH
-  .\apps\vscode-extension\node_modules\.bin\vsce.cmd publish --azure-credential --packagePath .\apps\vscode-extension\keepwork-<version>.vsix
+  $proxyNames = 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy'
+  $savedProxy = @{}
+  foreach ($name in $proxyNames) {
+    $savedProxy[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+  }
+  try {
+    .\apps\vscode-extension\node_modules\.bin\vsce.cmd publish --azure-credential --packagePath .\apps\vscode-extension\keepwork-<version>.vsix
+  } finally {
+    foreach ($name in $proxyNames) {
+      [Environment]::SetEnvironmentVariable($name, $savedProxy[$name], 'Process')
+    }
+  }
   ```
 
 - The explicit PATH prefix is needed only when Azure CLI was installed after the current VS Code process started; a restarted VS Code should inherit it normally.

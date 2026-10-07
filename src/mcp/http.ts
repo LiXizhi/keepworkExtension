@@ -198,6 +198,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     terminalApi: 'pty-session-v1',
                     agentSessionApi: 'v1',
                     agentContextApi: 'v1',
+                    agentModeApi: 'v1',
                     agentInventoryApi: 'v1',
                     aichatClient: aichatClientRemembered(),
                     aichatPresenceApi: 'post-sse-v1',

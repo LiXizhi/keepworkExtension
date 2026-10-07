@@ -1,6 +1,7 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { resolveAgentCli, CliLaunch } from './agentCliProcess';
+import { unsupportedModeMethod } from './agentModes';
 
 export interface HarnessAdapter {
     call(method: string, params?: unknown): Promise<any>;
@@ -18,6 +19,8 @@ export class CodexHarness extends EventEmitter implements HarnessAdapter {
     private nextId = 0;
     private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
     private launch?: CliLaunch;
+    private modes?: any[];
+    private plannedThreads = new Set<string>();
     cliInfo() { return this.launch && { path: this.launch.path, source: this.launch.source }; }
     constructor(private executable?: string, private args = ['app-server', '--stdio']) { super(); }
 
@@ -44,7 +47,7 @@ export class CodexHarness extends EventEmitter implements HarnessAdapter {
                             const request = this.pending.get(message.id);
                             if (!request) continue;
                             this.pending.delete(message.id); clearTimeout(request.timer);
-                            if (message.error) request.reject(Object.assign(new Error(message.error.message || 'Codex request failed'), { rpcRejected: true }));
+                            if (message.error) request.reject(Object.assign(new Error(message.error.message || 'Codex request failed'), { rpcRejected: true, code: message.error.code }));
                             else request.resolve(message.result);
                         }
                     } catch { child.kill(); }
@@ -54,7 +57,7 @@ export class CodexHarness extends EventEmitter implements HarnessAdapter {
             child.stderr.resume();
             const fail = (error: Error) => {
                 if (this.child !== child) return;
-                this.child = undefined; this.ready = undefined;
+                this.child = undefined; this.ready = undefined; this.modes = undefined;
                 for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
                 this.pending.clear(); reject(error); this.emit('exit', error.message);
             };
@@ -62,7 +65,7 @@ export class CodexHarness extends EventEmitter implements HarnessAdapter {
             child.stdin.on('error', () => fail(new Error('Codex input stream disconnected; check session state before retrying.')));
             child.on('exit', () => fail(new Error('Codex process stopped; interrupted prompts were not rerun.')));
             child.on('spawn', () => {
-                void this.rpc('initialize', { clientInfo: { name: 'keepwork_aichat', title: 'AIChat', version: '1.0.0' } }).then(result => {
+                void this.rpc('initialize', { clientInfo: { name: 'keepwork_aichat', title: 'AIChat', version: '1.0.0' }, capabilities: { experimentalApi: true } }).then(result => {
                     if (typeof result?.userAgent !== 'string') { reject(new Error('Incompatible Codex App Server handshake. Update Codex and reconnect.')); child.kill(); return; }
                     this.write({ method: 'initialized' }); resolve();
                 }, error => { reject(error); child.kill(); });
@@ -85,7 +88,27 @@ export class CodexHarness extends EventEmitter implements HarnessAdapter {
             catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e); }
         });
     }
-    async call(method: string, params?: unknown) { await this.start(); return this.rpc(method, params); }
+    async call(method: string, params?: any) {
+        await this.start();
+        if (method !== 'thread/mode/set') return this.rpc(method, params);
+        if (!this.modes) {
+            try { this.modes = (await this.rpc('collaborationMode/list')).data || []; }
+            catch (error) { if (!unsupportedModeMethod(error)) throw error; this.modes = []; }
+        }
+        const mode = params.mode === 'plan' ? 'plan' : 'default';
+        const preset = this.modes?.find(m => m.mode === mode);
+        if (!preset) {
+            if (mode === 'default' && this.plannedThreads.has(params.threadId)) throw new Error('Codex cannot leave native Plan mode; reconnect or update the CLI');
+            return { nativePlan: false };
+        }
+        const model = params.model || preset.model || (await this.rpc('model/list', { limit: 100 })).data?.find((m: any) => m.isDefault)?.id;
+        if (!model) return { nativePlan: false };
+        // Always send default after a native plan, including after reconnect.
+        this.plannedThreads.add(params.threadId);
+        return { nativePlan: mode === 'plan', turnOverrides: { collaborationMode: { mode, settings: {
+            model, reasoning_effort: params.effort || preset.reasoning_effort || null, developer_instructions: null,
+        } } } };
+    }
     respond(id: string | number, result: unknown) { this.write({ id, result }); }
     close() {
         const child = this.child;

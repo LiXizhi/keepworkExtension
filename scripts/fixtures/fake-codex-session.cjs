@@ -2,6 +2,8 @@ const readline=require('node:readline');
 const out=m=>process.stdout.write(JSON.stringify(m)+'\n');
 readline.createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);let result={};
+ const log=process.argv.find(a=>a.startsWith('--log='));if(log)require('node:fs').appendFileSync(log.slice(6),JSON.stringify(m)+'\n');
+ if(m.method==='collaborationMode/list'&&process.argv.includes('--modes'))result={data:['plan','default'].map(mode=>({mode,model:'fixture',reasoning_effort:'medium'}))};
  if(m.method==='initialize')result={userAgent:'fixture'};
  if(m.method==='account/read')result={account:{type:'chatgpt'}};
  if(m.method==='model/list')result={data:[{id:'fixture'}]};

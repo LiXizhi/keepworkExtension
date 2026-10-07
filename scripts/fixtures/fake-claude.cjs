@@ -13,6 +13,7 @@ function finish(text='中文😀',error=false){
 }
 readline.createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
+ if(log && process.argv.includes('--log-rpc'))require('node:fs').appendFileSync(log,JSON.stringify(m)+'\n');
  if(m.type==='control_request'){
   if(m.request.subtype==='initialize'&&process.argv.includes('--startup-result-error'))return send({type:'result',subtype:'error_during_execution',is_error:true,result:'Authentication required'});
   if(m.request.subtype==='initialize'&&process.argv.includes('--auth-required'))return send({type:'control_response',response:{subtype:'error',request_id:m.request_id,error:'Authentication required'}});

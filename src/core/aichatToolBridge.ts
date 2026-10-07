@@ -25,6 +25,8 @@ function validateResult(value: any) {
 
 /** Routes only to an explicitly bound page. Never uses latestAichatClient. */
 export class AichatToolBridge {
+    private policy = (_owner: string, _id: string, _name: string, _execution: string, _args?: any) => true;
+    setPolicy(policy: typeof this.policy) { this.policy = policy; }
     private nativeConnection?: () => { url: string; token: string };
     private native = new Map<string, AichatNativeTools>();
     configureNative(connection: () => { url: string; token: string }) { this.nativeConnection = connection; }
@@ -91,6 +93,7 @@ export class AichatToolBridge {
         const b = this.get(owner, id);
         const backend = b.backendTools?.find(t => t.name === name);
         const definition = backend || b.tools.find(t => t.name === name);
+        if (!this.policy(owner, id, name, backend ? 'backend' : definition ? 'web' : 'native', args)) return errorResult('Tool is unavailable in the current agent mode');
         if (!definition) {
             const native = this.nativeFor(owner, id);
             try { const tools = await native?.list(); if (tools?.some(t => t.name === name)) return await native!.call(name, args); } catch { return errorResult('Keepwork native MCP tool unavailable'); }
@@ -115,7 +118,7 @@ export class AichatToolBridge {
             if (!b.stream!.write(`event: tool\ndata: ${JSON.stringify({ callId, pageId: b.pageId, generation: b.generation, conversationId: id, name, arguments: args })}\n\n`)) this.disconnect(b);
         });
     }
-    list(owner: string, id: string) { const b = this.get(owner, id); return [...(b.backendTools || []).map(t => ({ ...t, online: true })), ...b.tools.filter(t => !b.backendTools?.some(x => x.name === t.name)).map(t => ({ ...t, online: !!b.stream && !b.stream.destroyed }))]; }
+    list(owner: string, id: string) { const b = this.get(owner, id); return [...(b.backendTools || []).filter(t => this.policy(owner, id, t.name, 'backend')).map(t => ({ ...t, online: true })), ...b.tools.filter(t => !b.backendTools?.some(x => x.name === t.name) && this.policy(owner, id, t.name, 'web')).map(t => ({ ...t, online: !!b.stream && !b.stream.destroyed }))]; }
     async descriptor(owner: string, id: string) {
         const b = this.get(owner, id), endpoint = await this.listen();
         return { name: 'keepwork_aichat', command: process.execPath, args: ['-e', AICHAT_TOOL_PROXY_SOURCE, endpoint], env: [{ name: 'KEEPWORK_AICHAT_CAPABILITY', value: b.capability }, { name: 'ELECTRON_RUN_AS_NODE', value: '1' }] };
@@ -140,7 +143,7 @@ export class AichatToolBridge {
                     else if (message.method === 'tools/call' && message.params?.name === 'aichat_list_tools') {
                         const native = await this.nativeFor(b.owner, b.conversationId)?.list().catch(() => []);
                         const names = new Set(this.list(b.owner, b.conversationId).map(t => t.name));
-                        result = { content: [{ type: 'text', text: JSON.stringify({ revision: b.revision, tools: [...this.list(b.owner, b.conversationId), ...(native || []).filter(t => !names.has(t.name))] }) }] };
+                        result = { content: [{ type: 'text', text: JSON.stringify({ revision: b.revision, tools: [...this.list(b.owner, b.conversationId), ...(native || []).filter(t => !names.has(t.name) && this.policy(b.owner, b.conversationId, t.name, 'native'))] }) }] };
                     }
                     else if (message.method === 'tools/call' && message.params?.name === 'aichat_call_tool') result = await this.invoke(b.owner, b.conversationId, message.params.arguments?.name, message.params.arguments?.arguments, controller.signal);
                     else result = errorResult('Unknown tool');

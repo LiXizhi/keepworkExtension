@@ -10,6 +10,7 @@ import { AGENT_BACKENDS, AGENT_CLI } from './agentCliBackends';
 import { resolveAgentCli } from './agentCliProcess';
 import { AichatToolBridge } from './aichatToolBridge';
 import { AichatWorkspaceFiles, WORKSPACE_FILE_TOOL } from './aichatWorkspaceFiles';
+import { agentMode, agentAccess, AgentMode, PLAN_FALLBACK } from './agentModes';
 export { AGENT_BACKENDS } from './agentCliBackends';
 type Backend = typeof AGENT_BACKENDS[number];
 
@@ -17,7 +18,7 @@ type Item = { id: string; type: string; [key: string]: any };
 type Session = {
     backend: Backend; id: string; owner: string; conversationId: string; threadId: string; title: string;
     roots: string[]; rootNames?: string[]; worktrees: string[]; sandboxPolicy?: any; model?: string; effort?: string; archived: boolean; removed: boolean; aichatContext?: boolean;
-    status: string; turnId?: string; error?: string; retrying?: boolean; cursor: number; items: Item[]; pending: any[];
+    status: string; mode?: AgentMode; nativePlan?: boolean; turnId?: string; error?: string; retrying?: boolean; cursor: number; items: Item[]; pending: any[];
     submissions: Record<string, { state: string; turnId?: string }>;
     events: any[]; updatedAt: number;
 };
@@ -102,6 +103,13 @@ export class AgentSessions {
     private adapters: Record<string, HarnessAdapter>;
     private capabilities = new Map<string, Promise<any>>();
     constructor(private file: string, adapter: HarnessAdapter = new CodexHarness(), adapters?: Record<string, HarnessAdapter>) {
+        this.toolBridge.setPolicy((owner, id, name, execution, args) => {
+            const planning = [...this.sessions.values()].some(s => s.owner === owner && s.conversationId === id && !s.removed && s.mode === 'plan');
+            if (!planning) return true;
+            if (execution === 'native') return ['web_search', 'fetch_url', 'grep', 'grep_files'].includes(name);
+            if (execution === 'backend') return name === 'workspace_file' && (!args || ['read', 'list', 'search'].includes(args.operation));
+            return ['read_file', 'list_dir', 'search_files', 'create_file', 'replace_string_in_file'].includes(name);
+        });
         this.workspaceFiles = new AichatWorkspaceFiles(path.join(path.dirname(file), 'agent-git-drafts'));
         this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
         try {
@@ -254,9 +262,11 @@ export class AgentSessions {
         });
         const backend: Backend = input.backend || 'codex';
         const bridgeOptions = aichatContext ? await this.bridgeOptions(owner, input.conversationId, backend) : {};
-        const result = await this.adapterFor(backend).call('thread/start', { cwd: roots[0], roots, catalogKey: owner + ':' + input.conversationId, ...bridgeOptions, sandbox: 'danger-full-access', approvalPolicy: 'never', ...(input.model ? { model: String(input.model) } : {}) });
+        const mode = agentMode(input.mode), { sandbox, approvalPolicy } = agentAccess(mode);
+        const result = await this.adapterFor(backend).call('thread/start', { cwd: roots[0], roots, catalogKey: owner + ':' + input.conversationId, ...bridgeOptions, sandbox, approvalPolicy, ...(input.model ? { model: String(input.model) } : {}) });
         if (!result.thread?.id) throw new Error('Incompatible agent provider: no thread ID');
         const s: Session = { backend, id: randomUUID(), owner, conversationId: input.conversationId, threadId: result.thread.id, roots, rootNames, worktrees, sandboxPolicy: result.sandbox, title: AGENT_CLI[backend].name, model: input.model, archived: false, removed: false, status: 'idle', cursor: 0, items: [], pending: [], submissions: {}, events: [], updatedAt: Date.now(), ...(aichatContext ? { aichatContext: true } : {}) };
+        s.mode = mode;
         this.sessions.set(s.id, s); this.loaded.add(s.id); this.emit(s); return this.view(s);
     }
     revokeContext(owner: string) {
@@ -281,7 +291,7 @@ export class AgentSessions {
             }
             const bridgeOptions = s.aichatContext && !s.archived ? await this.bridgeOptions(s.owner, s.conversationId, s.backend) : {};
             const result = await this.forSession(s).call(s.archived ? 'thread/read' : 'thread/resume', { threadId: s.threadId, cwd: s.roots[0], includeTurns: true, ...bridgeOptions,
-                ...(!s.archived ? { sandbox: 'danger-full-access', approvalPolicy: 'never' } : {}) });
+                ...(!s.archived ? { sandbox: agentAccess(agentMode(s.mode)).sandbox, approvalPolicy: agentAccess(agentMode(s.mode)).approvalPolicy } : {}) });
             if (result.sandbox) s.sandboxPolicy = result.sandbox;
             s.items = (result.thread?.turns || []).flatMap((turn: any) => turn.items || []).slice(-2000).map((item: any) => bounded(visibleItem(item)));
             this.loaded.add(s.id); this.emit(s);
@@ -312,6 +322,7 @@ export class AgentSessions {
         if (s.submissions[input.requestId]) return { submission: s.submissions[input.requestId], session: this.view(s) };
         if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 200000) throw new Error('Text required (maximum 200000 characters)');
         if (s.archived || ACTIVE.has(s.status)) throw new Error('Session is archived or already running');
+        const mode = agentMode(input.mode ?? s.mode);
         verifyRoots(s.roots);
         const context = s.aichatContext ? this.toolBridge.context(owner, s.conversationId) : null;
         const text = context ? `<aichat_context revision="${context.revision.replace(/[^\w-]/g, '')}">\n${context.instructions}\n</aichat_context>\n<aichat_user_message>\n${input.text}` : workspacePrompt(input.text, s.roots, s.rootNames);
@@ -322,16 +333,20 @@ export class AgentSessions {
             sessions: overlapping.filter(other => other.owner === owner).slice(0, 10).map(other => ({ id: other.id, title: other.title.slice(0, 160) })),
         }] : [];
         // Claim before the first await, including resume/config lookup.
-        s.status = 'starting'; s.error = ''; s.retrying = false; s.turnId = undefined;
+        s.mode = mode; s.status = 'starting'; s.error = ''; s.retrying = false; s.turnId = undefined;
         if (Object.keys(s.submissions).length > 500) s.submissions = Object.fromEntries(Object.entries(s.submissions).slice(-250));
         s.submissions[input.requestId] = { state: 'starting' }; this.emit(s);
         let dispatched = false;
         try {
             await this.load(s);
-            // AIChat's requested default; App Server still enforces managed requirements.
-            const sandboxPolicy = { type: 'dangerFullAccess' };
+            const configured = await this.forSession(s).call('thread/mode/set', { threadId: s.threadId, mode, model: input.model || s.model, effort: input.effort });
+            s.nativePlan = mode === 'plan' && configured?.nativePlan === true;
+            const { sandboxPolicy, approvalPolicy } = agentAccess(mode);
+            const prompt = mode === 'plan' && !s.nativePlan ? (context
+                ? text.replace('\n</aichat_context>', PLAN_FALLBACK + '\n</aichat_context>')
+                : PLAN_FALLBACK + text) : text;
             dispatched = true;
-            const result = await this.forSession(s).call('turn/start', { threadId: s.threadId, input: [{ type: 'text', text }], cwd: s.roots[0], sandboxPolicy, approvalPolicy: 'never', ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) });
+            const result = await this.forSession(s).call('turn/start', { threadId: s.threadId, input: [{ type: 'text', text: prompt }], cwd: s.roots[0], sandboxPolicy, approvalPolicy, ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}), ...configured?.turnOverrides });
             s.turnId = result.turn?.id; s.model = input.model || s.model; s.effort = input.effort;
             s.submissions[input.requestId] = { state: 'accepted', turnId: s.turnId };
             if (s.status === 'starting') s.status = 'running';
@@ -411,10 +426,15 @@ export class AgentSessions {
         // AIChat sessions default to Full access across all adapters. ACP and
         // Claude can still request tool approval despite approvalPolicy=never.
         // Actual questions remain interactive; unknown requests stay rejected.
-        if (message.method !== 'item/tool/requestUserInput' && !message.params?.requiresUserDecision) {
+        if (agentMode(s.mode) === 'craft' && message.method !== 'item/tool/requestUserInput' && !message.params?.requiresUserDecision) {
             this.forSession(s).respond(message.id, message.method === 'item/permissions/requestApproval'
                 ? { permissions: message.params?.permissions || {}, scope: 'turn' }
                 : { decision: 'accept' });
+            return;
+        }
+        if (s.mode === 'plan' && message.method !== 'item/tool/requestUserInput') {
+            this.forSession(s).respond(message.id, message.method === 'item/permissions/requestApproval'
+                ? { permissions: {}, scope: 'turn' } : { decision: message.params?.readOnly === true && !message.params?.requiresUserDecision ? 'accept' : 'decline' });
             return;
         }
         s.pending.push(bounded(message)); s.status = 'waiting'; this.emit(s);

@@ -7,7 +7,7 @@ import { HarnessAdapter } from './codexHarness';
 import { resolveAgentCli, CliLaunch, stopCli } from './agentCliProcess';
 import { AcpBackend, AGENT_CLI } from './agentCliBackends';
 
-type Thread = { id: string; cwd: string; turns: any[]; models?: any; configOptions?: any[]; loaded?: boolean; mcpServers?: any[] };
+type Thread = { id: string; cwd: string; turns: any[]; models?: any; modes?: any; normalMode?: string; configOptions?: any[]; loaded?: boolean; mcpServers?: any[] };
 export function cacheValue(value: any, budget = { remaining: 2_000_000 }, depth = 0): any {
     if (budget.remaining <= 0 || depth > 24) return '';
     budget.remaining -= 16;
@@ -144,7 +144,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         }
         if (m.method === 'session/request_permission' && this.active.has(m.params?.sessionId)) {
             this.permissions.set(m.id, m.params);
-            this.emit('request', { id: m.id, method: 'item/commandExecution/requestApproval', params: { threadId: m.params.sessionId, command: m.params.toolCall?.title || 'CLI tool', toolCall: cacheValue(m.params.toolCall || {}), options: m.params.options } });
+            this.emit('request', { id: m.id, method: 'item/commandExecution/requestApproval', params: { threadId: m.params.sessionId, readOnly: ['read', 'search'].includes(m.params.toolCall?.kind), command: m.params.toolCall?.title || 'CLI tool', toolCall: cacheValue(m.params.toolCall || {}), options: m.params.options } });
         } else this.write({ id: m.id, error: { code: -32601, message: 'Client method unsupported' } });
     }
     private notify(method: string, threadId: string, params: any) { this.emit('notification', { method, params: { threadId, ...params } }); }
@@ -155,6 +155,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             thread.configOptions = update.configOptions;
             this.notify('model/updated', thread.id, {});
         }
+        if (thread?.modes && update?.sessionUpdate === 'current_mode_update') thread.modes.currentModeId = update.currentModeId;
         if (!run || !update) return;
         if (['agent_message_chunk', 'agent_thought_chunk'].includes(update.sessionUpdate) && update.content?.type === 'text') {
             const key = update.sessionUpdate === 'agent_thought_chunk' ? 'thoughtItem' : 'textItem';
@@ -195,7 +196,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         if (thread.loaded) return;
         if (!this.capabilities.loadSession) throw Object.assign(new Error(`${this.backend} CLI cannot resume sessions. History is readable; start a new conversation to continue.`), { rpcRejected: true });
         const result = await this.rpc('session/load', { sessionId: thread.id, cwd: thread.cwd, mcpServers: thread.mcpServers || [] });
-        thread.loaded = true; thread.models = result.models || thread.models; thread.configOptions = result.configOptions || thread.configOptions;
+        thread.loaded = true; thread.models = result.models || thread.models; thread.configOptions = result.configOptions || thread.configOptions; thread.modes = result.modes || thread.modes;
     }
     async call(method: string, p: any = {}): Promise<any> {
         // Copilot versions that ignore ACP mcpServers need one process-level configuration per session.
@@ -256,6 +257,27 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             return { thread };
         }
         const thread = this.thread(p.threadId);
+        if (method === 'thread/mode/set') {
+            await this.resume(thread);
+            if (p.model) await this.setModel(thread, p.model);
+            const option = thread.configOptions?.find(o => o.category === 'mode' || o.id === 'mode');
+            const choices = option ? this.values(option).map(v => ({ id: v.value, name: v.name })) : thread.modes?.availableModes || [];
+            const current = option?.currentValue || thread.modes?.currentModeId;
+            const plan = choices.find((m: any) => /^(plan(?:[-_]mode)?|architect)$/i.test(m.id) || /^plan(?: mode)?$/i.test(m.name));
+            if (!thread.normalMode && current && current !== plan?.id) thread.normalMode = current;
+            const ids = p.mode === 'craft' ? ['bypassPermissions', 'yolo', 'full-access', 'code', 'build', 'agent', 'default', 'ask'] : ['ask', 'default', 'code', 'build', 'agent'];
+            const normal = ids.map(id => choices.find((m: any) => m.id === id)).find(Boolean)
+                || choices.find((m: any) => m.id === thread.normalMode && m.id !== plan?.id && (p.mode === 'craft' || !/bypass|yolo|full.?access|auto.?approve|acceptEdits/i.test(m.id)));
+            const selected = p.mode === 'plan' ? plan || normal : normal;
+            if (!selected && choices.length && p.mode !== 'craft') throw new Error('CLI does not advertise a mode for manual access or planning');
+            if (!selected && current && current === plan?.id && p.mode !== 'plan') throw new Error('CLI does not advertise a mode to leave Plan');
+            if (selected && selected.id !== current) {
+                if (option) await this.setOption(thread, option, selected.id);
+                else { await this.rpc('session/set_mode', { sessionId: thread.id, modeId: selected.id }); thread.modes.currentModeId = selected.id; }
+            }
+            this.save(thread);
+            return { nativePlan: p.mode === 'plan' && !!plan };
+        }
         if (method === 'thread/resume') { if (p.mcpServers) thread.mcpServers = p.mcpServers; await this.resume(thread); return { thread }; }
         if (method === 'turn/interrupt') {
             const run = this.active.get(thread.id); if (run) run.cancelled = true;
@@ -313,7 +335,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
     }
     private async newThread(cwd: string, mcpServers: any[] = []): Promise<Thread> {
         const result = await this.rpc('session/new', { cwd, mcpServers });
-        const thread: Thread = { id: result.sessionId, cwd, turns: [], models: result.models, configOptions: result.configOptions, loaded: true, mcpServers };
+        const thread: Thread = { id: result.sessionId, cwd, turns: [], models: result.models, modes: result.modes, configOptions: result.configOptions, loaded: true, mcpServers };
         if (!/^[\w-]{1,160}$/.test(thread.id || '')) throw new Error('ACP did not return a valid session ID');
         this.threads.set(thread.id, thread); return thread;
     }
