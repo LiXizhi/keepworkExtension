@@ -5,6 +5,7 @@ import * as pty from 'node-pty';
 import { GLOBAL_TERMINAL_CAP, OUTPUT_CHAR_CAP } from './config';
 import { resolveWorkdir } from './paths';
 import { assertAllowedCommand } from './terminal';
+import { POWERSHELL_UTF8_INIT } from './terminalEncoding';
 
 const TERMINAL_IDLE_MS = 30 * 60 * 1000;
 const MAX_INPUT_LENGTH = 64_000;
@@ -73,7 +74,7 @@ function shellSpec(): { command: string; args: string[] } {
             command: process.env.ComSpec && /cmd(?:\.exe)?$/i.test(process.env.ComSpec)
                 ? 'powershell.exe'
                 : (process.env.ComSpec || 'powershell.exe'),
-            args: ['-NoLogo', '-NoProfile'],
+            args: ['-NoLogo', '-NoProfile', '-NoExit', '-EncodedCommand', Buffer.from(POWERSHELL_UTF8_INIT, 'utf16le').toString('base64')],
         };
     }
     return { command: process.env.SHELL || '/bin/sh', args: [] };

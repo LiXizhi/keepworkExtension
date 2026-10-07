@@ -25,6 +25,10 @@ For revisions use `createScene({name=...,resume=true})`, inspect members, and
 `openMovie` when reopening a timeline. Stale fingerprints mean someone changed
 native content: inspect the discrepancy rather than overwriting it. Save a full
 updated generator if a short patch script would no longer reproduce the asset.
+Protected CodeBlock updates are native edits too: they do not automatically
+refresh an older scene manifest's code-member fingerprints. Keep the updated
+program/generator and document that mismatch. Continue program changes through
+protected code reads/updates; do not erase fingerprints to force a scene rebuild.
 Pass that generator explicitly to `save(fullGeneratorSource)` in a repair script.
 Updated clients retain it for later `save()` calls on the same scene object;
 on older clients, omit a second no-argument save that could overwrite it with the
@@ -62,6 +66,13 @@ For save/reopen acceptance, record the world identity and source/asset paths,
 save via the native explicit world operation, reopen, rediscover the new session
 identity, inspect groups/rig/movie and capture the reopened asset. Never do this
 to an unrelated user's world merely to test the skill. Use a disposable world.
+
+Reopening the same path is asynchronous: `worldEntered:true` and a matching path
+may still describe the old session immediately after `open_requested`. Retain the
+pre-open identity and poll status plus capabilities until that path is entered
+with a different session on the same client. On a delayed observation, continue
+polling the already requested open; do not issue another open or replay edits.
+Only then read world instructions and verify saved native cells and full source.
 
 Entered status can precede complete terrain/entity readiness. After reopen,
 wait for the relevant loaded members and exact snapshots to stabilize before

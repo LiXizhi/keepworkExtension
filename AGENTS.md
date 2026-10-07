@@ -67,6 +67,7 @@ The repository root is a private shared-runtime package. Product manifests, entr
 | `apps/local-helper` | Windows tray app, login startup, notify bridge, updater and NSIS packaging; imports the shared MCP source |
 | `apps/local-model-runtime` | Windows x64 local-model source, integrity data, tests and staged NodeRuntime; bundled only as Local Helper `extraResources` |
 | `apps/vscode-extension/src/vscode/daemon.ts` | Health probe, detached spawn, admin fetch |
+| `apps/vscode-extension/src/vscode/copilotMcp.ts` | Native VS Code MCP provider, singleton daemon resolution and connection-time auth for Copilot |
 | `apps/vscode-extension/src/vscode/statusBar.ts` | Status bar text / tooltip |
 | `apps/vscode-extension/src/vscode/mcpPanel.ts` | Click panel: clients + paged history + working directory / terminal |
 
@@ -120,6 +121,16 @@ HTTP:
   - Persist `~/.keepwork-mcp/calendar-reminders.json`. Daemon timers fire at `remindAt`; the extension notify bridge shows `showInformationMessage` with **打开日历** → `openExternal(openUrl)` (`http(s)` keepwork.com / localhost / 127.0.0.1 only). If VS Code is closed, due items retry every 15s until the bridge is up.
 
 Settings: `keepwork.mcp.enableHttp` / `keepwork.mcp.port` / `keepwork.mcp.workspaceRoot` / `keepwork.mcp.requireAuth` (default false).
+
+VS Code Copilot: `keepwork.mcp.connectCopilot` defaults to true. The extension
+contributes provider `keepwork.mcp` and registers it during activation; discovery
+publishes the loopback `/mcp` endpoint, resolution starts/attaches to the singleton
+and reads auth headers only then. Never write user/workspace MCP configuration or
+override editor trust/tool permissions. `contributes.chatSkills` points to the
+complete packaged `dist/skills/paracraft-create/SKILL.md`; keep its relative guides
+in the VSIX. Older editors without the MCP API must still activate. Verify with
+`npm run compile:only --prefix apps/vscode-extension` and
+`npm test --prefix apps/vscode-extension`.
 
 Root resolution (first match): `--root` / `KEEPWORK_MCP_ROOT` / VS Code setting / `~/.keepwork-mcp/config.json` / `~/.keepwork-mcp/workspace` (created automatically, with a `default` slot). Not the open VS Code folder. AIChat cwd is `workspace/default` or `workspace/[workspacename]`.
 
@@ -222,3 +233,28 @@ Cursor stdio (does not replace the HTTP daemon AIChat needs):
 - Local Helper packaging → keep product logic in `src/core` / `src/mcp`; `apps/local-helper` may only own tray/lifecycle/update/installer behavior. Build Windows PTY artifacts on Windows, keep native `node-pty` files unpacked, and never commit signing credentials.
 - Default working directory parent → `~/.keepwork-mcp/workspace` via `src/core/config.ts` `defaultUserWorkspace()`. Slots: `default` (no AIChat workspace) and `[workspacename]`. Do not default to the open VS Code folder.
 - Keepwork clone/open URL rules → `src/core/keepwork.ts` (VS Code commands only in v1; not MCP tools).
+
+## Agent CLI adapters
+
+Copilot's optional VS Code custom-model discovery/routing lives in `src/core/copilotHarness.ts`
+and `src/core/vscodeModels.ts`; the extension endpoint is `apps/vscode-extension/src/vscode/modelBridge.ts`.
+Native CLI models stay on ACP. Custom models require BYOK-capable Copilot CLI and
+an open editor, keep provider keys in VS Code, and use a separate authenticated
+loopback model bridge (never the terminal credential). Validate with
+`node --test scripts/copilot-model-bridge.test.cjs apps/vscode-extension/scripts/model-bridge.test.cjs`.
+
+`src/core/agentSessions.ts` and `src/mcp/agentHttp.ts` expose the shared owned `/agents`
+surface. `codexHarness.ts` handles Codex; `acpHarness.ts` handles WorkBuddy (CodeBuddy
+ACP engine), Copilot, Cursor, Trae, Qwen, Gemini, Kimi and OpenCode.
+`claudeHarness.ts` implements Claude native stream-json; `agentCliBackends.ts` owns
+the provider registry. Preserve backend-scoped routing, native credentials,
+non-replaying restart, local-only transcript caches and existing Origin/owner/auth
+checks. `skills/agent-cli-verify/SKILL.md` is packaged for both products and exposed
+as an MCP resource and VS Code chat skill. Run `npm run check:shared` and
+`node --test scripts/agent-sessions.test.cjs scripts/agent-backends.test.cjs scripts/agent-cli-discovery.test.cjs scripts/claude-harness.test.cjs`.
+Real acceptance is `node scripts/agent-cli-smoke.cjs`; unavailable or untested CLIs
+must not be reported as passing. See `docs/agent-harnesses.md`.
+
+## Agent CLI development maintenance
+
+For agent CLI installation recipes, discovery, protocol/model compatibility or periodic product upkeep, read [.github/skills/agent-cli-maintenance/SKILL.md](.github/skills/agent-cli-maintenance/SKILL.md), then the selected `.github/skills/agent-cli-maintenance/references/providers/<backend>.md`. This is a single development Skill with per-platform references. Runtime installation guidance is plain Markdown under `skills/agent-cli-verify/references/providers/`; do not register development maintenance Skills as user-facing product skills.

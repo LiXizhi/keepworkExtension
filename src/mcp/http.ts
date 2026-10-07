@@ -21,6 +21,8 @@ import { liveClientCount, listWebserverRoots, setHubListenPort, startParacraftWa
 import { tryHandleWebserver } from '../core/webserverProxy';
 import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
 import { TerminalSessionManager } from '../core/terminalSessions';
+import { AgentSessions } from '../core/agentSessions';
+import { handleAgentHttp } from './agentHttp';
 import { tryHandleAichatPresence, aichatClientRemembered } from '../core/aichatPresence';
 import { dashboardHtml } from './dashboard';
 import { dashboardSkill } from './dashboardSkill';
@@ -66,8 +68,8 @@ function applyCors(req: http.IncomingMessage, res: http.ServerResponse): void {
     } else if (!origin) {
         res.setHeader('Access-Control-Allow-Origin', '*');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID, X-Agent-Owner');
     res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version');
     if (String(req.headers['access-control-request-private-network'] || '').toLowerCase() === 'true') {
         res.setHeader('Access-Control-Allow-Private-Network', 'true');
@@ -134,7 +136,9 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     const token = readOrCreateToken();
     const transports = new Map<string, StreamableHTTPServerTransport>();
     const activeMcpStreams = new Set<string>();
+    const presenceStreams = new Map<string, http.ServerResponse>();
     const terminalSessions = new TerminalSessionManager();
+    const agentSessions = new AgentSessions(path.join(mcpHomeDir(), 'agent-sessions-v1.json'));
 
     const assertAuth = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
         if (!authRequired) return true;
@@ -155,8 +159,15 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         }
 
         try {
+            if (pathname.startsWith('/agents/')) {
+                const origin = String(req.headers.origin || '');
+                if (!origin || !originAllowed(origin)) { sendJson(res, 403, { error: 'Explicit allowed Origin required' }); return; }
+                if (!assertAuth(req, url, res)) return;
+                await handleAgentHttp(req, res, url, agentSessions);
+                return;
+            }
             if (pathname === '/aichat/presence') {
-                await tryHandleAichatPresence(req, res, hasSession);
+                await tryHandleAichatPresence(req, res, hasSession, presenceStreams);
                 return;
             }
             if (pathname === '/health' && req.method === 'GET') {
@@ -185,7 +196,11 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     browserApi: 'browser-v1',
                     fsDirApi: 'mkdir-v1',
                     terminalApi: 'pty-session-v1',
+                    agentSessionApi: 'v1',
+                    agentContextApi: 'v1',
+                    agentInventoryApi: 'v1',
                     aichatClient: aichatClientRemembered(),
+                    aichatPresenceApi: 'post-sse-v1',
                 });
                 return;
             }
@@ -502,6 +517,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         });
     });
 
+    agentSessions.toolBridge.configureNative(() => ({ url: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/mcp`, token }));
     writeInstance({
         pid: process.pid,
         port,
@@ -516,6 +532,9 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         stopParacraftWatch();
         stopCalendarWatch();
         terminalSessions.closeAll();
+        agentSessions.close();
+        for (const response of presenceStreams.values()) response.end();
+        presenceStreams.clear();
         await managedBrowsers.closeAll();
         for (const t of transports.values()) {
             try { await t.close(); } catch { /* ignore */ }

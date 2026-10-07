@@ -1,13 +1,21 @@
 ---
 name: paracraft-create
-description: Start Paracraft clients and create, load or save named local worlds with optional sign-in through Keepwork MCP. Create and revise editable terrain, biomes, villages, city roads, scenes, characters, animated films and working native mechanisms (常用机关：压力板、按钮、拉杆、导线); analyze world objects and maintain world-local documentation.
+description: Use Paracraft as a game engine to turn rules into editable minigames, character interactions and animated works, combining native scenes, actors, movies, circuits and CodeBlocks. Also create or revise terrain, props and local worlds, inspect existing worlds and maintain their documentation through Keepwork MCP.
 ---
 
-# Paracraft creation
+# Paracraft game and scene creation
 
-Turn a description or reference into editable native art, then inspect the result
-in Paracraft. Use `createScene` through Keepwork MCP; keep the generator source,
-named components, native blocks, bones and movies available for revision.
+Turn rules, a description or a reference into editable native game worlds and
+interactive behavior, then play and inspect the result in Paracraft. Use `createScene` through Keepwork
+MCP; keep generator source, named components, native blocks, bones, movies and
+CodeBlock programs available for revision.
+
+For a minigame, character-driven interactive work or a scene combining gameplay
+and animation, start with [game-engine.md](references/game-engine.md). Derive the
+input/state/feedback/end/reset contract from the user's rules, prove the uncertain
+engine capability, and build a playable slice before expanding the scene. Choose
+native components by responsibility; examples supply parts, not a fixed game list.
+For a static prop or scene, proceed directly to the relevant design guide below.
 
 Choose blocks according to the deliverable. **World scenes** should combine native
 materials and shapes: colored fences, stairs, slabs and slopes; textured wood and
@@ -92,6 +100,10 @@ use Paracraft BMax or miniature color voxels. See
 
 ## Design and build
 
+For a task combining terrain, routes, buildings and behavior, read
+[integrated-scenes.md](references/integrated-scenes.md) for shared layout,
+bounded execution, compact results and separate visual/functional acceptance.
+
 For a simple prop, a brief component list and a visual check may suffice. For a
 complex scene or reference reconstruction, use these passes, combining passes
 when that makes the work easier to review:
@@ -168,16 +180,39 @@ guide when relief matters. Lay out connected routes and building entrances befor
 building details. Keep terrain, infrastructure and buildings editable by region,
 and record their coordinates, seed and generator paths in the world's direct `docs/`.
 
-For common interactive mechanisms (常用机关), load
-[mechanisms.md](references/mechanisms.md), then only the relevant subguides:
-[pressure plates](references/pressure-plates.md), [buttons](references/buttons.md),
-[levers](references/levers.md) and [wiring](references/wiring.md).
-Use functional native blocks and verify input, signal propagation, output and reset.
-Keep circuitry in the editable world; a decorative model or a powered-state
-screenshot alone does not establish working behavior.
+For circuits and connected mechanisms (电路、串并联控制、常用机关), load
+[circuits.md](references/circuits.md). Design inputs, wiring, repeaters, logic,
+timing/memory and outputs as one system. Derive logic, state transitions and
+reset from the user's requirements; use native lessons to understand component
+behavior, then compose and adapt modules rather than copy a fixed layout. Verify input
+combinations, propagation, timing and reset with functional native blocks;
+a powered-state screenshot alone does not establish working behavior.
+
+For CodeBlock interactions, minigames, NPC behavior, dialogue, click/key input,
+cloning, scoring, timers or puzzles (代码方块、小游戏、角色行为与交互), read
+[code-blocks.md](references/code-blocks.md). Build the physical CodeBlock,
+MovieClip actor and activation chain, then verify behavior and reset. Use
+[codeblock-patterns.md](references/codeblock-patterns.md) to derive state, event
+and actor responsibilities from the requested gameplay; use
+[codeblock-lessons.md](references/codeblock-lessons.md) for the F1 tutorials and
+project 530 source map. The editable
+[codeblock-playground.lua](examples/codeblock-playground.lua) demonstrates a timed
+collection game and patrol/follow/idle NPC. Adapt it to the task; its geometry and
+rules are examples. Click handlers should submit requests to a movement/game
+worker: repeated native events can interrupt an earlier yielding handler.
+For this ready-made combination, inspect `template_info` with
+`{template:"codeblock_playground"}`, then `run_template` with its hash and normal
+job/world identity fields. It creates inactive stations without copying Lua into
+the model context. Read the patterns or lesson index only for the behavior needed.
 
 ## Operational invariants
 
+- Keep temporary capture and conversion files outside the world directory. Never
+  create `preview_base64.txt`, other Base64 staging files, or conversion scratch
+  files anywhere under a world, including a world-local temporary subfolder, even
+  if they would be deleted afterward. Use a unique task folder in the OS temporary
+  directory (such as `%TEMP%` on Windows), and clean up owned intermediates after
+  use. Only intended final preview images and world assets belong in the world.
 - CodeBlock scripts have normal CodeBlock authority. Helper bounds and undo do
   not cover arbitrary commands. Prefer helpers for attributable component edits.
 - Block coordinates are local and Y-up; model angles use radians; timeline inputs

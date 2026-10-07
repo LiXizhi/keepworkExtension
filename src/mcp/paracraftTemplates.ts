@@ -3,6 +3,10 @@ import { readCreationGuide } from './paracraftGuide';
 
 // Curated runnable templates, not a recursive directory catalog in every call.
 const templates = {
+    engine_games: { path: 'examples/engine-games.lua', description: 'Three independent native games: ordered-switch puzzle with movie playback, 4x4 connect-three board, and keyboard/click lane challenge. Six editable movie/code/lever stations and one toy mesh. Inactive; enable each inputs station before its host. Lane hazards use rule-based lane checks, not physical collision.', dimensions: [34, 8, 26], assetCount: 1,
+        requiredCapabilities: ['sceneCameraPoints', 'voxelMeshExport', 'modelDependencies'], palette: {} },
+    codeblock_playground: { path: 'examples/codeblock-playground.lua', description: 'Physical CodeBlock timed collection minigame plus patrol/follow/idle NPC. Three editable movie/code/lever stations, five collectible clones, one world-local toy mesh. Created inactive; enable tokens, host, NPC in that order.', dimensions: [18, 6, 14], assetCount: 1,
+        requiredCapabilities: ['sceneCameraPoints'], palette: {} },
     timber_cottage: { path: 'examples/timber-cottage.lua', description: '5 x 5 m unfurnished native timber/wool cottage: 3 m walls, five tinted panes, open 2 m door, colored stair roof with 5.5 m slab ridge, flush floor/path and thin carpet. No exports.', dimensions: [7, 6, 8], assetCount: 0,
         requiredCapabilities: ['doorAssemblies', 'terrainEditing', 'nativeBlockNames', 'sceneCameraPoints'], palette: { wall: '#E5DDC8', roof: '#8C5B48', glass: '#91B9B9', rug: '#BE997C' } },
     doorway: { path: 'examples/doorway.lua', description: 'Two native 1 x 2 m wooden doors, one closed and one open, in timber frames over a flush wood floor. Two-cell helper preflight and one undo command per door; no exports.', dimensions: [6, 3, 4], assetCount: 0,
@@ -80,7 +84,7 @@ const templates = {
         palette: { shoes: '#373F50', trousers: '#3B526F', shirt: '#559E94', skin: '#E9C8A6', hair: '#514236', eyes: '#303340', mouth: '#B97F70' } },
 } as const;
 
-export const creationTemplateCategories = ['architecture', 'gardens', 'furniture', 'animals', 'characters', 'moving_objects'] as const;
+export const creationTemplateCategories = ['architecture', 'gardens', 'furniture', 'animals', 'characters', 'moving_objects', 'interactions'] as const;
 const categories: Record<typeof creationTemplateCategories[number], readonly (keyof typeof templates)[]> = {
     architecture: ['timber_cottage', 'doorway', 'reading_corner', 'garden_pergola'],
     gardens: ['pocket_pond', 'flower_border', 'birdbath_garden', 'bench_garden', 'patio_cafe', 'pond_garden', 'conifer_garden', 'cherry_garden'],
@@ -88,6 +92,7 @@ const categories: Record<typeof creationTemplateCategories[number], readonly (ke
     animals: ['trotting_dog', 'sitting_cat', 'hopping_rabbit', 'curious_fox', 'skinned_fox', 'idle_fox', 'butterfly', 'bird'],
     characters: ['mini_character'],
     moving_objects: ['banking_aircraft', 'light_aircraft', 'rowing_boat', 'compact_car', 'desk_fan'],
+    interactions: ['codeblock_playground', 'engine_games'],
 };
 
 // Discovery reads curated metadata only; source/hash loading stays name-specific.

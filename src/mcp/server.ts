@@ -2,6 +2,7 @@ import { registerBrowserTools } from './browserTools';
 import { registerComputerTools } from './computerTools';
 import { registerCreationTools } from './paracraftTools';
 import { registerCreationGuide } from './paracraftGuide';
+import { registerAgentGuide } from './agentGuide';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { SERVER_NAME, SERVER_VERSION } from '../core/config';
@@ -72,6 +73,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     registerComputerTools(server);
     registerCreationTools(server, runtime);
     registerCreationGuide(server);
+    registerAgentGuide(server);
 
     server.registerTool(
         'mcp_status',

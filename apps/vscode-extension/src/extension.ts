@@ -8,6 +8,8 @@ import { createMcpStatusBar, refreshStatusBar } from './vscode/statusBar';
 import { openMcpPanel } from './vscode/mcpPanel';
 import { showKeepworkTerminal, startTerminalBridge } from './vscode/terminalBridge';
 import { startNotifyBridge } from './vscode/notifyBridge';
+import { startModelBridge } from './vscode/modelBridge';
+import { registerCopilotMcp } from './vscode/copilotMcp';
 
 async function openMcpWorkspace(context: vscode.ExtensionContext): Promise<void> {
     const root = configuredRoot(context);
@@ -43,9 +45,11 @@ async function changeMcpWorkspace(context: vscode.ExtensionContext): Promise<voi
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Keepwork extension is now active!');
+    registerCopilotMcp(context);
 
     const bridge = startTerminalBridge();
     const notify = startNotifyBridge();
+    const models = startModelBridge();
 
     const cloneCommand = vscode.commands.registerCommand('keepwork.cloneRepository', async () => {
         const keepworkUrl = await vscode.window.showInputBox({
@@ -153,6 +157,7 @@ export function activate(context: vscode.ExtensionContext) {
         { dispose: () => clearInterval(poll) },
         { dispose: () => bridge.dispose() },
         { dispose: () => notify.dispose() },
+        models,
     );
 
     if (mcpEnabled()) {

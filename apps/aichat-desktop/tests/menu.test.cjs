@@ -28,19 +28,23 @@ function host() {
   return { context, calls, menu: () => { vm.runInContext('menu()', context); return template; } };
 }
 
-test('desktop file menu exposes MCP status, dashboard, restart and local source switch', async () => {
+test('desktop menus are File Edit View Help and expose a serializable page payload', async () => {
   const h = host();
-  const items = h.menu()[0].submenu;
-  const mcp = items.find(item => item.label === 'Keepwork MCP Server').submenu;
-  assert.deepEqual(Array.from(mcp, item => item.label), ['查看状态…', '打开 Dashboard', '重启 Keepwork MCP Server']);
-  mcp[1].click();
+  const bar = h.menu().filter(item => ['File', 'Edit', 'View', 'Help'].includes(item.label));
+  assert.equal(JSON.stringify(bar.map(item => item.label)), JSON.stringify(['File', 'Edit', 'View', 'Help']));
+  assert.equal(JSON.stringify(bar[0].submenu.map(item => item.label).filter(Boolean)), JSON.stringify(['新对话', '打开文件夹…', '重新加载', '检查更新', '登录后自动启动', '退出']));
+  const help = bar[3].submenu;
+  help.find(item => item.label === '打开 Dashboard').click();
   assert.deepEqual(h.calls, ['http://127.0.0.1:8089/dashboard']);
-  const server = items.find(item => item.label === 'AIChat 服务器').submenu;
-  assert.ok(server.find(item => item.label === '使用本地源码服务器…'));
-  server.find(item => item.accelerator === 'CmdOrCtrl+R').click();
+  bar[0].submenu.find(item => item.label === '重新加载').click();
   assert.equal(h.calls.at(-1), 'reloadIgnoringCache');
-  server.find(item => item.label === '使用线上服务器').click();
+  help.find(item => item.label === '使用线上服务器').click();
   assert.equal(h.calls.at(-1), 'https://keepwork.com/chat');
+  const payload = vm.runInContext('menuPayload("view")', h.context);
+  assert.equal(payload.label, 'View');
+  assert.equal(JSON.stringify(payload.items.filter(item => item.id).map(item => item.id)), JSON.stringify(['toggle-sidebar', 'toggle-files', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'open-settings']));
+  for (const item of payload.items) assert.equal(typeof item.click, 'undefined');
+  assert.throws(() => vm.runInContext('menuPayload("nope")', h.context), /Invalid menu/);
 });
 
 test('MCP restart reloads local development page only after success and reports errors', async () => {

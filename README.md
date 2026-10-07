@@ -1,3 +1,9 @@
+# AIChat presence
+
+`/health` reports `aichatPresenceApi: "post-sse-v1"`. New AIChat clients use `POST /aichat/presence?stream=1`: register the current page/login in memory, then keep one SSE response open with secret-free 25-second heartbeats. Login remains in the request body, never the URL or response. Each live MCP session has at most one presence stream; disconnect and daemon shutdown clean up streams while retaining the latest remembered login. Existing Origin/live-session validation is unchanged.
+
+Legacy `POST /aichat/presence` still returns `{ remembered: true }` for older clients. New AIChat clients fall back to the existing periodic POST when the capability is absent. Update/restart the MCP runtime and refresh AIChat to use streaming. Verify with `node --test scripts/aichat-presence.test.cjs`.
+
 # Browser Dashboard
 
 Open `http://127.0.0.1:8089/dashboard` (or `/`) while the daemon is running.
@@ -43,6 +49,30 @@ The VS Code extension provides only editor and MCP capabilities on port `8089`. 
 The VS Code extension can clone projects from Keepwork, open files on keepwork.com, and run a **local MCP daemon** so [AIChat](https://keepwork.com/chat) can execute terminal commands and grep on this machine.
 
 ## Features
+
+### VS Code Copilot: automatic MCP and Paracraft skill discovery
+
+On current VS Code versions, activating Keepwork registers the **Keepwork** MCP
+server with Copilot through the native MCP server definition provider. Copilot
+discovers and connects to it when chat needs MCP tools; no `.vscode/mcp.json` or
+manual URL/token setup is required. The connection starts or attaches to the same
+loopback daemon used by AIChat and uses its configured port and authentication.
+VS Code retains control of server trust, tool permissions and disabled tools.
+Only changes to connection settings invalidate discovery; unrelated preferences
+leave the advertised server in place. Concurrent startup and connection requests
+share one daemon startup. This editor integration supplies MCP tools to Copilot;
+AIChat's `copilot` backend separately uses Copilot CLI and its native model catalog.
+
+The extension also contributes the packaged **paracraft-create** Agent Skill,
+including its references and examples. Ask Copilot in agent mode to “使用
+paracraft-create 创建一个本地世界并搭建小亭子”. Copilot can load the skill when
+relevant and operate Paracraft through `paracraft_cli`.
+
+`keepwork.mcp.connectCopilot` defaults to `true`; set it to `false` to stop
+advertising the MCP server to Copilot. `keepwork.mcp.enableHttp=false` also removes
+it. Older editors without the native MCP API retain the existing extension
+features and can configure MCP manually. Agent Skill discovery requires a VS Code
+version with `chatSkills` support and enabled Agent Skills.
 
 ### Clone Repository from Keepwork
 1. Press `Ctrl+Shift+P` → **Keepwork: Clone Repository**
@@ -270,3 +300,18 @@ Paracraft startup is available inside the same `paracraft_cli` gateway:
 its installed Windows protocol handler. Poll `launch_status` with the returned
 `launchId` if it is still waiting. No `clientId` is needed until startup completes.
 See [connection guide](skills/paracraft-create/references/connection.md).
+## AIChat agent harnesses
+
+The shared daemon exposes `/agents/*` for AIChat's **Harness** dropdown. Codex runs
+through a hidden stdio App Server, with persistent sessions, streaming, approvals,
+interruption and multi-repository checks. Browser and Desktop use the same runtime;
+KP Local Helper is not required. See [API and setup](docs/agent-harnesses.md).
+
+### Agent CLI verification
+
+The shared `/agents` API supports Codex, Claude Code, Cursor, Trae, Qwen Code,
+Gemini CLI, Kimi CLI, OpenCode, WorkBuddy, CodeBuddy and Copilot CLI. Creation accepts an optional `backend`; existing clients default
+to Codex. See [the contract and setup](docs/agent-harnesses.md).
+The packaged `agent-cli-verify` MCP/VS Code skill provides offline and real acceptance:
+`node --test scripts/agent-sessions.test.cjs scripts/agent-backends.test.cjs`, then
+`node scripts/agent-cli-smoke.cjs`. Unavailable providers fail the all-provider check.

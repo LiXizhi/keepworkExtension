@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { DEFAULT_TIMEOUT_MS, GLOBAL_TERMINAL_CAP, MAX_TIMEOUT_MS, OUTPUT_CHAR_CAP } from './config';
 import { PathEscapeError, resolveWorkdir } from './paths';
 import { tryRunInVscodeTerminal } from './vscodeBridge';
+import { cmdUtf8Command } from './terminalEncoding';
 
 export interface TerminalResult {
     ok: boolean;
@@ -115,7 +116,7 @@ export async function runTerminal(opts: {
 
 function runSpawn(command: string, cwd: string, timeoutMs: number): Promise<TerminalResult> {
     return new Promise((resolve) => {
-        const child = spawn(command, {
+        const child = spawn(process.platform === 'win32' ? cmdUtf8Command(command) : command, {
             cwd,
             shell: true,
             windowsHide: true,
@@ -149,6 +150,9 @@ function runSpawn(command: string, cwd: string, timeoutMs: number): Promise<Term
             killProcessTree(child.pid);
         }, timeoutMs);
 
+        // Decode across pipe chunks; a Chinese character or emoji may span reads.
+        child.stdout?.setEncoding('utf8');
+        child.stderr?.setEncoding('utf8');
         child.stdout?.on('data', (d) => append('stdout', d));
         child.stderr?.on('data', (d) => append('stderr', d));
 

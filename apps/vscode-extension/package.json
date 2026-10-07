@@ -24,6 +24,20 @@
     "keepwork-mcp": "./dist/cli.js"
   },
   "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "keepwork.mcp",
+        "label": "Keepwork MCP (Paracraft and local tools)"
+      }
+    ],
+    "chatSkills": [
+      {
+        "path": "./dist/skills/paracraft-create/SKILL.md"
+      },
+      {
+        "path": "./dist/skills/agent-cli-verify/SKILL.md"
+      }
+    ],
     "commands": [
       {
         "command": "keepwork.cloneRepository",
@@ -74,6 +88,11 @@
     "configuration": {
       "title": "Keepwork",
       "properties": {
+        "keepwork.mcp.connectCopilot": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically make Keepwork MCP available to VS Code Copilot. Uses the existing loopback daemon; VS Code controls MCP trust and tool permissions."
+        },
         "keepwork.mcp.enableHttp": {
           "type": "boolean",
           "default": true,

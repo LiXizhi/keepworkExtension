@@ -10,12 +10,12 @@ async function main() {
   if (!sources) throw new Error('Set AICHAT_SOURCE_DIR to the AIChat source directory');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-electron-'));
   const workspace = path.join(dir, 'workspace'); fs.mkdirSync(workspace);
+  const pageHtml = '<!doctype html><title>AIChat Desktop test</title><link rel="stylesheet" href="/base.css"><link rel="stylesheet" href="/shell.css"><body class="light"><iframe src="/preview.html"></iframe><script type="module">import * as desktop from "/desktop.js"; import * as files from "/keepwork_fs.js"; import { installDesktopMenu } from "/desktop_menu.js"; installDesktopMenu({ command(id) { if (id === "new-chat") { window.menuCommand = id; return true; } return false; }, checked(id) { return id === "toggle-sidebar"; } }); window.adapters={desktop,files};</script>';
+  const filesToServe = { '/desktop.js': ['js/desktop.js', 'text/javascript'], '/keepwork_fs.js': ['js/keepwork_fs.js', 'text/javascript'], '/desktop_menu.js': ['js/desktop_menu.js', 'text/javascript'], '/base.css': ['css/base.css', 'text/css'], '/shell.css': ['css/shell.css', 'text/css'] };
   const server = http.createServer((req, res) => {
-    if (req.url === '/desktop.js' || req.url === '/keepwork_fs.js') {
-      res.setHeader('Content-Type', 'text/javascript'); res.end(fs.readFileSync(path.join(sources, 'js', req.url.slice(1)))); return;
-    }
-    res.setHeader('Content-Type', 'text/html');
-    res.end('<!doctype html><title>AIChat Desktop test</title><iframe src="/preview.html"></iframe><script type="module">import * as desktop from "/desktop.js"; import * as files from "/keepwork_fs.js"; window.adapters={desktop,files};</script>');
+    const file = filesToServe[req.url.split('?')[0]];
+    if (file) { res.setHeader('Content-Type', file[1]); res.end(fs.readFileSync(path.join(sources, file[0]))); return; }
+    res.setHeader('Content-Type', 'text/html'); res.end(pageHtml);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const entry = `http://127.0.0.1:${server.address().port}/AIChat.html`;
@@ -25,22 +25,42 @@ async function main() {
     delete env.ELECTRON_RUN_AS_NODE;
     const packaged = process.env.AICHAT_PACKAGED_EXE;
     application = await _electron.launch({ executablePath: packaged || require('electron'),
-      args: [...(packaged ? [] : [path.resolve(__dirname, '..')]), '--background', `--user-data-dir=${path.join(dir, 'profile')}`], env, timeout: 30000 });
+      args: [...(packaged ? [] : [path.resolve(__dirname, '..')]), `--user-data-dir=${path.join(dir, 'profile')}`], env, timeout: 30000 });
     assert.equal(await application.evaluate(({ app }) => app.getPath('userData')), path.join(dir, 'profile'));
     const page = await application.firstWindow();
     if (packaged) {
       await page.route('https://keepwork.com/**', async route => {
         const url = new URL(route.request().url());
-        if (['/desktop.js', '/keepwork_fs.js'].includes(url.pathname)) {
-          await route.fulfill({ contentType: 'text/javascript', body: fs.readFileSync(path.join(sources, 'js', url.pathname.slice(1)), 'utf8') });
-        } else {
-          await route.fulfill({ contentType: 'text/html', body: '<title>Packaged AIChat test</title><iframe src="/preview.html"></iframe><script type="module">import * as desktop from "/desktop.js"; import * as files from "/keepwork_fs.js"; window.adapters={desktop,files};</script>' });
-        }
+        const served = filesToServe[url.pathname];
+        if (served) await route.fulfill({ contentType: served[1], body: fs.readFileSync(path.join(sources, served[0]), 'utf8') });
+        else await route.fulfill({ contentType: 'text/html', body: pageHtml });
       });
       await page.goto('https://keepwork.com/chat');
     }
     await page.waitForFunction(() => window.adapters && window.aichatDesktop);
     await page.waitForSelector('#keepwork-desktop-titlebar');
+    await page.evaluate(() => {
+      window.postMessage({ channel: 'aichat.desktop-menu.v1', type: 'show', x: 12, y: 40, menu: {
+        id: 'view', label: 'View', items: [
+          { id: 'toggle-sidebar', label: '历史侧栏', check: true },
+          { type: 'separator' },
+          { id: 'zoom-in', label: '放大', shortcut: 'Ctrl+=' },
+          { id: 'new-chat', label: '新对话', shortcut: 'Ctrl+N' },
+        ],
+      } }, location.origin);
+    });
+    await page.waitForSelector('#aichat-desktop-menu [data-command="zoom-in"]');
+    assert.match(await page.locator('#aichat-desktop-menu').innerText(), /历史侧栏/);
+    assert.match(await page.locator('#aichat-desktop-menu').innerText(), /Ctrl\+=/);
+    assert.equal(await page.getAttribute('#aichat-desktop-menu [data-command="toggle-sidebar"]', 'aria-checked'), 'true');
+    await page.screenshot({ path: path.join(os.tmpdir(), 'aichat-desktop-menu.png') });
+    await page.click('#aichat-desktop-menu [data-command="zoom-in"]');
+    assert.ok(await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomLevel()) > 0);
+    await page.evaluate(() => window.postMessage({ channel: 'aichat.desktop-menu.v1', type: 'show', x: 80, y: 40, menu: { id: 'file', label: 'File', items: [{ id: 'new-chat', label: '新对话' }] } }, location.origin));
+    await page.click('#aichat-desktop-menu [data-command="new-chat"]');
+    assert.equal(await page.evaluate(() => window.menuCommand), 'new-chat');
+    assert.equal(await page.locator('#aichat-desktop-menu').count(), 0);
+    await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.setZoomLevel(0));
     // AIChat's #app wrapper has auto height. A percentage shell height collapses
     // to content height instead of filling the area below native chrome.
     await page.evaluate(() => {
@@ -83,8 +103,23 @@ async function main() {
     await page.evaluate(id => aichatDesktop.terminal('close', { id }), session.id);
     await page.reload(); await page.waitForFunction(() => window.adapters);
     assert.equal((await page.evaluate(() => aichatDesktop.roots()))[0].id, grant.id);
-    assert.equal(await application.evaluate(({ BrowserWindow }) => { const w = BrowserWindow.getAllWindows()[0]; w.close(); return w.isDestroyed(); }), false);
-    console.log('Electron sandbox, native grants, AIChat files, PTY, iframe isolation, reload and hide passed');
+    const closed = await application.evaluate(({ BrowserWindow }) => {
+      const w = BrowserWindow.getAllWindows()[0];
+      w.close();
+      return { destroyed: w.isDestroyed(), windows: BrowserWindow.getAllWindows().length };
+    });
+    assert.deepEqual(closed, { destroyed: true, windows: 0 });
+    const reopened = await application.evaluate(async ({ app, BrowserWindow }) => {
+      app.emit('activate');
+      for (let i = 0; i < 50; i++) {
+        const w = BrowserWindow.getAllWindows()[0];
+        if (w && !w.webContents.isLoading() && w.webContents.getURL().startsWith('http://127.0.0.1:')) return true;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return false;
+    });
+    assert.equal(reopened, true);
+    console.log('Electron sandbox, native grants, AIChat files, PTY, iframe isolation, reload and close passed');
   } finally {
     if (application) await application.close();
     await new Promise(resolve => server.close(resolve));

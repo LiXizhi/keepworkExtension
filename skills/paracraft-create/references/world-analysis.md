@@ -1,5 +1,9 @@
 # Read an existing world
 
+For adapting inspected CodeBlock programs into new interactions or games, read
+[code-blocks.md](code-blocks.md). Its [lesson map](codeblock-lessons.md) documents
+F1 and project 530 examples; historical coordinates still require fresh inspection.
+
 Read the world's AGENTS.md first. Discover `analyze_world` via CLI help and obtain
 the current expectedIdentity. Request an overview, or filter `kind` to `code`,
 `movie`, `sign`, `module`; optional `bounds:{min:[x,y,z],max:[x,y,z]}` uses absolute

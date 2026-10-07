@@ -19,7 +19,7 @@ test('only the trusted top-level window can call native IPC', () => {
 test('preload exposes no Node/Electron primitives and is absent from subframes', () => {
   let exposed;
   const source = fs.readFileSync(require.resolve('../src/preload.cjs'), 'utf8');
-  const context = { process: { isMainFrame: false }, require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { exposed = value; } }, ipcRenderer: { invoke: () => null } }) };
+  const context = { process: { isMainFrame: false }, require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { exposed = value; } }, ipcRenderer: { invoke: () => null, on() {} } }) };
   vm.runInNewContext(source, context); assert.equal(exposed, undefined);
   context.process.isMainFrame = true; vm.runInNewContext(`(()=>{${source}\n})()`, context);
   assert.equal(exposed.version, 1); assert.equal(exposed.require, undefined); assert.equal(exposed.ipcRenderer, undefined);

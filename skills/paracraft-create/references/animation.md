@@ -2,6 +2,9 @@
 
 For multi-set films, cameras and master/child MovieBlock sequences, read
 [filmmaking.md](filmmaking.md). The actor-clip workflow below also supports those shots.
+For actor behavior driven by clicks, dialogue, game state or sensing, read
+[code-blocks.md](code-blocks.md); runtime CodeBlock playback uses milliseconds,
+while the scene authoring helpers below use seconds.
 
 Create a MovieBlock inside the scene's reserved control area. Add an actor from a
 verified BMax with a separate preview position and scale. Helper times are seconds;

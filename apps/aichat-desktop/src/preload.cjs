@@ -2,6 +2,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Electron only installs this preload on the application window; children get none.
 if (process.isMainFrame) {
   const call = (method, args = {}) => ipcRenderer.invoke('aichat-desktop:v1', method, args);
+  const hostCommands = new Set(['open-folder', 'reload', 'check-updates', 'toggle-login', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'select-all', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'mcp-status', 'mcp-dashboard', 'mcp-restart', 'open-browser', 'local-source', 'published-site']);
+  ipcRenderer.on('aichat-desktop:page-command', (_event, id) => {
+    if (typeof id === 'string') window.postMessage({ channel: 'aichat.desktop-menu.v1', type: 'command', id }, window.location.origin);
+  });
   // App chrome lives in an isolated shadow root, not in AIChat's replaceable #app.
   if (typeof document !== 'undefined') window.addEventListener('DOMContentLoaded', async () => {
     try {
@@ -15,9 +19,22 @@ if (process.isMainFrame) {
       const header = document.createElement('header');
       if (config.platform === 'darwin') header.style.paddingLeft = '80px';
       const icon = document.createElement('img'); icon.src = config.icon; icon.alt = ''; header.append(icon);
-      ['文件', '编辑', '视图'].forEach((label, index) => {
-        const button = document.createElement('button'); button.textContent = label; button.setAttribute('aria-haspopup', 'menu');
-        button.addEventListener('click', () => { void call('menu', { index }); }); header.append(button);
+      const menuButtons = [];
+      [['file', 'File'], ['edit', 'Edit'], ['view', 'View'], ['help', 'Help']].forEach(([id, label]) => {
+        const button = document.createElement('button'); button.textContent = label; button.setAttribute('aria-haspopup', 'menu'); button.setAttribute('aria-expanded', 'false');
+        button.addEventListener('click', async () => {
+          menuButtons.forEach(item => item.setAttribute('aria-expanded', item === button ? 'true' : 'false'));
+          const rect = button.getBoundingClientRect();
+          const menu = await call('menu', { id });
+          window.postMessage({ channel: 'aichat.desktop-menu.v1', type: 'show', menu, x: rect.left, y: rect.bottom }, window.location.origin);
+        });
+        menuButtons.push(button); header.append(button);
+      });
+      window.addEventListener('message', event => {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        const data = event.data;
+        if (!data || data.channel !== 'aichat.desktop-menu.v1' || data.type !== 'closed') return;
+        menuButtons.forEach(item => item.setAttribute('aria-expanded', 'false'));
       });
       const center = document.createElement('div'); center.className = 'center';
       const title = document.createElement('span'); title.className = 'title'; title.textContent = 'KeepWork 第二大脑';
@@ -57,6 +74,7 @@ if (process.isMainFrame) {
     file: (op, args) => call('file', { ...args, op }),
     terminal: (op, args) => call('terminal', { ...args, op }),
     status: () => call('status'), checkUpdates: () => call('checkUpdates'),
+    runMenuCommand: id => { if (hostCommands.has(id)) return call('command', { id }); },
     onFolderSelected: callback => {
       const listener = (_event, selected) => { if (typeof selected === 'string') callback(selected); };
       ipcRenderer.on('aichat-desktop:folder-selected', listener);

@@ -18,7 +18,8 @@ Task/F5 sets `AICHAT_DESKTOP_LOCAL_SOURCE=1`: the app serves the sibling
 and skipping occupied ports. Set `AICHAT_SOURCE_DIR` if that checkout lives elsewhere.
 The terminal prints the actual source URL. An explicit `AICHAT_DESKTOP_DEV_URL` takes
 priority for an existing Live Server. Missing source fails visibly instead of opening
-the published website. The owned HTTP server stops on Quit; closing to tray keeps it alive.
+the published website. The owned HTTP server stops on Quit. Closing the window destroys
+the page and leaves that server running so the tray can open a new window.
 The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arch>` if
 present; `AICHAT_MCP_RUNTIME_DIR` overrides it. No runtime is required for native files
 or user terminals. Use the tray menu's **退出** before starting a fresh debugging session.
@@ -42,15 +43,21 @@ in the desktop package. Packaging rejects missing or wrong-platform runtimes.
 
 ## Lifecycle and data
 
-The custom top title bar combines the K icon, menus, product title and native window
-controls in one row. It is installed by the isolated preload only after main-process
-URL validation; embedded tools receive neither the title bar nor its menu IPC.
+The custom top title bar combines the K icon, File / Edit / View / Help, product title
+and native window controls in one row. It is installed by the isolated preload only after
+main-process URL validation; embedded tools receive neither the title bar nor its menu IPC.
+Clicking a menu posts `aichat.desktop-menu.v1` into the AIChat page, which draws it.
+File starts a chat, opens a folder, reloads, checks updates, toggles login startup and quits.
+Edit is undo, redo and the clipboard. View toggles the history sidebar and file panel, zoom,
+fullscreen and settings. Help shows Keepwork MCP status, Dashboard, restart, the browser
+entry, and the local or published page. Page actions stay in AIChat; native actions return
+through `runMenuCommand`. The tray keeps the same service actions when the window is closed.
 The address stays visible (including fullscreen): `localhost:<port>` for local source
 or `keepwork.com/chat` for the published app. Click it to open the configured entry in
 the external browser; the adjacent refresh icon reloads the current desktop page.
 macOS retains its normal system application menu and traffic-light window controls.
 
-The **文件** menu (also available in the tray) includes **Keepwork MCP Server**:
+The tray menu, and **Help** inside the window, include **Keepwork MCP Server**:
 **查看状态** probes the live service and displays ownership, version, PID and workspace;
 **打开 Dashboard** opens `http://127.0.0.1:8089/dashboard` in the browser;
 **重启 Keepwork MCP Server** restarts the desktop-owned runtime or starts it if offline.
@@ -64,8 +71,12 @@ without cache via the refresh icon, menu or Ctrl/Cmd+R, and automatically after 
 MCP restart. Local source changes are read directly from disk. Only the selected entry
 gets the desktop bridge; Dashboard and embedded pages do not gain native privileges.
 
-- Single application instance; closing hides the window without suspending it. Tray/menu
-  **打开 KeepWork 第二大脑** restores it. **退出** closes native terminals and desktop-owned MCP only.
+- Single application instance. Closing the window destroys it and releases the page,
+  renderer process, and native terminal sessions. The tray process stays, and Keepwork MCP
+  keeps running (including a daemon owned by VS Code or Local Helper). The tray icon remains
+  in the taskbar notification area; **打开 KeepWork 第二大脑** or a tray click creates a new
+  window. Login startup (`--background`) starts the tray and MCP without loading the page.
+  **退出** closes native terminals and desktop-owned MCP only.
 - Login startup is off by default and optional in the application menu.
 - Electron's per-user application directory stores the persistent `aichat` browser session,
   `folder-grants.json`, settings, and MCP runtime installation records. Never upload grants.

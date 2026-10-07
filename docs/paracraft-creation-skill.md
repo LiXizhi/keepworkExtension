@@ -1,13 +1,273 @@
 # Paracraft art creation with MCP
 
-Common native mechanisms now route through
-[mechanisms.md](../skills/paracraft-create/references/mechanisms.md), with focused
-subguides for pressure plates, buttons, levers and wiring. They cover native
-registry names, mount metadata, pulse versus persistent state, collision-triggered
-release, signal routing and input/output/reset acceptance. Guidance is grounded in
-the native block implementations; it does not introduce a new engine API or claim
-runtime acceptance of the illustrative circuit. Mechanism state and connections
-are recorded in the world's direct `docs/mechanisms.md` when appropriate.
+## Game-engine workflow acceptance — 2026-10-07
+
+The skill now starts rule-driven work with `references/game-engine.md`: translate
+inputs, state, feedback, endings and reset into native scene/actor/CodeBlock/movie
+responsibilities; prove uncertain capabilities with a playable slice before art
+expansion. Static-art workflows remain available on demand. Canonical files are
+under `skills/paracraft-create/`; the local Codex skill is a junction to that tree.
+
+This iteration used a separate desktop client on port 8100 and the dedicated
+`CreationAcceptance_Engine_RSI_20261007` world. The native checks were:
+
+| Suite | Passed | Evidence |
+|---|---:|---|
+| Three games and genuine rule transfers | 31 | Sequence puzzle/movie, 4×4 connect-three in four directions, draw/boundary rules, natural lane victory/defeat, unordered switches, connect-four, stale inputs, isolation, missing dependency recovery and stop cleanup |
+| Input and persistence | 12 | Native keyboard event dispatch, interrupted movie reset without drift, saved code/movie/mesh/source, fresh session and actual play after reopening |
+| Revised collection/NPC regression | 23 | Real 20-second timeout, repeated hits/restarts, patrol/follow/idle, actor cleanup, power cycling and preserved player/camera |
+| Collection deadline boundary | 3 | Different CodeBlock clock origins, deadline-equality rejection of the last hit, 200 native requests score exactly five |
+
+The 31-game suite also passed again using the final packaged `engine_games`
+compiler, independently of the first raw-source installation. Counts above do
+not count that repeat twice. Running close-up captures showed labeled puzzle
+inputs, colored board state, visible rules, and danger-lane feedback.
+
+Observed corrections are reflected in examples and guidance:
+
+- Explicit replacement is needed even when layering a second material over a
+  floor created by the same generator. A failed early layout left one unused
+  floor in the disposable test world; it is not a playable station.
+- Read the native lever state when deciding whether to toggle, then wait for
+  consistent powered/loaded/actor state. Reading only the delayed code state
+  caused a hot-edit restart to toggle in the wrong direction.
+- `getTimer()` belongs to a CodeBlock's local lifetime. The collection example
+  now queues target IDs and adjudicates score/deadline in one controller, with
+  deadline taking precedence at equality. Feedback follows accepted hits.
+- Keyboard registration disables stop-last, unlike the default event policy;
+  short input callbacks and one worker also prevent concurrent long handlers.
+- Stop a movie before returning position ownership to game movement; a test
+  reset during playback and observed no later positional drift.
+
+`template_info {template:"engine_games"}` discovers the inactive six-station
+lab under `interactions`; `run_template` retains normal identity/hash/recovery
+semantics. A measured native compiler input was 263 bytes versus 8,094 bytes of
+generated Lua, excluding the surrounding MCP envelope. The final fresh HTTP MCP
+session discovered the template and new guide and recovered the existing native
+job by original request ID, without repeating construction. The extension's
+non-versioning compile and 15 guide/template/package tests passed; skill validation
+passed with Python UTF-8 mode (`python -X utf8 .../quick_validate.py ...`).
+
+Evidence directories under `%TEMP%` are `paracraft-engine-rsi-20261007-v2`,
+`paracraft-engine-rsi-lifecycle-20261007`, `paracraft-engine-rsi-collection-20261007`,
+`paracraft-engine-rsi-deadline-20261007` and `paracraft-engine-rsi-packaged-20261007`.
+Native runners are `scripts/paracraft-engine-games-native.cjs` (optional
+`--template`), `paracraft-engine-lifecycle-native.cjs`,
+`paracraft-codeblocks-native.cjs`, and `paracraft-collection-deadline-native.cjs`.
+The lifecycle/deadline runners take the relevant prior `build.json` after
+`PORT WORLD_PATH OUTPUT`; `paracraft-engine-mcp-check.cjs` takes saved request/job
+JSON and performs read-only discovery and job recovery.
+
+These are desktop rule/event/actor tests, not a claim that every game genre has
+been validated. Hardware keyboard/focus, screen picking, mobile/WASM, multiplayer,
+pathfinding and physical collision for the lane game remain untested. The lane
+game intentionally uses abstract lane checks, not physical collisions. The
+examples use prototype art. Protected edits to native code do not silently
+refresh old construction-manifest fingerprints: preserve conflicts and use the
+recorded native source as authority rather than blindly rerunning a generator.
+
+During final delivery the test client's native endpoint disconnected. A new
+isolated client reopened the saved world and confirmed the original six-station
+lab; the later packaged lab and collection/NPC runtime installations had not
+been saved. They were not blindly reconstructed. Their tests, screenshots and
+source remain evidence, while world documentation explicitly separates that
+history from the six retained stations. All six retained controllers were
+confirmed off and the consolidated documentation/source was followed by a
+successful native local save. `%TEMP%/paracraft-engine-rsi-final-state.json`
+records the fresh identity, inspected controls and save result.
+
+CodeBlock follow-up acceptance on 2026-10-07 passed **39 native checks**:
+the original 23 gameplay/NPC/power/reset checks, plus 16 checks covering two
+isolated template games, retry deduplication, stale-round input, 200 queued clicks,
+12 board-rule assertions, source/manifest/mesh persistence, native save/reopen and
+fresh gameplay after reopen. Evidence is retained in the OS temporary directory
+`paracraft-codeblock-perf-20261007`; the dedicated world is
+`CreationAcceptance_CodeBlocks_Comprehensive_20261007`. Native screen picking and
+complete F1 tutorial playback remain untested. All test controllers are off.
+
+The original acceptance run used 311 native calls (including seven build/job
+calls), 165,477 request bytes and 179,270 response bytes in 29.4 seconds.
+Repeating the same 23 checks on the existing inactive scene used 122 calls,
+68,288 request bytes and 118,457 response bytes in 28.0 seconds. Excluding the
+seven first-build calls, acceptance calls fell from 304 to 122 (60%); native
+behavior probes fell from 292 to 111 (62%). Counts measure transport calls and
+UTF-8 JSON bytes, not tokenizer output. Natural timeout remains a real 20-second
+test. Adaptive 150 ms–1 s polling, compact state/source-length returns, batched
+clicks/power-off and one document update reduce traffic without skipping checks.
+
+`template_info {template:"codeblock_playground"}` / `run_template` now creates
+the physical collection-game/NPC combination from packaged source. A measured
+request was 300 bytes versus 6,448 bytes of generated Lua, before the Lua's JSON
+escaping; model-side source copying is avoided. Request IDs still isolate scene,
+shared-state and mesh names and deduplicate retries. `saveSource:true` preserves
+editable source/manifest but does not save the native world. The updated template
+is included by the extension build; an already running older daemon needs its
+normal restart/update before it recognizes the new name.
+The current singleton daemon was checked with a fresh SDK MCP session: the new
+template was discovered, `run_template` completed, and an identical retry
+recovered the existing job. Native development CLI then confirmed real lever
+activation, running game state and five clones; controls were stopped and the
+disposable world saved. This live request used 358 parameter bytes with a hash,
+versus 6,431 bytes of packaged Lua. `run_npl_code` is a native development action,
+not an action exposed by the general creation MCP tool.
+
+Additional acceptance: `node scripts/paracraft-codeblocks-comprehensive.cjs PORT
+WORLD_PATH OUTPUT`. This runner saves/reopens only a guarded disposable world,
+checks fresh session identity and retries read-only readiness observations. Movie
+reload supplies a default character skin on these self-colored `.x` meshes;
+acceptance records that difference and compares their applicable asset/scale
+fields and mesh bytes. Skin-dependent actors must still compare actual skin.
+
+CodeBlock creation now routes to
+[code-blocks.md](../skills/paracraft-create/references/code-blocks.md), with
+[interaction patterns](../skills/paracraft-create/references/codeblock-patterns.md)
+and a [native lesson map](../skills/paracraft-create/references/codeblock-lessons.md).
+Research on 2026-10-07 indexed 41 installed F1 programming lessons and 141 loaded
+CodeBlocks in project 530 (CodeBlockTest), then read 23 selected programs and their
+native movie associations. Project 530 remained read-only; its historical samples
+were not executed. The map distinguishes lesson metadata/template source from
+full tutorial playback and tested behavior.
+
+[codeblock-playground.lua](../skills/paracraft-create/examples/codeblock-playground.lua)
+creates editable CodeBlock/MovieClip/lever stations for a timed collection game
+and patrol/follow/idle NPC, plus a world-local miniature color mesh. It does not
+activate or save the world. Native acceptance in the disposable
+`CreationAcceptance_CodeBlocks_Verified_20261007` world passed 23 behavior checks:
+real lever power and actor association, clone count, hit deduplication, winning,
+natural timeout, mid-round reset, rapid repeated start, NPC motion/state changes,
+power-off cleanup, power cycling and missing/restarted target station recovery.
+The final programs were also installed through protected source read/update/readback.
+The independent capture preserved the player and main camera. Native click dispatch
+was tested; OS screen picking, 41 full tutorial replays and native save/reopen were
+not. All three test stations were switched off afterward; world documentation and
+the mesh file exist, while native world edits were not saved by the test.
+
+The interruption test exposed an existing runtime edge: `broadcastAndWait` can
+wait indefinitely after the last receiver unregisters while its event container
+remains. The example uses asynchronous cleanup, monotonic round epochs and
+per-actor stale-round checks; it does not change the engine. Guidance also covers
+default stop-last-event behavior, avoiding yielding click handlers with stuck
+busy flags, and the seconds/milliseconds distinction in movement/movie APIs.
+
+Reproduce with `node scripts/paracraft-codeblocks-native.cjs PORT WORLD_PATH OUTPUT`
+in an initialized disposable `CreationAcceptance_CodeBlocks_*` world. The runner
+loads the actual skill example, retains request/job identity for recovery, uses
+`run_npl_code` for native observations and `tail_log` for recent logs, records
+behavior results/capture and updates world docs. A supplied existing build must
+match the current world session; it never rebuilds merely to recover a response.
+
+Integrated scene authoring now routes to
+[integrated-scenes.md](../skills/paracraft-create/references/integrated-scenes.md):
+shared meter-based layout and scouting, cell ownership/deduplication, compact
+inspection returns, component checkpoints and separate visual/functional checks.
+It clarifies that a failed job can retain earlier successful helper edits; resuming
+an older manifest is not recovery. Native undo must be bounded to owned operations
+and checked against actual cells, including newly added cells.
+
+An independent desktop trial on 2026-10-06 built a 32 x 28 m wooded waystation:
+two enterable cottage shells, flush connected roads, courtyard seating, three
+trees, relief and native `Enable AND (A OR B)` lighting. Initial construction took
+5906 ms and authored 755 cells in 16 groups. All eight native lighting combinations
+passed. A 219 ms single-roof revision preserved native ID/data signatures of the
+roads, other house and lighting. Immediate imagery initially showed the old roof
+color; subsequent same-view capture confirmed the updated mesh. The visual guide
+now distinguishes native data, render-mesh readiness and fresh-image delivery.
+
+The initial inspection payload was 59,484 bytes; retaining group counts, bounds,
+stale totals, origin and artifacts reduced the equivalent summary to 1,517 bytes
+(about 97%). Three equivalent 200-cell surface probes measured 109–219 ms for
+200 per-cell helper calls and 31–47 ms for ten row spans; all six cases restored
+the original native ID/data after removal. These are this desktop's observations,
+not total-task or universal speed guarantees. Preparation and functional waits
+are separate costs. The code environment did not expose ParaGlobal directly;
+the probe used commonlib.TimerManager.timeGetTime after checking the native source.
+
+The trial exposed missing gable infill and a unit-amplitude height field collapsing
+to isolated cells; the settlement/terrain guides now cover these concrete checks.
+A refinement also failed on overlapping foliage placements after previous helpers
+had succeeded. Precisely bounded native undo restored the saved geometry in 72
+steps, with fingerprint and extra-cell checks; no forced snapshots or raw block
+overwrites were used. Trial requests, generators, native results and images are
+retained outside the world in the OS temporary folder
+`paracraft-integrated-20261006-2010`; final editable source and docs belong to the
+disposable `CreationAcceptance_Integrated_20261006_2010` world.
+
+With the revised guidance, a subsequent refinement completed in 671 ms, retaining
+781 cells in 18 groups. Fresh reopened images confirmed green west roofing,
+filled gables, thinner asymmetric crowns and wider stepped relief. Native local
+save/reopen advanced the session identity to 3; the 4,298-byte full generator
+matched exactly and all 751 non-circuit members matched their stored fingerprints.
+One of 30 circuit cells differed through normal Wire simulation; all eight input
+combinations passed again and the lamp was reset off. Doorway dimensions and the
+approach's native occupancy were checked, but actual player traversal was not.
+The scenery remains a compact stylized test fixture, with terraced hills and an
+exposed teaching circuit; these images do not establish polished landscape art.
+
+Finally, the opposite courtyard bench was corrected in 47 ms: native stair data
+2 and 1 confirmed opposing backs, with 0.5 m seats and a fresh close-up. The full
+generator then became 4,319 bytes and native saving succeeded again. This final
+bench revision was saved but not separately reopened; the comprehensive reopen
+checks above precede it.
+
+The full exercise took roughly 24 minutes, including preparation, functional
+waits, visual iterations and approximately six minutes of failure recovery.
+Construction timings and payload reduction should not be presented as that total
+workflow's measured speedup. Detailed report and reopened images are retained
+in the same external temporary evidence folder.
+
+Circuits and connected mechanisms use one integrated
+[circuits.md](../skills/paracraft-create/references/circuits.md), replacing the five
+component guides. It covers series signal paths, AND conditions, parallel inputs
+and outputs, repeaters, logic, timing, memory and application recipes, with an
+index to the 37 native circuit lessons and their actual block-template files.
+Paracraft teaching resources and implementation are authoritative; Minecraft
+official references inform the teaching structure. The guide includes a self-contained
+Lua builder for eight demand patterns, so common circuits do not need access to
+the installation's template files. Native acceptance on 2026-10-06 extracted this
+exact example into a fresh disposable world and passed 32 state checks, including
+all OR/AND and three-input mixed truth-table combinations, button release, fan-out,
+long-range regeneration and four-stage activation/deactivation timing. First-on
+times were 0/390/797/1250 ms; first-off times were 0/422/875/1329 ms on that run.
+The evaluation corrected lateral wire-to-lamp connections: native wire strength
+does not establish power output on every adjacent face. Eight independent native
+captures preserved the player's location and main camera. Screen picking and all
+37 teaching lessons are outside this acceptance scope.
+
+Reproduce with `node scripts/paracraft-circuits-native.cjs PORT WORLD_PATH OUTPUT
+PARAWORLD_ROOT skill` after entering and initializing a disposable
+`CreationAcceptance_Circuits_*` world. The runner fences world identity, extracts
+the guide's first Lua example, uses native click handling and simulation, and
+retains request/job, source, ports, state observations and timing traces in OUTPUT.
+It never saves the native world. World continuation uses existing circuit notes
+or direct `docs/circuits.md`, keeping native saving separate.
+
+The guide now prioritizes synthesis from boolean conditions, history/state and
+timing contracts. Lessons explain primitives; layouts are redesigned for the
+current requirement. Challenge coverage includes four-input lighting with three
+outputs, independently remembered puzzle achievements controlling an iron door,
+and button-latched warning lights with a native feedback oscillator, staggered
+edges, bounded stop drain and restart. It covers negative logic ports, feedback
+distance, initialization, reset conflicts, spatial isolation and pulse/stop budgets.
+
+Reproduce the transfer evaluation with
+`node scripts/paracraft-circuits-transfer-native.cjs PORT WORLD_PATH OUTPUT`
+in an initialized `CreationAcceptance_Circuits_Transfer_*` world. It synthesizes
+layouts without reading lesson files or copying the guide's standard examples;
+native circuitry controls outputs, while the runner creates, clicks and samples.
+On 2026-10-06 all 27 state checks passed, all three channels repeatedly rose in
+order, restart passed, and stop samples after 2000ms stayed off (last powered
+sample 1859ms). Source, request/job, ports and native traces are retained in
+`temp/circuits-transfer-20261006-v8/`. Player position/scale and main camera were
+preserved. No native world was saved. Captures failed or were black, so this
+transfer run establishes functional behavior but does not establish visual review.
+
+The evaluation exposed and corrected two engine issues in ParaWorld:
+`BlockRepeater:OnBlockRemoved` temporarily retains orientation/delay metadata
+for on/off notifications, and `BlockLogic` permits new input edges after an entry
+has already run in the current tick. Pending-coordinate deduplication remains in
+the simulator. These fixes are required by this native acceptance result; older
+clients must be rechecked. The runner preserves failures and reports them instead
+of forcing output states or replaying construction.
 
 Engines advertising nativeHalfBlocks now accept half-grid batches that classify
 each carrier into native full blocks, six slab orientations or native stair
@@ -344,3 +604,20 @@ The reopen runner deliberately saves the fixture and leaves its final camera
 revision unsaved; the playback runner verifies all three shots and camera recovery.
 Native reports and fresh screenshots are written to OUTPUT. The test geometry is
 a technical fixture, not a finished animated story.
+
+## Fifty-round integrated scene campaign
+
+The 2026-10-06/07 campaign completed 50 independent native rounds: five scene
+families × five design/control variants × two write strategies. All 25 pairs
+have equal actual native geometry after scoped revision and save/reopen, with
+486 circuit assertions, 30,906 geometry checks and 100 fresh images manually
+reviewed. Contiguous spans reduce native build elapsed time by a median 31.7%
+and helper calls by 84.8%; native guards remain enabled.
+
+[Campaign report](paracraft-integrated-50-report.md) records reproducible runners,
+evidence locations, recovered failures, timing method and coverage limits.
+The skill now also covers sandbox-safe timing, settled camera baselines,
+same-path asynchronous session changes, actual slab collision support and
+avoiding unchanged ground writes. Additional sparse-ground/height speedups are
+recommendations, not measured results. These fixtures do not establish actual
+player traversal or finished environment-art quality.

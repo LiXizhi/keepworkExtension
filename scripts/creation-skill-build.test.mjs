@@ -37,6 +37,7 @@ test('successful rebuild is an exact canonical copy and removes obsolete subskil
   const neighbor = path.join(f.out, 'cli.js');await fs.writeFile(neighbor, 'leave build entry intact');
   await f.finish({errors:[]});
   assert.deepEqual(await contents(f.target), await contents(canonical));
+  assert.deepEqual(await contents(path.join(f.out, 'skills/agent-cli-verify')), await contents(path.resolve(canonical, '../agent-cli-verify')));
   assert.equal(await fs.readFile(neighbor, 'utf8'), 'leave build entry intact');
 });
 test('failed build retains the last successful skill output', async t => {

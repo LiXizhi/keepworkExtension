@@ -149,7 +149,17 @@ function findNode(): Promise<string> {
     });
 }
 
-export async function ensureDaemon(context: vscode.ExtensionContext): Promise<HealthInfo> {
+let pendingDaemon: Promise<HealthInfo> | undefined;
+
+export function ensureDaemon(context: vscode.ExtensionContext): Promise<HealthInfo> {
+    // Startup and Copilot discovery may arrive together in the same extension host.
+    if (!pendingDaemon) {
+        pendingDaemon = ensureDaemonOnce(context).finally(() => { pendingDaemon = undefined; });
+    }
+    return pendingDaemon;
+}
+
+async function ensureDaemonOnce(context: vscode.ExtensionContext): Promise<HealthInfo> {
     if (!mcpEnabled()) return { ok: false, error: 'disabled' };
     const wanted = configuredRoot(context);
     const health = await probeHealth();

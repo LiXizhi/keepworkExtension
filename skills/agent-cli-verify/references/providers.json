@@ -1,0 +1,331 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "codex",
+      "name": "Codex",
+      "protocol": "codex",
+      "commands": [
+        "codex"
+      ],
+      "args": [
+        "app-server",
+        "--stdio"
+      ],
+      "login": "codex login",
+      "npm": "@openai/codex",
+      "source": "https://developers.openai.com/codex/cli/",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @openai/codex",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @openai/codex",
+        "evidence": "documented"
+      },
+      "notes": [
+        "原生 app-server 常驻复用；模型和 thinking effort 由 model/list 返回，不从静态版本表猜测。"
+      ]
+    },
+    {
+      "id": "workbuddy",
+      "name": "WorkBuddy",
+      "protocol": "acp",
+      "commands": [
+        "codebuddy",
+        "workbuddy",
+        "cbc",
+        "codebuddy-code"
+      ],
+      "args": [
+        "--acp"
+      ],
+      "login": "codebuddy /login",
+      "npm": "@tencent-ai/codebuddy-code",
+      "source": "https://www.codebuddy.cn/docs/cli/installation",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @tencent-ai/codebuddy-code",
+        "evidence": "native-install-verified",
+        "testedAt": "2026-10-07"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @tencent-ai/codebuddy-code",
+        "evidence": "documented"
+      },
+      "notes": [
+        "两种平台共享官方 CodeBuddy ACP 引擎，桌面 WorkBuddy 登录不保证 CLI 已登录。优先发现桌面 bundle；缺少登录模块时使用官方独立 CLI。"
+      ]
+    },
+    {
+      "id": "copilot",
+      "name": "Copilot",
+      "protocol": "acp",
+      "commands": [
+        "copilot"
+      ],
+      "args": [
+        "--acp",
+        "--stdio",
+        "--no-auto-update"
+      ],
+      "login": "copilot login",
+      "npm": "@github/copilot",
+      "source": "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @github/copilot",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @github/copilot",
+        "evidence": "documented"
+      },
+      "notes": [
+        "VS Code 编辑器内置 Copilot MCP 接入与 Copilot CLI 是两条不同路径；模型和思考选项来自原生 CLI/account。"
+      ]
+    },
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "protocol": "claude",
+      "commands": [
+        "claude"
+      ],
+      "args": [],
+      "login": "claude auth login",
+      "npm": "@anthropic-ai/claude-code",
+      "source": "https://code.claude.com/docs/en/setup",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "powershell-script",
+        "url": "https://claude.ai/install.ps1",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "shell-script",
+        "url": "https://claude.ai/install.sh",
+        "shell": "bash",
+        "evidence": "documented"
+      },
+      "notes": [
+        "官方优先原生安装；npm 是兼容备选。保留用户的 release channel 和组织策略，不使用绕过权限的启动参数。"
+      ],
+      "update": "claude update"
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "protocol": "acp",
+      "commands": [
+        "cursor-agent",
+        "agent"
+      ],
+      "args": [
+        "acp"
+      ],
+      "login": "agent login",
+      "source": "https://cursor.com/docs/cli/installation",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "powershell-script",
+        "url": "https://cursor.com/install?win32=true",
+        "shell": "Windows PowerShell 5.1",
+        "evidence": "native-install-verified",
+        "testedAt": "2026-10-07"
+      },
+      "macos": {
+        "kind": "shell-script",
+        "url": "https://cursor.com/install",
+        "shell": "bash",
+        "evidence": "documented"
+      },
+      "notes": [
+        "桌面 Cursor 不等于 Agent CLI；Windows 官方包装器需解析 dated versions 目录中的 bundled node.exe/index.js，不能假设顶层 EXE。",
+        "安装器可能重建 CLI 目录；已有可用安装优先复用。当前安装后 ACP initialize 已验证，尚未登录，模型/真实生成待验证。"
+      ],
+      "update": "agent update"
+    },
+    {
+      "id": "trae",
+      "name": "Trae",
+      "protocol": "acp",
+      "commands": [
+        "traecli",
+        "traex"
+      ],
+      "args": [
+        "acp",
+        "serve"
+      ],
+      "login": "traecli",
+      "source": "https://docs.trae.cn/cli_get-started-with-trae-code-cli-2",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "powershell-script",
+        "url": "https://trae.cn/trae-cli/install_v2.ps1",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "shell-script",
+        "url": "https://trae.cn/trae-cli/install_v2.sh",
+        "shell": "sh",
+        "evidence": "documented"
+      },
+      "notes": [
+        "TRAE 桌面版与 TraeCode CLI 2.0 分开；首次运行可能需要账号权限、沙箱初始化和项目受信任设置，不能自动代替用户确认。"
+      ],
+      "update": "traecli update"
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen Code",
+      "protocol": "acp",
+      "commands": [
+        "qwen"
+      ],
+      "args": [
+        "--acp"
+      ],
+      "login": "qwen",
+      "npm": "@qwen-code/qwen-code",
+      "source": "https://qwenlm.github.io/qwen-code-docs/en/users/quickstart/",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @qwen-code/qwen-code",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @qwen-code/qwen-code",
+        "evidence": "documented"
+      },
+      "notes": [
+        "当前 npm 安装要求 Node >=22。首次启动选择认证方式，已有凭据应复用；模型和思考选项以原生协议为准。"
+      ]
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "protocol": "acp",
+      "commands": [
+        "gemini"
+      ],
+      "args": [
+        "--experimental-acp"
+      ],
+      "login": "gemini",
+      "npm": "@google/gemini-cli",
+      "source": "https://geminicli.com/docs/get-started/installation/",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @google/gemini-cli",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @google/gemini-cli",
+        "evidence": "documented"
+      },
+      "notes": [
+        "使用稳定 latest 通道，不把 preview/nightly 当作普通升级。模型切换与原生 --experimental-acp 参数需随官方 CLI 版本核验。"
+      ]
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi CLI",
+      "protocol": "acp",
+      "commands": [
+        "kimi"
+      ],
+      "args": [
+        "acp"
+      ],
+      "login": "kimi login",
+      "npm": "@moonshot-ai/kimi-code",
+      "source": "https://www.kimi.com/code/docs/en/kimi-code-cli/getting-started.html",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @moonshot-ai/kimi-code",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @moonshot-ai/kimi-code",
+        "evidence": "documented"
+      },
+      "notes": [
+        "当前 TypeScript/npm Kimi Code 与旧 Python kimi-cli 分开，当前 npm 路径要求 Node >=22.19.0；Windows 需要 Git Bash。核对迁移说明，不能误升级到另一种实现。"
+      ]
+    },
+    {
+      "id": "codebuddy",
+      "name": "CodeBuddy",
+      "protocol": "acp",
+      "commands": [
+        "codebuddy",
+        "cbc",
+        "codebuddy-code"
+      ],
+      "args": [
+        "--acp"
+      ],
+      "login": "codebuddy /login",
+      "npm": "@tencent-ai/codebuddy-code",
+      "source": "https://www.codebuddy.cn/docs/cli/installation",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @tencent-ai/codebuddy-code",
+        "evidence": "native-install-verified",
+        "testedAt": "2026-10-07"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @tencent-ai/codebuddy-code",
+        "evidence": "documented"
+      },
+      "notes": [
+        "两种平台共享官方 CodeBuddy ACP 引擎，桌面 WorkBuddy 登录不保证 CLI 已登录。优先发现桌面 bundle；缺少登录模块时使用官方独立 CLI。"
+      ]
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "protocol": "acp",
+      "commands": [
+        "opencode"
+      ],
+      "args": [
+        "acp"
+      ],
+      "login": "opencode auth login",
+      "npm": "opencode-ai",
+      "source": "https://opencode.ai/docs/",
+      "reviewedAt": "2026-10-07",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g opencode-ai",
+        "evidence": "documented"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g opencode-ai",
+        "evidence": "documented"
+      },
+      "notes": [
+        "Windows 官方推荐 WSL，原生 npm 也是官方方法。Keepwork 守护进程默认在本机系统运行，不把 WSL 内的 CLI 路径当作 Windows EXE。"
+      ]
+    }
+  ]
+}

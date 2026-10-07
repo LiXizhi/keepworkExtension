@@ -27,7 +27,7 @@ Verified locally on Windows x64:
   node-pty Node-API prebuilds; no Visual Studio rebuild required.
 - Electron integration using actual AIChat adapters: MCP disabled, native folder selection,
   text read/write, ungranted/traversal rejection, preload absent in subframes, terminal
-  input/resize, persistent grants after reload, and hide rather than exit on window close.
+  input/resize, persistent grants after reload, and destroying the window on close while the process stays alive.
 - The same native integration against the packaged Windows application.
 - Bundled Windows MCP NodeRuntime startup/health and native PTY smoke test.
 - 10 existing NodeRuntime release tests, including fixed CDN URL compatibility.

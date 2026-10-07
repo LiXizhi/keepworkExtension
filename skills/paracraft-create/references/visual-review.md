@@ -34,6 +34,12 @@ exist, not that they look right. If the host cannot expose image content to the
 model, save the returned image locally and use the host's image-viewing tool;
 report the limitation if no visual inspection is possible. Never print base64.
 
+Prefer native MCP images or direct binary image writes. If a Base64 staging file
+is unavoidable, follow the root skill's temporary-file rule: create it in a unique
+OS temporary folder outside the world, decode it to the intended image location,
+then remove the owned staging file. Temporary inspection images also stay outside
+the world; only final previews intended for delivery are saved inside it.
+
 Check realistic scale using numeric bounds and the roughly 1.75 m player as a
 reference: one authored block is one real-world meter. Include final exported
 asset bounds; do not let camera framing or preview scaling hide oversized objects.
@@ -42,6 +48,14 @@ Compare each important feature to the brief/reference. Record a concrete finding
 such as "roof is too shallow relative to the columns", the affected group, and
 the next edit. Fix the largest mismatch first. Keep camera framing stable for
 before/after comparisons. Do not invent numerical likeness scores.
+
+After a material/shape revision, native readback can already show the new ID/data
+while an immediately captured world image still renders the previous chunk mesh.
+If the pixels disagree with verified native changes, allow a brief engine update
+and capture the same view again before revising geometry. A fresh capture rules
+out a cached image response, but does not guarantee chunk meshing has caught up.
+Distinguish that delay from 8-bit palette approximation or an unchanged native
+color; do not repeatedly remove/rebuild a correctly updated roof to refresh it.
 
 For a standalone character, keep a full-body portrait and an opposite side view
 separate from the scene overview. Frame the same camera across idle, clip changes
@@ -100,6 +114,13 @@ files/MCP image content, not textual logs or progress records.
 Give each fresh review its own ID and match the final report to that ID and
 its verified frames. A previous successful report in the same output directory
 does not validate the current partial or failed capture sequence.
+
+After opening/reopening a world, establish a settled main-camera baseline before
+testing capture preservation. First-render initialization can change its aspect
+ratio from the default to the current viewport ratio. Bring the existing client
+forward if needed, allow a brief update, then require stable camera observations.
+Compare all camera fields after capture with that settled baseline; do not drop
+aspect ratio from the check or attribute an initialization change to scene edits.
 
 Suggested stopping rule: after two revisions that do not improve the same feature,
 reconsider the representation or reference rather than repeating cosmetic edits.

@@ -63,6 +63,14 @@ should show solid supported columns, a deliberate rock/soil base and surface cap
 not a hollow skin or floating grass. Batch equal-height spans when useful and
 yield between bounded passes; inspect job progress without dumping all members.
 
+Check the quantized height field before writing: its nonzero footprint and
+adjacent levels must still express the intended relief. For example,
+`floor(max(0,1-distance/radius))` collapses a unit-height hill to its center cell;
+use an intended meter-height amplitude and review the resulting integer levels.
+At shallow relief, half-grid edge treatment or a wider supported terrace can
+improve the silhouette; do not increase the whole landscape's scale just to
+hide quantization.
+
 Sketch watercourses and settlement corridors before committing the field. Rivers
 need a connected downhill/level route, basin, bed and banks; do not add random
 water cells after the mountains. Native water IDs 75/76 simulate liquids: complete

@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { BIND_HOST, OUTPUT_CHAR_CAP, clearTerminalBridge, writeTerminalBridge } from '../../../../src/core/config';
 import type { TerminalResult } from '../../../../src/core/terminal';
+import { POWERSHELL_UTF8_INIT, cmdUtf8Command } from '../../../../src/core/terminalEncoding';
 
 export const KEEPWORK_TERMINAL_NAME = 'Keepwork';
 
@@ -31,10 +32,10 @@ function commandWithCwd(command: string, cwd: string): string {
     const isPwsh = /powershell|pwsh/.test(shell);
     if (isPwsh) {
         const escaped = cwd.replace(/'/g, "''");
-        return `Set-Location -LiteralPath '${escaped}'; ${command}`;
+        return `${POWERSHELL_UTF8_INIT}; Set-Location -LiteralPath '${escaped}'; ${command}`;
     }
     if (process.platform === 'win32') {
-        return `cd /d "${cwd}" && ${command}`;
+        return cmdUtf8Command(`cd /d "${cwd}" && ${command}`);
     }
     return `cd ${JSON.stringify(cwd)} && ${command}`;
 }

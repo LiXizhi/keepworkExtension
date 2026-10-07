@@ -1,4 +1,4 @@
 interface:
   display_name: "Paracraft Creation"
-  short_description: "Build scenes, animations and working native mechanisms"
-  default_prompt: "Use $paracraft-create to build and verify an editable scene, animated character or working native mechanism."
+  short_description: "Turn rules into playable native game worlds and animated works"
+  default_prompt: "Use $paracraft-create to turn my rules into an editable Paracraft game or interactive work, combining scenes, characters and animation, and verify gameplay and replay."

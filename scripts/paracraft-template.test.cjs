@@ -13,6 +13,20 @@ const {Client}=require('@modelcontextprotocol/sdk/client/index.js');
 const {InMemoryTransport}=require('@modelcontextprotocol/sdk/inMemory.js');
 const identity={clientId:'template-test',worldPath:'test/',sessionId:3};
 
+test('CodeBlock template isolates shared state, names and assets and can persist editable source',()=>{
+ const input={template:'codeblock_playground',expectedIdentity:identity,requestId:'game-a',saveSource:true};
+ const a=compileCreationTemplate(input,'chat-a'),b=compileCreationTemplate({...input,requestId:'game-b'},'chat-a');
+ assert.notEqual(a.metadata.sceneName,b.metadata.sceneName);
+ assert.match(a.code,new RegExp('name="'+a.metadata.sceneName+'"'));
+ assert.match(a.code,/local name=s.name;/);
+ assert.match(a.code,/local key = name\.\.":round"/);
+ assert.match(a.code,/local model="blocktemplates\/"\.\.name/);
+ assert.match(a.code,/s:save\(\);local info=s:inspect\(\);/);
+ assert.deepEqual(compileCreationTemplate(input,'chat-a'),a);
+ assert.equal(searchCreationTemplates({category:'interactions'}).templates[0].template,input.template);
+ assert.equal(creationTemplateInfo(input.template).assetCount,1);
+});
+
 test('template discovery pages metadata without reading source or scanning files',()=>{
  const read=fs.readFileSync,list=fs.readdirSync;
  fs.readFileSync=()=>{throw new Error('Discovery read source');};fs.readdirSync=()=>{throw new Error('Discovery scanned files');};

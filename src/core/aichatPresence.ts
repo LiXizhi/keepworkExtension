@@ -62,7 +62,7 @@ export function aichatPresenceView(): { remembered: boolean } {
     return { remembered: aichatClientRemembered() };
 }
 
-export async function tryHandleAichatPresence(req: http.IncomingMessage, res: http.ServerResponse, sessionLive: (sessionId: string) => boolean): Promise<boolean> {
+export async function tryHandleAichatPresence(req: http.IncomingMessage, res: http.ServerResponse, sessionLive: (sessionId: string) => boolean, streams: Map<string, http.ServerResponse> = new Map()): Promise<boolean> {
     const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
     if (pathname !== '/aichat/presence') return false;
     res.setHeader('Cache-Control', 'no-store');
@@ -85,7 +85,25 @@ export async function tryHandleAichatPresence(req: http.IncomingMessage, res: ht
         }
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { url?: string; token?: string; baseURL?: string; handler?: boolean };
         rememberAichatClient({ sessionId, url: String(body?.url || ''), token: String(body?.token || ''), baseURL: body?.baseURL, handler: body?.handler === true });
-        respond(200, aichatPresenceView());
+        if (new URL(req.url || '/', 'http://localhost').searchParams.get('stream') !== '1') {
+            respond(200, aichatPresenceView());
+        } else {
+            streams.get(sessionId)?.end();
+            streams.set(sessionId, res);
+            res.writeHead(200, { 'Content-Type': 'text/event-stream', 'X-Accel-Buffering': 'no' });
+            res.write('event: ready\ndata: {}\n\n');
+            const heartbeat = setInterval(() => {
+                if (!sessionLive(sessionId) || res.destroyed || res.writableEnded) { res.end(); return; }
+                // An older tab must not replace the latest tab's login on each heartbeat.
+                if (body?.handler !== true && current?.sessionId === sessionId) current.seenAt = Date.now();
+                if (!res.write(': presence\n\n')) res.end();
+            }, 25000);
+            heartbeat.unref();
+            res.on('close', () => {
+                clearInterval(heartbeat);
+                if (streams.get(sessionId) === res) streams.delete(sessionId);
+            });
+        }
     } catch {
         respond(400, { error: 'AIChat presence rejected' });
     }

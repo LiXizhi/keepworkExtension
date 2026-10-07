@@ -68,6 +68,12 @@ and current engine `creation.md` before selecting IDs/direction data. Packaged
 architecture templates are candidates via `template_info`, not assumed available
 village/city generators. Export only separate color-only props when useful.
 
+For a closed gabled house, include the front/rear wall infill between the top of
+the rectangular wall and the roof slopes. A stair roof and a three-meter wall
+alone can leave large triangular openings. Inspect one house at entrance height
+and from the opposite side before repeating its shell; leave those openings only
+when the design intentionally calls for ventilation or a review cutaway.
+
 Keep regional scene names and stable origins, e.g. village-east and road-north.
 Budget construction volume including foundations, roof, trees and controls against
 the current engine limits; for larger work see the terrain guide's tiling rules.

@@ -66,3 +66,12 @@ world's AGENTS.md. Startup alone creates/saves no world and claims no login stat
 Repository development uses its approved launcher/CLI tests, not a production
 fallback to a direct executable. Keep the singleton MCP hub and terminal approval
 rules unchanged. See [login.md](login.md) only when sign-in is relevant.
+
+When testing in a ParaWorld source checkout, a protocol launch can start a desktop
+without registering a CLI client. After its registration deadline, inspect clients
+and process/port state once; process existence alone is not readiness. Follow the
+checkout's AGENTS.md and Windows testing guide: use
+`bin/paracraft-cli-530.bat --new-instance` to preserve other clients, then verify
+native health and discover the returned client. Keep project 530 unchanged and
+enter a disposable local world before creation tests. This is a source-checkout
+testing route, not a fallback available on every user's installation.
