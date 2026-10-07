@@ -23,3 +23,10 @@ For F5 debugging, open `apps/vscode-extension` as the VS Code workspace so its a
 The daemon binds to `127.0.0.1:8089` by default. It can be started through the extension or from the repository root with `npm start --prefix apps/vscode-extension`. Its default workspace is `~/.keepwork-mcp/workspace`.
 
 See the [repository README](https://github.com/LiXizhi/keepworkExtension#readme) for the complete API, security boundaries and KP Local Helper documentation.
+
+## Second Brain / 第二大脑
+
+Use **Keepwork: Open Second Brain** for AIChat's simple interface in the Activity Bar.
+Work with local knowledge using an existing AI CLI, with optional Keepwork login.
+See [setup, development and verification](docs/second-brain.md). The hosted UI needs
+internet; second-brain skills remain in AIChat.

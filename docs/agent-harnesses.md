@@ -268,10 +268,21 @@ bundle can support ACP but lack interactive login modules; use the official
 case. Discovery does not read credentials, log in, install, or change PATH.
 A successful handshake does not establish authentication or real tool execution.
 
-Copilot CLI and Cursor use the same daemon-lifetime ACP process and model cache as
-WorkBuddy. Regression tests cover concurrent new drafts, two native-protocol turns,
-and explicit capability refresh without restarting the process. Model-dependent
-thought options come from native configuration, and disappear when unsupported.
+Copilot CLI and Cursor reuse their daemon-lifetime ACP process and model cache.
+WorkBuddy and CodeBuddy share a prompt-free discovery process and cached models,
+but each owned session starts its own CLI process with the selected primary folder
+as its OS working directory. These providers capture environment context at startup;
+passing only ACP `session/new.cwd` leaves the daemon's directory in that context.
+Session continuation reuses its process; reconnect restores the saved workspace as
+the launch directory. Capability refresh does not restart active session processes.
+Regression tests cover concurrent workspaces, relative file reads, continuation,
+restart and shared discovery in `scripts/agent-backends.test.cjs`.
+Regression `KWMCP-BUDDY-CWD-001` failed before the fix for both Buddy backend IDs:
+the child read its startup directory instead of either selected root. On Windows
+(2026-10-08), a real WorkBuddy context-only diagnostic also reproduced the inherited
+repository path before the fix and returned the selected temporary root afterward.
+This diagnostic did not exercise native file mutation or all-provider acceptance.
+Model-dependent thought options come from native configuration, and disappear when unsupported.
 The VS Code Copilot MCP provider is a separate editor integration; registering
 Keepwork tools there does not export the editor's language models to AIChat.
 

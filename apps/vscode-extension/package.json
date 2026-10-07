@@ -74,6 +74,10 @@
       {
         "command": "keepwork.showMcpTerminal",
         "title": "Keepwork: Show Terminal"
+      },
+      {
+        "command": "keepwork.openSecondBrain",
+        "title": "%secondBrain.open%"
       }
     ],
     "menus": {
@@ -112,8 +116,41 @@
           "type": "boolean",
           "default": false,
           "description": "Require the pairing token (~/.keepwork-mcp/token) for /mcp and /admin. Default off so AIChat can connect without a pairing step."
+        },
+        "keepwork.secondBrain.developmentUrl": {
+          "type": "string",
+          "default": "",
+          "description": "%secondBrain.developmentUrl%"
+        },
+        "keepwork.secondBrain.language": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "en",
+            "zh-CN"
+          ],
+          "default": "auto",
+          "description": "%secondBrain.language%"
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "keepworkSecondBrain",
+          "title": "%secondBrain.title%",
+          "icon": "media/second-brain.svg"
+        }
+      ]
+    },
+    "views": {
+      "keepworkSecondBrain": [
+        {
+          "id": "keepwork.secondBrain",
+          "name": "%secondBrain.title%",
+          "type": "webview"
+        }
+      ]
     }
   },
   "scripts": {

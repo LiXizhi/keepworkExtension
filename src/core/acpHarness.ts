@@ -53,7 +53,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         private executable?: string,
         private args = AGENT_CLI[backend].args,
         private prepareEnvironment?: () => Promise<NodeJS.ProcessEnv>,
-        private launchMcp?: any[]) { super(); }
+        private launchMcp?: any[], private launchCwd?: string) { super(); }
 
     private start(): Promise<any> {
         if (this.ready) return this.ready;
@@ -72,7 +72,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         return new Promise((resolve, reject) => {
             let command;
             try { command = resolveAgentCli(this.backend, launchArgs, this.executable); this.launch = command; } catch (e) { reject(e); return; }
-            const child = spawn(command.executable, command.args, { env, windowsHide: true, shell: false, stdio: 'pipe', detached: process.platform !== 'win32' });
+            const child = spawn(command.executable, command.args, { cwd: this.launchCwd, env, windowsHide: true, shell: false, stdio: 'pipe', detached: process.platform !== 'win32' });
             this.child = child;
             let buffer = '', failed = false;
             const fail = (error: Error) => {
@@ -198,14 +198,22 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         const result = await this.rpc('session/load', { sessionId: thread.id, cwd: thread.cwd, mcpServers: thread.mcpServers || [] });
         thread.loaded = true; thread.models = result.models || thread.models; thread.configOptions = result.configOptions || thread.configOptions; thread.modes = result.modes || thread.modes;
     }
+    private isBuddy() { return this.backend === 'workbuddy' || this.backend === 'codebuddy'; }
     async call(method: string, p: any = {}): Promise<any> {
         // Copilot versions that ignore ACP mcpServers need one process-level configuration per session.
+        // Buddy captures its environment at process startup; session/new.cwd alone does not
+        // change that context. Keep each owned session in its root, separate from discovery.
         // Never reuse a probe process or share another account's MCP capability.
         let delegated = this.scoped.get(p.threadId);
-        if (this.backend === 'copilot' && !this.launchMcp && p.mcpServers?.length && ['thread/start', 'thread/resume'].includes(method)) {
-            if (delegated && JSON.stringify(delegated.launchMcp) !== JSON.stringify(p.mcpServers)) { delegated.close(); this.scoped.delete(p.threadId); delegated = undefined; }
+        const needsScope = (this.isBuddy() && !this.launchCwd)
+            || (this.backend === 'copilot' && !this.launchMcp && p.mcpServers?.length);
+        if (needsScope && ['thread/start', 'thread/resume'].includes(method)) {
+            if (delegated && this.backend === 'copilot' && JSON.stringify(delegated.launchMcp) !== JSON.stringify(p.mcpServers)) { delegated.close(); this.scoped.delete(p.threadId); delegated = undefined; }
             if (!delegated) {
-                const child = new AcpHarness(this.backend, this.directory, this.executable, this.args, this.prepareEnvironment, p.mcpServers);
+                const cwd = p.cwd || (p.threadId ? this.thread(p.threadId).cwd : undefined);
+                if (this.isBuddy() && !cwd) throw new Error('Select a local workspace before starting the CLI');
+                const child = new AcpHarness(this.backend, this.directory, this.executable, this.args, this.prepareEnvironment,
+                    this.backend === 'copilot' ? p.mcpServers : undefined, cwd);
                 let threadId = p.threadId;
                 child.on('notification', message => this.emit('notification', message));
                 child.on('request', message => { const id = 'mcp-scope-' + randomUUID(); this.scopedRequests.set(id, { child, id: message.id }); this.emit('request', { ...message, id }); });

@@ -10,6 +10,7 @@ import { showKeepworkTerminal, startTerminalBridge } from './vscode/terminalBrid
 import { startNotifyBridge } from './vscode/notifyBridge';
 import { startModelBridge } from './vscode/modelBridge';
 import { registerCopilotMcp } from './vscode/copilotMcp';
+import { registerSecondBrain } from './vscode/secondBrain';
 
 async function openMcpWorkspace(context: vscode.ExtensionContext): Promise<void> {
     const root = configuredRoot(context);
@@ -46,6 +47,7 @@ async function changeMcpWorkspace(context: vscode.ExtensionContext): Promise<voi
 export function activate(context: vscode.ExtensionContext) {
     console.log('Keepwork extension is now active!');
     registerCopilotMcp(context);
+    registerSecondBrain(context);
 
     const bridge = startTerminalBridge();
     const notify = startNotifyBridge();

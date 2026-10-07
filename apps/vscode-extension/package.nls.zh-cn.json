@@ -1,0 +1,6 @@
+{
+  "secondBrain.title": "第二大脑",
+  "secondBrain.open": "Keepwork: 打开第二大脑",
+  "secondBrain.developmentUrl": "开发 AIChat 入口（仅回环 HTTP，不含查询参数或凭据）。留空使用线上 AIChat。",
+  "secondBrain.language": "第二大脑界面语言，auto 跟随 VS Code。"
+}

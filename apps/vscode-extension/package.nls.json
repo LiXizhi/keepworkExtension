@@ -1,0 +1,6 @@
+{
+  "secondBrain.title": "Second Brain",
+  "secondBrain.open": "Keepwork: Open Second Brain",
+  "secondBrain.developmentUrl": "Development AIChat entry (loopback HTTP only, no query or credentials). Empty uses hosted AIChat.",
+  "secondBrain.language": "Second Brain interface language. Auto follows VS Code."
+}

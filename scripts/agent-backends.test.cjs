@@ -46,6 +46,32 @@ for (const backend of AGENT_BACKENDS) test(`${backend}: versioned AIChat context
  assert.equal((await done(restarted,session.id,owner)).status,'completed');
 });
 const fixture=path.join(__dirname,'fixtures/fake-acp.cjs');
+for (const backend of ['workbuddy', 'codebuddy']) test(`${backend}: process cwd follows each workspace after discovery, concurrent turns and restart`, async t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'buddy-workspaces-'));
+ const roots=['primary 中文','other repo'].map(name=>{const root=path.join(dir,name);fs.mkdirSync(root);fs.writeFileSync(path.join(root,'workspace-marker.txt'),name);return root;});
+ const file=path.join(dir,'registry.json'), owner='cwd-test';
+ const make=()=>new AcpHarness(backend,path.join(dir,'cache'),process.execPath,[path.join(__dirname,'fixtures/fake-buddy-cwd.cjs')]);
+ const adapter=make(),manager=new AgentSessions(file,undefined,{[backend]:adapter});t.after(()=>manager.close());
+ await manager.status(backend,{owner,conversationId:'probe',cwd:roots[0]});
+ const sessions=await Promise.all(roots.map((root,i)=>manager.create(owner,{backend,conversationId:'cwd-'+i,roots:[root]})));
+ const inspect=async(m,s,index,requestId)=>{
+   await m.turn(s.id,owner,{requestId,text:'Report native working directory'});
+   const snapshot=await done(m,s.id,owner);
+   const reply=JSON.parse(snapshot.items.filter(item=>item.type==='agentMessage').at(-1).text);
+   const canonical=value=>process.platform==='win32'?value.toLowerCase():value;
+   assert.equal(canonical(reply.cwd),canonical(roots[index]),'CLI startup cwd must be the selected local workspace');
+   assert.equal(canonical(reply.sessionCwd),canonical(roots[index]));assert.equal(reply.marker,path.basename(roots[index]));
+   return reply.pid;
+ };
+ const pids=await Promise.all(sessions.map((s,i)=>inspect(manager,s,i,'first')));
+ assert.notEqual(pids[0],pids[1],'different workspaces must not share process-global context');
+ adapter.refreshCapabilities();
+ assert.equal(await inspect(manager,sessions[0],0,'continue'),pids[0],'refresh and continuation reuse the live session process');
+ manager.close();
+ const restarted=new AgentSessions(file,undefined,{[backend]:make()});t.after(()=>restarted.close());
+ await Promise.all(sessions.map(s=>restarted.read(s.id,owner)));
+ await Promise.all(sessions.map((s,i)=>inspect(restarted,s,i,'resumed')));
+});
 async function done(manager,id,owner) {
  const deadline=Date.now()+5000;
  while(Date.now()<deadline) {
@@ -245,7 +271,7 @@ test('daemon capabilities are shared across status requests and invalidated by p
  await manager.status('codex',{refresh:true});assert.equal(calls.filter(m=>m==='account/read').length,3);
 });
 
-for (const backend of ['workbuddy', 'copilot', 'cursor']) test(`${backend}: new drafts share cached models and one process; refresh and subsequent turns preserve the PID`, async t => {
+for (const backend of ['workbuddy', 'copilot', 'cursor']) test(`${backend}: drafts share model discovery; refresh and turns preserve discovery and session PIDs`, async t => {
  const {manager,dir,owner,adapters}=setup(t,['--config-options']);const adapter=adapters[backend],calls=[];
  const rpc=adapter.rpc.bind(adapter);adapter.rpc=(method,...args)=>{calls.push(method);return rpc(method,...args);};
  const scopes=Array.from({length:8},(_,i)=>({owner,cwd:dir,conversationId:'draft-'+i}));
@@ -255,9 +281,12 @@ for (const backend of ['workbuddy', 'copilot', 'cursor']) test(`${backend}: new 
  await manager.status(backend,{owner:'second-owner',cwd:dir,conversationId:'other'});
  assert.equal(calls.filter(m=>m==='session/new').length,1);
  const s=await manager.create(owner,{backend,conversationId:'draft-0',roots:[dir],model:'fixture'});
+ const sessionAdapter=adapter.scoped.get(s.threadId)||adapter,sessionPid=sessionAdapter.child.pid,sessionCalls=[];
+ if(sessionAdapter!==adapter){const sessionRpc=sessionAdapter.rpc.bind(sessionAdapter);sessionAdapter.rpc=(method,...args)=>{sessionCalls.push(method);return sessionRpc(method,...args);};}
  for(const id of ['one','two']){await manager.turn(s.id,owner,{requestId:id,text:'hello',model:'fixture',effort:'high'});assert.equal((await done(manager,s.id,owner)).status,'completed');}
  await manager.status(backend,{owner,sessionId:s.id,refresh:true});
  assert.equal(adapter.child.pid,pid);assert.equal(calls.filter(m=>m==='initialize').length,1);assert.equal(calls.filter(m=>m==='session/load').length,0);
- assert.equal(calls.filter(m=>m==='session/prompt').length,2);
+ assert.equal(sessionAdapter.child.pid,sessionPid);
+ assert.equal((sessionAdapter===adapter?calls:sessionCalls).filter(m=>m==='session/prompt').length,2);
  await manager.status(backend,{...scopes[1],refresh:true});assert.equal(adapter.child.pid,pid);assert.equal(calls.filter(m=>m==='session/new').length,2);
 });
