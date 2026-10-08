@@ -99,6 +99,7 @@ function streamFormUpload(uploadHost, token, remoteKey, entry) {
       }));
     });
     request.on('error', reject);
+    request.setTimeout(PART_TIMEOUT_MS, () => request.destroy(new Error(`Qiniu upload timed out for ${entry.name}`)));
     request.write(header);
 
     let uploaded = 0;
@@ -148,8 +149,22 @@ function requestBuffer(requestUrl, options, body) {
       }));
     });
     request.on('error', reject);
+    request.setTimeout(PART_TIMEOUT_MS, () => request.destroy(new Error(`Qiniu request timed out: ${requestUrl}`)));
     request.end(body);
   });
+}
+
+async function requestBufferWithRetry(requestUrl, options, body) {
+  let lastError;
+  for (let attempt = 1; attempt <= PART_ATTEMPTS; attempt += 1) {
+    try {
+      return await requestBuffer(requestUrl, options, body);
+    } catch (error) {
+      lastError = error;
+      if (attempt < PART_ATTEMPTS) process.stdout.write(`Retrying Qiniu request after ${error.message}\n`);
+    }
+  }
+  throw lastError;
 }
 
 function uploadPartOnce(config, entry, token, uploadId, part, totalParts) {
@@ -224,7 +239,7 @@ async function mapConcurrent(values, concurrency, task) {
 async function uploadLargeEntry(config, entry, token) {
   const basePath = multipartBasePath(config, entry);
   const authorization = `UpToken ${token}`;
-  const initResponse = await requestBuffer(new URL(basePath, config.uploadHost), {
+  const initResponse = await requestBufferWithRetry(new URL(basePath, config.uploadHost), {
     method: 'POST',
     headers: { Authorization: authorization },
   });
