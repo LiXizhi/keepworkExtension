@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish signed installers and promote desktop updates
+        description: Publish installers and promote desktop updates
         type: boolean
         default: false
 permissions:
@@ -42,13 +42,6 @@ jobs:
         run: echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
       - name: Package desktop
         working-directory: apps/aichat-desktop
-        env:
-          AICHAT_PUBLIC_RELEASE: ${{ inputs.publish && '1' || '0' }}
-          CSC_LINK: ${{ matrix.platform == 'win32' && secrets.WINDOWS_CSC_LINK || secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ matrix.platform == 'win32' && secrets.WINDOWS_CSC_KEY_PASSWORD || secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [[ '${{ matrix.platform }}' == win32 ]]; then npm run make:win; else npm run make:mac -- --${{ matrix.arch }}; fi
       - uses: actions/upload-artifact@v4

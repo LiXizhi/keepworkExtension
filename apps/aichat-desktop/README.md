@@ -119,10 +119,9 @@ available in the same directory but are not exposed by the website download flow
 
 The **Build KeepWork 第二大脑** workflow builds Windows x64 and both Mac architectures. Default
 runs retain internal artifacts only. Public publication requires its publish input and the
-`aichat-desktop-production` environment. Configure Qiniu credentials, Windows `WINDOWS_CSC_LINK`
-and `WINDOWS_CSC_KEY_PASSWORD`, Mac `MAC_CSC_LINK` and `MAC_CSC_KEY_PASSWORD`, plus Apple
-notarization credentials `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` as CI secrets.
-Public builds enforce signing; unsigned Mac builds do not support production auto-update.
+`aichat-desktop-production` environment. Configure Qiniu credentials as CI secrets. The current
+workflow publishes unsigned Windows and Mac builds, matching the repository's existing desktop
+release infrastructure. Signed Windows and notarized Mac distribution remain a separate release gate.
 
 The **Coordinated Keepwork stable release** workflow requires matching committed MCP/VSIX
 versions and a `keepwork-v<version>` tag or manual dispatch. It publishes the npm CLI and

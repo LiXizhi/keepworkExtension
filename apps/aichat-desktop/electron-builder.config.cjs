@@ -16,10 +16,9 @@ module.exports = {
     const m = JSON.parse(fs.readFileSync(path.join(runtime, 'runtime.json'), 'utf8'));
     if (m.platform !== platform || m.arch !== arch || m.product !== 'keepwork-mcp-node-runtime') throw new Error('Bundled MCP runtime target mismatch');
   },
-  forceCodeSigning: process.env.AICHAT_PUBLIC_RELEASE === '1',
   win: { target: [{ target: 'nsis', arch: ['x64'] }, { target: 'zip', arch: ['x64'] }], artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', verifyUpdateCodeSignature: true },
   nsis: { oneClick: false, perMachine: false, allowElevation: false, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
-  mac: { target: ['dmg', 'zip'], category: 'public.app-category.productivity', hardenedRuntime: true, notarize: process.env.AICHAT_PUBLIC_RELEASE === '1',
+  mac: { target: ['dmg', 'zip'], category: 'public.app-category.productivity', hardenedRuntime: true,
     artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', extendInfo: { NSMicrophoneUsageDescription: 'AIChat uses the microphone for voice conversations.', NSCameraUsageDescription: 'AIChat uses the camera when you start a video conversation.' } },
   publish: [{ provider: 'generic', url: `https://cdn.keepwork.com/keepwork/aichat-desktop/${process.platform}-${process.arch}/` }],
 };
