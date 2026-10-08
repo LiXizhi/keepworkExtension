@@ -38,7 +38,7 @@ jobs:
       - run: node apps/aichat-desktop/scripts/native-smoke.cjs
       - name: Verify Electron bridge against AIChat source adapters
         run: |
-          git clone --depth 1 https://code.kp-para.cn/paracraft/apps "$RUNNER_TEMP/aichat-source"
+          git clone --depth 1 https://git.keepwork.com/official/apps "$RUNNER_TEMP/aichat-source"
           export AICHAT_SOURCE_DIR="$RUNNER_TEMP/aichat-source/official/apps/tools/AIChat"
           node apps/aichat-desktop/scripts/electron-smoke.cjs
       - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
