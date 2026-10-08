@@ -7,6 +7,8 @@ const REFRESH_URL = 'https://fusion.qiniuapi.com/v2/tune/refresh';
 const MULTIPART_THRESHOLD = 4 * 1024 * 1024;
 const PART_SIZE = 8 * 1024 * 1024;
 const PART_CONCURRENCY = 4;
+const PART_TIMEOUT_MS = 120_000;
+const PART_ATTEMPTS = 3;
 
 function required(value, name) {
   const normalized = String(value || '').trim();
@@ -150,7 +152,7 @@ function requestBuffer(requestUrl, options, body) {
   });
 }
 
-function uploadPart(config, entry, token, uploadId, part, totalParts) {
+function uploadPartOnce(config, entry, token, uploadId, part, totalParts) {
   const requestUrl = new URL(
     `${multipartBasePath(config, entry)}/${encodeURIComponent(uploadId)}/${part.partNumber}`,
     config.uploadHost,
@@ -181,10 +183,28 @@ function uploadPart(config, entry, token, uploadId, part, totalParts) {
       });
     });
     request.on('error', reject);
+    request.setTimeout(PART_TIMEOUT_MS, () => request.destroy(new Error(
+      `Qiniu part ${part.partNumber} upload timed out for ${entry.name}`,
+    )));
     const fileStream = fs.createReadStream(entry.filePath, { start: part.start, end: part.end });
     fileStream.on('error', (error) => request.destroy(error));
     fileStream.pipe(request);
   });
+}
+
+async function uploadPart(config, entry, token, uploadId, part, totalParts) {
+  let lastError;
+  for (let attempt = 1; attempt <= PART_ATTEMPTS; attempt += 1) {
+    try {
+      return await uploadPartOnce(config, entry, token, uploadId, part, totalParts);
+    } catch (error) {
+      lastError = error;
+      if (attempt < PART_ATTEMPTS) {
+        process.stdout.write(`Retrying ${entry.name}: part ${part.partNumber}/${totalParts} after ${error.message}\n`);
+      }
+    }
+  }
+  throw lastError;
 }
 
 async function mapConcurrent(values, concurrency, task) {
