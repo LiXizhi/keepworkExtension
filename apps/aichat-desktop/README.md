@@ -29,6 +29,8 @@ From this repository, install root dependencies and `npm ci --prefix apps/aichat
 Run `npm run check --prefix apps/aichat-desktop` and
 `node apps/aichat-desktop/scripts/native-smoke.cjs` on each target OS. Native dependencies
 must load inside the pinned Electron runtime, not merely the system Node executable.
+Run `scripts/electron-smoke.cjs` from a workspace that also has the AIChat source checkout;
+the release workflow does not clone that private cross-repository dependency.
 
 Use `npm start --prefix apps/aichat-desktop` for the live website. For local AIChat source,
 set `AICHAT_DESKTOP_DEV_URL` to the actual loopback Live Server URL. This override is
