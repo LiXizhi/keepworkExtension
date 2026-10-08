@@ -109,6 +109,9 @@ stopped by this app; its owning application must restart it to update that runni
 The stable runtime feed is `https://cdn.keepwork.com/keepwork/mcp-stable/<target>.json`.
 Archives live in immutable version directories. The every-main six-file feed is unchanged.
 Desktop updater feeds are under `https://cdn.keepwork.com/keepwork/aichat-desktop/<platform>-<arch>/`.
+Each target also publishes `latest-client.json` for the AIChat website's single client-download
+button. That manifest always points to the target ZIP; installer and updater artifacts remain
+available in the same directory but are not exposed by the website download flow.
 
 ## Release prerequisites
 
