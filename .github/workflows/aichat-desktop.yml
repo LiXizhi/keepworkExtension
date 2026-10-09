@@ -55,14 +55,17 @@ jobs:
           KP_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.KP_APPLE_APP_SPECIFIC_PASSWORD }}
           KP_APPLE_TEAM_ID: ${{ secrets.KP_APPLE_TEAM_ID }}
         run: |
-          for name in KP_MAC_CSC_LINK KP_MAC_CSC_KEY_PASSWORD KP_APPLE_ID KP_APPLE_APP_SPECIFIC_PASSWORD KP_APPLE_TEAM_ID; do
-            if [[ -z "${!name}" ]]; then echo "Missing required Mac release secret: $name" >&2; exit 1; fi
-          done
-          echo "CSC_LINK=$KP_MAC_CSC_LINK" >> "$GITHUB_ENV"
-          echo "CSC_KEY_PASSWORD=$KP_MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
-          echo "APPLE_ID=$KP_APPLE_ID" >> "$GITHUB_ENV"
-          echo "APPLE_APP_SPECIFIC_PASSWORD=$KP_APPLE_APP_SPECIFIC_PASSWORD" >> "$GITHUB_ENV"
-          echo "APPLE_TEAM_ID=$KP_APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          if [[ -n "$KP_MAC_CSC_LINK" && -n "$KP_MAC_CSC_KEY_PASSWORD" && -n "$KP_APPLE_ID" && -n "$KP_APPLE_APP_SPECIFIC_PASSWORD" && -n "$KP_APPLE_TEAM_ID" ]]; then
+            echo "CSC_LINK=$KP_MAC_CSC_LINK" >> "$GITHUB_ENV"
+            echo "CSC_KEY_PASSWORD=$KP_MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_ID=$KP_APPLE_ID" >> "$GITHUB_ENV"
+            echo "APPLE_APP_SPECIFIC_PASSWORD=$KP_APPLE_APP_SPECIFIC_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$KP_APPLE_TEAM_ID" >> "$GITHUB_ENV"
+            echo "KP_MAC_RELEASE_SIGNED=true" >> "$GITHUB_ENV"
+          else
+            echo "Apple signing secrets unavailable; publishing Mac with a coherent ad-hoc signature. System Settings approval may be required."
+            echo "KP_MAC_RELEASE_SIGNED=false" >> "$GITHUB_ENV"
+          fi
       - name: Package desktop
         working-directory: apps/aichat-desktop
         run: |
@@ -73,7 +76,7 @@ jobs:
         run: |
           app=$(find release -maxdepth 2 -name '*.app' -print -quit)
           codesign --verify --deep --strict --verbose=2 "$app"
-          if [[ '${{ inputs.publish }}' == 'true' ]]; then
+          if [[ '${{ inputs.publish }}' == 'true' && "$KP_MAC_RELEASE_SIGNED" == 'true' ]]; then
             spctl --assess --type execute --verbose=4 "$app"
             xcrun stapler validate "$app"
           fi
