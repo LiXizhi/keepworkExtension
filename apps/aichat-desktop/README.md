@@ -20,8 +20,9 @@ The terminal prints the actual source URL. An explicit `AICHAT_DESKTOP_DEV_URL` 
 priority for an existing Live Server. Missing source fails visibly instead of opening
 the published website. The owned HTTP server stops on Quit. Closing the window destroys
 the page and leaves that server running so the tray can open a new window.
-The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arch>` if
-present; `AICHAT_MCP_RUNTIME_DIR` overrides it. No runtime is required for native files
+The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arch>` and
+`apps/local-model-runtime/runtime-staging/<platform>-<arch>` if present;
+`AICHAT_MCP_RUNTIME_DIR` and `KP_LOCAL_MODEL_RUNTIME_DIR` override them. No runtime is required for native files
 or user terminals. Use the tray menu's **退出** before starting a fresh debugging session.
 These tasks build only the desktop shell, never the AIChat website.
 
@@ -111,7 +112,8 @@ stopped by this app; its owning application must restart it to update that runni
 The stable runtime feed is `https://cdn.keepwork.com/keepwork/mcp-stable/<target>.json`.
 Archives live in immutable version directories. The every-main six-file feed is unchanged.
 Desktop updater feeds are under `https://cdn.keepwork.com/keepwork/aichat-desktop/<platform>-<arch>/`.
-Each target also publishes `latest-client.json` for the AIChat website's single client-download
+Each desktop package bundles both the MCP Node runtime and the `local-model` Node runtime
+(including the signed model package). Each target also publishes `latest-client.json` for the AIChat website's single client-download
 button. That manifest always points to the target ZIP; installer and updater artifacts remain
 available in the same directory but are not exposed by the website download flow.
 

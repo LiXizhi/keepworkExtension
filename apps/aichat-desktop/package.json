@@ -1,7 +1,7 @@
 {
   "name": "aichat-desktop",
   "productName": "KeepWork 第二大脑",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "AIChat native workspaces and Keepwork MCP companion",
   "author": "Keepwork",

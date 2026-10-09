@@ -19,7 +19,7 @@ const PRODUCT_NAME = 'KeepWork 第二大脑';
 if (!app.commandLine.hasSwitch('user-data-dir')) {
   app.setPath('userData', path.join(app.getPath('appData'), app.isPackaged ? 'AIChat Desktop' : 'aichat-desktop'));
 }
-let win: BrowserWindow | undefined, tray: Tray, quitting = false, runtime: any, files: any;
+let win: BrowserWindow | undefined, tray: Tray, quitting = false, runtime: any, modelRuntime: any, files: any;
 let opening: Promise<void> | null = null;
 let appIcon: ReturnType<typeof nativeImage.createFromPath> | undefined;
 const closedTip = `${PRODUCT_NAME}（窗口已关闭，点击重新打开）`;
@@ -97,7 +97,7 @@ async function checkUpdates() {
   if (checking) return checking;
   checking = (async () => {
     updateError = '';
-    const results = await Promise.allSettled([runtime.check(), ...(app.isPackaged ? [autoUpdater.checkForUpdates()] : [])]);
+    const results = await Promise.allSettled([runtime.check(), modelRuntime?.check(), ...(app.isPackaged ? [autoUpdater.checkForUpdates()] : [])]);
     updateError = results.filter(r => r.status === 'rejected').map((r: any) => r.reason.message).join('; ');
     menu();
   })().finally(() => { checking = null; });
@@ -411,8 +411,14 @@ else {
     try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8')) }; } catch { /* first launch */ }
     nativeTheme.themeSource = settings.theme === 'dark' ? 'dark' : 'light';
     files = new NativeFiles(path.join(home, 'folder-grants.json'));
-    const stagedRuntime = path.resolve(__dirname, '../../mcp-runtime/staging', `${process.platform === 'win32' ? 'windows' : 'macos'}-${process.arch}`);
+    const target = `${process.platform === 'win32' ? 'windows' : 'macos'}-${process.arch}`;
+    const stagedRuntime = path.resolve(__dirname, '../../mcp-runtime/staging', target);
+    const stagedModelRuntime = path.resolve(__dirname, '../../local-model-runtime/runtime-staging', target);
     runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion());
+    modelRuntime = new RuntimeSupervisor(path.join(home, 'local-model-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'local-model-runtime') : process.env.KP_LOCAL_MODEL_RUNTIME_DIR || (fs.existsSync(path.join(stagedModelRuntime, 'runtime.json')) ? stagedModelRuntime : ''), app.getVersion(), {}, {
+      product: 'keepwork-local-model-node-runtime', entry: 'app/dist/src/cli.js', port: 18089, updates: false,
+      matcher: (body: any) => body.service === 'keepwork-local-model' && body.protocolVersion === '1.0.0',
+    });
     appIcon = nativeImage.createFromPath(path.join(__dirname, 'keepwork.png'));
     if (process.platform === 'darwin') app.dock?.setIcon(appIcon);
     setupBridge();
@@ -425,7 +431,10 @@ else {
     autoUpdater.on('error', e => { updateError = e.message; menu(); });
     if (process.argv.includes('--background')) tray.setToolTip(closedTip);
     else await ensureShown();
-    if (!disableDevMcp) void runtime.start().then(menu).catch((e: Error) => { updateError = e.message; menu(); });
+    if (!disableDevMcp) {
+      void runtime.start().then(menu).catch((e: Error) => { updateError = e.message; menu(); });
+      void modelRuntime.start().then(menu).catch((e: Error) => { updateError = e.message; menu(); });
+    }
     setTimeout(() => { void checkUpdates(); }, 15000).unref();
     setInterval(() => { void checkUpdates(); }, 6 * 60 * 60 * 1000).unref();
   });
@@ -437,6 +446,7 @@ else {
     void (async () => {
       try { await runtime?.restarting; await runtime?.starting; } catch { /* Finish shutdown after failed startup. */ }
       await runtime?.stop();
+      await modelRuntime?.stop();
     })().finally(() => app.quit());
   });
 }

@@ -8,35 +8,40 @@ const semver = require('semver');
 const BASE = 'https://cdn.keepwork.com/keepwork/mcp-stable/';
 const PRODUCT = 'keepwork-mcp-node-runtime';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-function validateManifest(m, platform, arch) {
-  if (m?.schemaVersion !== 1 || m.product !== PRODUCT || m.platform !== platform || m.arch !== arch
+function validateManifest(m, platform, arch, options = {}) {
+  const product = options.product || PRODUCT;
+  const base = options.base || BASE;
+  if (m?.schemaVersion !== 1 || m.product !== product || m.platform !== platform || m.arch !== arch
       || !semver.valid(m.version) || !/^[a-f0-9]{40}$/.test(m.commit || '')
       || !/^[a-f0-9]{64}$/.test(m.sha256 || '') || !Number.isSafeInteger(m.size) || m.size < 1 || m.size > 500_000_000
-      || m.url !== `${BASE}${m.version}/${platform}-${arch}.zip`) throw new Error('Invalid stable runtime manifest');
+      || (options.updates !== false && m.url !== `${base}${m.version}/${platform}-${arch}.zip`)) throw new Error('Invalid stable runtime manifest');
   return m;
 }
-function validateRuntime(dir, platform, arch, version) {
+function validateRuntime(dir, platform, arch, version, options = {}) {
   const m = JSON.parse(fs.readFileSync(path.join(dir, 'runtime.json'), 'utf8'));
-  if (m.schemaVersion !== 1 || m.product !== PRODUCT || m.platform !== platform || m.arch !== arch
-      || !semver.valid(m.version) || (version && m.version !== version) || m.entry !== 'app/cli.cjs') throw new Error('Invalid runtime launch metadata');
+  const product = options.product || PRODUCT;
+  const entry = options.entry || 'app/cli.cjs';
+  if (m.schemaVersion !== 1 || m.product !== product || m.platform !== platform || m.arch !== arch
+      || !semver.valid(m.version) || (version && m.version !== version) || m.entry !== entry) throw new Error('Invalid runtime launch metadata');
   for (const rel of [platform === 'windows' ? 'node.exe' : 'bin/node', m.entry]) {
     const resolved = fs.realpathSync(path.join(dir, rel));
     if (!inside(fs.realpathSync(dir), resolved) || !fs.statSync(resolved).isFile()) throw new Error('Invalid runtime executable');
   }
   return m;
 }
-async function probe(port = 8089) {
+async function probe(port = 8089, matcher = body => body.name === 'keepwork-mcp' && body.fsApi === 'workspace') {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) });
     const body = await response.json();
-    return { reachable: true, compatible: response.ok && body.name === 'keepwork-mcp' && body.fsApi === 'workspace', ...body };
+    return { reachable: true, compatible: response.ok && matcher(body), ...body };
   } catch { return null; }
 }
 class RuntimeSupervisor {
-  constructor(home, bundled, hostVersion, deps = {}) {
+  constructor(home, bundled, hostVersion, deps = {}, options = {}) {
     this.home = home; this.bundled = bundled; this.hostVersion = hostVersion;
+    this.options = { product: PRODUCT, port: 8089, entry: 'app/cli.cjs', updates: true, ...options };
     this.platform = process.platform === 'win32' ? 'windows' : 'macos'; this.arch = process.arch;
-    this.deps = { probe, spawn, ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
+    this.deps = { probe: () => probe(this.options.port, this.options.matcher), spawn, ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
     this.child = null; this.stopping = false;
     try { this.record = JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')); } catch { this.record = {}; }
   }
@@ -101,11 +106,11 @@ class RuntimeSupervisor {
     for (const hash of candidates) {
       try {
         const dir = hash ? this.directory(hash) : this.bundled;
-        const manifest = validateRuntime(dir, this.platform, this.arch);
+        const manifest = validateRuntime(dir, this.platform, this.arch, undefined, this.options);
         const child = this.deps.spawn(path.join(dir, this.platform === 'windows' ? 'node.exe' : 'bin/node'),
-          [path.join(dir, 'app/cli.cjs'), '--port', '8089'], { cwd: dir, windowsHide: true, stdio: 'ignore',
+          [path.join(dir, manifest.entry), ...(manifest.args || ['--port', String(this.options.port)])], { cwd: dir, windowsHide: true, stdio: 'ignore',
             env: { ...process.env, KEEPWORK_MCP_HOST_KIND: 'electron-node-runtime', KEEPWORK_MCP_HOST_VERSION: this.hostVersion,
-              KEEPWORK_MCP_RUNTIME_VERSION: manifest.version, KEEPWORK_MCP_RUNTIME_COMMIT: manifest.commit || '' } });
+              KEEPWORK_MCP_RUNTIME_VERSION: manifest.version, KEEPWORK_MCP_RUNTIME_COMMIT: manifest.commit || '', ...(manifest.env || {}) } });
         this.child = child;
         let failed; child.on('error', e => { failed = e; });
         let health;
@@ -139,9 +144,10 @@ class RuntimeSupervisor {
     return this.checking;
   }
   async download() {
+    if (this.options.updates === false) return;
     const response = await fetch(`${BASE}${this.platform}-${this.arch}.json`, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error(`Runtime update HTTP ${response.status}`);
-    const m = validateManifest(await response.json(), this.platform, this.arch);
+    const m = validateManifest(await response.json(), this.platform, this.arch, this.options);
     if (m.sha256 === this.record.current || m.sha256 === this.record.pending) return;
     if (semver.valid(this.state.version) && !semver.gt(m.version, this.state.version)) return;
     fs.mkdirSync(this.home, { recursive: true });
@@ -157,7 +163,7 @@ class RuntimeSupervisor {
       if (size !== m.size || hash.digest('hex') !== m.sha256) throw new Error('Runtime integrity mismatch');
       const unpacked = path.join(stage, 'unpacked');
       await require('extract-zip')(archive, { dir: unpacked });
-      const launch = validateRuntime(unpacked, this.platform, this.arch, m.version);
+      const launch = validateRuntime(unpacked, this.platform, this.arch, m.version, this.options);
       if (launch.commit !== m.commit) throw new Error('Runtime commit mismatch');
       const target = this.directory(m.sha256);
       if (!fs.existsSync(target)) fs.renameSync(unpacked, target);

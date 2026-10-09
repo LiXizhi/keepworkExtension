@@ -33,14 +33,19 @@ jobs:
         with: { node-version: '22.23.2', architecture: '${{ matrix.arch }}' }
       - run: npm ci
       - run: npm ci --prefix apps/mcp-runtime
+      - run: npm ci --prefix apps/local-model-runtime
       - run: npm ci --prefix apps/aichat-desktop
       - run: npm run check:shared
       - run: npm run check --prefix apps/aichat-desktop
       - run: node apps/aichat-desktop/scripts/native-smoke.cjs
       - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
       - run: npm run smoke --prefix apps/mcp-runtime
+      - run: npm run runtime:stage --prefix apps/local-model-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+      - run: npm run runtime:smoke --prefix apps/local-model-runtime -- runtime-staging/${{ matrix.runtime }}
       - name: Set runtime path
-        run: echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+        run: |
+          echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+          echo "KP_LOCAL_MODEL_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/local-model-runtime/runtime-staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
       - name: Configure signed Mac release
         if: matrix.platform == 'darwin' && inputs.publish
         env:
