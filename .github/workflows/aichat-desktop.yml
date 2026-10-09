@@ -1,5 +1,7 @@
 name: Build KeepWork 第二大脑
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       publish:
@@ -47,7 +49,7 @@ jobs:
           echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
           echo "KP_LOCAL_MODEL_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/local-model-runtime/runtime-staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
       - name: Configure signed Mac release
-        if: matrix.platform == 'darwin' && inputs.publish
+        if: matrix.platform == 'darwin' && (inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]')))
         env:
           KP_MAC_CSC_LINK: ${{ secrets.KP_MAC_CSC_LINK }}
           KP_MAC_CSC_KEY_PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
@@ -89,7 +91,7 @@ jobs:
             apps/aichat-desktop/release/*.blockmap
             apps/aichat-desktop/release/latest*.yml
   publish:
-    if: inputs.publish
+    if: inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]'))
     needs: build
     runs-on: ubuntu-latest
     environment: aichat-desktop-production
