@@ -131,3 +131,16 @@ both source updates are published. No publication or real model inference was pe
 使用本地大脑与已连接的 AI CLI；AI 平台可能需要自己的账号。登录 Keepwork 后可使用其
 模型与云端功能。技能仍由 AIChat 管理，访客与登录账号的数据隔离，不会自动导入或上传。
 界面来自线上 AIChat，因此不承诺完全断网可用。语言设置支持英文、中文和跟随 VS Code。
+
+## Current workspace folders
+
+The new-chat dialog and workspace-combination editor list local folders from the
+current VS Code workspace. Clicking a folder starts a chat; selecting several
+opens an editable combination with a Primary folder. Existing combinations can
+add editor folders through the same list.
+
+The optional native `workspaceFolders` capability lists names, URIs and paths
+without grants. `selectWorkspaceFolder` rechecks workspace trust and current local
+membership before granting file access. Neither method accepts arbitrary paths;
+remote extension sessions retain the existing provider behavior. Both updated
+extension and AIChat sources are needed. Reopening a picker refreshes the list.

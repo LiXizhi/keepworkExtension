@@ -13,7 +13,8 @@ function fixture(t) {
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     const folder = path.join(dir, 'workspace'); fs.mkdirSync(folder);
     const state = { selected: [{ scheme: 'file', fsPath: folder }], dialogs: [], commands: [] };
-    const vscode = { window: { showOpenDialog: async options => { state.dialogs.push(options); return state.selected; } },
+    state.workspace = { isTrusted: true, workspaceFolders: [{ name: 'workspace', uri: { scheme: 'file', fsPath: folder, toString: () => 'file:///workspace' } }] };
+    const vscode = { env: {}, workspace: state.workspace, window: { showOpenDialog: async options => { state.dialogs.push(options); return state.selected; } },
         Uri: { file: fsPath => ({ fsPath }) }, commands: { executeCommand: async (...args) => state.commands.push(args) } };
     const api = {};
     vm.runInNewContext(ts.transpileModule(fs.readFileSync(source, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
@@ -37,10 +38,29 @@ test('native dialog grants persist; JSON round trips preserve binary files witho
     assert.deepEqual((await next('file', { rootId: grant.id, op: 'search', query: 'BYTES' })).files, ['nested/bytes.bin']);
     await next('file', { ...args, op: 'reveal' });
     assert.equal(state.commands[0][0], 'revealFileInOS');
+    await next('file', { ...args, op: 'reveal', mode: 'open' });
+    assert.equal(state.commands[1][0], 'vscode.open');
+    assert.equal(state.commands[1][1].fsPath, path.join(folder, 'nested', 'bytes.bin'));
     await next('file', { ...args, op: 'delete' });
     assert.equal((await next('file', { ...args, op: 'stat' })).exists, false);
     await next('revokeFolder', { rootId: grant.id });
     await assert.rejects(next('file', { ...args, op: 'read' }), /not granted/);
+});
+
+test('workspace listing is grant-free and selection revalidates membership and trust', async t => {
+    const { state, call, folder } = fixture(t);
+    const listed = await call('workspaceFolders');
+    assert.equal(listed[0].name, 'workspace');
+    assert.equal(listed[0].path, folder);
+    assert.equal((await call('roots')).length, 0);
+    await assert.rejects(call('selectWorkspaceFolder', { uri: 'file:///outside', path: folder }), /no longer/);
+    const grant = await call('selectWorkspaceFolder', { uri: listed[0].uri });
+    assert.equal(grant.path, fs.realpathSync(folder));
+    assert.equal(state.dialogs.length, 0);
+    state.workspace.workspaceFolders = [];
+    await assert.rejects(call('selectWorkspaceFolder', { uri: listed[0].uri }), /no longer/);
+    state.workspace.isTrusted = false;
+    await assert.rejects(call('workspaceFolders'), /trusted local/);
 });
 
 test('cancel, closed views, remote URIs and ungranted paths never acquire grants', async t => {

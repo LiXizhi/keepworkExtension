@@ -19,6 +19,12 @@ export function brainEntryURL(override = ''): URL {
 export function brainLocale(setting: string, language: string): 'en' | 'zh-CN' {
     return setting === 'zh-CN' || setting === 'auto' && /^zh\b/i.test(language) ? 'zh-CN' : 'en';
 }
+/** Carry the editor locale into standalone AIChat without bridge credentials. */
+export function brainBrowserURL(entry: URL, locale: 'en' | 'zh-CN'): URL {
+    const url = new URL(entry.href);
+    url.searchParams.set('locale', locale);
+    return url;
+}
 const labels = {
     en: { loading: 'Loading Second Brain…', retry: 'Retry', status: 'MCP status', browser: 'Open in browser', connected: 'MCP connected', disconnected: 'MCP unavailable — retry or check status', timeout: 'AIChat did not respond. Retry or open in browser.', update: 'This AIChat page needs the sidebar update. Retry after the website is updated.' },
     'zh-CN': { loading: '正在加载第二大脑…', retry: '重试', status: 'MCP 状态', browser: '在浏览器打开', connected: 'MCP 已连接', disconnected: 'MCP 不可用，请重试或查看状态', timeout: 'AIChat 未响应，请重试或在浏览器打开。', update: '此 AIChat 页面尚未支持侧栏，请在网站更新后重试。' },
@@ -72,7 +78,7 @@ html,body{height:100%;margin:0;padding:0;overflow:hidden;background:var(--vscode
      }
      if (msg.type === 'host:native-request' && ready && event.source === appWindow && config?.nativeHost?.session === msg.session) {
        if (typeof msg.requestId !== 'string' || msg.requestId.length > 100 || nativeRequests.size >= 32 || nativeRequests.has(msg.requestId)) return;
-       if (!['roots','pickFolder','revokeFolder','file'].includes(msg.method)) return;
+       if (!['roots','pickFolder','revokeFolder','file','workspaceFolders','selectWorkspaceFolder'].includes(msg.method)) return;
        nativeRequests.set(msg.requestId, event.source);
        vscode.postMessage({type:'native-request', requestId:msg.requestId, session:msg.session, method:msg.method, args:msg.args});
      }
@@ -140,7 +146,7 @@ export function registerSecondBrain(context: vscode.ExtensionContext): void {
             experience: 'simple', locale: locale(), theme: theme(), chat: 'keep',
             sessionPersistence: { localOnly: true },
             vscodeHost: { version: 1, models: true, session: nativeSession },
-            nativeHost: !vscode.env.remoteName ? { version: 1, files: true, session: nativeSession } : undefined,
+            nativeHost: !vscode.env.remoteName ? { version: 1, files: true, workspaceFolders: true, session: nativeSession } : undefined,
             localMcp: { url: mcpBaseUrl(), enabled: health.ok, token: health.ok && health.requireAuth ? readToken() || '' : '' },
         } });
     }
@@ -191,7 +197,7 @@ export function registerSecondBrain(context: vscode.ExtensionContext): void {
                 if (message?.type === 'fallback' && selectedEntry.origin !== 'https://keepwork.com') await render(view, true);
                 if (message?.type === 'status') await vscode.commands.executeCommand('keepwork.showMcpServer');
                 if (message?.type === 'browser') {
-                    try { await vscode.env.openExternal(vscode.Uri.parse(selectedEntry.href)); }
+                    try { await vscode.env.openExternal(vscode.Uri.parse(brainBrowserURL(selectedEntry, locale()).href)); }
                     catch (error) { vscode.window.showErrorMessage(String(error)); }
                 }
             });

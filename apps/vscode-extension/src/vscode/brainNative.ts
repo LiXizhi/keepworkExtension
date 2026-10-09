@@ -10,6 +10,14 @@ export function createBrainNative(context: vscode.ExtensionContext) {
         if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid native arguments');
         if (!active()) throw new Error('Native view closed');
         if (method === 'roots') return files.roots();
+        if (method === 'workspaceFolders' || method === 'selectWorkspaceFolder') {
+            if (vscode.env.remoteName || !vscode.workspace.isTrusted) throw new Error('Open a trusted local VS Code workspace');
+            const folders = (vscode.workspace.workspaceFolders || []).filter(folder => folder.uri.scheme === 'file');
+            if (method === 'workspaceFolders') return folders.map(folder => ({ uri: folder.uri.toString(), name: folder.name, path: folder.uri.fsPath }));
+            const folder = folders.find(folder => folder.uri.toString() === args.uri);
+            if (!folder) throw new Error('Folder is no longer in the VS Code workspace');
+            return files.grant(folder.uri.fsPath);
+        }
         if (method === 'revokeFolder') return files.revoke(args.rootId);
         if (method === 'pickFolder') {
             if (picking) throw new Error('Folder dialog already open');

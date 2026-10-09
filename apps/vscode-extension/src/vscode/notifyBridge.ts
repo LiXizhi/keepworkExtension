@@ -82,16 +82,18 @@ export function startNotifyBridge(): NotifyBridgeHandle {
         try {
             const raw = await readBody(req);
             const body = raw ? JSON.parse(raw) as { title?: string; body?: string; openUrl?: string } : {};
-            const title = String(body.title || '日历提醒').slice(0, 200);
+            const chinese = /^zh\b/i.test(vscode.env.language);
+            const openCalendar = chinese ? '打开日历' : 'Open calendar';
+            const title = String(body.title || (chinese ? '日历提醒' : 'Calendar reminder')).slice(0, 200);
             const detail = String(body.body || '').slice(0, 300);
             const openUrl = String(body.openUrl || '').trim();
             const safeUrl = isSafeOpenUrl(openUrl) ? openUrl : '';
             sendJson(res, 200, { ok: true });
             void vscode.window.showInformationMessage(
                 `${title}${detail ? `\n${detail}` : ''}`,
-                '打开日历',
+                openCalendar,
             ).then((action) => {
-                if (action === '打开日历' && safeUrl) {
+                if (action === openCalendar && safeUrl) {
                     return vscode.env.openExternal(vscode.Uri.parse(safeUrl));
                 }
                 return undefined;

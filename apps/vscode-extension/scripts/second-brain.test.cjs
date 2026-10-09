@@ -48,7 +48,7 @@ test('sidebar restores rather than forcing new chats; credentials are sent only 
     state.theme(); await new Promise(resolve => setImmediate(resolve));
     assert.equal(state.htmlWrites, writes, 'theme update preserves iframe');
     await state.receive({ type: 'browser', url: 'https://attacker.invalid' });
-    assert.equal(state.opened[0], state.api?.SECOND_BRAIN_URL || 'https://keepwork.com/chat');
+    assert.equal(state.opened[0], 'https://keepwork.com/chat?locale=en');
     state.dispose(); await state.receive({ type: 'ready' }); assert.equal(state.starts, 2);
 });
 test('development entry accepts only bare loopback HTTP URLs and locale follows VS Code', async () => {
@@ -92,6 +92,11 @@ test('wrapper ignores unrelated frames and origins and requires advertised capab
     listener({ source: {}, origin: win.origin, data: { type: 'native-result', requestId: 'file-1', session: 'native-session', ok: true, result: null } });
     assert.equal(outbound.at(-1)[0].type, 'host:native-result');
     assert.equal(outbound.at(-1)[0].result, null);
+    for (const method of ['workspaceFolders', 'selectWorkspaceFolder']) {
+        listener({ source: frameWindow, origin: 'https://keepwork.com', data: { ...native, requestId: method, method, args: { uri: 'file:///workspace' } } });
+        assert.equal(posted.at(-1).method, method);
+        assert.equal(posted.at(-1).args.uri, 'file:///workspace');
+    }
     listener({ source: {}, origin: win.origin, data: { type: 'second-brain-config', config: { locale: 'en', vscodeHost: { version: 1, models: true, session: 'lm-session' } }, labels: {} } });
     const lm = { channel: msg.channel, type: 'host:vscode-lm-request', requestId: 'lm-1', session: 'lm-session', method: 'chat', args: { messages: [] } };
     const beforeModel = posted.length;
@@ -133,6 +138,7 @@ test('native requests use the current view session independently of MCP; stale a
     const config = state.messages.at(-1).config;
     assert.equal(config.localMcp.enabled, false);
     assert.equal(config.nativeHost.files, true);
+    assert.equal(config.nativeHost.workspaceFolders, true);
     const request = { type: 'native-request', session: config.nativeHost.session, requestId: 'test', method: 'pickFolder', args: {} };
     await state.receive(request);
     assert.equal(state.messages.at(-1).result.path, 'C:/native');
@@ -150,4 +156,12 @@ test('native requests use the current view session independently of MCP; stale a
     state.dispose();
     await state.receive(request);
     assert.equal(state.nativeCalls.length, 1);
+});
+
+test('standalone launch carries English/Chinese locale without modifying the entry URL', async () => {
+    const { api } = await fixture();
+    const entry = api.brainEntryURL();
+    assert.equal(api.brainBrowserURL(entry, 'en').search, '?locale=en');
+    assert.equal(api.brainBrowserURL(entry, 'zh-CN').search, '?locale=zh-CN');
+    assert.equal(entry.search, '');
 });
