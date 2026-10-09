@@ -94,8 +94,31 @@ async function extractNodeArchive(archiveFile, extractDir) {
   fs.rmSync(extractDir, { recursive: true, force: true });
   fs.mkdirSync(extractDir, { recursive: true });
   if (archiveFile.endsWith('.zip')) {
+    // Git Bash's tar treats a Windows drive prefix (for example D:\\) as a
+    // remote archive host. Use the native extractor on Windows instead.
+    if (process.platform === 'win32') {
+      const quotePowerShell = (value) => `'${String(value).replaceAll("'", "''")}'`;
+      const command = [
+        'Expand-Archive',
+        '-LiteralPath', quotePowerShell(archiveFile),
+        '-DestinationPath', quotePowerShell(extractDir),
+        '-Force',
+      ].join(' ');
+      const result = spawnSync('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        command,
+      ], { stdio: 'inherit' });
+      if (result.error || result.status !== 0) {
+        throw new Error(`PowerShell failed to extract ${archiveFile}: ${result.error?.message || `exit ${result.status}`}`);
+      }
+      return;
+    }
     const result = spawnSync('tar', ['-xf', archiveFile, '-C', extractDir], { stdio: 'inherit' });
-    if (result.status !== 0) throw new Error(`system tar failed to extract ${archiveFile}`);
+    if (result.error || result.status !== 0) {
+      throw new Error(`system tar failed to extract ${archiveFile}: ${result.error?.message || `exit ${result.status}`}`);
+    }
   } else {
     await tar.x({ file: archiveFile, cwd: extractDir, gzip: true, strict: true });
   }
