@@ -1,5 +1,10 @@
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
+if (process.platform !== 'win32') {
+  const helper = path.join(__dirname, '..', 'node_modules', 'node-pty', 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper');
+  if (fs.existsSync(helper)) fs.chmodSync(helper, 0o755);
+}
 if (process.argv.includes('--child')) {
   const pty = require('node-pty');
   const child = pty.spawn(process.platform === 'win32' ? 'cmd.exe' : '/bin/sh', [], { cols: 80, rows: 24, cwd: process.cwd(), env: process.env });

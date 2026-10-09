@@ -26,7 +26,10 @@ async function main() {
     const packaged = process.env.AICHAT_PACKAGED_EXE;
     application = await _electron.launch({ executablePath: packaged || require('electron'),
       args: [...(packaged ? [] : [path.resolve(__dirname, '..')]), `--user-data-dir=${path.join(dir, 'profile')}`], env, timeout: 30000 });
-    assert.equal(await application.evaluate(({ app }) => app.getPath('userData')), path.join(dir, 'profile'));
+    assert.equal(
+      fs.realpathSync(await application.evaluate(({ app }) => app.getPath('userData'))),
+      fs.realpathSync(path.join(dir, 'profile')),
+    );
     const page = await application.firstWindow();
     if (packaged) {
       await page.route('https://keepwork.com/**', async route => {

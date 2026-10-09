@@ -1,13 +1,17 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const runtime = process.env.AICHAT_MCP_RUNTIME_DIR;
+const modelRuntime = process.env.KP_LOCAL_MODEL_RUNTIME_DIR;
 module.exports = {
   appId: 'com.keepwork.aichat-desktop', productName: 'KeepWork 第二大脑',
   icon: 'assets/keepwork.png', directories: { output: 'release' }, files: ['dist/**/*', 'package.json'],
   // node-pty 1.1 ships Node-API prebuilds; validate them inside Electron instead
   // of requiring every installer builder to compile a second copy with MSVC.
   asar: true, asarUnpack: ['node_modules/node-pty/**/*'], npmRebuild: false,
-  extraResources: runtime ? [{ from: path.resolve(runtime), to: 'mcp-runtime' }] : [],
+  extraResources: [
+    ...(runtime ? [{ from: path.resolve(runtime), to: 'mcp-runtime' }] : []),
+    ...(modelRuntime ? [{ from: path.resolve(modelRuntime), to: 'local-model-runtime' }] : []),
+  ],
   beforePack: async context => {
     require('node:child_process').execFileSync(process.execPath, [path.join(__dirname, 'scripts/native-smoke.cjs')], { stdio: 'inherit' });
     if (!runtime) throw new Error('AICHAT_MCP_RUNTIME_DIR must point to the tested native MCP runtime');
@@ -15,11 +19,15 @@ module.exports = {
     const arch = context.arch === 1 ? 'x64' : context.arch === 3 ? 'arm64' : 'unsupported';
     const m = JSON.parse(fs.readFileSync(path.join(runtime, 'runtime.json'), 'utf8'));
     if (m.platform !== platform || m.arch !== arch || m.product !== 'keepwork-mcp-node-runtime') throw new Error('Bundled MCP runtime target mismatch');
+    if (!modelRuntime) throw new Error('KP_LOCAL_MODEL_RUNTIME_DIR must point to the tested local-model runtime');
+    const local = JSON.parse(fs.readFileSync(path.join(modelRuntime, 'runtime.json'), 'utf8'));
+    if (local.platform !== platform || local.arch !== arch || local.product !== 'keepwork-local-model-node-runtime' || local.entry !== 'app/dist/src/cli.js') throw new Error('Bundled local-model runtime target mismatch');
   },
-  forceCodeSigning: process.env.AICHAT_PUBLIC_RELEASE === '1',
-  win: { target: [{ target: 'nsis', arch: ['x64'] }], artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', verifyUpdateCodeSignature: true },
+  afterPack: path.join(__dirname, 'scripts/after-pack.cjs'),
+  win: { target: [{ target: 'nsis', arch: ['x64'] }, { target: 'zip', arch: ['x64'] }], artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', verifyUpdateCodeSignature: true },
   nsis: { oneClick: false, perMachine: false, allowElevation: false, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
-  mac: { target: ['dmg', 'zip'], category: 'public.app-category.productivity', hardenedRuntime: true, notarize: process.env.AICHAT_PUBLIC_RELEASE === '1',
+  mac: { target: ['zip'], category: 'public.app-category.productivity', hardenedRuntime: true,
+    entitlements: 'assets/entitlements.mac.plist', entitlementsInherit: 'assets/entitlements.mac.plist',
     artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', extendInfo: { NSMicrophoneUsageDescription: 'AIChat uses the microphone for voice conversations.', NSCameraUsageDescription: 'AIChat uses the camera when you start a video conversation.' } },
   publish: [{ provider: 'generic', url: `https://cdn.keepwork.com/keepwork/aichat-desktop/${process.platform}-${process.arch}/` }],
 };

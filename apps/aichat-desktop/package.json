@@ -1,7 +1,7 @@
 {
   "name": "aichat-desktop",
   "productName": "KeepWork 第二大脑",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "AIChat native workspaces and Keepwork MCP companion",
   "author": "Keepwork",
@@ -13,8 +13,8 @@
     "check": "tsc -p tsconfig.json --noEmit && npm test && npm run build",
     "start": "npm run build && electron .",
     "pack": "npm run build && electron-builder --dir",
-    "make:win": "npm run build && electron-builder --win nsis --x64",
-    "make:mac": "npm run build && electron-builder --mac dmg zip",
+    "make:win": "npm run build && electron-builder --win nsis zip --x64",
+    "make:mac": "npm run build && electron-builder --mac zip",
     "postinstall": "node scripts/native-smoke.cjs"
   },
   "dependencies": {

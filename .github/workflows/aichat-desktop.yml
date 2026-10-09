@@ -1,9 +1,11 @@
 name: Build KeepWork 第二大脑
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish signed installers and promote desktop updates
+        description: Publish installers and promote desktop updates
         type: boolean
         default: false
 permissions:
@@ -16,6 +18,7 @@ defaults:
     shell: bash
 jobs:
   build:
+    environment: aichat-desktop-production
     strategy:
       fail-fast: false
       matrix:
@@ -32,41 +35,63 @@ jobs:
         with: { node-version: '22.23.2', architecture: '${{ matrix.arch }}' }
       - run: npm ci
       - run: npm ci --prefix apps/mcp-runtime
+      - run: npm ci --prefix apps/local-model-runtime
       - run: npm ci --prefix apps/aichat-desktop
       - run: npm run check:shared
       - run: npm run check --prefix apps/aichat-desktop
       - run: node apps/aichat-desktop/scripts/native-smoke.cjs
-      - name: Verify Electron bridge against AIChat source adapters
-        run: |
-          git clone --depth 1 https://code.kp-para.cn/paracraft/apps "$RUNNER_TEMP/aichat-source"
-          export AICHAT_SOURCE_DIR="$RUNNER_TEMP/aichat-source/official/apps/tools/AIChat"
-          node apps/aichat-desktop/scripts/electron-smoke.cjs
       - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
       - run: npm run smoke --prefix apps/mcp-runtime
+      - run: npm run runtime:stage --prefix apps/local-model-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
+      - run: npm run runtime:smoke --prefix apps/local-model-runtime -- runtime-staging/${{ matrix.runtime }}
       - name: Set runtime path
-        run: echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+        run: |
+          echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+          echo "KP_LOCAL_MODEL_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/local-model-runtime/runtime-staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+      - name: Configure signed Mac release
+        if: matrix.platform == 'darwin' && (inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]')))
+        env:
+          KP_MAC_CSC_LINK: ${{ secrets.KP_MAC_CSC_LINK }}
+          KP_MAC_CSC_KEY_PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
+          KP_APPLE_ID: ${{ secrets.KP_APPLE_ID }}
+          KP_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.KP_APPLE_APP_SPECIFIC_PASSWORD }}
+          KP_APPLE_TEAM_ID: ${{ secrets.KP_APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$KP_MAC_CSC_LINK" && -n "$KP_MAC_CSC_KEY_PASSWORD" && -n "$KP_APPLE_ID" && -n "$KP_APPLE_APP_SPECIFIC_PASSWORD" && -n "$KP_APPLE_TEAM_ID" ]]; then
+            echo "CSC_LINK=$KP_MAC_CSC_LINK" >> "$GITHUB_ENV"
+            echo "CSC_KEY_PASSWORD=$KP_MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_ID=$KP_APPLE_ID" >> "$GITHUB_ENV"
+            echo "APPLE_APP_SPECIFIC_PASSWORD=$KP_APPLE_APP_SPECIFIC_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$KP_APPLE_TEAM_ID" >> "$GITHUB_ENV"
+            echo "KP_MAC_RELEASE_SIGNED=true" >> "$GITHUB_ENV"
+          else
+            echo "Apple signing secrets unavailable; publishing Mac with a coherent ad-hoc signature. System Settings approval may be required."
+            echo "KP_MAC_RELEASE_SIGNED=false" >> "$GITHUB_ENV"
+          fi
       - name: Package desktop
         working-directory: apps/aichat-desktop
-        env:
-          AICHAT_PUBLIC_RELEASE: ${{ inputs.publish && '1' || '0' }}
-          CSC_LINK: ${{ matrix.platform == 'win32' && secrets.WINDOWS_CSC_LINK || secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ matrix.platform == 'win32' && secrets.WINDOWS_CSC_KEY_PASSWORD || secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [[ '${{ matrix.platform }}' == win32 ]]; then npm run make:win; else npm run make:mac -- --${{ matrix.arch }}; fi
+      - name: Verify Mac application signature and notarization
+        if: matrix.platform == 'darwin'
+        working-directory: apps/aichat-desktop
+        run: |
+          app=$(find release -maxdepth 2 -name '*.app' -print -quit)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          if [[ '${{ inputs.publish }}' == 'true' && "$KP_MAC_RELEASE_SIGNED" == 'true' ]]; then
+            spctl --assess --type execute --verbose=4 "$app"
+            xcrun stapler validate "$app"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             apps/aichat-desktop/release/*.exe
-            apps/aichat-desktop/release/*.dmg
             apps/aichat-desktop/release/*.zip
             apps/aichat-desktop/release/*.blockmap
             apps/aichat-desktop/release/latest*.yml
   publish:
-    if: inputs.publish
+    if: inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]'))
     needs: build
     runs-on: ubuntu-latest
     environment: aichat-desktop-production

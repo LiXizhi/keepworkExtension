@@ -20,8 +20,9 @@ The terminal prints the actual source URL. An explicit `AICHAT_DESKTOP_DEV_URL` 
 priority for an existing Live Server. Missing source fails visibly instead of opening
 the published website. The owned HTTP server stops on Quit. Closing the window destroys
 the page and leaves that server running so the tray can open a new window.
-The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arch>` if
-present; `AICHAT_MCP_RUNTIME_DIR` overrides it. No runtime is required for native files
+The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arch>` and
+`apps/local-model-runtime/runtime-staging/<platform>-<arch>` if present;
+`AICHAT_MCP_RUNTIME_DIR` and `KP_LOCAL_MODEL_RUNTIME_DIR` override them. No runtime is required for native files
 or user terminals. Use the tray menu's **退出** before starting a fresh debugging session.
 These tasks build only the desktop shell, never the AIChat website.
 
@@ -29,6 +30,8 @@ From this repository, install root dependencies and `npm ci --prefix apps/aichat
 Run `npm run check --prefix apps/aichat-desktop` and
 `node apps/aichat-desktop/scripts/native-smoke.cjs` on each target OS. Native dependencies
 must load inside the pinned Electron runtime, not merely the system Node executable.
+Run `scripts/electron-smoke.cjs` from a workspace that also has the AIChat source checkout;
+the release workflow does not clone that private cross-repository dependency.
 
 Use `npm start --prefix apps/aichat-desktop` for the live website. For local AIChat source,
 set `AICHAT_DESKTOP_DEV_URL` to the actual loopback Live Server URL. This override is
@@ -111,15 +114,22 @@ stopped by this app; its owning application must restart it to update that runni
 The stable runtime feed is `https://cdn.keepwork.com/keepwork/mcp-stable/<target>.json`.
 Archives live in immutable version directories. The every-main six-file feed is unchanged.
 Desktop updater feeds are under `https://cdn.keepwork.com/keepwork/aichat-desktop/<platform>-<arch>/`.
+Each desktop package bundles both the MCP Node runtime and the `local-model` Node runtime
+(including the signed model package). Each target also publishes `latest-client.json` for the AIChat website's single client-download
+button. That manifest always points to the target ZIP; installer and updater artifacts remain
+available in the same directory but are not exposed by the website download flow.
 
 ## Release prerequisites
 
 The **Build KeepWork 第二大脑** workflow builds Windows x64 and both Mac architectures. Default
-runs retain internal artifacts only. Public publication requires its publish input and the
-`aichat-desktop-production` environment. Configure Qiniu credentials, Windows `WINDOWS_CSC_LINK`
-and `WINDOWS_CSC_KEY_PASSWORD`, Mac `MAC_CSC_LINK` and `MAC_CSC_KEY_PASSWORD`, plus Apple
-notarization credentials `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` as CI secrets.
-Public builds enforce signing; unsigned Mac builds do not support production auto-update.
+runs retain internal artifacts only; Mac development ZIPs receive a coherent ad-hoc signature.
+Public publication requires its publish input and the `aichat-desktop-production` environment.
+Configure Qiniu credentials plus `KP_MAC_CSC_LINK`, `KP_MAC_CSC_KEY_PASSWORD`, `KP_APPLE_ID`,
+`KP_APPLE_APP_SPECIFIC_PASSWORD`, and `KP_APPLE_TEAM_ID` as environment secrets. Public Mac
+artifacts pass strict code-signature, Gatekeeper, and notarization-ticket checks when Apple secrets
+are configured. Without them, the workflow publishes a coherent ad-hoc-signed Mac ZIP; macOS users
+may need to approve it in System Settings. Windows publishing and bundled `local-model` remain
+mandatory gates.
 
 The **Coordinated Keepwork stable release** workflow requires matching committed MCP/VSIX
 versions and a `keepwork-v<version>` tag or manual dispatch. It publishes the npm CLI and
