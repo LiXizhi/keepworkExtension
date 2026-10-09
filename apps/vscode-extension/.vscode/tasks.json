@@ -2,6 +2,17 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "keepwork VS code extension:Run",
+      "type": "shell",
+      "command": "code",
+      "args": [
+        "--new-window",
+        "--extensionDevelopmentPath=${workspaceFolder}"
+      ],
+      "dependsOn": "VS Code Extension: Build",
+      "problemMatcher": []
+    },
+    {
       "type": "shell",
       "command": "npm run compile:only",
       "problemMatcher": "$tsc",

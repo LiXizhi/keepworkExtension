@@ -1,7 +1,7 @@
 {
   "name": "keepwork",
-  "displayName": "Keepwork",
-  "description": "Clone Keepwork repos, open files on keepwork.com, and run a local MCP daemon for AIChat terminal/grep",
+  "displayName": "Second brain(keepwork)",
+  "description": "Your digital brain powered by LLM wiki and tools.",
   "version": "0.1.32",
   "publisher": "Xizhi",
   "license": "MIT",
@@ -10,7 +10,7 @@
     "url": "https://github.com/LiXizhi/keepworkExtension.git"
   },
   "engines": {
-    "vscode": "^1.85.0",
+    "vscode": "^1.106.0",
     "node": ">=18.14.1"
   },
   "categories": [
@@ -90,7 +90,7 @@
       ]
     },
     "configuration": {
-      "title": "Keepwork",
+      "title": "Second brain(keepwork)",
       "properties": {
         "keepwork.mcp.connectCopilot": {
           "type": "boolean",
@@ -135,7 +135,7 @@
       }
     },
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "keepworkSecondBrain",
           "title": "%secondBrain.title%",

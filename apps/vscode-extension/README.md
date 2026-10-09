@@ -1,6 +1,12 @@
-# Keepwork for VS Code
+# Second brain(keepwork)
 
-This extension connects VS Code or Cursor to Keepwork and starts the shared Keepwork MCP daemon for local terminal, file, Paracraft and reminder capabilities.
+**Your digital brain powered by LLM wiki and tools.**
+
+Second brain(keepwork) brings a personal AI workspace into VS Code and Cursor, with your second brain as the core context for AI assistance. Use LLM wiki to organize knowledge, connect AI models and agents, and work with HTML tools for students, teachers and everyday life.
+
+The embedded AIChat workspace brings knowledge, learning and practical tasks together. Local terminal, file, Paracraft and reminder capabilities connect that workspace to your computer through the shared Keepwork MCP daemon. The broader AIChat ecosystem extends to browsers, tablets and other applications, helping you build and use a digital brain across your daily activities.
+
+The extension retains its Marketplace ID, `Xizhi.keepwork`, and existing `keepwork.*` commands and settings for compatibility.
 
 The extension is one application in the `keepworkExtension` repository. Shared runtime code lives in the repository-level `src/core` and `src/mcp` directories. The Windows web companion is built separately from `apps/local-helper` and is never included in the VSIX.
 
@@ -26,7 +32,7 @@ See the [repository README](https://github.com/LiXizhi/keepworkExtension#readme)
 
 ## Second Brain / 第二大脑
 
-Use **Keepwork: Open Second Brain** for AIChat's simple interface in the Activity Bar.
+Use **Second brain(keepwork): Open Second Brain** for AIChat's interface in the right Secondary Side Bar.
 Work with local knowledge using an existing AI CLI, with optional Keepwork login.
 See [setup, development and verification](docs/second-brain.md). The hosted UI needs
 internet; second-brain skills remain in AIChat.

@@ -1,6 +1,6 @@
 {
   "secondBrain.title": "Second Brain",
-  "secondBrain.open": "Keepwork: Open Second Brain",
-  "secondBrain.developmentUrl": "Development AIChat entry (loopback HTTP only, no query or credentials). Empty uses hosted AIChat.",
+  "secondBrain.open": "Second brain(keepwork): Open Second Brain",
+  "secondBrain.developmentUrl": "Development AIChat entry (loopback HTTP only, no query or credentials). Empty uses local AIChat source in Extension Development Hosts, otherwise keepwork.com/chat; unavailable local entries fall back to hosted AIChat.",
   "secondBrain.language": "Second Brain interface language. Auto follows VS Code."
 }

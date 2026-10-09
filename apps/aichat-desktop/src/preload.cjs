@@ -16,6 +16,9 @@ if (process.isMainFrame) {
       const shadow = host.attachShadow({ mode: 'closed' });
       const style = document.createElement('style');
       style.textContent = ':host{font:12px system-ui;color:var(--chrome-text,#1a1a2e)}header{height:34px;display:flex;align-items:center;gap:4px;background:var(--chrome-bg,#f2f3f7);-webkit-app-region:drag;padding:0 145px 0 10px;box-sizing:border-box}img{width:18px;height:18px;margin-right:8px}button{border:0;background:transparent;color:inherit;font:inherit;padding:5px 10px;border-radius:4px;-webkit-app-region:no-drag;cursor:pointer;white-space:nowrap}button:hover,button:focus-visible{background:var(--chrome-hover,#e2e6ef)}.center{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;min-width:0}.title{white-space:nowrap}.address{color:var(--chrome-address,#4a4a5a);background:var(--chrome-pill,#e2e6ef)}.refresh{width:28px;height:28px;padding:5px;display:grid;place-items:center}.refresh svg{width:16px;height:16px}@media(max-width:850px){.title{display:none}}';
+      // Paint the surface's upward shadow in native chrome: page shadows sit
+      // beneath this fixed title bar and cannot otherwise reach its background.
+      style.textContent += 'header::after{content:"";position:absolute;left:var(--chrome-surface-start,100%);right:0;bottom:0;height:5px;pointer-events:none;background:linear-gradient(to top,color-mix(in srgb,var(--chrome-text) 7%,transparent),transparent)}';
       const header = document.createElement('header');
       if (config.platform === 'darwin') header.style.paddingLeft = '80px';
       const icon = document.createElement('img'); icon.src = config.icon; icon.alt = ''; header.append(icon);
@@ -51,17 +54,38 @@ if (process.isMainFrame) {
       layout.textContent = 'body{height:calc(100vh - 34px)!important;transform:translateY(34px);position:relative;box-sizing:border-box!important}.app-shell{height:calc(100vh - 34px)!important}';
       document.head.append(layout); document.documentElement.append(host);
       let lastTheme;
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 1;
+      const paint = canvas.getContext('2d', { willReadFrequently: true });
+      const hexColor = value => {
+        paint.clearRect(0, 0, 1, 1);
+        paint.fillStyle = value;
+        paint.fillRect(0, 0, 1, 1);
+        return '#' + [...paint.getImageData(0, 0, 1, 1).data].slice(0, 3).map(v => v.toString(16).padStart(2, '0')).join('');
+      };
       const syncTheme = () => {
         const theme = document.body.classList.contains('light') ? 'light' : 'dark';
-        if (theme === lastTheme) return;
-        lastTheme = theme;
-        const values = theme === 'light'
-          ? ['#1a1a2e', '#f2f3f7', '#e2e6ef', '#4a4a5a', '#e2e6ef']
-          : ['#d4d4dc', '#18181f', '#34343e', '#aebdd6', '#22222c'];
+        const css = getComputedStyle(document.body);
+        const value = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+        const roundedSurface = document.body.dataset.experience === 'simple' && window.innerWidth > 768
+          && !document.body.matches('.aichat-layout-embed, .aichat-layout-minimal, .aichat-layout-thin, .aichat-layout-pet');
+        host.style.setProperty('--chrome-surface-start', roundedSurface ? `calc(${value('--experience-rail-width', '56px')} + 14px)` : '100%');
+        const values = [value('--text-primary', '#1a1a2e'),
+          value('--experience-rail-bg', value('--bg-sidebar', '#f2f3f7')),
+          value('--bg-pill-hover', '#e2e6ef'), value('--text-secondary', '#4a4a5a'), value('--bg-pill', '#e2e6ef')];
         ['text', 'bg', 'hover', 'address', 'pill'].forEach((key, i) => host.style.setProperty('--chrome-' + key, values[i]));
-        void call('theme', { theme }).catch(() => {});
+        const color = hexColor(getComputedStyle(header).backgroundColor);
+        const symbolColor = hexColor(getComputedStyle(host).color);
+        const signature = JSON.stringify([theme, color, symbolColor]);
+        if (signature === lastTheme) return;
+        lastTheme = signature;
+        void call('theme', { theme, color, symbolColor }).catch(() => {});
       };
-      new MutationObserver(syncTheme).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      new MutationObserver(syncTheme).observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-experience'] });
+      for (const event of ['aichat:theme-changed', 'aichat:skin-changed', 'aichat:experience-changed']) document.addEventListener(event, syncTheme);
+      // A custom skin's external stylesheet may finish after skin-changed.
+      document.addEventListener('load', event => { if (event.target?.tagName === 'LINK') syncTheme(); }, true);
+      window.addEventListener('resize', syncTheme);
       syncTheme();
     } catch { /* Untrusted/offline documents never receive native chrome controls. */ }
   }, { once: true });

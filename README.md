@@ -36,7 +36,7 @@ This repository contains the shared Keepwork MCP runtime and its separately pack
 ## Repository layout
 
 - `src/core` and `src/mcp`: shared local capabilities and MCP server
-- `apps/vscode-extension`: VS Code/Cursor extension, embedded CLI launcher and VSIX packaging
+- `apps/vscode-extension`: Second brain(keepwork) for VS Code/Cursor, embedded CLI launcher and VSIX packaging
 - `apps/local-helper`: Windows tray helper and unified MCP + local-model installer packaging
 - `apps/aichat-desktop`: Windows/macOS AIChat window, native folder grants and PTY, independently updated MCP; see [desktop setup and releases](apps/aichat-desktop/README.md)
 - `apps/local-model-runtime`: staged Windows x64 model service bundled only by Local Helper; never part of the VSIX
@@ -46,7 +46,7 @@ Each application owns its manifest, dependencies, entry points, tests and build 
 
 The VS Code extension provides only editor and MCP capabilities on port `8089`. The Windows x64 KP Local Helper installer provides the same MCP service on `8089` and supervises the separate local-model process on `18089`. A model change therefore requires a Local Helper version increase and a complete Helper update.
 
-The VS Code extension can clone projects from Keepwork, open files on keepwork.com, and run a **local MCP daemon** so [AIChat](https://keepwork.com/chat) can execute terminal commands and grep on this machine.
+The VS Code extension, **Second brain(keepwork)**, is your digital brain powered by LLM wiki and tools. Its embedded [AIChat](https://keepwork.com/chat) workspace puts a personal second brain at the center of AI assistance, with knowledge workflows and HTML tools for students, teachers and everyday tasks. It also connects to Keepwork projects and runs a **local MCP daemon** for terminal, file and other local capabilities. Its Marketplace ID remains `Xizhi.keepwork`.
 
 ## Features
 

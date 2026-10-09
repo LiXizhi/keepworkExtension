@@ -42,7 +42,7 @@ test('desktop menus are File Edit View Help and expose a serializable page paylo
   assert.equal(h.calls.at(-1), 'https://keepwork.com/chat');
   const payload = vm.runInContext('menuPayload("view")', h.context);
   assert.equal(payload.label, 'View');
-  assert.equal(JSON.stringify(payload.items.filter(item => item.id).map(item => item.id)), JSON.stringify(['toggle-sidebar', 'toggle-files', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'open-settings']));
+  assert.equal(JSON.stringify(payload.items.filter(item => item.id).map(item => item.id)), JSON.stringify(['experience-simple', 'experience-professional', 'theme-light', 'theme-dark', 'toggle-sidebar', 'toggle-files', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'open-settings']));
   for (const item of payload.items) assert.equal(typeof item.click, 'undefined');
   assert.throws(() => vm.runInContext('menuPayload("nope")', h.context), /Invalid menu/);
 });

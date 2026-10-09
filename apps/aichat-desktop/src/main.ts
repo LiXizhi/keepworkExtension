@@ -103,7 +103,7 @@ async function checkUpdates() {
   })().finally(() => { checking = null; });
   return checking;
 }
-const PAGE_COMMANDS = new Set(['new-chat', 'toggle-sidebar', 'toggle-files', 'open-settings']);
+const PAGE_COMMANDS = new Set(['new-chat', 'toggle-sidebar', 'toggle-files', 'open-settings', 'experience-simple', 'experience-professional', 'theme-light', 'theme-dark']);
 const HOST_COMMANDS = new Set(['open-folder', 'reload', 'check-updates', 'toggle-login', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'select-all', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'mcp-status', 'mcp-dashboard', 'mcp-restart', 'open-browser', 'local-source', 'published-site']);
 const MENU_ROLES: Record<string, string> = { undo: 'undo', redo: 'redo', cut: 'cut', copy: 'copy', paste: 'paste', 'select-all': 'selectAll', 'zoom-in': 'zoomIn', 'zoom-out': 'zoomOut', 'zoom-reset': 'resetZoom', fullscreen: 'togglefullscreen' };
 function shortcut(accelerator = '') {
@@ -179,6 +179,12 @@ function desktopMenus() {
       key('CmdOrCtrl+A', '全选', 'select-all'),
     ],
     view: [
+      { id: 'experience-simple', label: '简洁模式', check: true },
+      { id: 'experience-professional', label: '专业模式', check: true },
+      { type: 'separator' },
+      { id: 'theme-light', label: '浅色外观', check: true },
+      { id: 'theme-dark', label: '深色外观', check: true },
+      { type: 'separator' },
       { id: 'toggle-sidebar', label: '历史侧栏', check: true },
       { id: 'toggle-files', label: '文件面板', check: true },
       { type: 'separator' },
@@ -291,7 +297,10 @@ function setupBridge() {
     if (method === 'theme') {
       if (!['light', 'dark'].includes(args.theme)) throw new Error('Invalid theme');
       nativeTheme.themeSource = args.theme;
-      current.setTitleBarOverlay({ ...titlebarColors(args.theme), height: 34 });
+      const colors = titlebarColors(args.theme);
+      if (typeof args.color === 'string' && /^#[0-9a-f]{6}$/i.test(args.color)) colors.color = args.color;
+      if (typeof args.symbolColor === 'string' && /^#[0-9a-f]{6}$/i.test(args.symbolColor)) colors.symbolColor = args.symbolColor;
+      current.setTitleBarOverlay({ ...colors, height: 34 });
       if (settings.theme !== args.theme) { settings.theme = args.theme; atomicJson(settingsFile, settings); }
       return;
     }

@@ -76,7 +76,10 @@ AIChat client (outside this repo): `c:/lxzsrc/maisi/maisi/maisi/webgames/tools/A
 ## MCP surface
 
 The VS Code Second Brain view lives in `apps/vscode-extension/src/vscode/secondBrain.ts`.
-It embeds hosted AIChat using `aichat.external-tool.v1`, with optional Keepwork login.
+It defaults to the right Secondary Side Bar (VS Code 1.106+) and embeds `/chat`
+using `aichat.external-tool.v1`, with optional Keepwork login. Development Hosts
+serve local AIChat source through `brainDevelopment.ts` and fall back to `/chat`;
+the source server is loopback-only, does not build AIChat, and closes on disposal.
 Brain skills and workspace/profile ownership remain in AIChat. Do not introduce copies
 of those skills or a second MCP brain registry. Run `apps/vscode-extension/scripts/second-brain.test.cjs`
 for wrapper security/lifecycle checks; details: `apps/vscode-extension/docs/second-brain.md`.

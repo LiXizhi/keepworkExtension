@@ -49,7 +49,9 @@ main-process URL validation; embedded tools receive neither the title bar nor it
 Clicking a menu posts `aichat.desktop-menu.v1` into the AIChat page, which draws it.
 File starts a chat, opens a folder, reloads, checks updates, toggles login startup and quits.
 Edit is undo, redo and the clipboard. View toggles the history sidebar and file panel, zoom,
-fullscreen and settings. Help shows Keepwork MCP status, Dashboard, restart, the browser
+fullscreen, settings, simple/professional modes and light/dark appearance. The title bar
+shares the page CSS palette, including custom skin colors, and syncs resolved colors to
+native window buttons. Help shows Keepwork MCP status, Dashboard, restart, the browser
 entry, and the local or published page. Page actions stay in AIChat; native actions return
 through `runMenuCommand`. The tray keeps the same service actions when the window is closed.
 The address stays visible (including fullscreen): `localhost:<port>` for local source
