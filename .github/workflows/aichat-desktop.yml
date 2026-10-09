@@ -16,6 +16,7 @@ defaults:
     shell: bash
 jobs:
   build:
+    environment: aichat-desktop-production
     strategy:
       fail-fast: false
       matrix:
@@ -40,16 +41,42 @@ jobs:
       - run: npm run smoke --prefix apps/mcp-runtime
       - name: Set runtime path
         run: echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+      - name: Configure signed Mac release
+        if: matrix.platform == 'darwin' && inputs.publish
+        env:
+          KP_MAC_CSC_LINK: ${{ secrets.KP_MAC_CSC_LINK }}
+          KP_MAC_CSC_KEY_PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
+          KP_APPLE_ID: ${{ secrets.KP_APPLE_ID }}
+          KP_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.KP_APPLE_APP_SPECIFIC_PASSWORD }}
+          KP_APPLE_TEAM_ID: ${{ secrets.KP_APPLE_TEAM_ID }}
+        run: |
+          for name in KP_MAC_CSC_LINK KP_MAC_CSC_KEY_PASSWORD KP_APPLE_ID KP_APPLE_APP_SPECIFIC_PASSWORD KP_APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then echo "Missing required Mac release secret: $name" >&2; exit 1; fi
+          done
+          echo "CSC_LINK=$KP_MAC_CSC_LINK" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=$KP_MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+          echo "APPLE_ID=$KP_APPLE_ID" >> "$GITHUB_ENV"
+          echo "APPLE_APP_SPECIFIC_PASSWORD=$KP_APPLE_APP_SPECIFIC_PASSWORD" >> "$GITHUB_ENV"
+          echo "APPLE_TEAM_ID=$KP_APPLE_TEAM_ID" >> "$GITHUB_ENV"
       - name: Package desktop
         working-directory: apps/aichat-desktop
         run: |
           if [[ '${{ matrix.platform }}' == win32 ]]; then npm run make:win; else npm run make:mac -- --${{ matrix.arch }}; fi
+      - name: Verify Mac application signature and notarization
+        if: matrix.platform == 'darwin'
+        working-directory: apps/aichat-desktop
+        run: |
+          app=$(find release -maxdepth 2 -name '*.app' -print -quit)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          if [[ '${{ inputs.publish }}' == 'true' ]]; then
+            spctl --assess --type execute --verbose=4 "$app"
+            xcrun stapler validate "$app"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             apps/aichat-desktop/release/*.exe
-            apps/aichat-desktop/release/*.dmg
             apps/aichat-desktop/release/*.zip
             apps/aichat-desktop/release/*.blockmap
             apps/aichat-desktop/release/latest*.yml

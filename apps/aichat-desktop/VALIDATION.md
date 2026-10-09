@@ -55,7 +55,7 @@ AIChat verification:
 
 Still requiring release infrastructure or other platforms:
 
-- Signed Windows installation/update and Mac signing, notarization, installation and update
+- Signed Windows installation/update and production Mac notarization/update
   tests. Mac build/test jobs are defined but have not run from this Windows session.
 - A real installed N→N+1 shell update and Mac runtime activation.
 - Live Keepwork login/media permissions/cloud synchronization and full embedded-tool visual QA.
