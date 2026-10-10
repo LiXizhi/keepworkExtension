@@ -2,7 +2,7 @@
   "name": "keepwork",
   "displayName": "Second brain(keepwork)",
   "description": "Your digital brain powered by LLM wiki and tools.",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "publisher": "Xizhi",
   "license": "MIT",
   "repository": {
