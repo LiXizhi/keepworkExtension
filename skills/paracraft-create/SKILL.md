@@ -43,6 +43,16 @@ camera/world coordinates still use the native conversion through `scene:toWorld`
 See [scene-composition.md](references/scene-composition.md) for size anchors and
 [persistence.md](references/persistence.md) for export-scale verification.
 
+## Enter edit mode before modifying
+
+Before any world modification, run `/mode edit` on the selected client through
+`paracraft_cli` with `action:"run_command", params:{command:"/mode edit"}` and
+inspect the result. This is required before building, changing blocks or code,
+running mutating creation scripts/templates, spawning models or writing world
+files. Repeat after opening/reopening or switching worlds, or leaving edit mode.
+Read-only inspection does not require changing mode;
+entering edit mode does not override read-only protection or authorize saving.
+
 ## Start and resume
 
 Load lifecycle subguides before art creation when needed:
