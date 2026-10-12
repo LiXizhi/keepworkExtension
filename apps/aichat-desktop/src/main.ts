@@ -20,6 +20,7 @@ if (!app.commandLine.hasSwitch('user-data-dir')) {
   app.setPath('userData', path.join(app.getPath('appData'), app.isPackaged ? 'AIChat Desktop' : 'aichat-desktop'));
 }
 let win: BrowserWindow | undefined, tray: Tray, quitting = false, runtime: any, modelRuntime: any, files: any;
+let runtimeHeartbeat: ReturnType<typeof setInterval> | undefined;
 let opening: Promise<void> | null = null;
 let appIcon: ReturnType<typeof nativeImage.createFromPath> | undefined;
 const closedTip = `${PRODUCT_NAME}（窗口已关闭，点击重新打开）`;
@@ -86,6 +87,26 @@ function owner() {
   return `desktop:${current.webContents.id}`;
 }
 function show() { void ensureShown(); }
+async function checkRuntimeHeartbeat() {
+  if (disableDevMcp || quitting) return;
+  const supervisors = [
+    ['mcp', runtime],
+    ['local-model', modelRuntime],
+  ] as const;
+  for (const [name, supervisor] of supervisors) {
+    if (!supervisor) continue;
+    try {
+      await supervisor.refresh();
+      if (!['running', 'attached'].includes(supervisor.state?.state)) await supervisor.start();
+    } catch (error) {
+      console.warn(`${name} heartbeat recovery failed:`, error);
+    }
+  }
+}
+function startRuntimeHeartbeat() {
+  runtimeHeartbeat = setInterval(() => { void checkRuntimeHeartbeat(); }, 60_000);
+  runtimeHeartbeat.unref?.();
+}
 function ensureShown() {
   const current = liveWindow();
   if (current) { current.show(); current.focus(); return Promise.resolve(); }
@@ -425,7 +446,7 @@ else {
     const stagedModelRuntime = path.resolve(__dirname, '../../local-model-runtime/runtime-staging', target);
     runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion());
     modelRuntime = new RuntimeSupervisor(path.join(home, 'local-model-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'local-model-runtime') : process.env.KP_LOCAL_MODEL_RUNTIME_DIR || (fs.existsSync(path.join(stagedModelRuntime, 'runtime.json')) ? stagedModelRuntime : ''), app.getVersion(), {}, {
-      product: 'keepwork-local-model-node-runtime', entry: 'app/dist/src/cli.js', port: 18089, updates: false,
+      product: 'keepwork-local-model-node-runtime', entry: 'app/dist/src/cli.js', port: 18089, healthPath: '/v1/health', updates: false,
       matcher: (body: any) => body.service === 'keepwork-local-model' && body.protocolVersion === '1.0.0',
     });
     appIcon = nativeImage.createFromPath(path.join(__dirname, 'keepwork.png'));
@@ -442,7 +463,8 @@ else {
     else await ensureShown();
     if (!disableDevMcp) {
       void runtime.start().then(menu).catch((e: Error) => { updateError = e.message; menu(); });
-      void modelRuntime.start().then(menu).catch((e: Error) => { updateError = e.message; menu(); });
+      void modelRuntime.start().then(menu).catch((e: Error) => { console.error('local-model startup failed:', e); updateError = e.message; menu(); });
+      startRuntimeHeartbeat();
     }
     setTimeout(() => { void checkUpdates(); }, 15000).unref();
     setInterval(() => { void checkUpdates(); }, 6 * 60 * 60 * 1000).unref();
@@ -452,6 +474,7 @@ else {
   app.on('before-quit', event => {
     if (quitting) return;
     event.preventDefault(); quitting = true; clearTerminals(); developmentServer?.close();
+    if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }
     void (async () => {
       try { await runtime?.restarting; await runtime?.starting; } catch { /* Finish shutdown after failed startup. */ }
       await runtime?.stop();

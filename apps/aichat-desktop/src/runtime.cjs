@@ -29,9 +29,9 @@ function validateRuntime(dir, platform, arch, version, options = {}) {
   }
   return m;
 }
-async function probe(port = 8089, matcher = body => body.name === 'keepwork-mcp' && body.fsApi === 'workspace') {
+async function probe(port = 8089, matcher = body => body.name === 'keepwork-mcp' && body.fsApi === 'workspace', healthPath = '/health') {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) });
+    const response = await fetch(`http://127.0.0.1:${port}${healthPath}`, { signal: AbortSignal.timeout(1500) });
     const body = await response.json();
     return { reachable: true, compatible: response.ok && matcher(body), ...body };
   } catch { return null; }
@@ -41,7 +41,7 @@ class RuntimeSupervisor {
     this.home = home; this.bundled = bundled; this.hostVersion = hostVersion;
     this.options = { product: PRODUCT, port: 8089, entry: 'app/cli.cjs', updates: true, ...options };
     this.platform = process.platform === 'win32' ? 'windows' : 'macos'; this.arch = process.arch;
-    this.deps = { probe: () => probe(this.options.port, this.options.matcher), spawn, ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
+    this.deps = { probe: () => probe(this.options.port, this.options.matcher, this.options.healthPath), spawn, ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
     this.child = null; this.stopping = false;
     try { this.record = JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')); } catch { this.record = {}; }
   }
@@ -122,7 +122,7 @@ class RuntimeSupervisor {
           await delay(250);
         }
         if (!health?.compatible) throw new Error('Runtime health check failed');
-        if (health.pid !== child.pid) {
+        if (health.pid && health.pid !== child.pid) {
           await this.stop(); this.stopping = false;
           this.state = { state: 'attached', owner: health.hostKind || 'external', pending: !!this.record.pending }; return;
         }
