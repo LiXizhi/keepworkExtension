@@ -22,8 +22,13 @@ test('desktop publication creates a ZIP-only browser download manifest', t => {
   assert.deepEqual({ product: manifest.product, platform: manifest.platform, arch: manifest.arch, format: manifest.format },
     { product: 'aichat-desktop', platform: 'windows', arch: 'x64', format: 'zip' });
   assert.equal(manifest.version, '0.1.0');
-  assert.equal(manifest.fileName, 'KeepWork-SecondBrain-0.1.0-x64.zip');
-  assert.equal(manifest.url, 'https://cdn.keepwork.com/keepwork/aichat-desktop/win32-x64/KeepWork-SecondBrain-0.1.0-x64.zip');
+  assert.equal(manifest.fileName, 'KeepWork-SecondBrain.zip');
+  assert.equal(manifest.url, 'https://cdn.keepwork.com/keepwork/aichat-desktop/win32-x64/KeepWork-SecondBrain.zip');
+  const fixedArchive = entries.find(entry => entry.name === manifest.fileName);
+  assert.equal(fixedArchive.filePath, path.join(dir, 'KeepWork-SecondBrain-0.1.0-x64.zip'));
+  assert.equal(fixedArchive.sha256, manifest.sha256);
+  assert.equal(fixedArchive.size, manifest.size);
+  assert.ok(entries.some(entry => entry.name === 'KeepWork-SecondBrain-0.1.0-x64.zip'));
   assert.match(manifest.sha256, /^[a-f0-9]{64}$/);
 });
 
@@ -32,6 +37,19 @@ test('desktop publication rejects targets without exactly one ZIP client', t => 
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.writeFileSync(path.join(dir, 'latest-mac.yml'), 'version: 0.1.0\n');
   assert.throws(() => collect(dir, 'darwin-arm64'), /Exactly one client ZIP/);
+});
+
+test('all desktop targets publish the same fixed ZIP basename', t => {
+  for (const target of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-target-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const arch = target.split('-')[1];
+    fs.writeFileSync(path.join(dir, `KeepWork-SecondBrain-0.1.3-${arch}.zip`), 'zip fixture');
+    fs.writeFileSync(path.join(dir, target.startsWith('win32') ? 'latest.yml' : 'latest-mac.yml'), 'version: 0.1.3\n');
+    const entries = collect(dir, target);
+    const archive = entries.find(entry => entry.name === 'KeepWork-SecondBrain.zip');
+    assert.equal(archive.url, `https://cdn.keepwork.com/keepwork/aichat-desktop/${target}/KeepWork-SecondBrain.zip`);
+  }
 });
 
 test('desktop publication verifies binaries before promoting and verifying descriptors', async () => {

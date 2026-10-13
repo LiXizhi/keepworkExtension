@@ -23,14 +23,18 @@ function collect(dir, target) {
   const archive = entries.find(entry => entry.name === zipNames[0]);
   const versionMatch = archive.name.match(/^KeepWork-SecondBrain-(.+)-[^-]+\.zip$/i);
   if (!versionMatch) throw new Error('Client ZIP filename does not contain a version');
+  const fixedName = 'KeepWork-SecondBrain.zip';
+  const fixedKey = `keepwork/aichat-desktop/${target}/${fixedName}`;
+  const fixedArchive = { ...archive, name: fixedName, remoteKey: fixedKey, url: `${DOMAIN}/${fixedKey}` };
+  entries.push(fixedArchive);
   const manifest = {
     schemaVersion: 1,
     product: 'aichat-desktop',
     version: versionMatch[1],
     ...clientTarget,
     format: 'zip',
-    fileName: archive.name,
-    url: archive.url,
+    fileName: fixedArchive.name,
+    url: fixedArchive.url,
     size: archive.size,
     sha256: archive.sha256,
   };

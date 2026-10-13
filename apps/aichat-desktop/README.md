@@ -116,7 +116,14 @@ Archives live in immutable version directories. The every-main six-file feed is 
 Desktop updater feeds are under `https://cdn.keepwork.com/keepwork/aichat-desktop/<platform>-<arch>/`.
 Each desktop package bundles both the MCP Node runtime and the `local-model` Node runtime
 (including the signed model package). Each target also publishes `latest-client.json` for the AIChat website's single client-download
-button. That manifest always points to the target ZIP; installer and updater artifacts remain
+button. That manifest points to the fixed `KeepWork-SecondBrain.zip` alias in its target
+directory (`win32-x64`, `darwin-arm64`, or `darwin-x64`). The publisher uploads and verifies
+the alias from the versioned ZIP before promoting the manifest. AIChat declares
+`CLIENT_RELEASE_VERSION` in `js/client_download.js`; update it with each website release.
+Manifest requests use that version and package requests append `?v=<manifest version>`
+to separate CDN cache entries. The fixed alias always serves the current release, not an
+archive of older releases. Versioned ZIPs remain available for updater metadata.
+Installer and updater artifacts remain
 available in the same directory but are not exposed by the website download flow.
 
 ## Release prerequisites
