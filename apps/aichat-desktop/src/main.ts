@@ -8,6 +8,7 @@ const { defaultBrainFolder } = require('./brainFolder.cjs');
 const { checkGit, installGit } = require('./gitSetup.cjs');
 const { RuntimeSupervisor } = require('./runtime.cjs');
 const { ENTRY, trustedPage, assertSender, externalUrl } = require('./security.cjs');
+const { MediaGrants, installPermissions } = require('./permissions.cjs');
 let devUrl = !app.isPackaged ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
 let developmentServer: { close: () => void } | undefined;
 let applicationMenu: Menu;
@@ -28,6 +29,7 @@ let updateState = 'idle', updateError = '', checking: Promise<void> | null = nul
 const terminals = new TerminalSessionManager();
 const terminalIds = new Set<string>();
 let settingsFile: string;
+let mediaGrants: InstanceType<typeof MediaGrants>;
 let settings = { openAtLogin: false, theme: 'light' };
 let serviceBusy = false, switchingPage = false;
 function liveWindow() {
@@ -407,14 +409,7 @@ function openWindow() {
   created.webContents.on('will-navigate', (e, url) => { if (!trustedPage(url, devUrl)) { e.preventDefault(); if (externalUrl(url)) void shell.openExternal(url); } });
   created.webContents.on('will-redirect', (e, url, _inPlace, mainFrame) => { if (mainFrame && !trustedPage(url, devUrl)) e.preventDefault(); });
   created.webContents.setWindowOpenHandler(({ url }) => { if (externalUrl(url)) void shell.openExternal(url); return { action: 'deny' }; });
-  const session = created.webContents.session;
-  session.setPermissionCheckHandler((contents, permission, _origin, details) => contents === created.webContents && details.isMainFrame === true && trustedPage(details.embeddingOrigin || '', devUrl) && ['clipboard-sanitized-write'].includes(permission));
-  session.setPermissionRequestHandler(async (contents, permission, callback, details) => {
-    if (created.isDestroyed() || contents !== created.webContents || !details.isMainFrame || !trustedPage(details.requestingUrl, devUrl)
-        || !['media', 'notifications', 'clipboard-sanitized-write'].includes(permission)) return callback(false);
-    const answer = await dialog.showMessageBox(created, { message: `允许 AIChat 使用 ${permission}？`, buttons: ['不允许', '允许'], defaultId: 0, cancelId: 0 });
-    callback(answer.response === 1);
-  });
+  installPermissions(created, mediaGrants, () => devUrl, dialog);
   return created.loadURL(devUrl || ENTRY).catch(() => {
     // No native privileges on this offline error page. Reload retries the official entry.
     if (!created.isDestroyed()) void dialog.showMessageBox(created, { message: '无法连接 AIChat，请检查网络后从菜单重新加载。' });
@@ -438,6 +433,7 @@ else {
       }
     }
     const home = app.getPath('userData'); settingsFile = path.join(home, 'settings.json');
+    mediaGrants = new MediaGrants(path.join(home, 'media-grants.json'));
     try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8')) }; } catch { /* first launch */ }
     nativeTheme.themeSource = settings.theme === 'dark' ? 'dark' : 'light';
     files = new NativeFiles(path.join(home, 'folder-grants.json'));

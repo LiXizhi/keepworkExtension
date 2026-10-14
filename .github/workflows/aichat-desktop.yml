@@ -1,4 +1,5 @@
 name: Build KeepWork 第二大脑
+run-name: ${{ inputs.publisher_id && format('publisher-{0}', inputs.publisher_id) || github.event.head_commit.message || 'Desktop build' }}
 on:
   push:
     branches: [main]
@@ -8,6 +9,18 @@ on:
         description: Publish installers and promote desktop updates
         type: boolean
         default: false
+      release_build:
+        description: Build release-quality artifacts for the local publisher (no CDN upload)
+        type: boolean
+        default: false
+      source_sha:
+        description: Expected main commit for the local publisher
+        type: string
+        default: ''
+      publisher_id:
+        description: Unique local publisher run ID
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -18,6 +31,7 @@ defaults:
     shell: bash
 jobs:
   build:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[prepare desktop release]')
     environment: aichat-desktop-production
     strategy:
       fail-fast: false
@@ -33,6 +47,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '22.23.2', architecture: '${{ matrix.arch }}' }
+      - name: Validate local publisher request
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha }}
+          PUBLISHER_ID: ${{ inputs.publisher_id }}
+          RELEASE_BUILD: ${{ inputs.release_build }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          node -e 'const e=process.env; if(e.RELEASE_BUILD==="true" && (e.PUBLISH==="true" || !/^[a-zA-Z0-9-]+$/.test(e.PUBLISHER_ID) || e.EXPECTED_SHA!==e.GITHUB_SHA || e.GITHUB_REF!=="refs/heads/main")) throw Error("Invalid local publisher request")'
       - run: npm ci
       - run: npm ci --prefix apps/mcp-runtime
       - run: npm ci --prefix apps/local-model-runtime
@@ -49,7 +71,7 @@ jobs:
           echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
           echo "KP_LOCAL_MODEL_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/local-model-runtime/runtime-staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
       - name: Configure signed Mac release
-        if: matrix.platform == 'darwin' && (inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]')))
+        if: matrix.platform == 'darwin' && (inputs.publish || inputs.release_build || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]')))
         env:
           KP_MAC_CSC_LINK: ${{ secrets.KP_MAC_CSC_LINK }}
           KP_MAC_CSC_KEY_PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
@@ -78,10 +100,15 @@ jobs:
         run: |
           app=$(find release -maxdepth 2 -name '*.app' -print -quit)
           codesign --verify --deep --strict --verbose=2 "$app"
-          if [[ '${{ inputs.publish }}' == 'true' && "$KP_MAC_RELEASE_SIGNED" == 'true' ]]; then
+          if [[ "$KP_MAC_RELEASE_SIGNED" == 'true' ]]; then
             spctl --assess --type execute --verbose=4 "$app"
             xcrun stapler validate "$app"
           fi
+      - name: Record artifact provenance
+        env:
+          KP_PUBLISHER_ID: ${{ inputs.publisher_id }}
+          KP_DESKTOP_TARGET: ${{ matrix.platform }}-${{ matrix.arch }}
+        run: node scripts/desktop-build-info.cjs
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
@@ -90,6 +117,7 @@ jobs:
             apps/aichat-desktop/release/*.zip
             apps/aichat-desktop/release/*.blockmap
             apps/aichat-desktop/release/latest*.yml
+            apps/aichat-desktop/release/publisher-build.json
   publish:
     if: inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]'))
     needs: build

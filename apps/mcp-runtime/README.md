@@ -36,7 +36,10 @@ Local Helper installer release.
 Node.js is pinned by `KP_RUNTIME_NODE_VERSION` in the workflow (currently
 `22.23.2`). Every build installs locked dependencies on the target OS, stages the
 runtime, creates a ZIP, extracts it, and starts the extracted daemon on a temporary
-loopback port. The smoke test checks health and creates a native PTY session. ZIPs
+loopback port. The smoke test checks health and creates a native PTY session. It
+requests shell exit, waits for the PTY exit event, then waits for graceful daemon
+shutdown before removing its temporary workspace. This prevents Windows ConPTY
+from retaining the workspace directory lock during cleanup. ZIPs
 preserve macOS executable permissions and include native `node-pty` files. All three
 builds must succeed before publication. The workflow retains each ZIP/JSON pair as
 an Actions artifact.
