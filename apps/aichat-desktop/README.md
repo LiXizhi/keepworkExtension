@@ -108,8 +108,14 @@ The live website changes on launch/reload. Shell and MCP updates download at sta
 every six hours, and activate after **Quit** and restart. Closing the window is not a restart.
 MCP updates verify platform, size, SHA-256, source commit and launch metadata before staging;
 health checks promote them on startup. Failed startup falls back to the prior installed or
-bundled runtime. A compatible daemon owned by VS Code/Local Helper is attached and never
-stopped by this app; its owning application must restart it to update that running instance.
+bundled runtime. At startup, the desktop checks the existing Keepwork MCP on the configured
+loopback port (currently **8089**, not 8099) against the newest valid local runtime, including
+the bundled and staged copies. If its `runtimeVersion` (or legacy `version`) is lower, the
+desktop rechecks service identity, forcibly terminates that specific PID, waits for the
+listener to disappear, and starts its own runtime. Equal/newer or unknown versions remain
+attached; unrelated services, local-model services and invalid/self PIDs are never killed.
+Missing local runtimes or termination failures do not start a competing service. Manual
+restart and Quit still stop only desktop-owned processes.
 
 The stable runtime feed is `https://cdn.keepwork.com/keepwork/mcp-stable/<target>.json`.
 Archives live in immutable version directories. The every-main six-file feed is unchanged.

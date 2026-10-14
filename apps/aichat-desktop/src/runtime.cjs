@@ -41,7 +41,7 @@ class RuntimeSupervisor {
     this.home = home; this.bundled = bundled; this.hostVersion = hostVersion;
     this.options = { product: PRODUCT, port: 8089, entry: 'app/cli.cjs', updates: true, ...options };
     this.platform = process.platform === 'win32' ? 'windows' : 'macos'; this.arch = process.arch;
-    this.deps = { probe: () => probe(this.options.port, this.options.matcher, this.options.healthPath), spawn, ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
+    this.deps = { probe: () => probe(this.options.port, this.options.matcher, this.options.healthPath), spawn, kill: (pid, signal) => process.kill(pid, signal), ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
     this.child = null; this.stopping = false;
     try { this.record = JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')); } catch { this.record = {}; }
   }
@@ -94,15 +94,54 @@ class RuntimeSupervisor {
     this.starting = this.startRuntime().finally(() => { this.starting = null; });
     return this.starting;
   }
+  async replaceOlderRuntime(existing, localVersion) {
+    const current = await this.deps.probe();
+    if (!current) return null;
+    if (!current.compatible || current.pid !== existing.pid
+        || !semver.valid(current.runtimeVersion || current.version)
+        || !semver.lt(current.runtimeVersion || current.version, localVersion)) return current;
+    if (!Number.isSafeInteger(current.pid) || current.pid <= 0 || current.pid === process.pid) {
+      throw new Error('旧版 Keepwork MCP 未提供有效 PID，无法安全替换');
+    }
+    try { this.deps.kill(current.pid, 'SIGKILL'); }
+    catch (e) { if (e.code !== 'ESRCH') throw e; }
+    for (let i = 0; i < 40; i++) {
+      const health = await this.deps.probe();
+      if (!health) return null;
+      if (health.pid !== current.pid) return health;
+      await delay(250);
+    }
+    throw new Error('旧版 Keepwork MCP 未能停止，未启动第二个服务');
+  }
   async startRuntime() {
     this.stopping = false;
-    const existing = await this.deps.probe();
+    const candidates = [...new Set([this.record.pending, this.record.current, this.record.previous].filter(Boolean)), null];
+    const versions = new Map();
+    for (const hash of candidates) {
+      try {
+        versions.set(hash, validateRuntime(hash ? this.directory(hash) : this.bundled,
+          this.platform, this.arch, undefined, this.options).version);
+      } catch { /* Invalid candidates are handled by the existing rollback path. */ }
+    }
+    candidates.sort((a, b) => versions.has(a) && versions.has(b)
+      ? semver.rcompare(versions.get(a), versions.get(b)) : Number(versions.has(b)) - Number(versions.has(a)));
+    let existing = await this.deps.probe();
+    const localVersion = versions.get(candidates[0]);
+    if (this.options.product === PRODUCT && existing?.compatible && localVersion
+        && semver.valid(existing.runtimeVersion || existing.version)
+        && semver.lt(existing.runtimeVersion || existing.version, localVersion)) {
+      try {
+        existing = await this.replaceOlderRuntime(existing, localVersion);
+      } catch (e) {
+        this.state = { state: 'error', owner: existing.hostKind || 'external', error: e.message };
+        return;
+      }
+    }
     if (existing) {
       this.state = { state: existing.compatible ? 'attached' : 'conflict', owner: existing.hostKind || 'external',
-        version: existing.runtimeVersion, commit: existing.runtimeCommit, pending: !!this.record.pending };
+        version: existing.runtimeVersion || existing.version, commit: existing.runtimeCommit, pending: !!this.record.pending };
       return;
     }
-    const candidates = [...new Set([this.record.pending, this.record.current, this.record.previous].filter(Boolean)), null];
     for (const hash of candidates) {
       try {
         const dir = hash ? this.directory(hash) : this.bundled;

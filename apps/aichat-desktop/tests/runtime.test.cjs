@@ -104,6 +104,89 @@ test('restart starts an offline service and reports failed readiness', async () 
   assert.equal(supervisor.restarting, null);
 });
 
+function localRuntimeFixture(t, version = '2.0.0', options = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-takeover-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const bundled = path.join(home, 'bundled');
+  const supervisor = new RuntimeSupervisor(home, bundled, '0.1.0', {}, options);
+  function writeRuntime(dir, runtimeVersion) {
+    const exe = supervisor.platform === 'windows' ? 'node.exe' : 'bin/node';
+    fs.mkdirSync(path.dirname(path.join(dir, exe)), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(dir, exe), 'fixture');
+    fs.writeFileSync(path.join(dir, 'app', 'cli.cjs'), 'fixture');
+    fs.writeFileSync(path.join(dir, 'runtime.json'), JSON.stringify({ schemaVersion: 1,
+      product: supervisor.options.product, version: runtimeVersion, platform: supervisor.platform,
+      arch: supervisor.arch, entry: supervisor.options.entry }));
+  }
+  writeRuntime(bundled, version);
+  return { supervisor, writeRuntime };
+}
+
+test('startup forcibly replaces an older compatible MCP and owns the new runtime', async t => {
+  const { supervisor, writeRuntime } = localRuntimeFixture(t);
+  const current = 'c'.repeat(64);
+  writeRuntime(supervisor.directory(current), '1.0.0');
+  supervisor.record.current = current;
+  let health = { compatible: true, pid: 42123, hostKind: 'vscode-extension', version: '1.9.0' };
+  const calls = [];
+  supervisor.deps.probe = async () => health;
+  supervisor.deps.kill = (pid, signal) => { calls.push(['kill', pid, signal]); health = null; };
+  supervisor.deps.spawn = (_exe, _args, options) => {
+    calls.push(['spawn', options.env.KEEPWORK_MCP_RUNTIME_VERSION]);
+    const child = new EventEmitter(); child.pid = 42124; child.exitCode = null;
+    child.kill = () => { child.exitCode = 0; health = null; child.emit('exit', 0); };
+    health = { compatible: true, pid: child.pid, runtimeVersion: '2.0.0' };
+    return child;
+  };
+  await supervisor.start();
+  assert.deepEqual(calls, [['kill', 42123, 'SIGKILL'], ['spawn', '2.0.0']]);
+  assert.equal(supervisor.state.state, 'running');
+  assert.equal(supervisor.state.owner, 'desktop');
+  await supervisor.stop();
+});
+
+test('startup preserves equal, newer, unknown and incompatible external services', async t => {
+  for (const change of [{ runtimeVersion: '2.0.0' }, { runtimeVersion: '10.0.0' },
+    { runtimeVersion: 'unknown' }, { runtimeVersion: undefined }, { compatible: false, runtimeVersion: '1.0.0' }]) {
+    const { supervisor } = localRuntimeFixture(t);
+    const health = { compatible: true, pid: 42123, hostKind: 'local-helper', ...change };
+    supervisor.deps.probe = async () => health;
+    supervisor.deps.kill = () => assert.fail('must not kill');
+    supervisor.deps.spawn = () => assert.fail('must not spawn');
+    await supervisor.start();
+    assert.equal(supervisor.state.state, health.compatible ? 'attached' : 'conflict');
+  }
+});
+
+test('startup does not kill local-model services or services without a valid local MCP', async t => {
+  const { supervisor } = localRuntimeFixture(t, '2.0.0', { product: 'keepwork-local-model-node-runtime' });
+  supervisor.deps.probe = async () => ({ compatible: true, pid: 42123, runtimeVersion: '1.0.0' });
+  supervisor.deps.kill = () => assert.fail('must not kill model runtime');
+  await supervisor.start();
+  assert.equal(supervisor.state.state, 'attached');
+  supervisor.options.product = 'keepwork-mcp-node-runtime';
+  await supervisor.start();
+  assert.equal(supervisor.state.state, 'attached');
+});
+
+test('takeover rechecks identity and fails safely when termination is unavailable', async t => {
+  for (const mode of ['changed', 'invalid-pid', 'denied']) {
+    const { supervisor } = localRuntimeFixture(t);
+    const original = { compatible: true, pid: mode === 'invalid-pid' ? 0 : 42123, runtimeVersion: '1.0.0' };
+    let probes = 0;
+    supervisor.deps.probe = async () => ++probes > 1 && mode === 'changed'
+      ? { compatible: true, pid: 42125, runtimeVersion: '3.0.0' } : original;
+    supervisor.deps.kill = () => {
+      assert.equal(mode, 'denied');
+      throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
+    };
+    supervisor.deps.spawn = () => assert.fail('must not spawn before port is free');
+    await supervisor.start();
+    assert.equal(supervisor.state.state, mode === 'changed' ? 'attached' : 'error');
+  }
+});
+
 test('stop accepts signal-based child exit before a subsequent restart', async () => {
   const supervisor = new RuntimeSupervisor('unused', '', '0.1.0');
   const child = new EventEmitter(); child.exitCode = null; child.signalCode = null;
