@@ -26,6 +26,13 @@ The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arc
 or user terminals. Use the tray menu's **退出** before starting a fresh debugging session.
 These tasks build only the desktop shell, never the AIChat website.
 
+On macOS, the application menu is named **Keepwork**. Development builds prepare an
+ad-hoc-signed private Electron bundle under ignored `.dev-runtime/Keepwork.app`;
+Start and F5 use it because Cocoa reads the menu name from the bundle's
+`CFBundleName`. The installed Electron SDK is left untouched. Published Mac
+packages declare the same name; the product title and existing data directories
+remain KeepWork 第二大脑 and the original profile paths.
+
 From this repository, install root dependencies and `npm ci --prefix apps/aichat-desktop`.
 Run `npm run check --prefix apps/aichat-desktop` and
 `node apps/aichat-desktop/scripts/native-smoke.cjs` on each target OS. Native dependencies
@@ -54,7 +61,7 @@ in the desktop package. Packaging rejects missing or wrong-platform runtimes.
 
 ## Lifecycle and data
 
-The custom top title bar combines the K icon, File / Edit / View / Help, product title
+The custom top title bar combines the K icon, File / Edit / View / Help (Windows only), product title
 and native window controls in one row. It is installed by the isolated preload only after
 main-process URL validation; embedded tools receive neither the title bar nor its menu IPC.
 Clicking a menu posts `aichat.desktop-menu.v1` into the AIChat page, which draws it.
@@ -68,7 +75,7 @@ through `runMenuCommand`. The tray keeps the same service actions when the windo
 The address stays visible (including fullscreen): `localhost:<port>` for local source
 or `keepwork.com/chat` for the published app. Click it to open the configured entry in
 the external browser; the adjacent refresh icon reloads the current desktop page.
-macOS retains its normal system application menu and traffic-light window controls.
+macOS uses its normal system application menu without duplicate in-window menus, and retains traffic-light window controls.
 
 The tray menu, and **Help** inside the window, include **Keepwork MCP Server**:
 **查看状态** probes the live service and displays ownership, version, PID and workspace;
@@ -103,7 +110,7 @@ gets the desktop bridge; Dashboard and embedded pages do not gain native privile
   user-data directory; this does not reset the system microphone/camera permissions.
 - **Open Folder** grants a canonical directory and connects it to AIChat. Reopening a saved
   cloud workspace does not authorize access. Select its folder again on a new device.
-- Symlink/junction names are visible. Targets outside granted roots require another grant.
+- Workspace file operations follow symlinks/junctions inside a selected root, including external targets, matching MCP file access. Absolute paths and parent traversal remain rejected; replaced roots require reselection. Recursive scans detect link loops, and deleting a link preserves its target. Terminal working directories still require a grant for external targets.
 - Native terminal input is user-operated; agent `run_terminal` still uses MCP and existing
   confirmation. Disabling MCP does not remove native files or terminal tabs.
 

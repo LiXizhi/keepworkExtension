@@ -16,6 +16,8 @@ const disableDevMcp = !app.isPackaged && process.env.AICHAT_DESKTOP_DISABLE_MCP 
 if (devUrl && !/^http:\/\/(127\.0\.0\.1|localhost):\d+\//.test(devUrl)) throw new Error('Development URL must be loopback HTTP');
 app.setAppUserModelId('com.keepwork.aichat-desktop');
 const PRODUCT_NAME = 'KeepWork 第二大脑';
+const MAC_APP_NAME = 'Keepwork';
+if (process.platform === 'darwin') app.setName(MAC_APP_NAME);
 // Keep the original profile across product renames; explicit test/user profiles win.
 if (!app.commandLine.hasSwitch('user-data-dir')) {
   app.setPath('userData', path.join(app.getPath('appData'), app.isPackaged ? 'AIChat Desktop' : 'aichat-desktop'));
@@ -294,7 +296,7 @@ function menu() {
   tray?.setContextMenu(Menu.buildFromTemplate(items));
   const bar = desktopMenus();
   applicationMenu = Menu.buildFromTemplate([
-    ...(process.platform === 'darwin' ? [{ label: PRODUCT_NAME, submenu: [{ label: `关于 ${PRODUCT_NAME}`, enabled: false }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { label: '退出', accelerator: 'Cmd+Q', click: () => app.quit() }] }] : []),
+    ...(process.platform === 'darwin' ? [{ label: MAC_APP_NAME, submenu: [{ label: `关于 ${PRODUCT_NAME}`, enabled: false }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { label: '退出', accelerator: 'Cmd+Q', click: () => app.quit() }] }] : []),
     { label: 'File', submenu: templateFrom(bar.file) },
     { label: 'Edit', submenu: templateFrom(bar.edit) },
     { label: 'View', submenu: templateFrom(bar.view) },
@@ -354,7 +356,7 @@ function setupBridge() {
     if (method === 'checkUpdates') { await checkUpdates(); return { mcp: runtime.state, shell: updateState, error: updateError }; }
     if (method === 'file') {
       if (args.op === 'reveal') {
-        const target = files.resolve(args.rootId, args.rel);
+        const target = files.resolve(args.rootId, args.rel, { followLinks: true });
         if (args.mode === 'open') {
           const answer = await dialog.showMessageBox(current, { message: `使用默认应用打开 ${path.basename(target)}？`, buttons: ['取消', '打开'], defaultId: 0, cancelId: 0 });
           if (answer.response === 1) { const error = await shell.openPath(target); if (error) throw new Error(error); }
@@ -446,7 +448,9 @@ else {
       matcher: (body: any) => body.service === 'keepwork-local-model' && body.protocolVersion === '1.0.0',
     });
     appIcon = nativeImage.createFromPath(path.join(__dirname, 'keepwork.png'));
-    if (process.platform === 'darwin') app.dock?.setIcon(appIcon);
+    if (process.platform === 'darwin') {
+      app.dock?.setIcon(nativeImage.createFromPath(path.join(__dirname, 'keepwork-mac.png')));
+    }
     setupBridge();
     const icon = appIcon.resize({ width: process.platform === 'darwin' ? 22 : 16 });
     tray = new Tray(icon); tray.setToolTip(PRODUCT_NAME); tray.on('click', show); menu();

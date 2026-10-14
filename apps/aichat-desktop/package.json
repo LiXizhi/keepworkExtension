@@ -11,7 +11,7 @@
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.cjs",
     "check": "tsc -p tsconfig.json --noEmit && npm test && npm run build",
-    "start": "npm run build && electron .",
+    "start": "npm run build && node scripts/dev-electron.cjs",
     "pack": "npm run build && electron-builder --dir",
     "make:win": "npm run build && electron-builder --win nsis zip --x64",
     "make:mac": "npm run build && electron-builder --mac zip",

@@ -26,8 +26,8 @@ module.exports = {
   afterPack: path.join(__dirname, 'scripts/after-pack.cjs'),
   win: { target: [{ target: 'nsis', arch: ['x64'] }, { target: 'zip', arch: ['x64'] }], artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', verifyUpdateCodeSignature: true },
   nsis: { oneClick: false, perMachine: false, allowElevation: false, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
-  mac: { target: ['zip'], category: 'public.app-category.productivity', hardenedRuntime: true,
+  mac: { icon: 'assets/keepwork-mac.png', target: ['zip'], category: 'public.app-category.productivity', hardenedRuntime: true,
     entitlements: 'assets/entitlements.mac.plist', entitlementsInherit: 'assets/entitlements.mac.plist',
-    artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', extendInfo: { NSMicrophoneUsageDescription: 'AIChat uses the microphone for voice conversations.', NSCameraUsageDescription: 'AIChat uses the camera when you start a video conversation.' } },
+    artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', extendInfo: { CFBundleName: 'Keepwork', CFBundleDisplayName: 'Keepwork', NSMicrophoneUsageDescription: 'AIChat uses the microphone for voice conversations.', NSCameraUsageDescription: 'AIChat uses the camera when you start a video conversation.' } },
   publish: [{ provider: 'generic', url: `https://cdn.keepwork.com/keepwork/aichat-desktop/${process.platform}-${process.arch}/` }],
 };

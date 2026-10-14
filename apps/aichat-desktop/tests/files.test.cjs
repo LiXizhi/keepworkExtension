@@ -34,16 +34,37 @@ test('remembered paths and traversal do not grant access', t => {
   }
   assert.throws(() => files.execute('delete', { rootId: grant.id, rel: '', folder: true }), /root/);
 });
-test('junctions remain visible but cannot access ungranted targets; deletion only removes the link', t => {
+test('workspace links support onboarding browse and file operations without another grant; deletion preserves target', t => {
   const { dir, root, files } = fixture(t);
   const external = path.join(dir, 'external'); fs.mkdirSync(external); fs.writeFileSync(path.join(external, 'secret'), 'secret');
   fs.symlinkSync(external, path.join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
   const grant = files.grant(root);
   assert.equal(files.execute('list', { rootId: grant.id }).entries[0].symlink, true);
-  assert.throws(() => files.execute('read', { rootId: grant.id, rel: 'linked/secret' }), /another folder grant/);
-  assert.deepEqual(files.execute('search', { rootId: grant.id, query: 'secret' }).files, []);
-  files.grant(external);
+  assert.throws(() => files.resolve(grant.id, 'linked'), /another folder grant/);
+  assert.equal(files.execute('list', { rootId: grant.id, rel: 'linked' }).entries[0].name, 'secret');
+  assert.equal(files.execute('stat', { rootId: grant.id, rel: 'linked/secret' }).isFile, true);
+  assert.deepEqual(files.execute('search', { rootId: grant.id, query: 'secret' }).files, ['linked/secret']);
+  files.execute('write', { rootId: grant.id, rel: 'linked/new/file.txt', text: 'new' });
+  assert.equal(fs.readFileSync(path.join(external, 'new/file.txt'), 'utf8'), 'new');
+  assert.equal(files.roots().length, 1);
   assert.equal(Buffer.from(files.execute('read', { rootId: grant.id, rel: 'linked/secret' }).bytes).toString(), 'secret');
   files.execute('delete', { rootId: grant.id, rel: 'linked', folder: true });
   assert.equal(fs.readFileSync(path.join(external, 'secret'), 'utf8'), 'secret');
+});
+
+test('linked folders remain bounded, reject traversal, broken links and replaced roots', t => {
+  const { dir, root, files } = fixture(t);
+  const external = path.join(dir, 'external'); fs.mkdirSync(external);
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  fs.symlinkSync(external, path.join(root, 'linked'), linkType);
+  fs.symlinkSync(root, path.join(external, 'loop'), linkType);
+  fs.symlinkSync(path.join(dir, 'missing'), path.join(root, 'broken'), linkType);
+  fs.writeFileSync(path.join(external, 'note.txt'), 'note');
+  const grant = files.grant(root);
+  assert.deepEqual(files.execute('search', { rootId: grant.id, query: 'note' }).files, ['linked/note.txt']);
+  assert.throws(() => files.execute('read', { rootId: grant.id, rel: 'linked/../note.txt' }), /Invalid/);
+  assert.throws(() => files.execute('write', { rootId: grant.id, rel: 'broken/file', text: 'x' }), /Unavailable symlink/);
+  fs.renameSync(root, root + '-old');
+  fs.symlinkSync(external, root, linkType);
+  assert.throws(() => files.execute('list', { rootId: grant.id }), /Folder changed/);
 });

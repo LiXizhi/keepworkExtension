@@ -32,7 +32,7 @@ class NativeFiles {
     return { ...grant };
   }
   revoke(id) { this.grants = this.grants.filter(g => g.id !== id); atomicJson(this.file, this.grants); }
-  resolve(id, rel = '', { parentOnly = false } = {}) {
+  resolve(id, rel = '', { parentOnly = false, followLinks = false } = {}) {
     const grant = this.grants.find(g => g.id === id);
     if (!grant) throw new Error('Folder is not granted; select it using Open Folder');
     if (typeof rel !== 'string' || rel.includes('\0') || rel.includes(':') || path.isAbsolute(rel)
@@ -50,15 +50,17 @@ class NativeFiles {
       if (next === ancestor) throw new Error('Folder unavailable');
       ancestor = next;
     }
+    // Workspace file operations follow links inside the lexically verified root,
+    // matching MCP /fs. Other callers (notably terminal cwd) stay grant-confined.
     const real = fs.realpathSync(ancestor);
-    if (!this.grants.some(g => {
+    if (!followLinks && !this.grants.some(g => {
       try { return fs.realpathSync(g.path) === g.path && inside(g.path, real); } catch { return false; }
     })) throw new Error('Symlink target requires another folder grant');
     return target;
   }
   execute(op, args = {}) {
     const { rootId, rel = '' } = args;
-    const target = this.resolve(rootId, rel, { parentOnly: op === 'delete' });
+    const target = this.resolve(rootId, rel, { parentOnly: op === 'delete', followLinks: true });
     if (op === 'stat') {
       try { const s = fs.statSync(target); return { exists: true, isDirectory: s.isDirectory(), isFile: s.isFile(), size: s.size }; }
       catch (e) { if (e.code === 'ENOENT') return { exists: false }; throw e; }
@@ -74,7 +76,7 @@ class NativeFiles {
       const data = typeof args.text === 'string' ? Buffer.from(args.text) : Buffer.from(args.bytes || []);
       if (data.length > LIMIT) throw new Error('File exceeds write limit');
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      this.resolve(rootId, rel);
+      this.resolve(rootId, rel, { followLinks: true });
       fs.writeFileSync(target, data); return { ok: true };
     }
     if (op === 'mkdir') { fs.mkdirSync(target, { recursive: true }); return { ok: true }; }
@@ -90,7 +92,7 @@ class NativeFiles {
       const result = [], queue = [rel], visited = new Set(); let scanned = 0;
       while (queue.length && result.length < max && scanned < 8000) {
         const current = queue.shift(); let dir;
-        try { dir = this.resolve(rootId, current); } catch { continue; }
+        try { dir = this.resolve(rootId, current, { followLinks: true }); } catch { continue; }
         const real = fs.realpathSync(dir);
         if (visited.has(real)) continue;
         visited.add(real);
