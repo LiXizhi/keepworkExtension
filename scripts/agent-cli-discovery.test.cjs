@@ -43,7 +43,7 @@ for (const platform of ['win32', 'darwin']) {
         assert.equal(resolveAgentCli(backend, args, undefined, options).path, common);
         options.pathDirs = [path.join(home, 'first'), path.join(home, 'second')];
         assert.deepEqual(resolveAgentCli(backend, args, undefined, options), { executable: first, args, path: first, source: 'PATH' });
-        options.env[`KEEPWORK_${backend.toUpperCase()}_PATH`] = second;
+        options.env[`KEEPWORK_${backend === 'gemini' ? 'ANTIGRAVITY' : backend.toUpperCase()}_PATH`] = second;
         assert.equal(resolveAgentCli(backend, args, undefined, options).path, second);
         assert.equal(resolveAgentCli(backend, args, first, options).path, first);
         assert.throws(() => resolveAgentCli(backend, args, path.join(home, 'absent'), options), /Configured.*not found/);

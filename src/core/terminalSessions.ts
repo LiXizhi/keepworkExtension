@@ -6,6 +6,7 @@ import { GLOBAL_TERMINAL_CAP, OUTPUT_CHAR_CAP } from './config';
 import { resolveWorkdir } from './paths';
 import { assertAllowedCommand } from './terminal';
 import { POWERSHELL_UTF8_INIT } from './terminalEncoding';
+import { cliProxyEnvironment } from './cliProxyEnvironment';
 
 const TERMINAL_IDLE_MS = 30 * 60 * 1000;
 const MAX_INPUT_LENGTH = 64_000;
@@ -113,7 +114,7 @@ export class TerminalSessionManager {
             cwd: resolvedCwd,
             cols,
             rows,
-            env: process.env,
+            env: cliProxyEnvironment(),
             useConpty: process.platform === 'win32',
         });
         const now = Date.now();

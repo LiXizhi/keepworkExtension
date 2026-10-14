@@ -9,6 +9,8 @@ const {AgentSessions,AGENT_BACKENDS}=require('../src/core/agentSessions.ts');
 const {AcpHarness}=require('../src/core/acpHarness.ts');
 const {CodexHarness}=require('../src/core/codexHarness.ts');
 const {ClaudeHarness}=require('../src/core/claudeHarness.ts');
+const {AntigravityHarness}=require('../src/core/antigravityHarness.ts');
+const antigravityFixture=path.join(__dirname,'fixtures/fake-antigravity.cjs');
 const {AGENT_CLI}=require('../src/core/agentCliBackends.ts');
 const claudeFixture=path.join(__dirname,'fixtures/fake-claude.cjs');
 const codexFixture=path.join(__dirname,'fixtures/fake-codex-session.cjs');
@@ -37,7 +39,7 @@ for (const backend of AGENT_BACKENDS) test(`${backend}: versioned AIChat context
  const capability = backend === 'codex' ? descriptor.env.KEEPWORK_AICHAT_CAPABILITY : descriptor.env.find(e=>e.name==='KEEPWORK_AICHAT_CAPABILITY').value;
  manager.close();
  for(const name of fs.readdirSync(dir,{recursive:true}).filter(n=>n.endsWith('.json'))) assert.ok(!fs.readFileSync(path.join(dir,name),'utf8').includes(capability),name);
- const replacement=backend==='codex'?new CodexHarness(process.execPath,[codexFixture]):backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture]);
+ const replacement=backend==='codex'?new CodexHarness(process.execPath,[codexFixture]):backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture]):backend==='gemini'?new AntigravityHarness(path.join(dir,backend),process.execPath,[antigravityFixture]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture]);
  const restarted=new AgentSessions(file,undefined,{[backend]:replacement});t.after(()=>restarted.close());
  await restarted.read(session.id,owner);
  await assert.rejects(restarted.turn(session.id,owner,{requestId:'expired',text:'cannot run before reconnection'}),/Reconnect/);
@@ -84,7 +86,7 @@ async function done(manager,id,owner) {
 function setup(t,args=[]) {
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-backends-'));
  const file=path.join(dir,'registry.json');
- const adapters=Object.fromEntries(AGENT_BACKENDS.map(backend=>[backend,backend==='codex'?new CodexHarness(process.execPath,[codexFixture,...args]):backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture,...args]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture,...args])]));
+ const adapters=Object.fromEntries(AGENT_BACKENDS.map(backend=>[backend,backend==='codex'?new CodexHarness(process.execPath,[codexFixture,...args]):backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture,...args]):backend==='gemini'?new AntigravityHarness(path.join(dir,backend),process.execPath,[antigravityFixture,...args]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture,...args])]));
  const manager=new AgentSessions(file,undefined,adapters);
  t.after(()=>{manager.close();});
  return {dir,file,manager,adapters,owner:'fixture-owner'};
@@ -117,7 +119,7 @@ test('backend IDs scope idempotency, native thread collisions, event routing and
  adapters.workbuddy.emit('exit');assert.equal((await manager.read(b.id,owner)).status,'completed');
  await assert.rejects(manager.create(owner,{backend:'arbitrary',conversationId:'x',roots:[dir]}),/Unsupported/);
 });
-for(const backend of AGENT_BACKENDS.filter(b=>b!=='codex')) test(`${backend}: permissions, interrupt and daemon restart preserve history without resending`,async t=>{
+for(const backend of AGENT_BACKENDS.filter(b=>b!=='codex'&&b!=='gemini')) test(`${backend}: permissions, interrupt and daemon restart preserve history without resending`,async t=>{
  const {manager,dir,file,owner}=setup(t);
  const s=await manager.create(owner,{backend,conversationId:'x',roots:[dir]});
  await manager.turn(s.id,owner,{requestId:'permission',text:'permission'});
@@ -126,7 +128,7 @@ for(const backend of AGENT_BACKENDS.filter(b=>b!=='codex')) test(`${backend}: pe
  assert.equal(completed.pending.length,0);assert.ok(states.every(s=>s.status!=='waiting'),'Full access must not wait for tool permission');
  const result=await done(manager,s.id,owner);assert.ok(result.items.some(i=>i.text?.includes(backend==='claude'?'"behavior":"allow"':'"optionId":"yes"')));
  manager.close();
- const adapter=backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture]);
+ const adapter=backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture]):backend==='gemini'?new AntigravityHarness(path.join(dir,backend),process.execPath,[antigravityFixture]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture]);
  const restarted=new AgentSessions(file,undefined,{[backend]:adapter});t.after(()=>restarted.close());
  const restored=await restarted.read(s.id,owner);assert.deepEqual(restored.items,result.items);
  await restarted.turn(s.id,owner,{requestId:'after-restart',text:'hello'});assert.equal((await done(restarted,s.id,owner)).status,'completed');

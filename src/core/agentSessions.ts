@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { CodexHarness, HarnessAdapter } from './codexHarness';
 import { AcpHarness } from './acpHarness';
+import { AntigravityHarness } from './antigravityHarness';
 import { CopilotHarness } from './copilotHarness';
 import { ClaudeHarness } from './claudeHarness';
 import { AGENT_BACKENDS, AGENT_CLI } from './agentCliBackends';
@@ -111,7 +112,7 @@ export class AgentSessions {
             return ['read_file', 'list_dir', 'search_files', 'create_file', 'replace_string_in_file'].includes(name);
         });
         this.workspaceFiles = new AichatWorkspaceFiles(path.join(path.dirname(file), 'agent-git-drafts'));
-        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
+        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'gemini' ? new AntigravityHarness(file + '.gemini') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
         try {
             const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
             for (const row of rows) if (row.id && row.owner && row.threadId) this.sessions.set(row.id, { ...row, backend: row.backend || 'codex', status: ACTIVE.has(row.status) ? 'interrupted' : row.status, pending: [], events: [], items: [] });

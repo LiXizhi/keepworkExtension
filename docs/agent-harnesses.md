@@ -1,7 +1,7 @@
 # AIChat agent sessions
 
 `src/core/agentSessions.ts` owns sessions; `codexHarness.ts` implements the stdio
-Codex adapter; `acpHarness.ts` adapts native ACP servers; `claudeHarness.ts` adapts Claude bidirectional stream-json. `src/mcp/agentHttp.ts` exposes the API on the shared daemon.
+Codex adapter; `acpHarness.ts` adapts native ACP servers; `claudeHarness.ts` adapts Claude bidirectional stream-json; `antigravityHarness.ts` adapts native agy NDJSON under the stable `gemini` persistence key. `src/mcp/agentHttp.ts` exposes the API on the shared daemon.
 Native CLI sessions have no KP Local Helper or editor-window dependency. Optional
 Copilot custom-model sessions require the VS Code model bridge described below.
 
@@ -10,10 +10,11 @@ flowchart LR
     Browser[AIChat browser] --> HTTP[Shared loopback /agents API]
     Desktop[AIChat Desktop] --> HTTP
     HTTP --> Sessions[AgentSessions registry and overlap warnings]
-    Sessions --> Adapter[HarnessAdapter / CodexHarness / AcpHarness / ClaudeHarness]
+    Sessions --> Adapter[HarnessAdapter / CodexHarness / AcpHarness / ClaudeHarness / AntigravityHarness]
     Adapter -->|hidden stdio| Codex[Codex App Server]
     Adapter -->|Claude stream-json| Claude[Claude Code native CLI]
-    Adapter -->|ACP stdio| CLIs[Cursor / Trae / Qwen / Gemini / Kimi / OpenCode / CodeBuddy / Copilot]
+    Adapter -->|ACP stdio| CLIs[Cursor / Trae / Qwen / Kimi / OpenCode / CodeBuddy / Copilot]
+    Adapter -->|native NDJSON| Antigravity[Antigravity CLI: agy]
     Adapter --> CopilotRouter[CopilotHarness: native + optional editor models]
     CopilotRouter -->|isolated BYOK ACP process| EditorCLI[Copilot CLI tools and sessions]
     EditorCLI -->|authenticated loopback Chat Completions| EditorBridge[VS Code modelBridge]
@@ -400,3 +401,55 @@ each). Copilot's scoped tool calls worked, but the second answer timed out; full
 is incomplete. Codex model connection retried/timed out, Cursor required login, Gemini ACP
 initialization timed out, and Claude/Trae/Qwen/Kimi/OpenCode were not installed. Protocol
 fixtures passed for all 11; those results do not substitute for native platform acceptance.
+
+### Gemini authentication on Windows (2026-10-14)
+
+Gemini ACP launches and owned interactive terminals inherit the current user's enabled
+Windows static HTTP/HTTPS proxy when no explicit `HTTP_PROXY`, `HTTPS_PROXY` or
+`ALL_PROXY` variable exists (case-insensitive). Explicit variables, including empty
+values, win. The parent environment and Windows settings are not modified. PAC-only
+and SOCKS-only configurations are not converted. Existing `NO_PROXY` wins; otherwise
+loopback hosts and explicit Windows bypass entries are included. Windows `<local>`
+has no exact portable environment equivalent and is not expanded to every short hostname.
+
+Regression `GEMINI-AUTH-PROXY-001`: `node --test scripts/cli-proxy-environment.test.cjs`
+checks parsing, override precedence, disabled settings and the actual ACP/PTY spawn
+environments. In isolated copies, removing either environment handoff independently
+fails the launch test (controlled mutations, not historical-revision verification).
+
+On this Windows machine with Gemini CLI 0.64.0, the running daemon reported a direct
+Google OAuth token-exchange timeout. The source adapter with proxy inheritance reached
+the service, which then rejected the client with “This client is no longer supported
+for Gemini Code Assist for individuals” and directed the account to
+`https://antigravity.google`. This is an upstream account/service blocker, not successful
+authentication or generation. No credentials were read, copied or replaced; no account
+or provider was switched. Runtime tests do not override this live failure. Source changes
+must be included in the next Keepwork MCP runtime update to affect an already-running daemon.
+
+### Antigravity replacement (2026-10-14)
+
+The `gemini` registry entry now discovers `agy`, advertises protocol `antigravity`,
+and instantiates `AntigravityHarness`. Installers and runtime references are generated
+from the reviewed official native PowerShell/bash recipes. Windows discovery includes
+`%LOCALAPPDATA%/agy/bin`; `KEEPWORK_ANTIGRAVITY_PATH` overrides discovery. A stale
+`KEEPWORK_GEMINI_PATH` cannot select the retired binary. The proxy fallback above
+applies to agy launches and login terminals.
+
+The adapter retains a process per conversation, parses `init`/`step_update`/`result`,
+resumes only the returned native `conversation_id`, uses native model discovery and
+preserves local history without replay. Old Gemini ACP records remain readable but
+reject new turns with a new-chat instruction. Scoped MCP configuration is written
+only in a host-owned launch folder, with user roots supplied through `--add-dir`;
+capabilities stay in child environment memory. Native headless tool denials (including
+`SUCCESS` plus `denied_actions`) fail the turn. No blanket permission grants or
+global configuration changes are made. Ask/Plan use `--mode plan`.
+
+Regressions: `node --test scripts/antigravity-harness.test.cjs` covers discovery,
+streaming, multi-turn process reuse, exact native resume, local history migration,
+scoped MCP, Unicode, denial, crash and interruption. A controlled mutation removing
+the denial check fails the completed-vs-failed assertion. Real Windows agy 1.3.4
+model discovery and three conversational turns (two plus restart/resume) passed;
+`out/antigravity/native-turns.json` records one unchanged native conversation ID.
+The real MCP probe discovered the bridge but native permission policy denied its call;
+MCP-tool execution is not accepted. The generic read/write smoke also failed, including
+temporary-folder cleanup; it must not be reported as passing. macOS was not run.

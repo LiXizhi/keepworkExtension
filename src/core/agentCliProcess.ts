@@ -25,7 +25,7 @@ function entries(root: string): string[] { try { return fs.readdirSync(root).sli
 export function resolveAgentCli(backend: AgentCliBackend, args: string[], override?: string, options: DiscoveryOptions = {}): CliLaunch {
     const platform = options.platform || process.platform, env = options.env || process.env, home = options.home || os.homedir();
     const names = AGENT_CLI[backend].commands;
-    const configured = override || env[`KEEPWORK_${backend.toUpperCase()}_PATH`];
+    const configured = override || (backend === 'gemini' ? env.KEEPWORK_ANTIGRAVITY_PATH : env[`KEEPWORK_${backend.toUpperCase()}_PATH`]);
     const pathDirs = (options.pathDirs || (env.PATH || env.Path || '').split(platform === 'win32' ? ';' : ':')).map(d => d.replace(/^"|"$/g, '')).filter(d => path.isAbsolute(d));
     const tryPath = (target: string, source: string): CliLaunch | undefined => {
         const script = nodeScript(target);
@@ -70,13 +70,14 @@ export function resolveAgentCli(backend: AgentCliBackend, args: string[], overri
                 if (platform === 'win32') try { const command = cliCommand(path.join(dir, expanded), args, platform, env); if (file(command.executable, platform)) return { ...command, path: command.executable === process.execPath ? command.args[0] : command.executable, source: 'configured' }; } catch { /* next PATH entry */ }
             }
         }
-        throw new Error(`Configured ${backend} CLI not found: ${expanded}. Fix KEEPWORK_${backend.toUpperCase()}_PATH.`);
+        throw new Error(`Configured ${backend} CLI not found: ${expanded}. Fix KEEPWORK_${backend === 'gemini' ? 'ANTIGRAVITY' : backend.toUpperCase()}_PATH.`);
     }
     for (const dir of pathDirs) { const launch = tryDir(dir, 'PATH'); if (launch) return launch; }
     const common = platform === 'win32' ? [
         env.APPDATA && path.join(env.APPDATA, 'npm'), path.join(home, '.local', 'bin'), path.join(home, 'scoop', 'shims'),
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'),
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'codebuddy', 'bin'),
+        backend === 'gemini' && env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'agy', 'bin'),
         path.join(home, '.claude', 'bin'), path.join(home, '.cursor', 'bin'), path.join(home, '.opencode', 'bin'), path.join(home, '.kimi', 'bin'), path.join(home, '.trae', 'bin'),
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'cursor-agent'),
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'cursor-agent'),

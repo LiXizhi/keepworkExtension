@@ -266,7 +266,11 @@ loopback model bridge (never the terminal credential). Validate with
 
 `src/core/agentSessions.ts` and `src/mcp/agentHttp.ts` expose the shared owned `/agents`
 surface. `codexHarness.ts` handles Codex; `acpHarness.ts` handles WorkBuddy (CodeBuddy
-ACP engine), Copilot, Cursor, Trae, Qwen, Gemini, Kimi and OpenCode.
+ACP engine), Copilot, Cursor, Trae, Qwen, Kimi and OpenCode.
+`antigravityHarness.ts` implements native `agy` stream-json under the stable `gemini`
+backend key. Legacy Gemini ACP history stays readable and cannot resume in agy.
+Windows discovery uses `%LOCALAPPDATA%/agy/bin`; the override is `KEEPWORK_ANTIGRAVITY_PATH`.
+Test `node --test scripts/antigravity-harness.test.cjs` when changing this adapter.
 `claudeHarness.ts` implements Claude native stream-json; `agentCliBackends.ts` owns
 the provider registry. Preserve backend-scoped routing, native credentials,
 non-replaying restart, local-only transcript caches and existing Origin/owner/auth

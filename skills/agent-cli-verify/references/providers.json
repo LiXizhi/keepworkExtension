@@ -214,31 +214,38 @@
     },
     {
       "id": "gemini",
-      "name": "Gemini CLI",
-      "protocol": "acp",
+      "name": "Antigravity CLI",
+      "protocol": "antigravity",
       "commands": [
-        "gemini"
+        "agy"
       ],
       "args": [
-        "--experimental-acp"
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json"
       ],
-      "login": "gemini",
-      "npm": "@google/gemini-cli",
-      "source": "https://geminicli.com/docs/get-started/installation/",
-      "reviewedAt": "2026-10-07",
+      "login": "agy",
+      "source": "https://antigravity.google/docs/cli/install/",
+      "reviewedAt": "2026-10-14",
       "windows": {
-        "kind": "npm",
-        "command": "npm install -g @google/gemini-cli",
+        "kind": "powershell-script",
+        "url": "https://antigravity.google/cli/install.ps1",
         "evidence": "documented"
       },
       "macos": {
-        "kind": "npm",
-        "command": "npm install -g @google/gemini-cli",
+        "kind": "shell-script",
+        "shell": "bash",
+        "url": "https://antigravity.google/cli/install.sh",
         "evidence": "documented"
       },
       "notes": [
-        "使用稳定 latest 通道，不把 preview/nightly 当作普通升级。模型切换与原生 --experimental-acp 参数需随官方 CLI 版本核验。"
-      ]
+        "替代 Gemini CLI；保留后端 gemini 作为历史数据键。安装和运行使用 agy，不再安装 @google/gemini-cli。",
+        "Windows 默认路径为 %LOCALAPPDATA%/agy/bin/agy.exe；macOS 为 ~/.local/bin/agy。可用 KEEPWORK_ANTIGRAVITY_PATH 指定，不复用旧 KEEPWORK_GEMINI_PATH。",
+        "使用原生 stream-json 协议，不是 ACP。无交互模式不能回复权限请求，遵守原生权限配置；不会自动添加全局允许规则。",
+        "已有 Gemini CLI 对话仅保留可读历史，继续工作需新建 Antigravity 对话；凭据交由 agy 原生登录和系统密钥环管理。"
+      ],
+      "update": "agy update"
     },
     {
       "id": "kimi",

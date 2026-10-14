@@ -1,7 +1,7 @@
-# Gemini CLI CLI 维护参考
+# Antigravity CLI CLI 维护参考
 
-后端 ID：`gemini`。官方安装来源：[Gemini CLI](https://geminicli.com/docs/get-started/installation/)。
-安装说明最后人工核对：2026-10-07；该日期不代表所有系统的真实运行通过。
+后端 ID：`gemini`。官方安装来源：[Antigravity CLI](https://antigravity.google/docs/cli/install/)。
+安装说明最后人工核对：2026-10-14；该日期不代表所有系统的真实运行通过。
 
 先读现有 CLI 路径和版本，复用可用安装。用户要求安装/更新本平台时，
 通过已提供的 Keepwork `run_terminal` 和现有确认流程操作本机；检查请求
@@ -9,19 +9,22 @@
 
 ## 安装与更新
 
-- Windows：运行 `npm install -g @google/gemini-cli`。证据：documented。
-- macOS：运行 `npm install -g @google/gemini-cli`。证据：documented。
-- 检查版本：`gemini --version`；安装后旧 GUI PATH 可能尚未刷新，
+- Windows：从 `https://antigravity.google/cli/install.ps1` 下载临时脚本，检查当前官方内容后用 PowerShell 执行。证据：documented。
+- macOS：从 `https://antigravity.google/cli/install.sh` 下载临时脚本，检查当前官方内容后用 bash 执行。证据：documented。
+- 检查版本：`agy --version`；安装后旧 GUI PATH 可能尚未刷新，
   先检查常见安装目录，不为此重复安装。
-- 登录入口：`gemini`。在用户可见终端让用户完成授权，不复制凭据。
-- 更新：沿用原安装渠道核对官方稳定版，再执行对应包管理器更新；先记录旧版本与回退方法。
+- 登录入口：`agy`。在用户可见终端让用户完成授权，不复制凭据。
+- 更新：`agy update`，仍需确认当前官方方法与原有安装渠道一致。
 
-- 使用稳定 latest 通道，不把 preview/nightly 当作普通升级。模型切换与原生 --experimental-acp 参数需随官方 CLI 版本核验。
+- 替代 Gemini CLI；保留后端 gemini 作为历史数据键。安装和运行使用 agy，不再安装 @google/gemini-cli。
+- Windows 默认路径为 %LOCALAPPDATA%/agy/bin/agy.exe；macOS 为 ~/.local/bin/agy。可用 KEEPWORK_ANTIGRAVITY_PATH 指定，不复用旧 KEEPWORK_GEMINI_PATH。
+- 使用原生 stream-json 协议，不是 ACP。无交互模式不能回复权限请求，遵守原生权限配置；不会自动添加全局允许规则。
+- 已有 Gemini CLI 对话仅保留可读历史，继续工作需新建 Antigravity 对话；凭据交由 agy 原生登录和系统密钥环管理。
 
 ## 维护验证
 
-原生协议：`acp`；注册的命令候选：`gemini`；
-原生参数：`--experimental-acp`。
+原生协议：`antigravity`；注册的命令候选：`agy`；
+原生参数：`--input-format stream-json --output-format stream-json`。
 定期核对官方发布说明、安装脚本和协议变化。更新安装参考与源码注册表后，
 重新同步 AIChat/MCP Skill，并运行对应发现、协议和浏览器回归。
 
