@@ -32,6 +32,14 @@ Run `npm run check --prefix apps/aichat-desktop` and
 must load inside the pinned Electron runtime, not merely the system Node executable.
 Run `scripts/electron-smoke.cjs` from a workspace that also has the AIChat source checkout;
 the release workflow does not clone that private cross-repository dependency.
+After building, run `node apps/aichat-desktop/scripts/permissions-smoke.cjs` from the
+repository root to check repeat/reload/restart consent using Electron's synthetic media
+devices and an isolated profile. It does not record the real microphone or camera.
+For macOS microphone acceptance, also test the signed app with a real input device:
+Hardened Runtime requires `com.apple.security.device.audio-input` in the signing
+entitlements as well as `NSMicrophoneUsageDescription` in Info.plist. Synthetic
+devices do not validate this OS gate. Changing entitlements requires repackaging
+and signing the desktop app; reloading the website cannot repair an installed app.
 
 Use `npm start --prefix apps/aichat-desktop` for the live website. For local AIChat source,
 set `AICHAT_DESKTOP_DEV_URL` to the actual loopback Live Server URL. This override is
@@ -84,9 +92,15 @@ gets the desktop bridge; Dashboard and embedded pages do not gain native privile
   **退出** closes native terminals and desktop-owned MCP only.
 - Login startup is off by default and optional in the application menu.
 - Electron's per-user application directory stores the persistent `aichat` browser session,
-  `folder-grants.json`, settings, and MCP runtime installation records. Never upload grants.
+  `folder-grants.json`, `media-grants.json`, settings, and MCP runtime installation records. Never upload grants.
   The original `AIChat Desktop` installed profile directory (development: `aichat-desktop`),
   application ID and update feed stay stable across the product rename.
+- Microphone and camera consent is remembered separately for the trusted top-level page,
+  including across reloads, window recreation and app restarts. Local source and published
+  pages have separate grants. Concurrent identical requests share one prompt. Denial is
+  not saved, so a later explicit attempt can ask again. OS privacy permissions still apply.
+  To reset these app-level grants, quit the app and remove `media-grants.json` from its
+  user-data directory; this does not reset the system microphone/camera permissions.
 - **Open Folder** grants a canonical directory and connects it to AIChat. Reopening a saved
   cloud workspace does not authorize access. Select its folder again on a new device.
 - Symlink/junction names are visible. Targets outside granted roots require another grant.
