@@ -99,7 +99,12 @@ if (process.isMainFrame) {
     revokeFolder: rootId => call('revokeFolder', { rootId }),
     file: (op, args) => call('file', { ...args, op }),
     terminal: (op, args) => call('terminal', { ...args, op }),
-    status: () => call('status'), checkUpdates: () => call('checkUpdates'),
+    status: () => call('status'), checkUpdates: () => call('checkUpdates'), installUpdate: () => call('installUpdate'),
+    onUpdateStatus: callback => {
+      const listener = (_event, status) => { if (status && typeof status === 'object' && typeof callback === 'function') callback(status); };
+      ipcRenderer.on('aichat-desktop:update-status', listener);
+      return () => ipcRenderer.removeListener('aichat-desktop:update-status', listener);
+    },
     runMenuCommand: id => { if (hostCommands.has(id)) return call('command', { id }); },
     onFolderSelected: callback => {
       const listener = (_event, selected) => { if (typeof selected === 'string') callback(selected); };

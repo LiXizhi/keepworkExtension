@@ -3,7 +3,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const tar = require('tar');
 
 const projectRoot = path.resolve(__dirname, '..');
 const packageJson = require(path.join(projectRoot, 'package.json'));
@@ -120,6 +119,7 @@ async function extractNodeArchive(archiveFile, extractDir) {
       throw new Error(`system tar failed to extract ${archiveFile}: ${result.error?.message || `exit ${result.status}`}`);
     }
   } else {
+    const tar = require('tar');
     await tar.x({ file: archiveFile, cwd: extractDir, gzip: true, strict: true });
   }
 }
@@ -154,6 +154,31 @@ function npmCi(appDir, target) {
   });
   if (result.error) throw new Error(`npm ci --omit=dev failed to start: ${result.error.message}`);
   if (result.status !== 0) throw new Error(`npm ci --omit=dev failed with exit code ${result.status}`);
+}
+
+function pruneNativeDependencies(stageApp, target) {
+  const nodeModules = path.join(stageApp, 'node_modules');
+  const expectedSherpa = `sherpa-onnx-${target.nodePlatform}-${target.arch}`;
+  const sherpaNames = [
+    'sherpa-onnx-darwin-arm64', 'sherpa-onnx-darwin-x64',
+    'sherpa-onnx-linux-arm64', 'sherpa-onnx-linux-x64',
+    'sherpa-onnx-win-ia32', 'sherpa-onnx-win-x64',
+  ];
+  for (const name of sherpaNames) {
+    if (name !== expectedSherpa) fs.rmSync(path.join(nodeModules, name), { recursive: true, force: true });
+  }
+  for (const name of ['.package-lock.json']) fs.rmSync(path.join(nodeModules, name), { force: true });
+}
+
+function validateNativeDependencies(stageApp, target) {
+  const nodeModules = path.join(stageApp, 'node_modules');
+  const expectedSherpa = `sherpa-onnx-${target.nodePlatform}-${target.arch}`;
+  const sherpaDirs = fs.readdirSync(nodeModules, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && entry.name.startsWith('sherpa-onnx-'))
+    .map(entry => entry.name);
+  if (sherpaDirs.length !== 1 || sherpaDirs[0] !== expectedSherpa) {
+    throw new Error(`staged local-model runtime contains foreign sherpa packages: ${sherpaDirs.join(', ')}`);
+  }
 }
 
 async function stageRuntime(nodeVersion, target) {
@@ -201,6 +226,8 @@ async function stageRuntime(nodeVersion, target) {
   fs.writeFileSync(path.join(stageApp, 'package.json'), `${JSON.stringify(runtimePackage, null, 2)}\n`);
   fs.rmSync(path.join(stageApp, 'package-lock.json'), { force: true });
   fs.rmSync(path.join(stageApp, 'node_modules', '.package-lock.json'), { force: true });
+  pruneNativeDependencies(stageApp, target);
+  validateNativeDependencies(stageApp, target);
 
   fs.writeFileSync(path.join(stageDir, 'runtime.json'), `${JSON.stringify({
     schemaVersion: 1,
@@ -235,7 +262,11 @@ async function main() {
   for (const target of targets) await stageRuntime(nodeVersion, target);
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { pruneNativeDependencies, validateNativeDependencies };

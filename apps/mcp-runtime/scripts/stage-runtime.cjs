@@ -117,6 +117,47 @@ function npmCi(appDir, target) {
   if (result.status !== 0) throw new Error(`npm ci --omit=dev failed with exit code ${result.status}`);
 }
 
+function pruneNodePty(stageApp, target) {
+  const packageRoot = path.join(stageApp, 'node_modules', 'node-pty');
+  if (!fs.existsSync(packageRoot)) throw new Error('staged runtime is missing node-pty');
+  const expected = `${target.nodePlatform === 'win' ? 'win32' : target.nodePlatform}-${target.arch}`;
+  const prebuilds = path.join(packageRoot, 'prebuilds');
+  for (const entry of fs.readdirSync(prebuilds, { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name !== expected) fs.rmSync(path.join(prebuilds, entry.name), { recursive: true, force: true });
+  }
+  for (const entry of fs.readdirSync(packageRoot, { withFileTypes: true })) {
+    if (entry.isDirectory() && ['build', 'deps', 'scripts', 'src', 'third_party', 'typings'].includes(entry.name)) {
+      fs.rmSync(path.join(packageRoot, entry.name), { recursive: true, force: true });
+    }
+  }
+  for (const file of walkFiles(path.join(prebuilds, expected))) {
+    if (file.toLowerCase().endsWith('.pdb')) fs.rmSync(file, { force: true });
+  }
+}
+
+function walkFiles(root) {
+  if (!fs.existsSync(root)) return [];
+  const files = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) files.push(...walkFiles(full));
+    else files.push(full);
+  }
+  return files;
+}
+
+function validateTargetRuntime(stageDir, target) {
+  const packageRoot = path.join(stageDir, 'app', 'node_modules', 'node-pty');
+  const expected = `${target.nodePlatform === 'win' ? 'win32' : target.nodePlatform}-${target.arch}`;
+  const prebuilds = path.join(packageRoot, 'prebuilds');
+  const dirs = fs.readdirSync(prebuilds, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name);
+  if (dirs.length !== 1 || dirs[0] !== expected) throw new Error(`node-pty contains foreign prebuilds: ${dirs.join(', ')}`);
+  if (walkFiles(prebuilds).some(file => file.toLowerCase().endsWith('.pdb'))) throw new Error('node-pty contains debug symbols');
+  for (const name of ['build', 'deps', 'scripts', 'src', 'third_party', 'typings']) {
+    if (fs.existsSync(path.join(packageRoot, name))) throw new Error(`node-pty contains development directory: ${name}`);
+  }
+}
+
 async function stageRuntime(nodeVersion, target) {
   const archiveName = target.isWindows
     ? `node-v${nodeVersion}-${target.nodePlatform}-${target.arch}.zip`
@@ -161,6 +202,8 @@ async function stageRuntime(nodeVersion, target) {
   fs.writeFileSync(path.join(stageApp, 'package.json'), `${JSON.stringify(runtimePackage, null, 2)}\n`);
   fs.rmSync(path.join(stageApp, 'package-lock.json'), { force: true });
   fs.rmSync(path.join(stageApp, 'node_modules', '.package-lock.json'), { force: true });
+  pruneNodePty(stageApp, target);
+  validateTargetRuntime(stageDir, target);
 
   if (target.platform === 'darwin') {
     const helper = path.join(stageApp, 'node_modules', 'node-pty', 'prebuilds', `darwin-${target.arch}`, 'spawn-helper');
@@ -199,7 +242,11 @@ async function main() {
   for (const target of targets) await stageRuntime(nodeVersion, target);
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { pruneNodePty, validateTargetRuntime };

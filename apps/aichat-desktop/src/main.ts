@@ -27,7 +27,7 @@ let runtimeHeartbeat: ReturnType<typeof setInterval> | undefined;
 let opening: Promise<void> | null = null;
 let appIcon: ReturnType<typeof nativeImage.createFromPath> | undefined;
 const closedTip = `${PRODUCT_NAME}（窗口已关闭，点击重新打开）`;
-let updateState = 'idle', updateError = '', checking: Promise<void> | null = null;
+let updateState = 'idle', updateError = '', updateProgress = 0, checking: Promise<void> | null = null;
 const terminals = new TerminalSessionManager();
 const terminalIds = new Set<string>();
 let settingsFile: string;
@@ -127,6 +127,17 @@ async function checkUpdates() {
     menu();
   })().finally(() => { checking = null; });
   return checking;
+}
+function updatePayload() {
+  return { state: updateState, progress: updateProgress, error: updateError || '' };
+}
+function notifyUpdateStatus() {
+  const current = liveWindow();
+  if (current && trustedPage(current.webContents.getURL(), devUrl)) current.webContents.send('aichat-desktop:update-status', updatePayload());
+}
+function setUpdateState(state: string, progress = 0) {
+  updateState = state; updateProgress = Math.max(0, Math.min(100, Number(progress) || 0));
+  menu(); notifyUpdateStatus();
 }
 const PAGE_COMMANDS = new Set(['new-chat', 'toggle-sidebar', 'toggle-files', 'open-settings', 'experience-simple', 'experience-professional', 'theme-light', 'theme-dark']);
 const HOST_COMMANDS = new Set(['open-folder', 'reload', 'check-updates', 'toggle-login', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'select-all', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'mcp-status', 'mcp-dashboard', 'mcp-restart', 'open-browser', 'local-source', 'published-site']);
@@ -352,8 +363,13 @@ function setupBridge() {
       return defaultBrainFolder(files, app.getPath('documents'), args.prepare);
     }
     if (method === 'revokeFolder') { clearTerminals(); return files.revoke(args.rootId); }
-    if (method === 'status') return { version: app.getVersion(), mcp: runtime.state, shell: updateState, error: updateError };
-    if (method === 'checkUpdates') { await checkUpdates(); return { mcp: runtime.state, shell: updateState, error: updateError }; }
+    if (method === 'status') return { version: app.getVersion(), mcp: runtime.state, shell: updateState, progress: updateProgress, error: updateError };
+    if (method === 'checkUpdates') { await checkUpdates(); return { mcp: runtime.state, shell: updateState, progress: updateProgress, error: updateError }; }
+    if (method === 'installUpdate') {
+      if (updateState !== 'pending restart') return updatePayload();
+      autoUpdater.quitAndInstall();
+      return updatePayload();
+    }
     if (method === 'file') {
       if (args.op === 'reveal') {
         const target = files.resolve(args.rootId, args.rel, { followLinks: true });
@@ -455,10 +471,12 @@ else {
     const icon = appIcon.resize({ width: process.platform === 'darwin' ? 22 : 16 });
     tray = new Tray(icon); tray.setToolTip(PRODUCT_NAME); tray.on('click', show); menu();
     autoUpdater.autoDownload = true; autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on('checking-for-update', () => { updateState = 'checking'; menu(); });
-    autoUpdater.on('update-not-available', () => { updateState = 'current'; menu(); });
-    autoUpdater.on('update-downloaded', () => { updateState = 'pending restart'; menu(); });
-    autoUpdater.on('error', e => { updateError = e.message; menu(); });
+    autoUpdater.on('checking-for-update', () => { updateError = ''; setUpdateState('checking'); });
+    autoUpdater.on('update-available', () => { updateError = ''; setUpdateState('downloading'); });
+    autoUpdater.on('download-progress', info => { setUpdateState('downloading', info?.percent); });
+    autoUpdater.on('update-not-available', () => { updateError = ''; setUpdateState('current'); });
+    autoUpdater.on('update-downloaded', () => { setUpdateState('pending restart', 100); });
+    autoUpdater.on('error', e => { updateError = e.message; setUpdateState('error'); });
     if (process.argv.includes('--background')) tray.setToolTip(closedTip);
     else await ensureShown();
     if (!disableDevMcp) {

@@ -105,6 +105,11 @@ app/dist/src/cli.js serve --port 18089
 LOCAL_MODEL_ROOT=<runtime>/app
 ```
 
+Staging is target-specific: only the matching `sherpa-onnx` native package is kept
+for the selected platform and architecture. Foreign optional native packages are
+removed after installation, and validation rejects a staged runtime that contains
+more than the expected target package.
+
 ## Distribution boundary
 
 This application has no Electron shell, independent installer, CI publisher or

@@ -17,6 +17,12 @@ Each ZIP includes `runtime.json`, `LICENSE-node.txt`, `app/cli.cjs`,
 (macOS). The adjacent platform JSON is the independent download/package manifest;
 `runtime.json` inside the ZIP describes how a host launches the daemon.
 
+Runtime staging is target-specific. The packaged `node-pty` dependency retains only
+the native prebuild for the archive's platform and architecture; foreign prebuilds,
+debug symbols, and development/source directories are removed before packaging.
+Windows x64, macOS x64, and macOS arm64 archives remain fully offline-capable
+without carrying native binaries for the other targets.
+
 External consumers: see the [CDN download contract](../../docs/node-runtime-cdn.md)
 for the six fixed URLs, JSON fields, update detection and verification steps.
 

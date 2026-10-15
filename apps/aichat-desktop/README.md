@@ -118,7 +118,7 @@ gets the desktop bridge; Dashboard and embedded pages do not gain native privile
 
 Only the main AIChat window may invoke `aichat-desktop:v1`. Preload exposes
 `window.aichatDesktop` with `version`, `capabilities`, `roots`, `pickFolder`, `revokeFolder`,
-`file`, `terminal`, `status`, `checkUpdates`, and `onFolderSelected`. File calls use opaque
+`file`, `terminal`, `status`, `checkUpdates`, `installUpdate`, `onUpdateStatus`, and `onFolderSelected`. File calls use opaque
 root IDs plus relative paths. Native folder grants cannot be created from renderer arguments.
 Frame, webContents and exact page URL checks run on every invocation. Embedded tools and
 previews do not receive the preload. No generic IPC, filesystem, shell or Node objects escape.
