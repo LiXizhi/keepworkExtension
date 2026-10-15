@@ -7,20 +7,44 @@ import * as path from 'node:path';
 import { HarnessAdapter } from './codexHarness';
 import { cacheValue } from './acpHarness';
 import { CliLaunch, resolveAgentCli, stopCli } from './agentCliProcess';
+import { cliProxyEnvironment } from './cliProxyEnvironment';
 import { unsupportedModeMethod } from './agentModes';
 
-type Thread = { id: string; cwd: string; roots: string[]; turns: any[]; native: boolean; planMode?: boolean; model?: string; mcpServers?: any[]; aichatInstructions?: string };
+type Thread = { id: string; cwd: string; roots: string[]; turns: any[]; native: boolean; planMode?: boolean; model?: string; effort?: string; mcpServers?: any[]; aichatInstructions?: string };
 type Run = { id: string; items: any[]; cancelled?: boolean; messageId?: string; timer: NodeJS.Timeout };
 type Connection = { child: ChildProcessWithoutNullStreams; ready: Promise<any>; pending: Map<string, any>; run?: Run; permissions: Map<string, any>; models: any[] };
 const rejected = (message: string) => Object.assign(new Error(message), { rpcRejected: true });
+const EFFORT_THINKING_TOKENS: Record<string, number> = { low: 4000, medium: 10000, high: 20000, xhigh: 31999, max: 31999 };
+function normalizeClaudeModel(m: any) {
+    const id = m?.value || m?.id;
+    if (!id) return null;
+    const rawEfforts = Array.isArray(m.supportedReasoningEfforts) ? m.supportedReasoningEfforts
+        : Array.isArray(m.supportedEffortLevels) ? m.supportedEffortLevels
+        : m.supportsEffort ? ['low', 'medium', 'high', 'max'] : [];
+    const supportedReasoningEfforts = rawEfforts.map((e: any) => typeof e === 'string'
+        ? { reasoningEffort: e, displayName: e }
+        : { reasoningEffort: e.reasoningEffort || e.value || e.id, displayName: e.displayName || e.name || e.reasoningEffort || e.value || e.id, ...(e.description ? { description: e.description } : {}) }
+    ).filter((e: any) => e.reasoningEffort);
+    const defaultReasoningEffort = m.defaultReasoningEffort || m.defaultEffort
+        || (supportedReasoningEfforts.some((e: any) => e.reasoningEffort === 'medium') ? 'medium' : supportedReasoningEfforts[0]?.reasoningEffort);
+    return {
+        id,
+        displayName: m.displayName || m.name || id,
+        ...(m.description ? { description: m.description } : {}),
+        ...(typeof m.isDefault === 'boolean' ? { isDefault: m.isDefault } : {}),
+        ...(supportedReasoningEfforts.length ? { supportedReasoningEfforts, ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}) } : {}),
+    };
+}
 
 /** Claude's native bidirectional stream-json control protocol, without shell or SDK dependency. */
 export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
     private threads = new Map<string, Thread>();
     private connections = new Map<string, Connection>();
+    private modelCache: any[] = [];
     private launch?: CliLaunch;
     constructor(private directory: string, private executable?: string, private prefix: string[] = []) { super(); }
     cliInfo() { return this.launch && { path: this.launch.path, source: this.launch.source }; }
+    refreshCapabilities() { this.modelCache = []; }
     private notify(method: string, threadId: string, params: any) { this.emit('notification', { method, params: { threadId, ...params } }); }
     private save(thread: Thread) {
         fs.mkdirSync(this.directory, { recursive: true });
@@ -55,8 +79,8 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
             this.connections.delete(idle[0]); stopCli(idle[1].child);
         }
         const args = [...this.prefix, '--print', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--permission-prompt-tool', 'stdio', `${thread.native ? '--resume' : '--session-id'}=${thread.id}`,
-            ...thread.roots.slice(1).flatMap(root => ['--add-dir', root]), ...(thread.model ? ['--model', thread.model] : [])];
-        const environment = { ...process.env };
+            ...thread.roots.slice(1).flatMap(root => ['--add-dir', root]), ...(thread.model ? ['--model', thread.model] : []), ...(thread.effort ? ['--effort', thread.effort] : [])];
+        const environment = { ...cliProxyEnvironment() };
         if (thread.mcpServers?.length) {
             const servers = Object.fromEntries(thread.mcpServers.map(server => [server.name, { command: server.command, args: server.args, env: Object.fromEntries(server.env.map((entry: any) => {
                 environment[entry.name] = entry.value;
@@ -91,7 +115,10 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         child.stdin.on('error', () => fail(new Error('Claude input stream disconnected')));
         c.ready = this.control(c, { subtype: 'initialize', hooks: {} }).then(result => {
             c.models = result.models || [];
-            if (Array.isArray(result.models)) this.notify('model/updated', thread.id, {});
+            if (Array.isArray(result.models) && result.models.length) {
+                this.modelCache = result.models;
+                this.notify('model/updated', thread.id, {});
+            }
             return result;
         });
         void c.ready.catch(error => fail(error)); return c.ready;
@@ -102,11 +129,16 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         if (existing) Object.assign(existing, cacheValue(value)); else { run.items.push(cacheValue(value)); run.items = run.items.slice(-2000); }
         this.notify('item/completed', thread.id, { item: existing || run.items.at(-1) });
     }
-    private block(thread: Thread, c: Connection, block: any, index: number, messageId: string) {
-        const id = block.type === 'tool_use' ? block.id : `${messageId}:${index}`;
-        if (block.type === 'text' || block.type === 'thinking') this.item(thread, c, { id, type: block.type === 'text' ? 'agentMessage' : 'reasoning', text: block.text || block.thinking || '' });
-        if (block.type === 'tool_use') this.item(thread, c, { id, type: 'mcpToolCall', command: block.name, arguments: block.input || {}, status: 'inProgress' });
-        if (block.type === 'tool_result') this.item(thread, c, { id: block.tool_use_id, type: 'mcpToolCall', result: block.content, status: block.is_error ? 'failed' : 'completed' });
+    private block(thread: Thread, c: Connection, block: any, index: number, messageId: string, parentToolUseId?: string | null) {
+        const parent = typeof parentToolUseId === 'string' && parentToolUseId ? parentToolUseId : undefined;
+        const id = block.type === 'tool_use' ? block.id : `${parent ? parent + ':' : ''}${messageId}:${index}`;
+        const meta = parent ? { parentToolUseId: parent } : {};
+        if (block.type === 'text' || block.type === 'thinking') this.item(thread, c, { id, type: block.type === 'text' ? 'agentMessage' : 'reasoning', text: block.text || block.thinking || '', ...meta });
+        if (block.type === 'tool_use') this.item(thread, c, { id, type: ['Task', 'Agent'].includes(block.name) ? 'collabToolCall' : 'mcpToolCall', command: block.name, arguments: block.input || {}, status: 'inProgress', ...meta });
+        if (block.type === 'tool_result') {
+            const existing = c.run?.items.find(i => i.id === block.tool_use_id);
+            this.item(thread, c, { id: block.tool_use_id, type: existing?.type || 'mcpToolCall', result: block.content, status: block.is_error ? 'failed' : 'completed', ...meta });
+        }
     }
     private message(thread: Thread, c: Connection, m: any) {
         if (m.type === 'control_response') {
@@ -133,17 +165,18 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
             c.pending.clear();
         }
         if (!run) return;
+        const parent = typeof m.parent_tool_use_id === 'string' && m.parent_tool_use_id ? m.parent_tool_use_id : undefined;
         if (m.type === 'stream_event') {
             const event = m.event;
             if (event?.type === 'message_start') run.messageId = event.message?.id || randomUUID();
-            if (event?.type === 'content_block_start') this.block(thread, c, event.content_block, event.index, run.messageId || run.id);
+            if (event?.type === 'content_block_start') this.block(thread, c, event.content_block, event.index, run.messageId || run.id, parent);
             if (event?.type === 'content_block_delta' && ['text_delta', 'thinking_delta'].includes(event.delta?.type)) {
-                const id = `${run.messageId || run.id}:${event.index}`, item = run.items.find(i => i.id === id);
-                this.item(thread, c, { id, type: event.delta.type === 'text_delta' ? 'agentMessage' : 'reasoning', text: ((item?.text || '') + (event.delta.text || event.delta.thinking || '')).slice(-131072) });
+                const id = `${parent ? parent + ':' : ''}${run.messageId || run.id}:${event.index}`, item = run.items.find(i => i.id === id);
+                this.item(thread, c, { id, type: event.delta.type === 'text_delta' ? 'agentMessage' : 'reasoning', text: ((item?.text || '') + (event.delta.text || event.delta.thinking || '')).slice(-131072), ...(parent ? { parentToolUseId: parent } : {}) });
             }
         }
         if (m.type === 'assistant' || m.type === 'user') {
-            for (const [index, block] of (Array.isArray(m.message?.content) ? m.message.content : []).entries()) if (m.type === 'assistant' || block.type === 'tool_result') this.block(thread, c, block, index, m.message?.id || m.uuid || run.id);
+            for (const [index, block] of (Array.isArray(m.message?.content) ? m.message.content : []).entries()) if (m.type === 'assistant' || block.type === 'tool_result') this.block(thread, c, block, index, m.message?.id || m.uuid || run.id, parent);
         }
         if (m.type === 'result') {
             if (!run.items.some(i => i.type === 'agentMessage') && typeof m.result === 'string') this.item(thread, c, { id: randomUUID(), type: 'agentMessage', text: m.result });
@@ -159,20 +192,50 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         try { this.save(thread); } catch { status = 'failed'; error = 'Could not persist local Claude history'; }
         this.notify('turn/completed', thread.id, { turn: { id: run.id, status, ...(error ? { error: { message: error } } : {}) } });
     }
+    private async applyEffort(thread: Thread, c: Connection, effort?: string, model?: string) {
+        if (effort === undefined) return;
+        if (!effort) {
+            if (thread.effort) {
+                try { await this.control(c, { subtype: 'set_max_thinking_tokens', max_thinking_tokens: null }); }
+                catch (error) { if (!unsupportedModeMethod(error)) throw error; }
+                delete thread.effort;
+            }
+            return;
+        }
+        const tokens = EFFORT_THINKING_TOKENS[effort];
+        if (!tokens) throw rejected(`Unsupported Claude reasoning effort: ${effort}`);
+        const targetModel = model || thread.model;
+        const modelMeta = [...c.models, ...this.modelCache].find(m => (m.value || m.id) === targetModel);
+        if (modelMeta) {
+            if (modelMeta.supportsEffort === false) throw rejected('This Claude model does not expose reasoning effort');
+            const normalized = normalizeClaudeModel(modelMeta);
+            if (normalized?.supportedReasoningEfforts?.length && !normalized.supportedReasoningEfforts.some((e: any) => e.reasoningEffort === effort)) {
+                throw rejected(`This Claude model does not support reasoning effort: ${effort}`);
+            }
+        }
+        try { await this.control(c, { subtype: 'set_max_thinking_tokens', max_thinking_tokens: tokens }); }
+        catch (error) { if (!unsupportedModeMethod(error)) throw error; }
+        thread.effort = effort;
+    }
     async call(method: string, p: any = {}): Promise<any> {
         if (method === 'account/read') {
             const command = resolveAgentCli('claude', [...this.prefix, '--version'], this.executable); this.launch = command;
             await promisify(execFile)(command.executable, command.args, { timeout: 10000, maxBuffer: 65536, windowsHide: true });
             return { account: null, authUnknown: true, probe: 'executable' };
         }
-        if (method === 'model/list') return { data: [...this.connections.values()].flatMap(c => c.models.map(m => ({ id: m.value || m.id, displayName: m.displayName || m.name || m.value }))).filter(m => m.id) };
+        if (method === 'model/list') {
+            const raw = [...[...this.connections.values()].flatMap(c => c.models), ...this.modelCache];
+            const data = raw.map(normalizeClaudeModel).filter((m, i, a): m is NonNullable<typeof m> => !!m && a.findIndex(x => x?.id === m.id) === i);
+            return { data };
+        }
         if (['thread/name/set', 'thread/archive', 'thread/unarchive'].includes(method)) {
             const c = this.connections.get(p.threadId);
             if (method === 'thread/archive' && c && !c.run) { this.connections.delete(p.threadId); stopCli(c.child); }
             return {};
         }
         if (method === 'thread/start') {
-            const thread: Thread = { id: randomUUID(), cwd: p.cwd, roots: p.roots || [p.cwd], turns: [], native: false, model: p.model, mcpServers: p.mcpServers, aichatInstructions: p.aichatInstructions };
+            if (p.effort && !EFFORT_THINKING_TOKENS[p.effort]) throw rejected(`Unsupported Claude reasoning effort: ${p.effort}`);
+            const thread: Thread = { id: randomUUID(), cwd: p.cwd, roots: p.roots || [p.cwd], turns: [], native: false, model: p.model, ...(p.effort ? { effort: p.effort } : {}), mcpServers: p.mcpServers, aichatInstructions: p.aichatInstructions };
             this.threads.set(thread.id, thread); await this.boot(thread); this.save(thread); return { thread };
         }
         const thread = this.thread(p.threadId);
@@ -193,8 +256,8 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         if (method === 'turn/interrupt') { if (c.run) c.run.cancelled = true; await this.control(c, { subtype: 'interrupt' }); return {}; }
         if (method !== 'turn/start') throw rejected('Unsupported Claude harness method');
         if (c.run) throw rejected('Claude session already running');
-        if (p.effort) throw rejected('Per-turn Claude effort changes are unsupported; use native CLI settings');
         if (p.model) { await this.control(c, { subtype: 'set_model', model: p.model }); thread.model = p.model; }
+        if (p.effort !== undefined) await this.applyEffort(thread, c, p.effort, p.model || thread.model);
         thread.native = true; this.save(thread);
         const run: Run = { id: randomUUID(), items: [], timer: setTimeout(() => { this.finish(thread, c, 'failed', 'Claude turn timed out; not rerun'); this.connections.delete(thread.id); stopCli(c.child); }, 30 * 60 * 1000) }; c.run = run;
         this.notify('turn/started', thread.id, { turn: { id: run.id } });
@@ -214,6 +277,7 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         throw rejected('Claude request expired');
     }
     close() {
+        this.refreshCapabilities();
         for (const [id, c] of this.connections) {
             if (c.run) this.finish(this.thread(id), c, 'interrupted', 'Claude connection closed');
             for (const p of c.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Claude closed')); }

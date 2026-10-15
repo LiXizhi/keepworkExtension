@@ -17,7 +17,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(m.type==='control_request'){
   if(m.request.subtype==='initialize'&&process.argv.includes('--startup-result-error'))return send({type:'result',subtype:'error_during_execution',is_error:true,result:'Authentication required'});
   if(m.request.subtype==='initialize'&&process.argv.includes('--auth-required'))return send({type:'control_response',response:{subtype:'error',request_id:m.request_id,error:'Authentication required'}});
-  send({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:{models:[{value:'fixture',displayName:'Fixture model'}]}}});
+  send({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:{models:[
+   {value:'fixture',displayName:'Fixture model',isDefault:true,supportsEffort:true,supportedEffortLevels:['low','medium','high']},
+   {value:'fast',displayName:'Fast model',supportsEffort:false}
+  ]}}});
   if(m.request.subtype==='initialize')send({type:'system',subtype:'init',session_id:session});
   if(m.request.subtype==='interrupt')send({type:'result',subtype:'success',result:'Interrupted'});
   return;
@@ -27,6 +30,13 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   if(prompt.includes('crash'))return process.exit(1);
   if(prompt.includes('wait'))return;
   if(prompt.includes('permission')||prompt.includes('question'))return send({type:'control_request',request_id:'approval-'+session,request:{subtype:'can_use_tool',tool_name:prompt.includes('question')?'AskUserQuestion':'Read',input:prompt.includes('question')?{questions:[{question:'Choose?',options:[{label:'yes'}]}]}:{path:'fixture.txt',apiToken:'SECRET_NOT_IN_CACHE'}}});
+  if(prompt.includes('subagent')){
+   send({type:'assistant',parent_tool_use_id:null,message:{id:'msg-1',content:[{type:'text',text:'Delegating'},{type:'tool_use',id:'task-1',name:'Task',input:{description:'research'}}]}});
+   send({type:'assistant',parent_tool_use_id:'task-1',message:{id:'msg-1',content:[{type:'text',text:'Subagent note'},{type:'tool_use',id:'sub-read-1',name:'Read',input:{path:'sub.txt'}}]}});
+   send({type:'user',parent_tool_use_id:'task-1',message:{content:[{type:'tool_result',tool_use_id:'sub-read-1',content:'sub-content'}]}});
+   send({type:'user',parent_tool_use_id:null,message:{content:[{type:'tool_result',tool_use_id:'task-1',content:'task-done'}]}});
+   return send({type:'result',subtype:'success',result:'Delegating'});
+  }
   if(prompt.includes('stream')){
    send({type:'stream_event',event:{type:'message_start',message:{id:'streamed'}}});
    send({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
