@@ -8,9 +8,19 @@ import {
 } from './paths';
 
 export const FS_API = 'workspace';
-const MAX_FILE_BYTES = 16_000_000;
+const MAX_FILE_BYTES = 1024 * 1024 * 1024;
+const MAX_PPT_BYTES = 100 * 1024 * 1024;
 const DEFAULT_LIST_MAX = 1000;
 const MAX_LIST_MAX = 5000;
+
+export function localFileSizeLimit(filename: string): number {
+    return /\.pptx?$/i.test(filename) ? MAX_PPT_BYTES : MAX_FILE_BYTES;
+}
+
+function assertFileSize(filename: string, size: number): void {
+    const maxBytes = localFileSizeLimit(filename);
+    if (size > maxBytes) throw new Error(`file too large (max ${maxBytes / 1024 / 1024} MiB): ${filename}`);
+}
 
 // MIME from extension so other clients can use /fs/file like a normal file URL
 // (img, html, lua in a tab). Never append charset=: that makes XHR decode the
@@ -145,7 +155,7 @@ export function readSearchFile(rootRaw: string, relRaw: string, { includeLinks =
     }
     if (st.isDirectory()) throw new Error('path is a directory');
     if (!st.isFile()) throw new Error(`not a file: ${rel}`);
-    if (st.size > MAX_FILE_BYTES) throw new Error(`file too large: ${rel}`);
+    assertFileSize(rel, st.size);
     return {
         rel: includeLinks ? rel.replace(/\\/g, '/') : relativeToRoot(root, abs).replace(/\\/g, '/'),
         type: contentTypeFor(abs),
@@ -288,7 +298,7 @@ function writeSearchFile(rootRaw: string, relRaw: string, body: Buffer) {
     const root = resolveRoot(rootRaw);
     const rel = normalizeRel(relRaw);
     const abs = resolveUnderRoot(root, rel, { includeLinks: true });
-    if (body.length > MAX_FILE_BYTES) throw new Error(`file too large: ${rel}`);
+    assertFileSize(rel, body.length);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, body);
     return { rel, size: body.length };
@@ -406,7 +416,7 @@ export async function tryHandleFs(opts: {
     method: string;
     url: URL;
     res: http.ServerResponse;
-    readBodyBuffer?: () => Promise<Buffer>;
+    readBodyBuffer?: (maxBytes?: number) => Promise<Buffer>;
     sendJson: (status: number, body: unknown) => void;
 }): Promise<boolean> {
     if (!opts.pathname.startsWith('/fs')) return false;
@@ -466,7 +476,7 @@ export async function tryHandleFs(opts: {
                 opts.sendJson(500, { ok: false, error: 'readBodyBuffer missing' });
                 return true;
             }
-            const body = await opts.readBodyBuffer();
+            const body = await opts.readBodyBuffer(localFileSizeLimit(rel));
             opts.sendJson(200, { ok: true, ...writeSearchFile(root, rel, body) });
             return true;
         }

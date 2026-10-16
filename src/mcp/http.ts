@@ -83,14 +83,14 @@ function extractToken(req: http.IncomingMessage, url: URL): string {
     return String(url.searchParams.get('token') || '').trim();
 }
 
-function readBodyBuffer(req: http.IncomingMessage): Promise<Buffer> {
+function readBodyBuffer(req: http.IncomingMessage, maxBytes = 16_000_000): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
         let size = 0;
         req.on('data', (c) => {
             const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
             size += buf.length;
-            if (size > 16_000_000) {
+            if (size > maxBytes) {
                 reject(new Error('request too large'));
                 req.destroy();
                 return;
@@ -239,7 +239,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 method: req.method || 'GET',
                 url,
                 res,
-                readBodyBuffer: () => readBodyBuffer(req),
+                readBodyBuffer: (maxBytes) => readBodyBuffer(req, maxBytes),
                 sendJson: (status, body) => sendJson(res, status, body),
             });
             if (handledFs) return;

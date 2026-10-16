@@ -1,7 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const LIMIT = 16_000_000;
+function fileSizeLimit(filename) {
+  return /\.pptx?$/i.test(filename) ? 100 * 1024 * 1024 : 1024 * 1024 * 1024;
+}
 function inside(root, target) {
   const rel = path.relative(root, target);
   return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
@@ -68,13 +70,14 @@ class NativeFiles {
     if (op === 'read') {
       try {
         const stat = fs.statSync(target);
-        if (!stat.isFile() || stat.size > LIMIT) throw new Error('File exceeds read limit or is not a file');
+        if (!stat.isFile()) throw new Error('Path is not a file');
+        if (stat.size > fileSizeLimit(rel)) throw new Error(`File exceeds read limit (${fileSizeLimit(rel) / 1024 / 1024} MiB)`);
         return { bytes: new Uint8Array(fs.readFileSync(target)) };
       } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
     }
     if (op === 'write') {
       const data = typeof args.text === 'string' ? Buffer.from(args.text) : Buffer.from(args.bytes || []);
-      if (data.length > LIMIT) throw new Error('File exceeds write limit');
+      if (data.length > fileSizeLimit(rel)) throw new Error(`File exceeds write limit (${fileSizeLimit(rel) / 1024 / 1024} MiB)`);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       this.resolve(rootId, rel, { followLinks: true });
       fs.writeFileSync(target, data); return { ok: true };

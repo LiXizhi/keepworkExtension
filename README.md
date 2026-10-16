@@ -102,6 +102,8 @@ Status bar: `Keepwork MCP` (plus client count). Hover for a summary; click for c
 
 `GET /health` includes `workspaceRoot` so AIChat can map cloud workspace slots onto a cwd relative to that root. It also reports `paracraftClients` when desktop Paracraft processes have registered, `webserverBase` (`http://127.0.0.1:<port>/webserver`) so web-paracraft can bind the NPL code wiki, and `fsApi: "workspace"` when local-disk list/write/delete are available. `GET /exists?path=` checks that a typed local absolute path exists; AIChat must verify that path before using `/fs/*`. `run_terminal` accepts that path as `cwd` so a bound local disk folder does not fall back to `workspace/<foldername>`. AIChat local-disk `list_dir` / `search_files` / `read_file` / writes use `/fs/list`, `/fs/search`, `/fs/file`, `/fs/dir` (includes symbolic links and junctions). Local web-paracraft can overlay git files with `?searchroot=<abs>&searchpath=<rel>` via `GET /fs/file` (one file per request, **raw on-disk bytes**, MIME from the extension, no `charset=` — same API as a normal file URL; optional `?base64=true` JSON is unused by the overlay; loopback, confined to that root).
 
+Local file reads and writes accept PPT/PPTX up to 100 MiB and other files up to 1 GiB. The `/fs/file` PUT request body uses the same per-file limit; other HTTP request bodies retain their existing cap. The native AIChat Desktop file adapter uses the same limits. Restart the MCP daemon after updating its runtime for these changes to take effect.
+
 `GET /health` also reports `terminalApi: "pty-session-v1"`. AIChat uses this capability for its user-operated xterm.js workspace Terminal tab; it is not registered as another LLM MCP tool:
 
 - `POST /terminal/sessions` — create a PTY in `{ cwd, cols, rows }`
