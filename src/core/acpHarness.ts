@@ -53,7 +53,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         private executable?: string,
         private args = AGENT_CLI[backend].args,
         private prepareEnvironment?: () => Promise<NodeJS.ProcessEnv>,
-        private launchMcp?: any[], private launchCwd?: string) { super(); }
+        private launchMcp?: any[], private launchCwd?: string, private persistHistory = true) { super(); }
 
     private start(): Promise<any> {
         if (this.ready) return this.ready;
@@ -187,6 +187,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         return thread!;
     }
     private save(thread: Thread) {
+        if (!this.persistHistory) return;
         fs.mkdirSync(this.directory, { recursive: true });
         const file = path.join(this.directory, thread.id + '.json');
         const { loaded, mcpServers, ...data } = thread;
@@ -213,7 +214,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
                 const cwd = p.cwd || (p.threadId ? this.thread(p.threadId).cwd : undefined);
                 if (this.isBuddy() && !cwd) throw new Error('Select a local workspace before starting the CLI');
                 const child = new AcpHarness(this.backend, this.directory, this.executable, this.args, this.prepareEnvironment,
-                    this.backend === 'copilot' ? p.mcpServers : undefined, cwd);
+                    this.backend === 'copilot' ? p.mcpServers : undefined, cwd, this.persistHistory);
                 let threadId = p.threadId;
                 child.on('notification', message => this.emit('notification', message));
                 child.on('request', message => { const id = 'mcp-scope-' + randomUUID(); this.scopedRequests.set(id, { child, id: message.id }); this.emit('request', { ...message, id }); });

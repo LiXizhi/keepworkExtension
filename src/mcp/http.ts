@@ -1,3 +1,5 @@
+import { Personas } from '../core/personas';
+import { handlePersonaHttp } from './personaHttp';
 import { managedBrowsers } from '../core/browser';
 import * as http from 'node:http';
 import * as path from 'node:path';
@@ -27,6 +29,8 @@ import { tryHandleAichatPresence, aichatClientRemembered } from '../core/aichatP
 import { dashboardHtml } from './dashboard';
 import { dashboardSkill } from './dashboardSkill';
 import { apiDocs } from './apiDocs';
+import { MessagingService } from '../core/messaging';
+import { handleMessagingHttp } from './messagingHttp';
 
 export interface HttpServerHandle {
     port: number;
@@ -139,6 +143,9 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     const presenceStreams = new Map<string, http.ServerResponse>();
     const terminalSessions = new TerminalSessionManager();
     const agentSessions = new AgentSessions(path.join(mcpHomeDir(), 'agent-sessions-v1.json'));
+    const messaging = new MessagingService(path.join(mcpHomeDir(), 'messaging-v1'), port);
+    runtime.messaging = messaging;
+    const personas = new Personas(path.join(mcpHomeDir(),'personas-v1'),agentSessions,messaging);
 
     const assertAuth = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
         if (!authRequired) return true;
@@ -159,10 +166,18 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         }
 
         try {
+            if (pathname.startsWith('/messaging/')) {
+                const worker = pathname === '/messaging/worker' || pathname.startsWith('/messaging/worker/');
+                const origin = String(req.headers.origin || '');
+                if (worker ? (origin && origin !== `http://127.0.0.1:${port}`) : (!origin || !originAllowed(origin))) { sendJson(res,403,{error:'Messaging Origin rejected'}); return; }
+                if (!worker && !assertAuth(req,url,res)) return;
+                await handleMessagingHttp(req,res,url,messaging); return;
+            }
             if (pathname.startsWith('/agents/')) {
                 const origin = String(req.headers.origin || '');
                 if (!origin || !originAllowed(origin)) { sendJson(res, 403, { error: 'Explicit allowed Origin required' }); return; }
                 if (!assertAuth(req, url, res)) return;
+                if (pathname === '/agents/personas' || pathname.startsWith('/agents/personas/')) { await handlePersonaHttp(req,res,url,personas,messaging); return; }
                 await handleAgentHttp(req, res, url, agentSessions);
                 return;
             }
@@ -202,6 +217,8 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     agentInventoryApi: 'v1',
                     aichatClient: aichatClientRemembered(),
                     aichatPresenceApi: 'post-sse-v1',
+                    messagingApi: 'messaging-v1',
+                    personasApi: 'personas-v1',
                 });
                 return;
             }
@@ -527,12 +544,14 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     });
     startParacraftWatch();
     startCalendarWatch();
+    messaging.resume();
 
     const close = async () => {
         clearInterval(pruneTimer);
         stopParacraftWatch();
         stopCalendarWatch();
         terminalSessions.closeAll();
+        personas.close();
         agentSessions.close();
         for (const response of presenceStreams.values()) response.end();
         presenceStreams.clear();
@@ -541,6 +560,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
             try { await t.close(); } catch { /* ignore */ }
         }
         transports.clear();
+        messaging.close();
         await new Promise<void>((resolve) => server.close(() => resolve()));
         clearInstance();
     };

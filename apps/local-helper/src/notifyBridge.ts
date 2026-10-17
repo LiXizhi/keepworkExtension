@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { Notification, shell } from 'electron';
+import { BrowserWindow, Notification, shell } from 'electron';
 import {
     BIND_HOST,
     clearNotifyBridge,
@@ -64,6 +64,7 @@ async function revealPath(abs: string): Promise<void> {
 }
 
 export async function startHelperNotifyBridge(): Promise<HelperNotifyBridgeHandle> {
+    const messagingWindows = new Set<BrowserWindow>();
     const token = randomBytes(24).toString('hex');
     const server = http.createServer(async (req, res) => {
         const url = new URL(req.url || '/', 'http://127.0.0.1');
@@ -81,6 +82,21 @@ export async function startHelperNotifyBridge(): Promise<HelperNotifyBridgeHandl
         }
 
         try {
+            if (pathname === '/messaging-worker' && req.method === 'POST') {
+                const body = JSON.parse(await readBody(req));
+                const target = new URL(String(body.url || ''));
+                if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || target.pathname !== '/messaging/worker' || !/^#[a-f0-9-]{72}$/.test(target.hash) || target.username || target.password) throw new Error('Invalid messaging worker URL');
+                if (messagingWindows.size >= 4) throw new Error('Messaging worker limit reached');
+                const window = new BrowserWindow({ width: 720, height: 600, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false, partition: 'messaging-' + randomBytes(16).toString('hex') } });
+                messagingWindows.add(window);
+                window.webContents.on('page-title-updated', (_event, title) => { if (title === 'Keepwork worker finished' && !window.isDestroyed()) window.close(); });
+                window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+                window.webContents.on('will-navigate', event => event.preventDefault());
+                const timer = setTimeout(() => { if (!window.isDestroyed()) window.close(); }, 1810000);
+                window.on('closed', () => { clearTimeout(timer); messagingWindows.delete(window); });
+                await window.loadURL(target.href);
+                sendJson(res,200,{ok:true}); return;
+            }
             if (pathname === '/reveal' && req.method === 'POST') {
                 const body = JSON.parse((await readBody(req)) || '{}') as { path?: string };
                 const requested = String(body.path || '').trim();
@@ -142,6 +158,7 @@ export async function startHelperNotifyBridge(): Promise<HelperNotifyBridgeHandl
     return {
         port,
         dispose() {
+            for (const window of messagingWindows) window.close();
             clearInterval(advertiseTimer);
             clearNotifyBridge(process.pid);
             server.close();

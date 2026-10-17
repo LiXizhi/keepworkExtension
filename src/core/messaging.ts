@@ -1,0 +1,225 @@
+import { latestAichatClient } from './aichatPresence';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { createHash } from 'node:crypto';
+import { configValue, confined, defaultMessageConfig, DEFAULT_PROMPT, digestMessage, incoming, Incoming, knowledgeContext, knowledgeDirectory, MessageConfig, readRules, RULE_DIR, trigger } from './messagingPolicy';
+import { DingTalkDelivery, dws, listenDws } from './messagingDingtalk';
+import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
+
+interface Binding { id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; rulesDir?: string; agentPrompt?: string }
+interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; card?: string }
+interface Runtime { binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number }
+export class MessagingService {
+    private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; sends?: Record<string,string> }> = {};
+    private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
+    private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
+    agentBindings(owner:string,agentId:string){return this.list().filter(b=>b.agentOwner===owner&&b.agentId===agentId).map(b=>({...b,unread:this.box(b.id).messages.filter(m=>m.direction==='in'&&m.time>(this.box(b.id).read[m.conversation]||0)).length}));}
+    assertAgentBinding(owner:string,agentId:string,id:string){const b=this.get(id).binding;if(b.agentOwner!==owner||b.agentId!==agentId)throw Error('渠道不属于此分身');}
+    bindAgent(owner:string,agentId:string,id:string){const r=this.get(id);for(const other of this.runs.values())if(other.binding.profile===r.binding.profile&&other.binding.agentId&&(other.binding.agentOwner!==owner||other.binding.agentId!==agentId))throw Error('该身份已由其他分身使用');if(!/^[\w-]{1,160}$/.test(agentId))throw Error('Invalid Agent ID');
+        if(!r.binding.agentId){const rules=this.rules(id);const directory=RULE_DIR+'/agents/'+agentId;let dir=r.binding.root;for(const part of directory.split('/')){dir=path.join(dir,part);if(fs.existsSync(dir))confined(r.binding.root,path.relative(r.binding.root,dir));else fs.mkdirSync(dir);}for(const [name,data] of [['config.json',JSON.stringify(rules.config,null,2)],['SKILL.md',rules.prompt]]){const file=path.join(dir,name);if(!fs.existsSync(file))fs.writeFileSync(file,data,{mode:0o600});else confined(r.binding.root,path.relative(r.binding.root,file));}r.binding.rulesDir=directory;}
+        r.binding.agentOwner=owner;r.binding.agentId=agentId;this.persist(r);return this.view(id);}
+    setAgentPrompt(owner:string,agentId:string,prompt:string){for(const r of this.runs.values())if(r.binding.agentOwner===owner&&r.binding.agentId===agentId){r.binding.agentPrompt=prompt;this.persist(r);}}
+    detachAgent(owner:string,agentId:string){for(const r of this.runs.values())if(r.binding.agentOwner===owner&&r.binding.agentId===agentId){this.stop(r.binding.id);delete r.binding.agentId;delete r.binding.agentOwner;delete r.binding.agentPrompt;delete this.inbox[r.binding.id];}this.saveInbox();this.persist();}
+    inboxView(owner:string,agentId:string,id:string,conversation='',before=Infinity){this.assertAgentBinding(owner,agentId,id);const box=this.box(id);if(conversation){const rows=box.messages.filter(m=>m.conversation===conversation&&m.time<before).slice(-50);return {messages:rows,before:rows.length===50?rows[0].time:null,paused:box.paused.includes(conversation)};}
+        const ids=[...new Set(box.messages.map(m=>m.conversation))];return {conversations:ids.map(key=>({id:key,last:box.messages.filter(m=>m.conversation===key).at(-1),unread:box.messages.filter(m=>m.conversation===key&&m.direction==='in'&&m.time>(box.read[key]||0)).length,paused:box.paused.includes(key)}))};}
+    inboxAction(owner:string,agentId:string,id:string,conversation:string,action:string){this.assertAgentBinding(owner,agentId,id);const box=this.box(id),r=this.get(id);if(action==='read')box.read[conversation]=Date.now();
+        else if(action==='clear')box.messages=box.messages.filter(m=>conversation&&m.conversation!==conversation);
+        else if(action==='pause'){if(!box.paused.includes(conversation))box.paused.push(conversation);r.active.get(conversation)?.abort();for(const job of r.queues.get(conversation)||[])job.receipt.state='cancelled';r.queues.delete(conversation);}
+        else if(action==='resume')box.paused=box.paused.filter(x=>x!==conversation);else throw Error('Unknown inbox action');this.saveInbox();this.persist(r);return {ok:true};}
+    async manualReply(owner:string,agentId:string,id:string,conversation:string,requestId:string,text:string,takeover=true){this.assertAgentBinding(owner,agentId,id);if(!/^[\w-]{1,160}$/.test(requestId)||!text.trim()||text.length>60000)throw Error('Invalid reply');const box=this.box(id);const previous=box.messages.find(m=>m.id===requestId&&m.direction==='out');if(previous)return previous;if(box.sends?.[requestId])return {id:requestId,state:box.sends[requestId]};
+        const target=[...box.messages].reverse().find(m=>m.conversation===conversation&&m.direction==='in');if(!target)throw Error('请选择已有会话');if(takeover)this.inboxAction(owner,agentId,id,conversation,'pause');
+        const row={...target,id:requestId,text,time:Date.now(),direction:'out',state:'sending'};box.messages.push(row);(box.sends||={})[requestId]='unknown';this.saveInbox();const r=this.get(id);
+        try{await new DingTalkDelivery(r.binding.root,r.binding.profile).send(target,requestId,text);row.state='sent';}catch{row.state='unknown';}box.sends![requestId]=row.state;this.saveInbox();return row;}
+    private runs = new Map<string, Runtime>();
+    private identities = new Set<string>();
+    private closed = false;
+    private watchers = new Map<() => void, () => void>();
+    readonly workers: MessagingWorkers;
+    constructor(private home: string, port: number) {
+        this.workers = new MessagingWorkers(port);
+        fs.mkdirSync(home, { recursive: true });
+        try { this.inbox=JSON.parse(fs.readFileSync(path.join(home,'inbox.json'),'utf8'));for(const box of Object.values(this.inbox))for(const m of box.messages)if(m.state==='sending')m.state='unknown'; } catch { /* first run */ }
+        try { for (const b of JSON.parse(fs.readFileSync(path.join(home, 'bindings.json'), 'utf8'))) this.add(b); } catch { /* no configuration */ }
+    }
+    resume() { for (const r of this.runs.values()) if (r.binding.enabled) void this.start(r.binding.id).catch(() => {}); }
+    private add(binding: Binding) {
+        let receipts: Receipt[] = [], seen: string[] = [];
+        try { const data = JSON.parse(fs.readFileSync(path.join(this.home, binding.id + '.json'), 'utf8')); receipts = data.receipts || []; seen = data.seen || []; } catch { /* new binding */ }
+        for (const receipt of receipts) if (['queued','running','sending'].includes(receipt.state)) { receipt.state = 'unknown'; receipt.reason = 'Service restarted; not replayed'; }
+        const r: Runtime = { binding, status: 'stopped', error: '', identity: '', self: '', since: Date.now(), queues: new Map(), active: new Map(), receipts, seen, history: new Map(), subscriptions: '', retries: 0 };
+        this.runs.set(binding.id, r); return r;
+    }
+    private get(id: string) { const run = this.runs.get(id); if (!run) throw new Error('Messaging configuration not found'); return run; }
+    private persist(run?: Runtime) {
+        const write = (file: string, value: any) => { fs.writeFileSync(file + '.tmp', JSON.stringify(value), { mode: 0o600 }); fs.renameSync(file + '.tmp', file); };
+        write(path.join(this.home, 'bindings.json'), [...this.runs.values()].map(r => r.binding));
+        if (run) write(path.join(this.home, run.binding.id + '.json'), { receipts: run.receipts.slice(-200), seen: run.seen.slice(-10000) });
+        for (const update of this.watchers.keys()) update();
+    }
+    watch(update: () => void, close: () => void) { this.watchers.set(update,close); return () => { this.watchers.delete(update); }; }
+    list() { return [...this.runs.values()].map(r => this.view(r.binding.id)); }
+    view(id: string) {
+        const r = this.get(id);
+        return { ...r.binding, status: r.status, error: r.error, active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', autoReply: r.binding.enabled };
+    }
+    rules(id: string) { const b=this.get(id).binding;return readRules(b.root,b.rulesDir); }
+    defaults(root?: string | null) {
+        const result = { config: defaultMessageConfig(), prompt: DEFAULT_PROMPT };
+        if (!root) return result;
+        if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Existing local second-brain directory required');
+        for (const file of ['config.json','SKILL.md']) {
+            const relative = RULE_DIR + '/' + file;
+            if (!fs.existsSync(path.join(root,relative))) continue;
+            const target = confined(root,relative); if (fs.statSync(target).size > 65536) throw new Error('Messaging rules too large');
+            const text = fs.readFileSync(target,'utf8');
+            if (file === 'config.json') result.config = configValue(JSON.parse(text)); else result.prompt = text;
+        }
+        return result;
+    }
+    configure(input: { root: string; profile: string; config: MessageConfig; prompt: string }) {
+        if (!path.isAbsolute(input.root) || !fs.statSync(input.root).isDirectory()) throw new Error('Existing local second-brain directory required');
+        const root = fs.realpathSync(input.root);
+        if (!/^[^\s,:]+:[^\s,:]+$/.test(input.profile)) throw new Error('Select a stable corpId:userId profile');
+        const config = configValue(input.config);
+        if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 32768) throw new Error('Reply prompt required');
+        for (const dir of config.knowledge) knowledgeDirectory(root,dir);
+        const id = createHash('sha256').update(root + '\0' + input.profile).digest('hex').slice(0,32);
+        let r = this.runs.get(id); if (r) this.stop(id);
+        // Check every existing ancestor before creating a missing skill directory.
+        let dir = root; for (const part of (r?.binding.rulesDir||RULE_DIR).split('/')) { dir = path.join(dir, part); if (fs.existsSync(dir)) confined(root, path.relative(root, dir)); else fs.mkdirSync(dir); }
+        for (const [name, data] of [['config.json', JSON.stringify(config, null, 2) + '\n'], ['SKILL.md', input.prompt]] as const) {
+            const file = path.join(dir, name); if (fs.existsSync(file)) confined(root, path.relative(root,file));
+            fs.writeFileSync(file, data, { mode: 0o600 });
+        }
+        if (!r) r = this.add({ id, root, profile: input.profile, enabled: false });
+        r.history.clear(); this.persist(r); return this.view(id);
+    }
+    async profiles(root: string) {
+        if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Local second-brain directory required');
+        const result = await dws(['profile','list','-f','json'], root);
+        // Deliberately project identifiers, never return arbitrary credential fields.
+        const found: any[] = [];
+        const walk = (v: any) => { if (!v || typeof v !== 'object') return; const corp = v.corpId || v.corp_id, user = v.userId || v.user_id; if (corp && user) found.push({ id: `${corp}:${user}`, name: String(v.corpName || v.corp_name || corp) + ' / ' + String(v.userName || v.user_name || user) }); else for (const child of Object.values(v)) walk(child); };
+        walk(result); return found;
+    }
+    async groups(root: string, profile: string, query: string) {
+        if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Local second-brain directory required');
+        if (!/^[^\s,:]+:[^\s,:]+$/.test(profile)) throw new Error('Select a stable corpId:userId profile');
+        if (query.length > 200) throw new Error('Group query too long');
+        const args = query ? ['chat','+chat-search','--query',query,'--limit','50'] : ['chat','+chat-list','--types','group','--page-size','50'];
+        const result = await dws([...args,'--profile',profile,'-f','json'],root);
+        const groups = new Map<string,{id:string;name:string}>();
+        const walk = (v: any) => { if (!v || typeof v !== 'object') return; const id = v.openConversationId || v.open_conversation_id || v.conversation_id; if (typeof id === 'string') groups.set(id,{id,name:String(v.name || v.title || v.conversationName || id)}); else for (const child of Object.values(v)) walk(child); };
+        walk(result); return [...groups.values()].slice(0,50);
+    }
+    async start(id: string) {
+        const r = this.get(id); if (r.starting) return r.starting;
+        if (r.status === 'listening') return;
+        r.binding.enabled = true; this.persist(r);
+        r.starting = this.startRun(r).finally(() => { r.starting = undefined; }); return r.starting;
+    }
+    private async startRun(r: Runtime) {
+        if (this.closed) throw new Error('Service closed');
+        r.status = 'connecting'; r.error = '';
+        try {
+            const { config } = this.rules(r.binding.id);
+            if (!config.knowledge.length) throw new Error('请先选择允许公开的知识目录');
+            const status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
+            const identity = status.identity;
+            if (!identity?.corp_id || !identity?.user_id || `${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
+            if (status.bus?.live?.consumers?.length || status.subscriptions?.length) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；请先在其所属程序中检查并停止，不会自动抢占');
+            r.identity = r.binding.profile; r.self = identity.open_dingtalk_id || '';
+            if (this.identities.has(r.identity)) throw new Error('This account already has a listener');
+            this.identities.add(r.identity); r.ownsIdentity = true;
+            if (!r.binding.enabled || this.closed) throw new Error('Start cancelled');
+            r.since = Date.now(); r.subscriptions = JSON.stringify([config.groups, config.keywords.length > 0]);
+            r.stop = await listenDws(r.binding.root, r.binding.profile, config, e => this.receive(r,e), () => this.disconnected(r));
+            if (!r.binding.enabled || this.closed) { r.stop(); r.stop = undefined; this.releaseIdentity(r); r.status = 'stopped'; return; }
+            r.status = 'listening'; r.retries = 0; this.persist(r);
+        } catch(error) { this.releaseIdentity(r); r.status = 'error'; r.error = error instanceof Error ? error.message : 'Listener failed'; this.persist(r); throw error; }
+    }
+    private releaseIdentity(r: Runtime) { if (r.ownsIdentity) this.identities.delete(r.identity); r.ownsIdentity = false; }
+    private disconnected(r: Runtime) {
+        r.stop?.(); r.stop = undefined; this.releaseIdentity(r); r.status = 'disconnected'; r.error = 'Listener disconnected';
+        this.persist(r);
+        // Bounded reconnect; no prompt or send replay. Subscription failures remain visible.
+        if (!this.closed && r.binding.enabled && r.retries++ < 2 && !r.retry) r.retry = setTimeout(() => { r.retry = undefined; void this.start(r.binding.id).catch(() => {}); }, 5000 * r.retries);
+    }
+    stop(id: string) {
+        const r = this.get(id); r.binding.enabled = false; clearTimeout(r.retry); r.retry = undefined;
+        r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
+        for (const q of r.queues.values()) for (const job of q) job.receipt.state = 'cancelled';
+        r.queues.clear(); for (const controller of r.active.values()) controller.abort();
+        r.status = 'stopped'; r.error = ''; this.persist(r);
+    }
+    private receive(r: Runtime, event: any) {
+        if (!r.binding.enabled || this.closed) return;
+        const message = incoming(event); if (!message) return;
+        const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
+        const receipt: Receipt = { id, time: Date.now(), state: 'ignored' }; r.receipts.push(receipt); r.receipts = r.receipts.slice(-200);
+        try {
+            const {config} = this.rules(r.binding.id);
+            if (JSON.stringify([config.groups, config.keywords.length > 0]) !== r.subscriptions) throw new Error('监听群或称呼开关已变化，请重新启用服务');
+            receipt.reason = trigger(message, config, r.since, r.self);
+            if(!['old','self','echo'].includes(receipt.reason)) { const box=this.box(r.binding.id);if(!box.messages.some(m=>m.id===message.id&&m.direction==='in'))box.messages.push({...message,direction:'in'});this.saveInbox();if(box.paused.includes(message.conversation))receipt.reason='taken-over'; }
+            // A group-keyword subscription can deliver before the @me subscription.
+            // An ignored group event must not consume the accepted message's dedup key.
+            r.seen.push(receipt.reason === 'reply' ? id : id + ':' + message.kind); r.seen = r.seen.slice(-10000);
+            if (receipt.reason !== 'reply') { this.persist(r); return; }
+            const q = r.queues.get(message.conversation) || [];
+            const total = [...this.runs.values()].reduce((n,run) => n + [...run.queues.values()].reduce((sum,rows) => sum+rows.length,0),0);
+            if (total >= 100 || q.length >= 20) { receipt.state = 'rejected'; receipt.reason = 'Queue limit reached'; this.persist(r); return; }
+            receipt.state = 'queued'; delete receipt.reason; q.push({message,receipt}); r.queues.set(message.conversation,q); this.persist(r); this.pump();
+        } catch(error) { receipt.state = 'error'; receipt.reason = 'Invalid configuration'; r.status = 'error'; r.error = (error as Error).message; this.stop(r.binding.id); r.status = 'error'; r.error = (error as Error).message; this.persist(r); }
+    }
+    private pump() {
+        let active = [...this.runs.values()].reduce((n,r) => n+r.active.size,0);
+        for (const r of this.runs.values()) for (const [key,q] of r.queues) {
+            if (active >= 4 || this.closed) return;
+            if (!r.binding.enabled) continue;
+            if (!q.length || r.active.has(key)) continue;
+            const job = q.shift()!, controller = new AbortController(); r.active.set(key,controller); active++;
+            void this.execute(r,job.message,job.receipt,controller.signal).finally(() => { r.active.delete(key); if (!q.length) r.queues.delete(key); this.pump(); });
+        }
+    }
+    private async execute(r: Runtime, message: Incoming, receipt: Receipt, signal: AbortSignal) {
+        const delivery = new DingTalkDelivery(r.binding.root,r.binding.profile); let card = '';
+        try {
+            receipt.state = 'running'; this.persist(r);
+            const {config,prompt} = this.rules(r.binding.id);
+            const agentPrompt=r.binding.agentPrompt||'';
+            if (!config.knowledge.length) throw new Error('请先选择允许公开的知识目录');
+            // Policy changes invalidate conversation memory, including formerly public material.
+            const scope = createHash('sha256').update(JSON.stringify(config)+prompt).digest('hex');
+            const historyKey = scope + '\0' + message.conversation + '\0' + message.sender;
+            const input: AnswerInput = { brain: path.basename(r.binding.root), prompt: agentPrompt+'\n'+prompt, question: message.text, knowledge: knowledgeContext(r.binding.root,config,message.text), history: r.history.get(historyKey) || [] };
+            card = await delivery.create(message); receipt.card = card || undefined;
+            if (card) await delivery.update(card,'【AI 代答】正在查阅获准公开的资料…',1);
+            let answer = '';
+            const choice = messagingExecutorChoice(config, r.binding.agentOwner ? latestAichatClient(r.binding.agentOwner)?.defaultExecutor || null : undefined);
+            if (!['keepwork','aichat'].includes(choice.backend)) {
+                try { receipt.executor = choice.backend; answer = await restrictedCliAnswer(this.home,{...config,executor:choice.backend,model:choice.model},input,signal); }
+                catch(error) { if (!(error instanceof BeforeSubmission)) throw error; }
+            }
+            if (!answer) { receipt.executor = 'keepwork-pro'; this.persist(r); answer = await this.workers.answer(input,signal,r.binding.agentOwner ? latestAichatClient(r.binding.agentOwner) : latestAichatClient()); }
+            if (signal.aborted) throw new Error('Cancelled');
+            const current = this.rules(r.binding.id);
+            if (JSON.stringify(current.config) !== JSON.stringify(config) || current.prompt !== prompt || (r.binding.agentPrompt||'') !== agentPrompt) throw new Error('Rules changed during execution; answer withheld');
+            if(this.box(r.binding.id).paused.includes(message.conversation))throw Error('会话已由本人接管');
+            const text = answer.startsWith('【AI 代答】') ? answer : '【AI 代答】' + answer;
+            receipt.state = 'sending'; this.persist(r);
+            if (card) await delivery.update(card,text,3); else await delivery.send(message,receipt.id,text);
+            receipt.state = 'done';
+            this.box(r.binding.id).messages.push({...message,id:receipt.id+'-answer',text,time:Date.now(),direction:'out',state:'sent'});this.saveInbox();
+            r.history.set(historyKey,[...input.history,{role:'user',content:message.text},{role:'assistant',content:answer}].slice(-8));
+            if (r.history.size > 100) r.history.delete(r.history.keys().next().value!);
+        } catch(error) {
+            const sending = receipt.state === 'sending';
+            receipt.state = sending ? 'unknown' : signal.aborted ? 'cancelled' : 'error'; receipt.reason = (error as Error).message;
+            if (card && !sending) { try { await delivery.update(card,'【AI 代答】本次处理未完成，请联系本人查看自动回复状态。',5); } catch { /* no duplicate final message */ } }
+            r.error = receipt.reason || 'Task failed';
+        } finally { this.persist(r); }
+    }
+    close() { this.closed = true; for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }
+}
+export { defaultMessageConfig, DEFAULT_PROMPT };

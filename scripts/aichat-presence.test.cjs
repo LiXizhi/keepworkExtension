@@ -57,3 +57,19 @@ test('legacy presence and SSE share validation, never echo login, clean up and r
         await new Promise(resolve => server.close(resolve));
     }
 });
+
+
+test('presence retains validated current default without echoing credentials',()=>{
+    rememberAichatClient({sessionId:'defaults',url:'https://keepwork.com/chat',token:'fixture',defaultExecutor:{backend:'codex',model:'chosen'}});
+    assert.deepEqual(latestAichatClient().defaultExecutor,{backend:'codex',model:'chosen'});
+    rememberAichatClient({sessionId:'defaults',url:'https://keepwork.com/chat',token:'fixture',defaultExecutor:{backend:'untrusted',model:'chosen'}});
+    assert.equal(latestAichatClient().defaultExecutor,undefined);
+});
+
+
+test('owner worker login is scoped by Origin and owner capability',()=>{
+    const {createHash}=require('node:crypto'),origin='https://keepwork.com',owner='12345678-1234-1234-1234-123456789012';
+    rememberAichatClient({sessionId:'owned',url:origin+'/chat',token:'owner-only',owner,origin});
+    const key=createHash('sha256').update(origin+'\0'+owner).digest('hex');
+    assert.equal(latestAichatClient(key).token,'owner-only');assert.equal(latestAichatClient('different-owner'),null);
+});

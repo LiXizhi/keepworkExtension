@@ -68,3 +68,16 @@ test('owned interactive PowerShell initializes UTF-8 before the first file read'
         const deadline = setTimeout(() => { clearInterval(timer); reject(new Error('Interactive terminal did not return the UTF-8 file content')); }, 12000);
     });
 });
+
+
+test('cancellable Agent terminal never starts an already cancelled command',async t=>{
+    const root=fixture(t),controller=new AbortController();controller.abort();
+    await assert.rejects(runTerminal({root,command:'echo should-not-run',signal:controller.signal}),/cancelled/);
+});
+
+test('cancellable Agent terminal stops its own child without the editor bridge',{timeout:10000},async t=>{
+    const root=fixture(t),controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),300);t.after(()=>clearTimeout(timer));
+    const result=await runTerminal({root,command:process.platform==='win32'?'powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"':'"'+process.execPath+'" -e "setTimeout(()=>{},30000)"',signal:controller.signal,timeoutMs:8000});
+    assert.equal(controller.signal.aborted,true);assert.equal(result.ok,false);assert.equal(result.via,'spawn');assert.equal(result.timedOut,false);
+});

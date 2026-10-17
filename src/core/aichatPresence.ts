@@ -1,4 +1,5 @@
 import * as http from 'node:http';
+import { createHash } from 'node:crypto';
 
 function presenceOriginAllowed(origin: string): boolean {
     try {
@@ -15,6 +16,7 @@ export interface AichatClient {
     token: string;
     baseURL: string;
     seenAt: number;
+    defaultExecutor?: { backend: string; model: string };
 }
 
 interface StoredClient extends AichatClient {
@@ -22,6 +24,7 @@ interface StoredClient extends AichatClient {
 }
 
 let current: StoredClient | null = null;
+const owners = new Map<string,StoredClient>();
 
 export function sanitizeClientUrl(value: string): string {
     const url = new URL(value);
@@ -40,18 +43,26 @@ function sanitizeBase(value: unknown): string {
     return url.origin + url.pathname.replace(/\/+$/, '');
 }
 
-export function rememberAichatClient(input: { sessionId: string; url: string; token: string; baseURL?: string; handler?: boolean }): void {
+function sanitizeDefaultExecutor(value: { backend?: string; model?: string } | undefined) {
+    const backends = ['keepwork','copilot','codex','claude','workbuddy','cursor','trae','qwen','gemini','kimi','codebuddy','opencode'];
+    if (!value || !backends.includes(String(value.backend))) return undefined;
+    return { backend: String(value.backend), model: typeof value.model === 'string' ? value.model.slice(0,256) : '' };
+}
+
+export function rememberAichatClient(input: { sessionId: string; url: string; token: string; baseURL?: string; owner?: string; origin?: string; handler?: boolean; defaultExecutor?: { backend?: string; model?: string } }): void {
     if (input.handler) return;
     const token = String(input.token || '');
     if (!input.sessionId || !token || token.length > 8192) throw new Error('AIChat login required');
-    current = { sessionId: input.sessionId, url: sanitizeClientUrl(input.url), token, baseURL: sanitizeBase(input.baseURL), seenAt: Date.now() };
+    current = { sessionId: input.sessionId, url: sanitizeClientUrl(input.url), token, baseURL: sanitizeBase(input.baseURL), defaultExecutor: sanitizeDefaultExecutor(input.defaultExecutor), seenAt: Date.now() };
+    if (/^[a-zA-Z0-9-]{32,128}$/.test(input.owner || '') && input.origin) owners.set(createHash('sha256').update(input.origin+'\0'+input.owner).digest('hex'),current);
 }
 
 /** Closing or pruning the MCP session must not drop the last page URL and login. */
 export function noteAichatSessionClosed(_sessionId?: string): void {}
 
-export function latestAichatClient(): AichatClient | null {
-    return current ? { url: current.url, token: current.token, baseURL: current.baseURL, seenAt: current.seenAt } : null;
+export function latestAichatClient(owner?: string): AichatClient | null {
+    const client = owner ? owners.get(owner) : current;
+    return client ? { url: client.url, token: client.token, baseURL: client.baseURL, defaultExecutor: client.defaultExecutor, seenAt: client.seenAt } : null;
 }
 
 export function aichatClientRemembered(): boolean {
@@ -83,8 +94,8 @@ export async function tryHandleAichatPresence(req: http.IncomingMessage, res: ht
             if (size > 16384) throw new Error('Request too large');
             chunks.push(Buffer.from(chunk));
         }
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { url?: string; token?: string; baseURL?: string; handler?: boolean };
-        rememberAichatClient({ sessionId, url: String(body?.url || ''), token: String(body?.token || ''), baseURL: body?.baseURL, handler: body?.handler === true });
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { url?: string; token?: string; baseURL?: string; owner?: string; origin?: string; handler?: boolean; defaultExecutor?: { backend?: string; model?: string } };
+        rememberAichatClient({ sessionId, url: String(body?.url || ''), token: String(body?.token || ''), baseURL: body?.baseURL, handler: body?.handler === true, defaultExecutor: body?.defaultExecutor, owner: body?.owner, origin: String(req.headers.origin||'') });
         if (new URL(req.url || '/', 'http://localhost').searchParams.get('stream') !== '1') {
             respond(200, aichatPresenceView());
         } else {

@@ -85,6 +85,7 @@ export async function runTerminal(opts: {
     cwd?: string;
     timeoutMs?: number;
     root: string;
+    signal?: AbortSignal;
 }): Promise<TerminalResult> {
     const command = String(opts.command || '').trim();
     assertAllowedCommand(command);
@@ -108,13 +109,15 @@ export async function runTerminal(opts: {
     timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(1000, timeoutMs));
 
     return withGlobalSlot(async () => {
-        const viaVscode = await tryRunInVscodeTerminal({ command, cwd, timeoutMs });
+        if(opts.signal?.aborted)throw new Error('Task cancelled');
+        // Cancellable background jobs own their child process, never the user's editor terminal.
+        const viaVscode = opts.signal ? null : await tryRunInVscodeTerminal({ command, cwd, timeoutMs });
         if (viaVscode) return viaVscode;
-        return runSpawn(command, cwd, timeoutMs);
+        return runSpawn(command, cwd, timeoutMs, opts.signal);
     });
 }
 
-function runSpawn(command: string, cwd: string, timeoutMs: number): Promise<TerminalResult> {
+function runSpawn(command: string, cwd: string, timeoutMs: number, abortSignal?: AbortSignal): Promise<TerminalResult> {
     return new Promise((resolve) => {
         const child = spawn(process.platform === 'win32' ? cmdUtf8Command(command) : command, {
             cwd,
@@ -122,6 +125,9 @@ function runSpawn(command: string, cwd: string, timeoutMs: number): Promise<Term
             windowsHide: true,
             env: process.env,
         });
+        const abort = () => killProcessTree(child.pid);
+        abortSignal?.addEventListener('abort',abort,{once:true});
+        if(abortSignal?.aborted)abort();
         let stdout = '';
         let stderr = '';
         let truncated = false;
@@ -160,8 +166,9 @@ function runSpawn(command: string, cwd: string, timeoutMs: number): Promise<Term
             if (settled) return;
             settled = true;
             clearTimeout(timer);
+            abortSignal?.removeEventListener('abort',abort);
             resolve({
-                ok: !timedOut && exitCode === 0,
+                ok: !timedOut && !abortSignal?.aborted && exitCode === 0,
                 command,
                 cwd,
                 exitCode,

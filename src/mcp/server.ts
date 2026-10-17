@@ -13,8 +13,10 @@ import { vscodeTerminalBridgeLive } from '../core/vscodeBridge';
 import { fetchUrl, webSearch } from '../core/web';
 import { currentRequest } from './context';
 import { recordCall, summarizeArgs } from './sessions';
+import type { MessagingService } from '../core/messaging';
 
 export interface ServerRuntime {
+    messaging?: MessagingService;
     viaHub?: boolean;
     root: string;
     port: number;
@@ -74,6 +76,16 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     registerCreationTools(server, runtime);
     registerCreationGuide(server);
     registerAgentGuide(server);
+
+    if (runtime.messaging) server.registerTool('listen_dingtalk_messages', {
+        description: 'Start already configured and enabled DingTalk auto-reply. Configure and enable in Second Brain first. No account, target or credential arguments.',
+        inputSchema: z.object({}),
+    }, wrap('listen_dingtalk_messages', async () => {
+        const rows = runtime.messaging!.list().filter(row => row.enabled);
+        if (!rows.length) throw new Error('请先在第二大脑的钉钉自动回复面板配置并启用服务');
+        for (const row of rows) await runtime.messaging!.start(row.id);
+        return textResult(JSON.stringify(runtime.messaging!.list().map(({id,status,error}) => ({id,status,error}))));
+    }));
 
     server.registerTool(
         'mcp_status',
