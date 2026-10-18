@@ -3,16 +3,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { configValue, confined, defaultMessageConfig, DEFAULT_PROMPT, digestMessage, incoming, Incoming, knowledgeContext, knowledgeDirectory, MessageConfig, readRules, RULE_DIR, trigger } from './messagingPolicy';
+import { FeishuDelivery, feishuIdentity, pollFeishu } from './messagingFeishu';
 import { DingTalkDelivery, dws, listenDws, loginDws } from './messagingDingtalk';
 import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
 
-interface Binding { id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; rulesDir?: string; agentPrompt?: string }
+interface Binding { channel?: 'dingtalk' | 'feishu'; id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; rulesDir?: string; agentPrompt?: string }
 interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; card?: string }
-interface Runtime { binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
+interface Runtime { pollAbort?: AbortController; lastPollAt?: number; binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
 // Only failures requiring configuration/authorization repair leave automatic recovery.
 export function messagingNeedsRepair(error: any): boolean {
     const detail = typeof error?.detail === 'object' ? JSON.stringify(error.detail) : String(error?.detail || '');
-    return /identity does not match|already has a listener|已有个人消息桥|DWS CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录/i.test(String(error?.message || error) + ' ' + detail);
+    return /identity does not match|already has a listener|已有个人消息桥|DWS CLI unavailable|Lark CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录/i.test(String(error?.message || error) + ' ' + detail);
 }
 export function messagingNeedsLogin(error: any): boolean {
     return /Select a current DingTalk CLI account|invalid.?grant|invalid.?token|token.*expired|unauthenticated|unauthorized|login.required|未登录/i.test(String(error?.message || error) + ' ' + JSON.stringify(error?.detail || ''));
@@ -24,8 +25,8 @@ export class MessagingService {
     private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
     agentBindings(owner:string,agentId:string){return this.list().filter(b=>b.agentOwner===owner&&b.agentId===agentId).map(b=>({...b,unread:this.box(b.id).messages.filter(m=>m.direction==='in'&&m.time>(this.box(b.id).read[m.conversation]||0)).length}));}
     assertAgentBinding(owner:string,agentId:string,id:string){const b=this.get(id).binding;if(b.agentOwner!==owner||b.agentId!==agentId)throw Error('渠道不属于此分身');}
-    bindAgent(owner:string,agentId:string,id:string){const r=this.get(id);for(const other of this.runs.values())if(other.binding.profile===r.binding.profile&&other.binding.agentId&&(other.binding.agentOwner!==owner||other.binding.agentId!==agentId))throw Error('该身份已由其他分身使用');if(!/^[\w-]{1,160}$/.test(agentId))throw Error('Invalid Agent ID');
-        if(!r.binding.agentId){const rules=this.rules(id);const directory=RULE_DIR+'/agents/'+agentId;let dir=r.binding.root;for(const part of directory.split('/')){dir=path.join(dir,part);if(fs.existsSync(dir))confined(r.binding.root,path.relative(r.binding.root,dir));else fs.mkdirSync(dir);}for(const [name,data] of [['config.json',JSON.stringify(rules.config,null,2)],['SKILL.md',rules.prompt]]){const file=path.join(dir,name);if(!fs.existsSync(file))fs.writeFileSync(file,data,{mode:0o600});else confined(r.binding.root,path.relative(r.binding.root,file));}r.binding.rulesDir=directory;}
+    bindAgent(owner:string,agentId:string,id:string){const r=this.get(id);for(const other of this.runs.values())if((other.binding.channel||'dingtalk')===(r.binding.channel||'dingtalk')&&other.binding.profile===r.binding.profile&&other.binding.agentId&&(other.binding.agentOwner!==owner||other.binding.agentId!==agentId))throw Error('该身份已由其他分身使用');if(!/^[\w-]{1,160}$/.test(agentId))throw Error('Invalid Agent ID');
+        if(!r.binding.agentId){const rules=this.rules(id);const directory=RULE_DIR+'/agents/'+agentId+(r.binding.channel==='feishu'?'/feishu':'');let dir=r.binding.root;for(const part of directory.split('/')){dir=path.join(dir,part);if(fs.existsSync(dir))confined(r.binding.root,path.relative(r.binding.root,dir));else fs.mkdirSync(dir);}for(const [name,data] of [['config.json',JSON.stringify(rules.config,null,2)],['SKILL.md',rules.prompt]]){const file=path.join(dir,name);if(!fs.existsSync(file))fs.writeFileSync(file,data,{mode:0o600});else confined(r.binding.root,path.relative(r.binding.root,file));}r.binding.rulesDir=directory;}
         r.binding.agentOwner=owner;r.binding.agentId=agentId;this.persist(r);return this.view(id);}
     setAgentPrompt(owner:string,agentId:string,prompt:string){for(const r of this.runs.values())if(r.binding.agentOwner===owner&&r.binding.agentId===agentId){r.binding.agentPrompt=prompt;this.persist(r);}}
     detachAgent(owner:string,agentId:string){for(const r of this.runs.values())if(r.binding.agentOwner===owner&&r.binding.agentId===agentId){this.stop(r.binding.id);delete r.binding.agentId;delete r.binding.agentOwner;delete r.binding.agentPrompt;delete this.inbox[r.binding.id];}this.saveInbox();this.persist();}
@@ -38,7 +39,7 @@ export class MessagingService {
     async manualReply(owner:string,agentId:string,id:string,conversation:string,requestId:string,text:string,takeover=true){this.assertAgentBinding(owner,agentId,id);if(!/^[\w-]{1,160}$/.test(requestId)||!text.trim()||text.length>60000)throw Error('Invalid reply');const box=this.box(id);const previous=box.messages.find(m=>m.id===requestId&&m.direction==='out');if(previous)return previous;if(box.sends?.[requestId])return {id:requestId,state:box.sends[requestId]};
         const target=[...box.messages].reverse().find(m=>m.conversation===conversation&&m.direction==='in');if(!target)throw Error('请选择已有会话');if(takeover)this.inboxAction(owner,agentId,id,conversation,'pause');
         const row={...target,id:requestId,text,time:Date.now(),direction:'out',state:'sending'};box.messages.push(row);(box.sends||={})[requestId]='unknown';this.saveInbox();const r=this.get(id);
-        try{await new DingTalkDelivery(r.binding.root,r.binding.profile).send(target,requestId,text);row.state='sent';}catch{row.state='unknown';}box.sends![requestId]=row.state;this.saveInbox();return row;}
+        try{await this.delivery(r).send(target,requestId,text);row.state='sent';}catch{row.state='unknown';}box.sends![requestId]=row.state;this.saveInbox();return row;}
     private runs = new Map<string, Runtime>();
     private identities = new Set<string>();
     private closed = false;
@@ -69,7 +70,7 @@ export class MessagingService {
     list() { return [...this.runs.values()].map(r => this.view(r.binding.id)); }
     view(id: string) {
         const r = this.get(id);
-        return { ...r.binding, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', autoReply: r.binding.enabled };
+        return { ...r.binding, channel:r.binding.channel||'dingtalk', transport:r.binding.channel==='feishu'?'polling':'events', pollIntervalMs:r.binding.channel==='feishu'?600000:undefined, lastPollAt:r.lastPollAt||null, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', autoReply: r.binding.enabled };
     }
     rules(id: string) { const b=this.get(id).binding;return readRules(b.root,b.rulesDir); }
     defaults(root?: string | null) {
@@ -85,22 +86,23 @@ export class MessagingService {
         }
         return result;
     }
-    configure(input: { root: string; profile: string; config: MessageConfig; prompt: string }) {
+    configure(input: { channel?: 'dingtalk' | 'feishu'; root: string; profile: string; config: MessageConfig; prompt: string }) {
         if (!path.isAbsolute(input.root) || !fs.statSync(input.root).isDirectory()) throw new Error('Existing local second-brain directory required');
         const root = fs.realpathSync(input.root);
+        if(input.channel && !['dingtalk','feishu'].includes(input.channel))throw Error('Unknown channel');
         if (!/^[^\s,:]+:[^\s,:]+$/.test(input.profile)) throw new Error('Select a stable corpId:userId profile');
         const config = configValue(input.config);
         if (typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 32768) throw new Error('Reply prompt required');
         for (const dir of config.knowledge) knowledgeDirectory(root,dir);
-        const id = createHash('sha256').update(root + '\0' + input.profile).digest('hex').slice(0,32);
+        const id = createHash('sha256').update(root + '\0' + (input.channel==='feishu'?'feishu:':'') + input.profile).digest('hex').slice(0,32);
         let r = this.runs.get(id); if (r) this.stop(id);
         // Check every existing ancestor before creating a missing skill directory.
-        let dir = root; for (const part of (r?.binding.rulesDir||RULE_DIR).split('/')) { dir = path.join(dir, part); if (fs.existsSync(dir)) confined(root, path.relative(root, dir)); else fs.mkdirSync(dir); }
+        let dir = root; for (const part of (r?.binding.rulesDir||(input.channel==='feishu'?RULE_DIR+'/feishu':RULE_DIR)).split('/')) { dir = path.join(dir, part); if (fs.existsSync(dir)) confined(root, path.relative(root, dir)); else fs.mkdirSync(dir); }
         for (const [name, data] of [['config.json', JSON.stringify(config, null, 2) + '\n'], ['SKILL.md', input.prompt]] as const) {
             const file = path.join(dir, name); if (fs.existsSync(file)) confined(root, path.relative(root,file));
             fs.writeFileSync(file, data, { mode: 0o600 });
         }
-        if (!r) r = this.add({ id, root, profile: input.profile, enabled: false });
+        if (!r) r = this.add({ id, root, profile: input.profile, enabled: false, ...(input.channel==='feishu'?{channel:input.channel,rulesDir:RULE_DIR+'/feishu'}:{}) });
         r.history.clear(); this.persist(r); return this.view(id);
     }
     async loginAgent(owner: string, agentId: string, root: string, prompt: string) {
@@ -108,7 +110,7 @@ export class MessagingService {
         root = fs.realpathSync(root);
         const key = owner + '\0' + agentId;
         if (this.logins.has(key)) return this.logins.get(key);
-        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root);
+        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root && (b.channel||'dingtalk') === 'dingtalk');
         if (existing.length > 1) throw new Error('Multiple DingTalk bindings; select the account in settings');
         const pending = loginDws(root, existing[0]?.profile).then(() => {
             if (this.closed) throw new Error('Service closed');
@@ -119,7 +121,7 @@ export class MessagingService {
     async connectAgent(owner: string, agentId: string, root: string, prompt: string) {
         if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Existing local second-brain directory required');
         root = fs.realpathSync(root);
-        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root);
+        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root && (b.channel||'dingtalk') === 'dingtalk');
         if (existing.length > 1) throw new Error('Multiple DingTalk bindings; select the account in settings');
         let binding = existing[0];
         if (!binding) {
@@ -137,6 +139,21 @@ export class MessagingService {
         try { await this.start(binding.id); } catch(error) { if (this.get(binding.id).status !== 'reconnecting') throw error; }
         return this.view(binding.id);
     }
+    async connectFeishuAgent(owner:string,agentId:string,root:string,prompt:string) {
+        if(!path.isAbsolute(root)||!fs.statSync(root).isDirectory())throw Error('Existing local second-brain directory required');
+        root=fs.realpathSync(root);
+        let binding=this.list().find(b=>b.channel==='feishu'&&b.agentOwner===owner&&b.agentId===agentId&&b.root===root);
+        if(!binding){
+            const identity=await feishuIdentity(root);
+            binding=this.list().find(b=>b.channel==='feishu'&&b.root===root&&b.profile===identity.id);
+            if(!binding)binding=this.configure({channel:'feishu',root,profile:identity.id,...this.defaults(root)});
+            this.bindAgent(owner,agentId,binding.id);
+        }
+        this.setAgentPrompt(owner,agentId,prompt);
+        try{await this.start(binding.id);}catch(error){if(this.get(binding.id).status!=='reconnecting')throw error;}
+        return this.view(binding.id);
+    }
+    private delivery(r:Runtime){return r.binding.channel==='feishu'?new FeishuDelivery(r.binding.root,r.binding.profile):new DingTalkDelivery(r.binding.root,r.binding.profile);}
     async profiles(root: string) {
         if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Local second-brain directory required');
         let result: any;
@@ -177,6 +194,23 @@ export class MessagingService {
         try {
             const { config } = this.rules(r.binding.id);
             rulesLoaded = true;
+            if(r.binding.channel==='feishu'){
+                const identity=await feishuIdentity(r.binding.root,r.binding.profile);
+                r.identity='feishu:'+identity.id;r.self=identity.self;
+                if(this.identities.has(r.identity))throw Error('This account already has a listener');
+                this.identities.add(r.identity);r.ownsIdentity=true;
+                if(!r.binding.enabled||this.closed)throw Error('Start cancelled');
+                // The adapter's persisted checkpoint excludes historical messages on first enable.
+                r.since=0;r.subscriptions=JSON.stringify([config.groups,config.keywords.length>0]);
+                r.pollAbort=new AbortController();
+                r.stop=await pollFeishu(r.binding.root,r.binding.profile,path.join(this.home,r.binding.id+'.cursor.json'),m=>this.receive(r,m),error=>{
+                    r.stop?.();r.stop=undefined;this.releaseIdentity(r);r.error=error.message;
+                    if(this.closed||!r.binding.enabled)return;
+                    if(messagingNeedsRepair(error)){r.status='error';this.persist(r);}else this.scheduleReconnect(r);
+                },time=>{r.lastPollAt=time;this.persist(r);},undefined,undefined,r.pollAbort.signal);
+                if(!r.binding.enabled||this.closed){r.stop();r.stop=undefined;this.releaseIdentity(r);r.status='stopped';return;}
+                r.status='listening';r.retries=0;this.persist(r);return;
+            }
             // Empty selection exposes no brain files; message-only replies remain usable.
             const status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
             const identity = status.identity;
@@ -216,7 +250,7 @@ export class MessagingService {
         this.persist(r);
     }
     private disconnected(r: Runtime) {
-        r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
+        r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
         if (this.closed || !r.binding.enabled) return;
         r.error = 'Listener disconnected';
         // Reconnect subscriptions only. Never replay model work or message sends.
@@ -224,20 +258,20 @@ export class MessagingService {
     }
     stop(id: string) {
         const r = this.get(id); r.binding.enabled = false; clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.retries = 0;
-        r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
+        r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
         for (const q of r.queues.values()) for (const job of q) job.receipt.state = 'cancelled';
         r.queues.clear(); for (const controller of r.active.values()) controller.abort();
         r.status = 'stopped'; r.error = ''; this.persist(r);
     }
     private receive(r: Runtime, event: any) {
         if (!r.binding.enabled || this.closed) return;
-        const message = incoming(event); if (!message) return;
+        const message: Incoming | null = r.binding.channel==='feishu' ? event : incoming(event); if (!message) return;
         const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
         const receipt: Receipt = { id, time: Date.now(), state: 'ignored' }; r.receipts.push(receipt); r.receipts = r.receipts.slice(-200);
         try {
             const {config} = this.rules(r.binding.id);
             if (JSON.stringify([config.groups, config.keywords.length > 0]) !== r.subscriptions) throw new Error('监听群或称呼开关已变化，请重新启用服务');
-            receipt.reason = trigger(message, config, r.since, r.self);
+            receipt.reason = trigger(message, config, r.since, r.self, r.binding.channel !== 'feishu');
             if(!['old','self','echo'].includes(receipt.reason)) { const box=this.box(r.binding.id);if(!box.messages.some(m=>m.id===message.id&&m.direction==='in'))box.messages.push({...message,direction:'in'});this.saveInbox();if(box.paused.includes(message.conversation))receipt.reason='taken-over'; }
             // A group-keyword subscription can deliver before the @me subscription.
             // An ignored group event must not consume the accepted message's dedup key.
@@ -260,7 +294,7 @@ export class MessagingService {
         }
     }
     private async execute(r: Runtime, message: Incoming, receipt: Receipt, signal: AbortSignal) {
-        const delivery = new DingTalkDelivery(r.binding.root,r.binding.profile); let card = '';
+        const delivery = this.delivery(r); let card = '';
         try {
             receipt.state = 'running'; this.persist(r);
             const {config,prompt} = this.rules(r.binding.id);
@@ -297,6 +331,6 @@ export class MessagingService {
             r.error = receipt.reason || 'Task failed';
         } finally { this.persist(r); }
     }
-    close() { this.closed = true; for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }
+    close() { this.closed = true; for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.pollAbort?.abort(); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }
 }
 export { defaultMessageConfig, DEFAULT_PROMPT };

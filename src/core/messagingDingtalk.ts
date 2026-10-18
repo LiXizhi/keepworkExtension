@@ -82,6 +82,10 @@ export class DingTalkDelivery {
         return dws(['chat', '+messages-update-card', '--biz-id', card, '--content', text, '--flow-status', String(status), '--profile', this.profile, '-f', 'json', '--yes'], this.root);
     }
     async send(message: Incoming, id: string, text: string) {
-        for (const [index, part] of splitReply(text).entries()) await dws(['chat', '+messages-send', '--as', 'user', ...(message.kind === 'direct' ? ['--open-dingtalk-id', message.sender] : ['--group', message.conversation]), '--text', part, '--idempotency-key', `${id}-${index}`, '--profile', this.profile, '-f', 'json', '--yes'], this.root);
+        const marker = '【AI 代答】';
+        const parts = text.startsWith(marker)
+            ? splitReply(text.slice(marker.length), 6000 - Buffer.byteLength(marker)).map(part => marker + part)
+            : splitReply(text);
+        for (const [index, part] of parts.entries()) await dws(['chat', '+messages-send', '--as', 'user', ...(message.kind === 'direct' ? ['--open-dingtalk-id', message.sender] : ['--group', message.conversation]), '--text', part, '--idempotency-key', `${id}-${index}`, '--profile', this.profile, '-f', 'json', '--yes'], this.root);
     }
 }

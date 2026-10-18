@@ -31,7 +31,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
             case 'respond':send(200,personas.respond(owner,id,input));return;
             case 'schedules':send(200,personas.schedule(owner,id,input));return;
             case 'remove':await personas.remove(owner,id);send(200,{ok:true});return;
-            case 'channel-connect':{const agent=personas.read(owner,id);try{send(200,await messaging.connectAgent(owner,id,String(input.root||agent.root||''),agent.prompt));}catch(error){if(!messagingNeedsLogin(error))throw error;send(200,{status:'needs-login',listening:false,needsLogin:true});}return;}
+            case 'channel-connect':{const agent=personas.read(owner,id);try{if(input.channel && !['dingtalk','feishu'].includes(input.channel))throw Error('Unknown channel');send(200,await (input.channel==='feishu'?messaging.connectFeishuAgent(owner,id,String(input.root||agent.root||''),agent.prompt):messaging.connectAgent(owner,id,String(input.root||agent.root||''),agent.prompt)));}catch(error){if(!messagingNeedsLogin(error))throw error;send(200,{status:'needs-login',listening:false,needsLogin:true});}return;}
             case 'channel-login':{const agent=personas.read(owner,id);send(200,await messaging.loginAgent(owner,id,String(input.root||agent.root||''),agent.prompt));return;}
             case 'bind':{const result=messaging.bindAgent(owner,id,input.binding);messaging.setAgentPrompt(owner,id,personas.read(owner,id).prompt);send(200,result);return;}
             case 'inbox':send(200,messaging.inboxAction(owner,id,input.binding,input.conversation||'',input.action));return;

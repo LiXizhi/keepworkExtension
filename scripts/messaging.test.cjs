@@ -21,7 +21,7 @@ function fixture(t) {
     class BeforeSubmission extends Error {}
     const serviceModule=load('messaging',{
         './aichatPresence':{latestAichatClient:()=>null},
-        './messagingDingtalk':{loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){return '';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
+        './messagingDingtalk':{loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){return '';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
         './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve('课程学习答案');};pending.push({input,end});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
     });
     const service=new serviceModule.MessagingService(path.join(dir,'state'),8089);t.after(()=>service.close());
@@ -368,4 +368,85 @@ test('native authorization uses CLI browser flow with scoped profile and discard
  await loginDws(os.tmpdir(),'corp:user');assert.deepEqual(calls[0].args,['auth','login','--profile','corp:user']);
  assert.equal(calls[0].options.shell,false);assert.equal(drains,2);
  code=1;await assert.rejects(loginDws(os.tmpdir()),/cancelled or failed/);
+});
+
+
+test('Feishu persisted binding owns polling, inbox, delivery and cached status independently of DingTalk',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-feishu-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const root=path.join(dir,'brain');fs.mkdirSync(root);let checks=0,stops=0,receive;const sent=[];
+ const module=load('messaging',{
+  './aichatPresence':{latestAichatClient:()=>null},
+  './messagingFeishu':{feishuIdentity:async()=>{checks++;return {id:'app:person',self:'person'};},pollFeishu:async(_r,_p,_f,onMessage,_error,onPoll)=>{receive=onMessage;onPoll(Date.now());return()=>stops++;},FeishuDelivery:class{async create(){return '';}async send(...args){sent.push(args);}}},
+  './messagingExecutor':{messagingExecutorChoice:()=>({backend:'aichat'}),MessagingWorkers:class{async answer(){return 'fixture answer';}close(){}}}
+ });
+ const home=path.join(dir,'state'),service=new module.MessagingService(home,8089);t.after(()=>service.close());
+ const b=await service.connectFeishuAgent('owner','agent',root,'prompt');assert.equal(b.listening,true);assert.equal(b.transport,'polling');assert.equal(b.pollIntervalMs,600000);assert.ok(b.lastPollAt);assert.equal(b.channel,'feishu');
+ const before=checks;for(let i=0;i<5;i++)service.agentBindings('owner','agent');await service.connectFeishuAgent('owner','agent',root,'prompt');assert.equal(checks,before);
+ receive({id:'message',conversation:'chat',sender:'peer',text:'hello',time:Date.now(),kind:'direct'});await tick();await tick();assert.equal(sent.length,1);
+ receive({id:'message',conversation:'chat',sender:'peer',text:'hello',time:Date.now(),kind:'direct'});await tick();assert.equal(sent.length,1);
+ assert.equal(service.inboxView('owner','agent',b.id).conversations.length,1);
+ service.close();assert.ok(stops);const resumed=new module.MessagingService(home,8089);t.after(()=>resumed.close());resumed.resume();await tick();await tick();assert.equal(resumed.view(b.id).listening,true);
+ resumed.stop(b.id);assert.equal(resumed.view(b.id).status,'stopped');
+});
+
+test('Feishu searches one recent page per tick, never lists chats, and resumes pagination after failure',async t=>{
+ const {pollFeishu}=load('messagingFeishu');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-feishu-search-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const file=path.join(dir,'cursor.json');fs.writeFileSync(file,JSON.stringify({since:Date.now()-86400000,chats:{old:1}}));
+ const rows=[],calls=[];let fail=false;
+ const call=async args=>{if(args[0]==='auth')return {appId:'app',identities:{user:{status:'ready',available:true,verified:true,openId:'self'}}};
+ calls.push(args);assert.equal(args[1],'+messages-search');assert.equal(args.includes('--page-all'),false);assert.equal(args[args.indexOf('--page-size')+1],'50');
+ const start=Date.parse(args[args.indexOf('--start')+1]),end=Date.parse(args[args.indexOf('--end')+1]);assert.ok(end-start<=660000);
+ if(fail)throw Error('temporary disconnect');
+ return {data:{messages:[{message_id:args.includes('--page-token')?'two':'one',chat_id:'chat',chat_type:'p2p',sender:{id:'peer'},msg_type:'text',content:'hello',create_time:end-1000}],has_more:!args.includes('--page-token'),page_token:'next'}};
+ };
+ let stop=await pollFeishu(dir,'app:self',file,m=>rows.push(m),()=>{},()=>{},call,60000);stop();
+ assert.equal(calls.length,1);assert.deepEqual(rows.map(m=>m.id),['one']);const saved=fs.readFileSync(file,'utf8');assert.equal(JSON.parse(saved).window.token,'next');
+ fail=true;await assert.rejects(pollFeishu(dir,'app:self',file,m=>rows.push(m),()=>{},()=>{},call),/temporary/);assert.equal(fs.readFileSync(file,'utf8'),saved);
+ fail=false;stop=await pollFeishu(dir,'app:self',file,m=>rows.push(m),()=>{},()=>{},call,60000);stop();
+ assert.equal(calls.at(-1)[calls.at(-1).indexOf('--page-token')+1],'next');assert.deepEqual(rows.map(m=>m.id),['one','two']);assert.equal(JSON.parse(fs.readFileSync(file)).window,undefined);
+});
+
+test('Feishu rejects bot-only auth and identity changes before any message request',async()=>{
+ const {feishuIdentity,pollFeishu}=load('messagingFeishu');
+ await assert.rejects(feishuIdentity('.',undefined,async()=>({appId:'app',identities:{bot:{status:'ready',verified:true}}})),/login required/);
+ await assert.rejects(feishuIdentity('.','app:self',async()=>({appId:'app',identities:{user:{status:'ready',available:true,verified:true,openId:'other'}}})),/identity does not match/);
+});
+
+test('every AI reply segment retains echo marker and stays within DWS byte limit',async()=>{
+    const sent=[];
+    const {DingTalkDelivery}=load('messagingDingtalk',{
+        'node:fs':{...fs,existsSync:()=>true,statSync:()=>({isFile:()=>true})},
+        'node:child_process':{spawn:(_exe,args)=>{sent.push(args[args.indexOf('--text')+1]);const c=new EventEmitter();c.stdout=new EventEmitter();c.stdout.setEncoding=()=>{};c.stderr={resume(){}};c.stdin={end(){}};process.nextTick(()=>{c.stdout.emit('data','{}');c.emit('close',0);});return c;}},
+    });
+    const answer='课程🙂'.repeat(2000);
+    await new DingTalkDelivery('.', 'corp:user').send(policy.incoming(message()),'reply','【AI 代答】'+answer);
+    assert.ok(sent.length>1);assert.ok(sent.every(s=>s.startsWith('【AI 代答】')&&Buffer.byteLength(s)<=6000));
+    assert.equal(sent.map(s=>s.slice('【AI 代答】'.length)).join(''),answer);
+});
+
+
+test('DingTalk self mentions use events, deduplicate and suppress echoes and ordinary self messages',async t=>{
+    const f=fixture(t);await f.service.start(f.binding.id);
+    const event={...message('own','group-dm','owner'),type:'user_im_message_receive_at'};
+    f.events[0]({...event,type:'user_im_message_receive_group'});await tick();
+    assert.equal(f.pending.length,0);
+    f.events[0](event);f.events[0](event);await tick();
+    assert.equal(f.pending.length,1);f.pending[0].end();await tick();
+    assert.equal(f.sent.length,1);assert.equal(f.sent[0][0].kind,'mention');
+    assert.equal(f.sent[0][0].conversation,'group-dm');
+    f.events[0]({...event,message_id:'echo',content:f.sent[0][2]});
+    f.events[0]({...event,message_id:'old',create_time:1});
+    f.events[0](message('self-dm','dm','owner'));await tick();
+    assert.equal(f.pending.length,1);
+    f.service.stop(f.binding.id);f.events[0]({...event,message_id:'after-stop'});await tick();
+    assert.equal(f.pending.length,1);
+});
+
+test('self mention exception is explicit and does not allow ordinary self group or direct messages',()=>{
+    const config=policy.defaultMessageConfig(),m={...policy.incoming(message()),sender:'owner',kind:'mention'};
+    assert.equal(policy.trigger(m,config,0,'owner',true),'reply');
+    assert.equal(policy.trigger(m,config,0,'owner',false),'self');
+    for(const kind of ['group','direct'])assert.equal(policy.trigger({...m,kind},config,0,'owner',true),'self');
+    assert.equal(policy.trigger({...m,text:'【AI 代答】reply'},config,0,'owner',true),'echo');
 });

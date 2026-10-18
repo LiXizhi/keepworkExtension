@@ -85,7 +85,8 @@ export function apiDocs(port: number, requireAuth: boolean) {
     add('Agents', 'POST', '/agents/personas/:id/clear', 'Clear owner conversation and context summary; preserves configuration, schedules, channels and request deduplication. Rejects active tasks.');
     add('Agents', 'POST', '/agents/personas/:id/cancel', 'Cancel this Agent task and pending approvals.');
     add('Agents', 'POST', '/agents/personas/:id/respond', 'Respond to an owned pending approval or question.', 'id, decision, answers');
-    add('Agents', 'POST', '/agents/personas/:id/bind', 'Explicitly attach an existing DingTalk binding without starting it.', 'binding');
+    add('Agents', 'POST', '/agents/personas/:id/channel-connect', 'Reuse a personal CLI account and persist background reception. DingTalk uses events; Feishu uses polling. Snapshots/SSE never execute CLI probes.', 'root; optional channel: dingtalk (default) or feishu');
+    add('Agents', 'POST', '/agents/personas/:id/bind', 'Explicitly attach an existing channel binding without starting it.', 'binding');
     add('Agents', 'GET', '/agents/personas/:id/inbox', 'Local channel threads or paginated messages; never part of the owner conversation.', 'binding, optional conversation and before');
     add('Agents', 'POST', '/agents/personas/:id/reply', 'Take over selected channel conversation and deliver one idempotent reply.', 'binding, conversation, requestId, text');
     add('AIChat', 'POST', '/aichat/presence?stream=1', 'Same registration as legacy presence, followed by a long-lived SSE response with secret-free heartbeats. Health advertises aichatPresenceApi: post-sse-v1. Closing the stream retains the last login.', 'Same headers and JSON body as POST /aichat/presence. One stream per MCP session; disconnect or daemon shutdown cleans up the stream.', undefined, undefined, 'Live Mcp-Session-Id and explicit allowed Origin');

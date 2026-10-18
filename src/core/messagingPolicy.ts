@@ -56,9 +56,9 @@ export function incoming(event: any): Incoming | null {
     if (!id || !event.sender_open_dingtalk_id || (kind !== 'direct' && !event.conversation_id) || !Number.isFinite(time)) return null;
     return { id: String(id), conversation: String(event.conversation_id || event.sender_open_dingtalk_id), sender: String(event.sender_open_dingtalk_id), text: event.content.slice(0, 16000), time, kind };
 }
-export function trigger(message: Incoming, config: MessageConfig, since: number, self: string) {
+export function trigger(message: Incoming, config: MessageConfig, since: number, self: string, allowSelfMention = false) {
     if (message.time < since) return 'old';
-    if (self && message.sender === self) return 'self';
+    if (self && message.sender === self && !(allowSelfMention && message.kind === 'mention')) return 'self';
     if (message.text.startsWith('【AI 代答】')) return 'echo';
     if (message.kind === 'direct' || message.kind === 'mention') return 'reply';
     return config.groups.includes(message.conversation) && config.keywords.some(word => message.text.includes(word)) ? 'reply' : 'not-triggered';
