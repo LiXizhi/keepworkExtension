@@ -10,8 +10,8 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP</div><nav class="tree" aria-label="Dashboard navigation">
 <a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#paracrafts">Paracrafts</a>
-<a href="#chat">AI 对话</a>
-<details open><summary>Developer</summary><a href="#api-docs">API docs</a></details>
+<a href="#personas">Personas / 分身</a><a href="#chat">AI 对话</a>
+<details open><summary>Developer</summary><a href="#api-docs">API docs</a><a href="#tools-skills">Tools &amp; skills</a></details>
 </nav></aside><main>
 <h1 id="view-title">Overview / 概览</h1>
 <form id="auth" hidden><label for="token">Pairing token</label><input id="token" type="password" autocomplete="off" required><button>Connect</button></form>
@@ -24,13 +24,15 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div>
 </section>
 <section class="view" id="view-paracrafts" hidden><div id="paracrafts" class="scroll"></div><h2>Web Paracraft</h2><div id="webparacrafts" class="scroll"></div></section>
-<section class="view" id="view-api-docs" hidden><p id="api-info"></p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
+<section class="view" id="view-api-docs" hidden><p>HTTP APIs, authentication, parameters and JavaScript fetch examples.</p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
+<section class="view" id="view-tools-skills" hidden><p>Built-in MCP tool calls, skills and skill references. Expand an entry to inspect its input schema or resource URI.</p><label for="catalog-filter">Filter tools and skills</label><input id="catalog-filter" type="search" placeholder="Name or description" style="width:100%;margin:12px 0"><div id="tools-skills"></div></section>
+<section class="view" id="view-personas" hidden><p id="persona-stats"></p><h2>Personas</h2><div id="personas" class="scroll"></div><h2>Managed sessions</h2><p class="muted">MCP conversation contexts and currently retained execution sessions. Completed execution sessions may be cleaned up.</p><div id="persona-sessions" class="scroll"></div></section>
 <section class="view" id="view-chat" hidden><iframe id="chat-frame" title="Keepwork MCP AI 对话" referrerpolicy="no-referrer" allow="clipboard-write"></iframe></section>
 </main>
 <script>
 const byId = id => document.getElementById(id);
 let token = '', offset = 0, busy = false, stopped = false, view = 'overview', apiCatalog = null;
-const viewNames = {overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs',chat:'AI 对话'};
+const viewNames = {personas:'Personas / 分身',overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs','tools-skills':'Tools & skills',chat:'AI 对话'};
 function startChat() {
   let url = new URL('https://keepwork.com/chat');
   const override = new URLSearchParams(location.search).get('aichat');
@@ -86,24 +88,54 @@ async function refresh() {
     byId('range').textContent = (page.history.length ? offset + 1 : 0) + '-' + (offset + page.history.length) + ' of ' + page.total;
     byId('prev').disabled = offset === 0; byId('next').disabled = !page.hasMore;
     }
+    if (requestedView === 'personas') {
+      const data = await request('/admin/personas');
+      byId('persona-stats').textContent = data.stats.total + ' personas · ' + data.stats.active + ' active · ' + data.stats.messages + ' messages · ' + data.stats.enabledSchedules + ' enabled schedules · ' + data.stats.sessions + ' managed sessions';
+      table('personas',['Name','ID','State','Executor','Model','Messages','Unread','Schedules (enabled/total)','Channels','Last message'],data.personas.map(p=>[p.name,p.id,p.state,p.executor,p.model,p.messages,p.unread,p.enabledSchedules + '/' + p.schedules,p.channels,p.lastMessageAt ? new Date(p.lastMessageAt).toLocaleString() : '-']),'No personas managed by this service.');
+      table('persona-sessions',['Persona','Session','Kind','Backend','State'],data.sessions.map(s=>[s.persona,s.id,s.kind,s.backend,s.state]),'No managed sessions.');
+    }
     if (requestedView === 'paracrafts') {
       const [native, health] = await Promise.all([request('/paracraft/clients'),request('/health')]);
       table('paracrafts',['Client','Platform','World','PID'],native.clients.map(client => [client.clientId,client.platform,client.worldName || '-',client.pid]),'No connected desktop Paracraft clients.');
       table('webparacrafts',['Instance','Root'],health.webservers.map(server => [server.instance,server.root]),'No connected Web Paracraft instances.');
     }
-    if (requestedView === 'api-docs' && !apiCatalog) { apiCatalog = await request('/admin/api-docs'); renderApis(); }
+    if (['api-docs','tools-skills'].includes(requestedView) && !apiCatalog) { apiCatalog = await request('/admin/api-docs'); renderApis(); renderCatalog(); }
     byId('auth').hidden = true; byId('stop').disabled = false; byId('notice').textContent = '';
   } catch (error) {
-    metadata({Status:'Unavailable'}); for (const target of ['clients','overview-clients','history','paracrafts','webparacrafts','api-docs']) byId(target).replaceChildren(); apiCatalog = null;
+    metadata({Status:'Unavailable'}); for (const target of ['clients','overview-clients','history','paracrafts','webparacrafts','api-docs','tools-skills','personas','persona-sessions','persona-stats']) byId(target).replaceChildren(); apiCatalog = null;
     byId('stop').disabled = true; byId('prev').disabled = true; byId('next').disabled = true; byId('range').textContent = '0 of 0'; byId('notice').textContent = error.message;
   } finally { busy = false; byId('refresh').disabled = false; if (view !== requestedView) refresh(); }
 }
+function renderCatalog() {
+  if (!apiCatalog) return;
+  const query = byId('catalog-filter').value.toLowerCase();
+  byId('tools-skills').replaceChildren();
+  let matches = 0;
+  for (const [key, title] of [['tools','Built-in MCP tool calls'],['skills','Built-in skills'],['references','Skill references']]) {
+    const all = apiCatalog[key] || [];
+    const rows = all.filter(entry => JSON.stringify(entry).toLowerCase().includes(query));
+    if (!rows.length) continue;
+    matches += rows.length;
+    const heading = document.createElement('h2'); heading.textContent = title + ' (' + rows.length + '/' + all.length + ')'; byId('tools-skills').append(heading);
+    for (const entry of rows) {
+      const article = document.createElement('article'); article.className = 'api-item catalog-' + key;
+      const name = document.createElement('strong'); name.textContent = entry.name;
+      const description = document.createElement('p'); description.textContent = (entry.uri && entry.uri.startsWith('keepwork://skills/agent-cli-verify/') ? 'Second Brain configuration only · Not advertised to normal MCP sessions. ' : '') + (entry.description || 'No description provided.');
+      article.append(name, description);
+      const details = document.createElement('details'), summary = document.createElement('summary'), content = document.createElement('pre');
+      summary.textContent = key === 'tools' ? 'Input schema' : 'Resource URI';
+      content.textContent = key === 'tools' ? JSON.stringify(entry.inputSchema, null, 2) : entry.uri;
+      details.append(summary, content); article.append(details); byId('tools-skills').append(article);
+    }
+  }
+  if (!matches) byId('tools-skills').textContent = 'No matching tools or skills.';
+}
 function renderApis() {
   if (!apiCatalog) return;
-  byId('api-info').textContent = apiCatalog.description;
   const query = byId('api-filter').value.toLowerCase();
   byId('api-docs').replaceChildren();
   const entries = apiCatalog.endpoints.filter(entry => JSON.stringify(entry).toLowerCase().includes(query));
+  if (entries.length) { const heading = document.createElement('h2'); heading.textContent = 'HTTP APIs (' + entries.length + '/' + apiCatalog.endpoints.length + ')'; byId('api-docs').append(heading); }
   for (const entry of entries) {
     const details = document.createElement('details'); details.className = 'api-item';
     const summary = document.createElement('summary'); summary.textContent = entry.method + ' ' + entry.path + '  |  ' + entry.group;
@@ -126,6 +158,7 @@ function selectView() {
 }
 window.addEventListener('hashchange',selectView);
 byId('api-filter').oninput = renderApis;
+byId('catalog-filter').oninput = renderCatalog;
 byId('refresh').onclick = () => { stopped = false; refresh(); };
 byId('auth').onsubmit = event => { event.preventDefault(); token = byId('token').value.trim(); byId('token').value = ''; refresh(); };
 byId('copy').onclick = async () => { try { await navigator.clipboard.writeText(location.origin + '/mcp'); byId('notice').textContent = 'MCP URL copied.'; } catch { byId('notice').textContent = 'Could not copy URL.'; } };

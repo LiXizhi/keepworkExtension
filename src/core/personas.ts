@@ -9,7 +9,7 @@ import { runTerminal } from './terminal';
 
 type Message = { id: string; role: string; text: string; time: number; state?: string };
 type Schedule = { id: string; title: string; prompt: string; time: string; timezone: string; enabled: boolean; next: number; last?: string; lastDate?: string; target?: { binding: string; conversation: string } };
-type Persona = { id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; session?: string; error?: string; pending?: any[] }; };
+type Persona = { id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; worker?: boolean; session?: string; error?: string; pending?: any[] }; };
 const ID = /^[\w-]{1,160}$/;
 const active = (p: Persona) => !!p.job && ['queued','running','waiting'].includes(p.job.state);
 const ownerTools = [
@@ -32,6 +32,7 @@ export class Personas {
     private aborts = new Map<string,AbortController>();
     private approvals = new Map<string,(accept:boolean)=>void>();
     private timer: NodeJS.Timeout;
+    private stopMessagingWatch: () => void;
     private deliveries = new Set<NodeJS.Timeout>();
     private watchers = new Set<{owner:string; update:()=>void; close:()=>void}>();
     constructor(private home: string, private sessions: AgentSessions, private messaging: MessagingService) {
@@ -43,6 +44,7 @@ export class Personas {
                 this.rows.set(this.key(p.owner,p.id),p);this.save(p);
             } catch { /* Invalid records are not executed. */ }
         }
+        this.stopMessagingWatch=this.messaging.watch(() => { for(const w of this.watchers) w.update(); }, () => {});
         this.timer=setInterval(()=>this.tick(),15000);this.timer.unref();
     }
     private key(owner:string,id:string){return createHash('sha256').update(owner+'\0'+id).digest('hex');}
@@ -51,6 +53,26 @@ export class Personas {
     private get(owner:string,id:string){const p=this.rows.get(this.key(owner,id));if(!p)throw Error('分身不存在');return p;}
     private view(p:Persona){const {owner,messages,requests,summary,...rest}=p;return {...rest,unread:messages.filter(m=>m.role==='assistant'&&m.time>p.readAt).length,channels:this.messaging.agentBindings(p.owner,p.id)};}
     list(owner:string){return [...this.rows.values()].filter(p=>p.owner===owner).map(p=>this.view(p)).sort((a,b)=>a.order-b.order);}
+    /** Admin-only metadata. Never expose prompts, transcript bodies or owner capabilities. */
+    dashboard() {
+        const personas=[...this.rows.values()].map(p=>({
+            key:this.key(p.owner,p.id),id:p.id,name:p.name,
+            state:p.job?.state||'idle',executor:p.executor==='auto'?(p.preference?.backend||'keepwork'):p.executor,
+            model:p.model||p.preference?.model||'',messages:p.messages.length,
+            unread:p.messages.filter(m=>m.role==='assistant'&&m.time>p.readAt).length,
+            schedules:p.schedules.length,enabledSchedules:p.schedules.filter(s=>s.enabled).length,
+            channels:this.messaging.agentBindings(p.owner,p.id).length,
+            lastMessageAt:p.messages.at(-1)?.time||null,
+        }));
+        const sessions=[...this.rows.values()].flatMap(p=>{
+            const personaKey=this.key(p.owner,p.id);
+            const rows=this.sessions.list(personaKey,0,Number.MAX_SAFE_INTEGER).map(s=>({personaKey,persona:p.name,id:s.id,kind:'CLI',backend:s.backend,state:s.status}));
+            if(active(p)&&p.job?.worker)rows.push({personaKey,persona:p.name,id:p.job!.id,kind:'Worker',backend:'keepwork',state:p.job!.state});
+            return [{personaKey,persona:p.name,id:p.id,kind:'Conversation',backend:'MCP',state:p.job?.state||'idle'},...rows];
+        });
+        return {personas,sessions,stats:{total:personas.length,active:personas.filter(p=>['queued','running','waiting'].includes(p.state)).length,
+            messages:personas.reduce((n,p)=>n+p.messages,0),enabledSchedules:personas.reduce((n,p)=>n+p.enabledSchedules,0),sessions:sessions.length}};
+    }
     upsert(owner:string,input:any){
         if(!ID.test(input.id||''))throw Error('Invalid Agent ID');
         const old=this.rows.get(this.key(owner,input.id));
@@ -63,6 +85,13 @@ export class Personas {
     }
     read(owner:string,id:string,before=Infinity){const p=this.get(owner,id);const rows=p.messages.filter(m=>m.time<before).slice(-50);return {...this.view(p),messages:rows,before:rows.length===50?rows[0].time:null};}
     markRead(owner:string,id:string){const p=this.get(owner,id);p.readAt=Math.max(Date.now(),p.messages.at(-1)?.time||0);this.save(p);return this.view(p);}
+    clear(owner:string,id:string){
+        const p=this.get(owner,id);
+        if(active(p))throw Error('请先等待或取消当前任务再清空上下文');
+        p.messages=[];p.summary='';p.readAt=0;p.job=undefined;
+        // Keep request receipts: a delayed retry must not replay a cleared task.
+        this.save(p);return this.read(owner,id);
+    }
     submit(owner:string,id:string,input:any){
         const p=this.get(owner,id),requestId=String(input.requestId||'');if(!ID.test(requestId))throw Error('requestId required');
         if(p.requests[requestId])return this.view(p);
@@ -121,6 +150,7 @@ export class Personas {
                 let knowledge='';
                 // Fallback deliberately stays tool-free; CLI owns action/approval execution.
                 if(p.root){try{knowledge=knowledgeContext(p.root,{...defaultMessageConfig(),knowledge:fs.readdirSync(p.root,{withFileTypes:true}).filter(d=>d.isDirectory()&&!d.isSymbolicLink()&&!d.name.startsWith('.')&&!/^(account|credentials|secrets)$/i.test(d.name)).map(d=>d.name)},text);}catch{/* no implicit public grant */}}
+                job.worker=true;
                 answer=await this.messaging.workers.answer({prompt,question:text,history,knowledge,brain:p.name,ownerTask:true,tools:ownerTools},signal,latestAichatClient(p.owner),(name,args)=>this.ownerTool(p,name,args,signal));
             }
             if(signal.aborted)throw Error('已取消');if(!answer.trim())throw Error('执行器未返回答案');
@@ -171,5 +201,5 @@ export class Personas {
         }
     }
     async remove(owner:string,id:string){const p=this.get(owner,id);await this.cancel(owner,id);p.schedules=[];this.messaging.detachAgent(owner,id);this.rows.delete(this.key(owner,id));fs.rmSync(path.join(this.home,this.key(owner,id)+'.json'),{force:true});}
-    close(){if(this.closed)return;clearInterval(this.timer);for(const timer of this.deliveries)clearInterval(timer);this.deliveries.clear();for(const p of this.rows.values())if(active(p)){p.job!.state='unknown';p.job!.pending=[];this.save(p);}this.closed=true;for(const w of this.watchers)w.close();this.watchers.clear();for(const controller of this.aborts.values())controller.abort();}
+    close(){if(this.closed)return;this.stopMessagingWatch();clearInterval(this.timer);for(const timer of this.deliveries)clearInterval(timer);this.deliveries.clear();for(const p of this.rows.values())if(active(p)){p.job!.state='unknown';p.job!.pending=[];this.save(p);}this.closed=true;for(const w of this.watchers)w.close();this.watchers.clear();for(const controller of this.aborts.values())controller.abort();}
 }

@@ -453,3 +453,7 @@ model discovery and three conversational turns (two plus restart/resume) passed;
 The real MCP probe discovered the bridge but native permission policy denied its call;
 MCP-tool execution is not accepted. The generic read/write smoke also failed, including
 temporary-folder cleanup; it must not be reported as passing. macOS was not run.
+
+### Configuration-only guide discovery
+
+Normal HTTP and stdio MCP sessions omit `agent-cli-verify` and all installation/provider references from resource discovery. `ServerRuntime.includeSetupGuides` explicitly opts a configuration or developer-catalog context into the existing resource URIs and read handlers. The dashboard uses this opt-in for inspection, without advertising setup resources to connected agents. Second Brain setup continues to load its selected provider configuration on demand.

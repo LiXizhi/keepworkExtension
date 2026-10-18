@@ -19,9 +19,9 @@ through existing AIChat tools and confirmations, without forwarding the dashboar
 Keepwork login, local-network browser permission and AIChat MCP pairing may be required.
 The sidebar separates Overview, History, Clients, Paracrafts and Developer > API docs;
 each view has a shareable hash URL (for example `/dashboard#history`). History is loaded only in its own view.
-API docs are rendered from `/admin/api-docs`, with filtering, authentication notes, parameters and JavaScript fetch examples.
+Developer > Tools & skills lists searchable built-in MCP tools, skills and skill references, with descriptions and expandable input schemas/resource URIs. Developer > API docs contains HTTP authentication notes, parameters and JavaScript fetch examples. Both views use `/admin/api-docs` and have separate filters; the catalog is directly accessible at `/dashboard#tools-skills`.
 The server generates this catalog from structured definitions in `src/mcp/apiDocs.ts`, the live Paracraft action set,
-and runtime integration availability. Add HTTP endpoint definitions there when adding new routes; MCP tool schemas remain discoverable through `tools/list`.
+and runtime integration availability. Add HTTP endpoint definitions there when adding new routes. Tool and packaged-skill metadata is read through the same runtime's `tools/list` and `resources/list` registrations without executing tools, reading skill bodies or creating HTTP client sessions; the dashboard assistant skill is included as well.
 Run `node --test scripts/dashboard.test.cjs` for HTTP tests. With a running unauthenticated development daemon and Edge installed,
 run `node --test scripts/dashboard-browser.test.cjs` for browser validation (`DASHBOARD_URL` overrides the default URL).
 
@@ -317,3 +317,7 @@ to Codex. See [the contract and setup](docs/agent-harnesses.md).
 The packaged `agent-cli-verify` MCP/VS Code skill provides offline and real acceptance:
 `node --test scripts/agent-sessions.test.cjs scripts/agent-backends.test.cjs`, then
 `node scripts/agent-cli-smoke.cjs`. Unavailable providers fail the all-provider check.
+
+The dashboard **Personas / 分身** tab (`/dashboard#personas`) shows persona totals, active tasks, message and schedule counts, and managed MCP conversation / retained CLI / active headless-worker sessions. `/admin/personas` uses the existing admin authentication and Origin checks and returns metadata only, without message bodies, prompts, credentials or approval payloads. Completed execution sessions may be removed while the MCP conversation remains. The AIChat persona dashboard icon opens this tab on the currently configured MCP origin.
+
+CLI setup guides (`agent-cli-verify` and its installation/provider references) are configuration-only. Normal MCP sessions do not register or advertise them. The developer dashboard explicitly includes them for inspection and labels them accordingly; Second Brain setup loads its selected provider configuration on demand.

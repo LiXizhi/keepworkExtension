@@ -1,8 +1,13 @@
 
+export const dashboardSkillMetadata = {
+    name: 'keepwork-mcp-assistant',
+    description: 'Answer Keepwork local MCP questions, diagnose connections and help perform user-requested actions involving the dashboard, clients, files, terminal and Paracraft.',
+};
+
 export function dashboardSkill(baseUrl: string): string {
     return `---
-name: keepwork-mcp-assistant
-description: Answer Keepwork local MCP questions, diagnose connections and help perform user-requested actions involving the dashboard, clients, files, terminal and Paracraft.
+name: ${dashboardSkillMetadata.name}
+description: ${dashboardSkillMetadata.description}
 ---
 
 # Keepwork MCP Assistant

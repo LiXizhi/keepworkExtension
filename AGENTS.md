@@ -274,8 +274,10 @@ Test `node --test scripts/antigravity-harness.test.cjs` when changing this adapt
 `claudeHarness.ts` implements Claude native stream-json; `agentCliBackends.ts` owns
 the provider registry. Preserve backend-scoped routing, native credentials,
 non-replaying restart, local-only transcript caches and existing Origin/owner/auth
-checks. `skills/agent-cli-verify/SKILL.md` is packaged for both products and exposed
-as an MCP resource and VS Code chat skill. Run `npm run check:shared` and
+checks. `skills/agent-cli-verify/SKILL.md` is packaged for both products. Its MCP resources
+are opt-in via `ServerRuntime.includeSetupGuides` for configuration/catalog contexts only;
+normal HTTP and stdio sessions must not advertise setup guides or provider references.
+Second Brain setup loads selected provider configuration separately on demand. Run `npm run check:shared` and
 `node --test scripts/agent-sessions.test.cjs scripts/agent-backends.test.cjs scripts/agent-cli-discovery.test.cjs scripts/claude-harness.test.cjs`.
 Real acceptance is `node scripts/agent-cli-smoke.cjs`; unavailable or untested CLIs
 must not be reported as passing. See `docs/agent-harnesses.md`.

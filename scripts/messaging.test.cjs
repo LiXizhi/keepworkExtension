@@ -9,7 +9,7 @@ const { EventEmitter } = require('node:events');
 function load(name, mocks = {}) {
     const file = path.resolve(__dirname, '../src/core', name + '.ts');
     const m = new Module(file, module); m.filename = file; m.paths = module.paths;
-    m.require = id => Object.hasOwn(mocks,id) ? mocks[id] : id.startsWith('./messaging') ? load(path.basename(id),mocks) : require(id);
+    m.require = id => Object.hasOwn(mocks,id) ? mocks[id] : (id.startsWith('./messaging') || id === './headless') ? load(path.basename(id),mocks) : require(id);
     m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file); return m.exports;
 }
 const policy = load('messagingPolicy');
@@ -17,16 +17,16 @@ const message = (id='1', conversation='dm', sender='sender') => ({type:'user_im_
 function fixture(t) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-messaging-test-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
     const root=path.join(dir,'brain');fs.mkdirSync(path.join(root,'public'),{recursive:true});fs.writeFileSync(path.join(root,'public','lesson.md'),'课程学习计划：先读教材，再练习。');
-    const events=[], sent=[], cards=[], updates=[], pending=[]; let conflict=false, failure=false, active=0, max=0;
+    const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0;
     class BeforeSubmission extends Error {}
     const serviceModule=load('messaging',{
         './aichatPresence':{latestAichatClient:()=>null},
-        './messagingDingtalk':{dws:async()=>({identity:{corp_id:'corp',user_id:'user'},bus:{live:{consumers:conflict?[{}]:[]}}}),listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);return()=>{};},DingTalkDelivery:class{async create(){return '';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
+        './messagingDingtalk':{loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){return '';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
         './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve('课程学习答案');};pending.push({input,end});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
     });
     const service=new serviceModule.MessagingService(path.join(dir,'state'),8089);t.after(()=>service.close());
     const binding=service.configure({root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
-    return {service,binding,root,events,sent,pending,updates,cards,get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
+    return {service,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
@@ -207,4 +207,165 @@ test('owner worker capability grants only declared tools and deduplicates calls'
     assert.deepEqual(await Promise.all([workers.tool(key,owner,call,'read_file',{}),workers.tool(key,owner,call,'read_file',{})]),['result','result']);assert.equal(count,1);
     await assert.rejects(workers.tool(key,owner,call,'read_file',{path:'changed'}),/reused/);
     workers.result(key,owner,'done');assert.equal(await pending,'done');workers.close();
+});
+
+test('messaging reuses one headless browser across concurrent and sequential jobs, isolates and cleans contexts', async () => {
+    const browsers=[], contexts=[], urls=[]; let launches=0;
+    const {MessagingWorkers}=load('messagingExecutor',{
+        './acpHarness':{}, './agentCliProcess':{}, './aichatPresence':{},
+        './headless':{resolveBrowser:()=>'/fixture/browser'},
+        'playwright-core':{chromium:{launch:async options=>{
+            launches++; assert.equal(options.headless,true);
+            await tick();
+            const browser=new EventEmitter(); browser.close=async()=>{browser.closed=true;browser.emit('disconnected');};
+            browser.newContext=async()=>{
+                const page=new EventEmitter();page.goto=async url=>{urls.push(url);};
+                const context={closed:false,newPage:async()=>page,close:async()=>{context.closed=true;page.emit('close');}};
+                contexts.push(context);return context;
+            };
+            browsers.push(browser);return browser;
+        }}},
+    });
+    const workers=new MessagingWorkers(8089), input={prompt:'rule',question:'q',knowledge:'',history:[],brain:'brain'};
+    const login={url:'https://keepwork.com/chat',token:'fixture-login',baseURL:''};
+    const start=controller=>workers.answer(input,controller.signal,login);
+    const a=new AbortController(),b=new AbortController();
+    const first=start(a),second=start(b);
+    await tick();await tick();assert.equal(launches,1);assert.equal(contexts.length,2);
+    const owner='12345678-1234-1234-1234-123456789abc';
+    const key=new URL(urls[0]).hash.slice(1);workers.claim(key,owner);workers.result(key,owner,'done');assert.equal(await first,'done');assert.equal(contexts[0].closed,true);
+    b.abort();await assert.rejects(second,/Cancelled/);assert.equal(contexts[1].closed,true);assert.ok(!browsers[0].closed);
+    const third=start(new AbortController());await tick();assert.equal(launches,1);
+    browsers[0].emit('disconnected');await assert.rejects(third,/disconnected/);assert.equal(contexts[2].closed,true);
+    const fourth=start(new AbortController());await tick();await tick();assert.equal(launches,2);
+    workers.close();await assert.rejects(fourth,/Service stopped/);await tick();assert.equal(browsers[1].closed,true);
+    await assert.rejects(start(new AbortController()),/Service stopped/);
+});
+
+test('shutdown during browser launch closes the late browser without creating a worker', async () => {
+    let release,closed=false;
+    const {MessagingWorkers}=load('messagingExecutor',{
+        './acpHarness':{},'./agentCliProcess':{},'./aichatPresence':{},'./headless':{resolveBrowser:()=>'/fixture/browser'},
+        'playwright-core':{chromium:{launch:()=>new Promise(resolve=>{release=()=>resolve({on(){},close:async()=>{closed=true;},newContext(){assert.fail('no context after shutdown');}});})}},
+    });
+    const workers=new MessagingWorkers(8089);
+    const pending=workers.answer({history:[]},new AbortController().signal,{url:'https://keepwork.com/chat',token:'fixture',baseURL:''});
+    workers.close();await assert.rejects(pending,/Service stopped/);release();await tick();assert.equal(closed,true);
+});
+
+test('real headless browser completes sequential worker handshakes and retains the browser', {timeout:30000}, async t => {
+    const {resolveBrowser}=load('headless');
+    if(!resolveBrowser()){t.skip('System Edge/Chrome unavailable');return;}
+    const {MessagingWorkers,messagingWorkerHtml}=load('messagingExecutor',{'./acpHarness':{},'./agentCliProcess':{},'./aichatPresence':{}});
+    const http=require('node:http');let workers;
+    const server=http.createServer(async(req,res)=>{
+        try {
+            const route=req.url.split('?')[0];
+            if(route==='/messaging/worker'){res.setHeader('Content-Type','text/html');res.end(messagingWorkerHtml);return;}
+            if(route==='/fixture'){
+                res.setHeader('Content-Type','text/html');res.end(`<script>
+                const channel='aichat.external-tool.v1',nonce=new URLSearchParams(location.hash.slice(1)).get('messagingNonce');
+                addEventListener('message',e=>{if(e.data.type==='host:messaging-task')parent.postMessage({channel,nonce,type:'tool:messaging-result',text:'fixture answer'},location.origin);});
+                parent.postMessage({channel,nonce,type:'tool:messaging-ready'},location.origin);
+                </script>`);return;
+            }
+            const key=(req.headers.authorization||'').replace('Bearer ',''),owner=req.headers['x-agent-owner'];
+            let body='';for await(const chunk of req)body+=chunk;
+            res.setHeader('Content-Type','application/json');
+            if(route==='/messaging/worker/claim')res.end(JSON.stringify(workers.claim(key,owner)));
+            else if(route==='/messaging/worker/result'){const result=JSON.parse(body);workers.result(key,owner,result.text,result.error);res.end('{}');}
+            else {res.statusCode=404;res.end('{}');}
+        }catch{res.statusCode=500;res.end('{}');}
+    });
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    workers=new MessagingWorkers(server.address().port);
+    t.after(async()=>{workers.close();if(workers.browser)await (await workers.browser).close();await new Promise(resolve=>server.close(resolve));});
+    const login={url:`http://127.0.0.1:${server.address().port}/fixture`,token:'fixture-only',baseURL:''};
+    const input={prompt:'',question:'',knowledge:'',history:[],brain:''};
+    assert.equal(await workers.answer(input,new AbortController().signal,login),'fixture answer');
+    const browser=await workers.browser;
+    assert.equal(await workers.answer(input,new AbortController().signal,login),'fixture answer');
+    assert.equal(await workers.browser,browser);assert.ok(browser.isConnected());
+});
+
+
+test('connectAgent reuses current CLI account and saved rules, starts once and preserves binding',async t=>{
+    const f=fixture(t);let profiles=0;
+    f.service.profiles=async()=>{profiles++;return [{id:'corp:user',current:true},{id:'other:user',current:false}];};
+    const first=await f.service.connectAgent('owner','default-persona',f.root,'Persona prompt');
+    assert.equal(first.listening,true);assert.equal(first.autoReply,true);assert.equal(first.agentId,'default-persona');
+    assert.deepEqual(f.service.rules(first.id).config.knowledge,['public']);
+    const again=await f.service.connectAgent('owner','default-persona',f.root,'Persona prompt');
+    assert.equal(again.id,first.id);assert.equal(f.events.length,1);assert.equal(profiles,1);
+    await assert.rejects(f.service.connectAgent('another','default-persona',f.root,'Other'),/其他分身/);
+});
+test('empty public selection allows personal-event replies without reading any brain files',async t=>{
+    const f=fixture(t);
+    f.service.configure({root:f.root,profile:'corp:user',config:policy.defaultMessageConfig(),prompt:policy.DEFAULT_PROMPT});
+    f.service.profiles=async()=>[{id:'corp:user',current:true}];
+    const connected=await f.service.connectAgent('owner','default-persona',f.root,'Persona prompt');
+    assert.equal(connected.listening,true);
+    f.events[0](message('no-knowledge'));await tick();
+    assert.equal(f.pending[0].input.knowledge,'');
+    f.pending[0].end();await tick();assert.equal(f.sent.length,1);
+});
+
+
+test('MCP retries initial failures beyond two attempts with capped backoff and no message replay',async t=>{
+    t.mock.timers.enable({apis:['setTimeout']});
+    const f=fixture(t);f.connectionFailures=6;
+    f.service.profiles=async()=>[{id:'corp:user',current:true}];
+    const result=await f.service.connectAgent('owner','default-persona',f.root,'Persona');
+    assert.equal(result.status,'reconnecting');assert.equal(result.needsRepair,false);
+    for(const delay of [5000,10000,20000,40000,60000,60000]){t.mock.timers.tick(delay);await tick();}
+    assert.equal(f.statusChecks,7);assert.equal(f.events.length,1);
+    assert.equal(f.service.view(f.binding.id).status,'listening');
+    assert.equal(f.service.view(f.binding.id).nextRetryAt,null);
+    assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
+});
+test('disconnect recovery is single-flight and explicit stop cancels recovery',async t=>{
+    t.mock.timers.enable({apis:['setTimeout']});
+    const f=fixture(t);await f.service.start(f.binding.id);
+    f.exits[0]();f.exits[0]();assert.equal(f.service.view(f.binding.id).status,'reconnecting');
+    t.mock.timers.tick(5000);await tick();assert.equal(f.events.length,2);
+    f.exits[1]();f.service.stop(f.binding.id);
+    t.mock.timers.tick(600000);await tick();assert.equal(f.events.length,2);
+    assert.equal(f.service.view(f.binding.id).status,'stopped');
+});
+test('authorization and missing CLI need repair; transient transport failures remain automatic',()=>{
+    const {messagingNeedsRepair}=load('messaging',{'./aichatPresence':{latestAichatClient:()=>null},'./messagingExecutor':{}});
+    assert.equal(messagingNeedsRepair(Error('DWS CLI unavailable')),true);
+    assert.equal(messagingNeedsRepair({message:'DWS rejected the operation',detail:{code:'invalid_grant'}}),true);
+    assert.equal(messagingNeedsRepair(Error('Listener disconnected')),false);
+});
+
+
+test('initial profile discovery retries read-only failures before asking AI for repair',async t=>{
+    t.mock.timers.enable({apis:['setTimeout']});
+    const f=fixture(t);f.connectionFailures=2;
+    const connecting=f.service.connectAgent('owner','default-persona',f.root,'Persona');
+    await tick();t.mock.timers.tick(1000);await tick();t.mock.timers.tick(2000);await tick();
+    assert.equal((await connecting).listening,true);assert.equal(f.statusChecks,4);
+});
+
+
+test('explicit native authorization is single-flight and reconnects without model work',async t=>{
+ const f=fixture(t);
+ await f.service.connectAgent('owner','default-persona',f.root,'Persona');
+ assert.equal(f.logins.length,0);
+ await Promise.all([f.service.loginAgent('owner','default-persona',f.root,'Persona'),f.service.loginAgent('owner','default-persona',f.root,'Persona')]);
+ assert.equal(f.logins.length,1);assert.equal(f.logins[0].profile,'corp:user');assert.equal(f.logins[0].root,f.root);
+ assert.equal(f.service.view(f.binding.id).listening,true);assert.equal(f.pending.length,0);
+});
+
+
+test('native authorization uses CLI browser flow with scoped profile and discards credential output',async()=>{
+ const calls=[];let code=0,drains=0;
+ const {loginDws}=load('messagingDingtalk',{
+  'node:fs':{...fs,existsSync:()=>true,statSync:()=>({isFile:()=>true})},
+  'node:child_process':{spawn:(exe,args,options)=>{calls.push({args,options});const c=new EventEmitter();c.stdout={resume(){drains++;}};c.stderr={resume(){drains++;}};c.kill=()=>{};process.nextTick(()=>c.emit('close',code));return c;}}
+ });
+ await loginDws(os.tmpdir(),'corp:user');assert.deepEqual(calls[0].args,['auth','login','--profile','corp:user']);
+ assert.equal(calls[0].options.shell,false);assert.equal(drains,2);
+ code=1;await assert.rejects(loginDws(os.tmpdir()),/cancelled or failed/);
 });

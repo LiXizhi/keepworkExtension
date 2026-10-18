@@ -53,7 +53,7 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                 assert.ok(!html.includes(home));
                 new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
             }
-            for (const route of ['/admin/status', '/admin/history', '/admin/api-docs']) {
+            for (const route of ['/admin/status', '/admin/history', '/admin/api-docs', '/admin/personas']) {
                 assert.equal((await fetch(base + route)).status, requireAuth ? 401 : 200);
                 const headers = { Authorization: `Bearer ${server.token}`, Origin: base };
                 const response = await fetch(base + route, { headers });
@@ -65,6 +65,16 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                     assert.ok(catalog.endpoints.some(entry => entry.path === '/paracraft/{id}/query_scene'));
                     assert.ok(!catalog.endpoints.some(entry => /dingtalk/i.test(entry.path)));
                     assert.ok(catalog.endpoints.every(entry => entry.example.includes(base)));
+                    assert.ok(catalog.tools.some(entry => entry.name === 'run_terminal' && entry.inputSchema.properties.command));
+                    assert.ok(catalog.tools.some(entry => entry.name === 'listen_dingtalk_messages'));
+                    assert.ok(catalog.tools.some(entry => entry.name === 'paracraft_cli'));
+                    assert.ok(catalog.tools.some(entry => entry.name === 'computer_use'));
+                    assert.ok(catalog.tools.every(entry => entry.description && entry.inputSchema));
+                    assert.deepEqual(catalog.skills.map(entry => entry.name), ['agent-cli-verify', 'keepwork-mcp-assistant', 'paracraft-create']);
+                    assert.ok(catalog.skills.every(entry => entry.description && entry.uri.endsWith('/SKILL.md')));
+                    assert.ok(catalog.references.some(entry => entry.name === 'agent-cli-install' && entry.description));
+                    const status = await (await fetch(base + '/admin/status', { headers })).json();
+                    assert.equal(status.clients.length, 0, 'Catalog discovery must not create dashboard clients');
                     assert.ok(!JSON.stringify(catalog).includes(server.token));
                 }
                 assert.equal((await fetch(base + route, { headers: { ...headers, Origin: 'https://untrusted.example' } })).status, 403);
@@ -79,4 +89,31 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
         if (oldLoader) require.extensions['.ts'] = oldLoader; else delete require.extensions['.ts'];
         fs.rmSync(home, { recursive: true, force: true });
     }
+});
+test('Personas hash opens dashboard statistics and managed sessions in a real browser',async t=>{
+    const Module=require('node:module'),{chromium}=require('playwright-core');
+    const file=path.resolve(__dirname,'../src/mcp/dashboard.ts'),mod=new Module(file,module);
+    mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,file);
+    const headlessFile=path.resolve(__dirname,'../src/core/headless.ts'),headless=new Module(headlessFile,module);
+    headless._compile(ts.transpileModule(fs.readFileSync(headlessFile,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,headlessFile);
+    const executablePath=headless.exports.resolveBrowser();if(!executablePath){t.skip('System Edge/Chrome unavailable');return;}
+    const browser=await chromium.launch({executablePath,headless:true});
+    try{
+        const page=await browser.newPage();let empty=false;
+        await page.route('**/*',route=>{
+            const url=new URL(route.request().url());
+            if(url.pathname==='/dashboard')return route.fulfill({contentType:'text/html',body:mod.exports.dashboardHtml()});
+            if(url.pathname==='/admin/status')return route.fulfill({json:{pid:1,port:8080,workspaceRoot:'fixture',uptimeMs:1000,clients:[]}});
+            if(url.pathname==='/admin/personas')return route.fulfill({json:empty?{stats:{total:0,active:0,messages:0,enabledSchedules:0,sessions:0},personas:[],sessions:[]}:{stats:{total:1,active:1,messages:4,enabledSchedules:2,sessions:1},personas:[{id:'default-persona',name:'<img src=x onerror=alert(1)>',state:'running',executor:'keepwork',messages:4,unread:1,enabledSchedules:2,schedules:3,channels:1}],sessions:[{persona:'My assistant',id:'default-persona',kind:'Conversation',backend:'MCP',state:'running'}]}});
+            return route.fulfill({status:404,body:'{}'});
+        });
+        await page.goto('http://127.0.0.1:8080/dashboard#personas');
+        await page.locator('#personas table').waitFor();
+        assert.equal(await page.locator('#view-personas').isVisible(),true);
+        assert.match(await page.locator('#persona-stats').textContent(),/1 personas.*4 messages/);
+        assert.match(await page.locator('#persona-sessions').textContent(),/default-persona.*Conversation.*MCP/);
+        assert.equal(await page.locator('#personas img').count(),0);
+        empty=true;await page.getByText('No personas managed by this service.',{exact:true}).waitFor();
+        assert.equal(await page.locator('#persona-sessions table').count(),0);
+    }finally{await browser.close();}
 });

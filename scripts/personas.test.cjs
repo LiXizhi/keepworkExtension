@@ -11,7 +11,7 @@ function fixture(t,backend='keepwork'){
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
     const {Personas,nextPersonaRun}=moduleFor({'./aichatPresence':{latestAichatClient:owner=>owner==='owner'?client:null},'./messagingPolicy':{defaultMessageConfig:()=>({}),knowledgeContext:()=>''},'./terminal':{runTerminal:async opts=>{calls.push(opts);return {ok:true};}}});
     const callbacks=new Map();const sessions={async create(owner,input){calls.push({owner,input});return {id:'native'};},subscribe(id,owner,fn){callbacks.set(id,fn);return()=>callbacks.delete(id);},async turn(id,owner,input){calls.push({owner,input});callbacks.get(id)?.({session:{status:'running',pending:[]}});},async interrupt(){callbacks.get('native')?.({session:{status:'interrupted'}});},respond(id,owner,input){calls.push({owner,input});}};
-    const messaging={setAgentPrompt:()=>{},agentBindings:()=>[],detachAgent:()=>{},assertAgentBinding:()=>{},inboxView:()=>({conversations:[]}),workers:{answer(input,signal,login,executeTool){if(!login)return Promise.reject(Error('需要登录 AIChat'));return new Promise((resolve,reject)=>{pending.push({input,resolve,reject,executeTool});signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});});}}};
+    const messaging={watch:()=>()=>{},setAgentPrompt:()=>{},agentBindings:()=>[],detachAgent:()=>{},assertAgentBinding:()=>{},inboxView:()=>({conversations:[]}),workers:{answer(input,signal,login,executeTool){if(!login)return Promise.reject(Error('需要登录 AIChat'));return new Promise((resolve,reject)=>{pending.push({input,resolve,reject,executeTool});signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});});}}};
     const service=new Personas(home,sessions,messaging);t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
     service.upsert('owner',{id:'first',name:'我的分身',root:home,executor:'auto'});
     return {service,home,pending,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,setClient:value=>{client=value;}};
@@ -60,4 +60,32 @@ test('history pagination, read state, bounded context and deletion during execut
 });
 test('missing account login never uses another account worker credential',async t=>{
     const f=fixture(t);f.setClient(null);f.service.submit('owner','first',{requestId:'login',text:'hi'});await tick();assert.equal(f.service.read('owner','first').job.state,'needs-login');assert.equal(f.pending.length,0);
+});
+
+test('clear context is owner scoped, persistent, preserves schedules and dedup, and starts fresh',async t=>{
+    const f=fixture(t);
+    f.service.schedule('owner','first',{id:'daily',title:'daily',prompt:'task',time:'09:00',timezone:'UTC',enabled:true});
+    for(let i=0;i<10;i++){f.service.submit('owner','first',{requestId:'old-'+i,text:'old context '+i});f.pending.at(-1).resolve('old answer');await tick();}
+    assert.throws(()=>f.service.clear('other','first'),/不存在/);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(f.home,fs.readdirSync(f.home).find(x=>x.endsWith('.json'))),'utf8')).summary);
+    f.service.clear('owner','first');
+    const cleared=f.service.read('owner','first');assert.deepEqual(cleared.messages,[]);assert.equal(cleared.before,null);assert.equal(cleared.job,undefined);assert.equal(cleared.schedules.length,1);assert.equal(cleared.name,'我的分身');assert.equal(cleared.unread,0);
+    const persisted=JSON.parse(fs.readFileSync(path.join(f.home,fs.readdirSync(f.home).find(x=>x.endsWith('.json'))),'utf8'));assert.equal(persisted.summary,'');assert.deepEqual(persisted.messages,[]);
+    const restarted=new f.Personas(f.home,f.sessions,f.messaging);t.after(()=>restarted.close());assert.deepEqual(restarted.read('owner','first').messages,[]);
+    f.service.submit('owner','first',{requestId:'old-0',text:'old context 0'});assert.equal(f.pending.length,10);
+    f.service.submit('owner','first',{requestId:'fresh',text:'fresh'});assert.deepEqual(f.pending.at(-1).input.history,[]);assert.doesNotMatch(f.pending.at(-1).input.prompt,/old context|old answer/);
+    assert.throws(()=>f.service.clear('owner','first'),/等待或取消/);assert.equal(f.service.read('owner','first').messages.length,1);
+    f.pending.at(-1).resolve('new answer');await tick();
+});
+
+test('dashboard snapshot shows owned conversation and native execution metadata without context bodies',async t=>{
+    const f=fixture(t);f.sessions.list=owner=>{assert.match(owner,/^[a-f0-9]{64}$/);return [{id:'native-session',backend:'codex',status:'running',items:[{text:'private body'}],pending:[{secret:'hidden'}]}];};
+    f.service.submit('owner','first',{requestId:'job',text:'private question'});
+    const snapshot=f.service.dashboard();
+    assert.equal(snapshot.stats.total,1);assert.equal(snapshot.stats.active,1);assert.equal(snapshot.stats.messages,1);
+    assert.deepEqual(snapshot.sessions.map(s=>s.kind),['Conversation','CLI','Worker']);
+    assert.equal(snapshot.sessions[1].id,'native-session');
+    assert.doesNotMatch(JSON.stringify(snapshot),/private question|private body|hidden|owner-login/);
+    f.pending[0].resolve('private reply');await tick();
+    assert.equal(f.service.dashboard().stats.active,0);assert.equal(f.service.dashboard().sessions.some(s=>s.kind==='Worker'),false);
 });

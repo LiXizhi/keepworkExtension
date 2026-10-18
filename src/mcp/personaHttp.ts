@@ -1,7 +1,7 @@
 import * as http from 'node:http';
 import { ownerKey } from '../core/agentSessions';
 import { Personas } from '../core/personas';
-import { MessagingService } from '../core/messaging';
+import { MessagingService, messagingNeedsLogin } from '../core/messaging';
 
 export async function handlePersonaHttp(req:http.IncomingMessage,res:http.ServerResponse,url:URL,personas:Personas,messaging:MessagingService){
     res.setHeader('Cache-Control','no-store');
@@ -25,11 +25,14 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
         if(req.method!=='POST'){send(405,{error:'Method not allowed'});return;}
         switch(action){
             case 'messages':send(200,personas.submit(owner,id,input));return;
+            case 'clear':send(200,personas.clear(owner,id));return;
             case 'read':send(200,personas.markRead(owner,id));return;
             case 'cancel':send(200,await personas.cancel(owner,id));return;
             case 'respond':send(200,personas.respond(owner,id,input));return;
             case 'schedules':send(200,personas.schedule(owner,id,input));return;
             case 'remove':await personas.remove(owner,id);send(200,{ok:true});return;
+            case 'channel-connect':{const agent=personas.read(owner,id);try{send(200,await messaging.connectAgent(owner,id,String(input.root||agent.root||''),agent.prompt));}catch(error){if(!messagingNeedsLogin(error))throw error;send(200,{status:'needs-login',listening:false,needsLogin:true});}return;}
+            case 'channel-login':{const agent=personas.read(owner,id);send(200,await messaging.loginAgent(owner,id,String(input.root||agent.root||''),agent.prompt));return;}
             case 'bind':{const result=messaging.bindAgent(owner,id,input.binding);messaging.setAgentPrompt(owner,id,personas.read(owner,id).prompt);send(200,result);return;}
             case 'inbox':send(200,messaging.inboxAction(owner,id,input.binding,input.conversation||'',input.action));return;
             case 'reply':send(200,await messaging.manualReply(owner,id,input.binding,input.conversation,input.requestId,input.text));return;

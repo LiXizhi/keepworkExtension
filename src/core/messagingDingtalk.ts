@@ -7,7 +7,7 @@ import { Incoming, MessageConfig, splitReply } from './messagingPolicy';
 export function resolveDws(): string {
     const dirs = (process.env.PATH || process.env.Path || '').split(path.delimiter);
     const binary = process.platform === 'win32' ? 'dws.exe' : 'dws';
-    const candidates = [process.env.KEEPWORK_DWS_PATH || '', ...dirs.map(d => path.join(d, binary)),
+    const candidates = [process.env.KEEPWORK_DWS_PATH || '', path.join(os.homedir(), '.local', 'bin', binary), ...dirs.map(d => path.join(d, binary)),
         ...[process.env.APPDATA && path.join(process.env.APPDATA, 'npm'), ...dirs, path.join(os.homedir(), '.npm-global', 'lib'), '/usr/local/lib', '/opt/homebrew/lib']
             .filter((v): v is string => !!v).map(d => path.join(d, 'node_modules/dingtalk-workspace-cli/vendor', binary))];
     for (const file of candidates) if (path.isAbsolute(file) && fs.existsSync(file) && fs.statSync(file).isFile()) return file;
@@ -24,6 +24,16 @@ export function dws(args: string[], cwd: string): Promise<any> {
         child.stdout.setEncoding('utf8'); child.stdout.on('data', s => { output += s; if (output.length > 2_000_000) { child.stdin.end(); finish(new DwsError(true)); } });
         child.stderr.resume(); child.on('error', () => finish(new DwsError(false)));
         child.on('close', code => { try { const result = JSON.parse(output); if (code || result.error) finish(new DwsError(false, result.error)); else finish(undefined, result); } catch { finish(new DwsError(true)); } });
+    });
+}
+// Explicit interactive authorization only; output may contain credentials and is discarded.
+export function loginDws(root: string, profile?: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const child = spawn(resolveDws(), ['auth', 'login', ...(profile ? ['--profile', profile] : [])], {cwd:root,shell:false,windowsHide:true,stdio:'pipe'});
+        child.stdout.resume(); child.stderr.resume();
+        const timer = setTimeout(() => { child.kill(); reject(new Error('DingTalk authorization timed out; retry authorization')); }, 180000);
+        child.on('error', () => { clearTimeout(timer); reject(new Error('DingTalk authorization could not start')); });
+        child.on('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error('DingTalk authorization was cancelled or failed')); });
     });
 }
 export function listenerArgs(config: MessageConfig): string[][] {
@@ -48,7 +58,7 @@ export async function listenDws(root: string, profile: string, config: MessageCo
                 });
                 child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-4000); if (!ready && diagnostics.includes('[event] ready')) { ready = true; clearTimeout(timer); resolve(); } });
                 child.on('error', () => { clearTimeout(timer); reject(new Error('DWS listener could not start')); if (!stopping) onExit(); });
-                child.on('close', () => { clearTimeout(timer); if (!ready) reject(new Error('DWS listener exited before ready')); if (!stopping) onExit(); });
+                child.on('close', () => { clearTimeout(timer); if (!ready) reject(new Error(/invalid.?grant|token.*expired|unauthorized|\b401\b|auth login|未登录|请.*登录/i.test(diagnostics) ? 'DingTalk login required' : 'DWS listener exited before ready')); if (!stopping) onExit(); });
             });
         }
         return stop;

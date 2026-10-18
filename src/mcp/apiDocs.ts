@@ -75,12 +75,14 @@ export function apiDocs(port: number, requireAuth: boolean) {
     for (const [route, body] of Object.entries({ register: { clientId: '<CLIENT_ID>', platform: 'desktop' }, unregister: { clientId: '<CLIENT_ID>' }, '{id}/jobs/poll': { waitMs: 2000 }, '{id}/jobs/results': { results: [{ jobId: '<JOB_ID>', result: {} }] }, '{id}/jobs/{jobId}/result': { result: {} } })) add('Paracraft bridge', 'POST', '/paracraft/' + route, 'Engine registration / job transport. Intended for Paracraft clients.', 'Replace path placeholders; JSON body as below.', undefined, body, 'No token required');
     add('Web Paracraft', 'GET', '/webserver/{instance}/{path}', 'Proxy an external WASM NPL wiki request. Other HTTP methods are forwarded as well.', 'instance and root from /health.webservers; path is the wiki resource.', undefined, undefined, 'No token required');
     add('AIChat', 'POST', '/aichat/presence', 'Remember the latest AIChat page URL and login in memory. A closed session does not erase it. The response never echoes the login.', 'Header: Mcp-Session-Id of a live MCP session. JSON: url, token, optional baseURL. Explicit allowed Origin required.', undefined, { url: 'https://keepwork.com/chat', token: '<KEEPWORK_LOGIN>' }, 'Live Mcp-Session-Id and explicit allowed Origin');
+    add('Admin', 'GET', '/admin/personas', 'Metadata-only persona statistics and managed conversation/execution sessions; admin authentication required when configured.');
     add('Agents', 'GET', '/agents/personas', 'List long-lived Agent identities, channel states and unread counts. Requires X-Agent-Owner and allowed Origin.');
     add('Agents', 'POST', '/agents/personas', 'Create or update an Agent; local roots never enter cloud profiles.', 'id, name, avatar, prompt, root, executor, model, pinned, order');
     add('Agents', 'GET', '/agents/personas/events', 'Owner-scoped SSE change notifications; fetch snapshots after reconnect.');
     add('Agents', 'GET', '/agents/personas/:id', 'Single lasting conversation, 50 messages per page.', 'Optional before timestamp');
     add('Agents', 'POST', '/agents/personas/:id/messages', 'Idempotent owner task; no replay after uncertain submission.', 'requestId, text');
     add('Agents', 'POST', '/agents/personas/:id/schedules', 'Daily daemon schedule in an IANA timezone; disabled unless enabled explicitly.', 'id, title, prompt, time HH:mm, timezone, enabled; optional explicit target {binding,conversation}; remove:true deletes');
+    add('Agents', 'POST', '/agents/personas/:id/clear', 'Clear owner conversation and context summary; preserves configuration, schedules, channels and request deduplication. Rejects active tasks.');
     add('Agents', 'POST', '/agents/personas/:id/cancel', 'Cancel this Agent task and pending approvals.');
     add('Agents', 'POST', '/agents/personas/:id/respond', 'Respond to an owned pending approval or question.', 'id, decision, answers');
     add('Agents', 'POST', '/agents/personas/:id/bind', 'Explicitly attach an existing DingTalk binding without starting it.', 'binding');
@@ -97,7 +99,7 @@ export function apiDocs(port: number, requireAuth: boolean) {
     add('Agent harnesses', 'POST', '/agents/sessions/{id}/respond', 'Answer a pending approval or question.', 'JSON: id plus decision, or answers keyed by question ID.');
     add('Agent harnesses', 'GET', '/agents/sessions/{id}/events?cursor=0', 'Stream bounded NDJSON session snapshots; reconnect does not resend prompts.', 'Same Origin and X-Agent-Owner as creation.');
     add('Agent harnesses', 'POST', '/agents/sessions/{id}/turns', 'Start a CLI turn; overlapping active workspaces return an advisory warning without blocking.', 'JSON: requestId, text, optional model/effort. Result: submission, session, optional warnings [{code: workspace_overlap, sessions: [{id, title}]}]. One active turn per session. See docs/agent-harnesses.md.');
-    return { description: 'Runtime API catalog. Examples are JavaScript fetch calls; replace placeholders before use. Browser requests remain subject to Origin rules. Write, terminal and lifecycle operations have side effects. MCP tool schemas are available through tools/list.', endpoints };
+    return { description: 'Runtime catalog of built-in MCP tool calls, skills, skill references and HTTP APIs. Tool descriptions and input schemas come from tools/list; packaged skills come from resources/list plus the dashboard assistant. Examples are JavaScript fetch calls; replace placeholders before use. Browser requests remain subject to Origin rules. Write, terminal and lifecycle operations have side effects.', endpoints };
 }
 
 

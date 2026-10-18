@@ -1,11 +1,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { chromium, Browser, BrowserContext } from 'playwright-core';
+import { resolveBrowser } from './headless';
 import { AcpHarness } from './acpHarness';
 import { resolveAgentCli } from './agentCliProcess';
 import { latestAichatClient } from './aichatPresence';
-import { readNotifyBridge } from './config';
 import { MessageConfig } from './messagingPolicy';
 
 export interface AnswerInput { ownerTask?: boolean; prompt: string; question: string; knowledge: string; history: { role: string; content: string }[]; brain: string; tools?: any[] }
@@ -66,11 +66,14 @@ export async function copilotAnswer(home: string, config: MessageConfig, input: 
     finally { adapter.close(); }
 }
 
-type WorkerJob = { toolCalls: Map<string,{signature:string; result:Promise<unknown>}>; executeTool?: (name:string,args:any)=>Promise<unknown>; key: string; owner?: string; claimed: boolean; input: AnswerInput; resolve: (text: string) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; login: { url: string; token: string; baseURL: string }; signal: AbortSignal; abort: () => void };
+type WorkerJob = { context?: BrowserContext; toolCalls: Map<string,{signature:string; result:Promise<unknown>}>; executeTool?: (name:string,args:any)=>Promise<unknown>; key: string; owner?: string; claimed: boolean; input: AnswerInput; resolve: (text: string) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; login: { url: string; token: string; baseURL: string }; signal: AbortSignal; abort: () => void };
 export class MessagingWorkers {
     private jobs = new Map<string, WorkerJob>();
+    private browser?: Promise<Browser>;
+    private stopped = false;
     constructor(private port: number) {}
     async answer(input: AnswerInput, signal: AbortSignal, login = latestAichatClient(), executeTool?: (name:string,args:any)=>Promise<unknown>) {
+        if (this.stopped) throw new BeforeSubmission('Service stopped');
         if (!login?.token) throw new BeforeSubmission('需要登录 AIChat');
         const page = new URL(login.url);
         if (!((page.protocol === 'https:' && ['keepwork.com','cdn.keepwork.com'].includes(page.hostname)) || (page.protocol === 'http:' && ['127.0.0.1','localhost'].includes(page.hostname)))) throw new BeforeSubmission('AIChat page origin unavailable');
@@ -108,18 +111,51 @@ export class MessagingWorkers {
     alive(key: string, owner: string) { return this.jobs.get(key)?.owner === owner; }
     private finish(key: string, text: string, error?: string) {
         const job = this.jobs.get(key); if (!job) return;
-        this.jobs.delete(key); clearTimeout(job.timer); job.signal.removeEventListener('abort', job.abort);
+        this.jobs.delete(key);
+        void job.context?.close().catch(() => {});
+        clearTimeout(job.timer); job.signal.removeEventListener('abort', job.abort);
         if (error || !text) job.reject(new Error(error || 'Empty AIChat answer')); else job.resolve(text);
     }
-    close() { for (const key of this.jobs.keys()) this.finish(key, '', 'Service stopped'); }
-    private async launch(url: string) {
-        const bridge = readNotifyBridge();
-        if (bridge) {
-            try { const response = await fetch(`http://127.0.0.1:${bridge.port}/messaging-worker`, { method: 'POST', headers: { Authorization: `Bearer ${bridge.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ url }), signal: AbortSignal.timeout(5000) }); if (response.ok) return; } catch { /* browser fallback */ }
+    close() {
+        this.stopped = true;
+        for (const key of this.jobs.keys()) this.finish(key, '', 'Service stopped');
+        void this.browser?.then(browser => browser.close()).catch(() => {});
+    }
+    private getBrowser(): Promise<Browser> {
+        if (!this.browser) {
+            // Cache the launch promise too: concurrent requests must share one process.
+            const pending = (async () => {
+                const executablePath = resolveBrowser();
+                if (!executablePath) throw new Error('Install Edge or Chrome for AIChat workers');
+                const browser = await chromium.launch({ executablePath, headless: true, timeout: 15000 });
+                browser.on('disconnected', () => {
+                    if (this.browser !== pending) return;
+                    this.browser = undefined;
+                    for (const key of this.jobs.keys()) this.finish(key, '', 'AIChat browser disconnected; not retried');
+                });
+                return browser;
+            })();
+            this.browser = pending;
+            void pending.catch(() => { if (this.browser === pending) this.browser = undefined; });
         }
-        const executable = process.platform === 'win32' ? 'rundll32.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open';
-        const args = process.platform === 'win32' ? ['url.dll,FileProtocolHandler', url] : [url];
-        await new Promise<void>((resolve, reject) => { const child = spawn(executable, args, { shell: false, windowsHide: true, stdio: 'ignore' }); child.on('error', reject); child.on('spawn', () => { child.unref(); resolve(); }); });
+        return this.browser;
+    }
+    private async launch(url: string) {
+        const key = new URL(url).hash.slice(1);
+        const browser = await this.getBrowser();
+        if (this.stopped || !this.jobs.has(key)) return;
+        const context = await browser.newContext();
+        const job = this.jobs.get(key);
+        if (this.stopped || !job) { await context.close(); return; }
+        job.context = context;
+        try {
+            const page = await context.newPage();
+            page.on('crash', () => this.finish(key, '', 'AIChat worker crashed; not retried'));
+            page.on('close', () => this.finish(key, '', 'AIChat worker closed; not retried'));
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } catch {
+            this.finish(key, '', 'Cannot open AIChat headless worker');
+        }
     }
 }
 export const messagingWorkerHtml = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>第二大脑自动回复</title><style>body{font:16px system-ui;margin:20px}iframe{width:100%;height:75vh;border:0}</style><p id="status">正在连接第二大脑…</p><script>

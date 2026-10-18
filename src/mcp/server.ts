@@ -16,6 +16,8 @@ import { recordCall, summarizeArgs } from './sessions';
 import type { MessagingService } from '../core/messaging';
 
 export interface ServerRuntime {
+    /** Explicit setup/catalog contexts only; never advertise CLI setup guides in normal sessions. */
+    includeSetupGuides?: boolean;
     messaging?: MessagingService;
     viaHub?: boolean;
     root: string;
@@ -75,7 +77,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     registerComputerTools(server);
     registerCreationTools(server, runtime);
     registerCreationGuide(server);
-    registerAgentGuide(server);
+    if (runtime.includeSetupGuides) registerAgentGuide(server);
 
     if (runtime.messaging) server.registerTool('listen_dingtalk_messages', {
         description: 'Start already configured and enabled DingTalk auto-reply. Configure and enable in Second Brain first. No account, target or credential arguments.',

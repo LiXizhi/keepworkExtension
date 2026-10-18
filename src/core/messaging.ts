@@ -3,13 +3,22 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { configValue, confined, defaultMessageConfig, DEFAULT_PROMPT, digestMessage, incoming, Incoming, knowledgeContext, knowledgeDirectory, MessageConfig, readRules, RULE_DIR, trigger } from './messagingPolicy';
-import { DingTalkDelivery, dws, listenDws } from './messagingDingtalk';
+import { DingTalkDelivery, dws, listenDws, loginDws } from './messagingDingtalk';
 import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
 
 interface Binding { id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; rulesDir?: string; agentPrompt?: string }
 interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; card?: string }
-interface Runtime { binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number }
+interface Runtime { binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
+// Only failures requiring configuration/authorization repair leave automatic recovery.
+export function messagingNeedsRepair(error: any): boolean {
+    const detail = typeof error?.detail === 'object' ? JSON.stringify(error.detail) : String(error?.detail || '');
+    return /identity does not match|already has a listener|已有个人消息桥|DWS CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录/i.test(String(error?.message || error) + ' ' + detail);
+}
+export function messagingNeedsLogin(error: any): boolean {
+    return /Select a current DingTalk CLI account|invalid.?grant|invalid.?token|token.*expired|unauthenticated|unauthorized|login.required|未登录/i.test(String(error?.message || error) + ' ' + JSON.stringify(error?.detail || ''));
+}
 export class MessagingService {
+    private logins = new Map<string, Promise<any>>();
     private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; sends?: Record<string,string> }> = {};
     private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
     private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
@@ -60,7 +69,7 @@ export class MessagingService {
     list() { return [...this.runs.values()].map(r => this.view(r.binding.id)); }
     view(id: string) {
         const r = this.get(id);
-        return { ...r.binding, status: r.status, error: r.error, active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', autoReply: r.binding.enabled };
+        return { ...r.binding, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', autoReply: r.binding.enabled };
     }
     rules(id: string) { const b=this.get(id).binding;return readRules(b.root,b.rulesDir); }
     defaults(root?: string | null) {
@@ -94,12 +103,54 @@ export class MessagingService {
         if (!r) r = this.add({ id, root, profile: input.profile, enabled: false });
         r.history.clear(); this.persist(r); return this.view(id);
     }
+    async loginAgent(owner: string, agentId: string, root: string, prompt: string) {
+        if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Existing local second-brain directory required');
+        root = fs.realpathSync(root);
+        const key = owner + '\0' + agentId;
+        if (this.logins.has(key)) return this.logins.get(key);
+        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root);
+        if (existing.length > 1) throw new Error('Multiple DingTalk bindings; select the account in settings');
+        const pending = loginDws(root, existing[0]?.profile).then(() => {
+            if (this.closed) throw new Error('Service closed');
+            return this.connectAgent(owner, agentId, root, prompt);
+        }).finally(() => this.logins.delete(key));
+        this.logins.set(key, pending); return pending;
+    }
+    async connectAgent(owner: string, agentId: string, root: string, prompt: string) {
+        if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Existing local second-brain directory required');
+        root = fs.realpathSync(root);
+        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root);
+        if (existing.length > 1) throw new Error('Multiple DingTalk bindings; select the account in settings');
+        let binding = existing[0];
+        if (!binding) {
+            const profiles = await this.profiles(root);
+            const current = profiles.filter(p => p.current);
+            const selected = current.length === 1 ? current[0] : profiles.length === 1 ? profiles[0] : null;
+            if (!selected) throw new Error('Select a current DingTalk CLI account before connecting');
+            const occupied = this.list().find(b => b.profile === selected.id && b.agentId && (b.agentOwner !== owner || b.agentId !== agentId));
+            if (occupied) throw new Error('该身份已由其他分身使用');
+            binding = this.list().find(b => b.root === root && b.profile === selected.id)!;
+            if (!binding) binding = this.configure({ root, profile: selected.id, ...this.defaults(root) });
+            this.bindAgent(owner, agentId, binding.id);
+        }
+        this.setAgentPrompt(owner, agentId, prompt);
+        try { await this.start(binding.id); } catch(error) { if (this.get(binding.id).status !== 'reconnecting') throw error; }
+        return this.view(binding.id);
+    }
     async profiles(root: string) {
         if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Local second-brain directory required');
-        const result = await dws(['profile','list','-f','json'], root);
+        let result: any;
+        for (let attempt = 0; ; attempt++) {
+            try { result = await dws(['profile','list','-f','json'], root); break; }
+            catch(error) {
+                if (this.closed || messagingNeedsRepair(error) || attempt >= 2) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+            }
+        }
+        if (this.closed) throw new Error('Service closed');
         // Deliberately project identifiers, never return arbitrary credential fields.
         const found: any[] = [];
-        const walk = (v: any) => { if (!v || typeof v !== 'object') return; const corp = v.corpId || v.corp_id, user = v.userId || v.user_id; if (corp && user) found.push({ id: `${corp}:${user}`, name: String(v.corpName || v.corp_name || corp) + ' / ' + String(v.userName || v.user_name || user) }); else for (const child of Object.values(v)) walk(child); };
+        const walk = (v: any) => { if (!v || typeof v !== 'object') return; const corp = v.corpId || v.corp_id, user = v.userId || v.user_id; if (corp && user) found.push({ id: `${corp}:${user}`, name: String(v.corpName || v.corp_name || corp) + ' / ' + String(v.userName || v.user_name || user), current: v.isCurrent === true || result.currentProfile === `${corp}:${user}` }); else for (const child of Object.values(v)) walk(child); };
         walk(result); return found;
     }
     async groups(root: string, profile: string, query: string) {
@@ -115,18 +166,22 @@ export class MessagingService {
     async start(id: string) {
         const r = this.get(id); if (r.starting) return r.starting;
         if (r.status === 'listening') return;
+        clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined;
         r.binding.enabled = true; this.persist(r);
         r.starting = this.startRun(r).finally(() => { r.starting = undefined; }); return r.starting;
     }
     private async startRun(r: Runtime) {
         if (this.closed) throw new Error('Service closed');
         r.status = 'connecting'; r.error = '';
+        let rulesLoaded = false;
         try {
             const { config } = this.rules(r.binding.id);
-            if (!config.knowledge.length) throw new Error('请先选择允许公开的知识目录');
+            rulesLoaded = true;
+            // Empty selection exposes no brain files; message-only replies remain usable.
             const status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
             const identity = status.identity;
-            if (!identity?.corp_id || !identity?.user_id || `${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
+            if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
+            if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
             if (status.bus?.live?.consumers?.length || status.subscriptions?.length) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；请先在其所属程序中检查并停止，不会自动抢占');
             r.identity = r.binding.profile; r.self = identity.open_dingtalk_id || '';
             if (this.identities.has(r.identity)) throw new Error('This account already has a listener');
@@ -136,17 +191,39 @@ export class MessagingService {
             r.stop = await listenDws(r.binding.root, r.binding.profile, config, e => this.receive(r,e), () => this.disconnected(r));
             if (!r.binding.enabled || this.closed) { r.stop(); r.stop = undefined; this.releaseIdentity(r); r.status = 'stopped'; return; }
             r.status = 'listening'; r.retries = 0; this.persist(r);
-        } catch(error) { this.releaseIdentity(r); r.status = 'error'; r.error = error instanceof Error ? error.message : 'Listener failed'; this.persist(r); throw error; }
+        } catch(error) {
+            this.releaseIdentity(r);
+            if (this.closed || !r.binding.enabled) { r.status = 'stopped'; r.error = ''; return; }
+            r.error = error instanceof Error ? error.message : 'Listener failed';
+            if (rulesLoaded && !messagingNeedsRepair(error)) this.scheduleReconnect(r);
+            else { clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.status = 'error'; this.persist(r); }
+            throw error;
+        }
     }
     private releaseIdentity(r: Runtime) { if (r.ownsIdentity) this.identities.delete(r.identity); r.ownsIdentity = false; }
-    private disconnected(r: Runtime) {
-        r.stop?.(); r.stop = undefined; this.releaseIdentity(r); r.status = 'disconnected'; r.error = 'Listener disconnected';
+    private scheduleReconnect(r: Runtime) {
+        if (this.closed || !r.binding.enabled) return;
+        r.status = 'reconnecting';
+        if (!r.retry) {
+            const delay = Math.min(60000, 5000 * 2 ** Math.min(r.retries++, 4));
+            r.nextRetryAt = Date.now() + delay;
+            r.retry = setTimeout(() => {
+                r.retry = undefined; r.nextRetryAt = undefined;
+                if (!this.closed && r.binding.enabled) void this.start(r.binding.id).catch(() => {});
+            }, delay);
+            r.retry.unref();
+        }
         this.persist(r);
-        // Bounded reconnect; no prompt or send replay. Subscription failures remain visible.
-        if (!this.closed && r.binding.enabled && r.retries++ < 2 && !r.retry) r.retry = setTimeout(() => { r.retry = undefined; void this.start(r.binding.id).catch(() => {}); }, 5000 * r.retries);
+    }
+    private disconnected(r: Runtime) {
+        r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
+        if (this.closed || !r.binding.enabled) return;
+        r.error = 'Listener disconnected';
+        // Reconnect subscriptions only. Never replay model work or message sends.
+        this.scheduleReconnect(r);
     }
     stop(id: string) {
-        const r = this.get(id); r.binding.enabled = false; clearTimeout(r.retry); r.retry = undefined;
+        const r = this.get(id); r.binding.enabled = false; clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.retries = 0;
         r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
         for (const q of r.queues.values()) for (const job of q) job.receipt.state = 'cancelled';
         r.queues.clear(); for (const controller of r.active.values()) controller.abort();
@@ -188,7 +265,7 @@ export class MessagingService {
             receipt.state = 'running'; this.persist(r);
             const {config,prompt} = this.rules(r.binding.id);
             const agentPrompt=r.binding.agentPrompt||'';
-            if (!config.knowledge.length) throw new Error('请先选择允许公开的知识目录');
+            // Empty selection exposes no brain files; message-only replies remain usable.
             // Policy changes invalidate conversation memory, including formerly public material.
             const scope = createHash('sha256').update(JSON.stringify(config)+prompt).digest('hex');
             const historyKey = scope + '\0' + message.conversation + '\0' + message.sender;

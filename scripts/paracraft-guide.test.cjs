@@ -36,9 +36,7 @@ test('one CLI and one root skill, with schemas and references loaded on demand',
     assert.equal(root.files, undefined, 'Skill read dumps the whole file index');
     const resources = await client.listResources();
     assert.equal(resources.resources.filter(r => r.uri.startsWith('keepwork://skills/paracraft-create/')).length, 1);
-    assert.ok(resources.resources.some(r => r.uri === 'keepwork://skills/agent-cli-verify/SKILL.md'));
-    const cliGuide = await client.readResource({ uri: 'keepwork://skills/agent-cli-verify/SKILL.md' });
-    assert.match(cliGuide.contents[0].text, /name: agent-cli-verify/);
+    assert.ok(!resources.resources.some(r => r.uri.startsWith('keepwork://skills/agent-cli-verify/')));
     const read = await client.readResource({ uri: 'keepwork://skills/paracraft-create/SKILL.md' });
     assert.equal(read.contents[0].text, root.content);
     assert.ok(!client.getServerCapabilities().prompts, 'Unneeded prompt advertised');

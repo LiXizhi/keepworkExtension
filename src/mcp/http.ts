@@ -29,6 +29,7 @@ import { tryHandleAichatPresence, aichatClientRemembered } from '../core/aichatP
 import { dashboardHtml } from './dashboard';
 import { dashboardSkill } from './dashboardSkill';
 import { apiDocs } from './apiDocs';
+import { mcpCatalog } from './mcpCatalog';
 import { MessagingService } from '../core/messaging';
 import { handleMessagingHttp } from './messagingHttp';
 
@@ -386,6 +387,12 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 }
             }
 
+            if (pathname === '/admin/personas' && req.method === 'GET') {
+                if (!assertAuth(req, url, res)) return;
+                sendJson(res, 200, personas.dashboard());
+                return;
+            }
+
             if (pathname === '/admin/status' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, {
@@ -405,7 +412,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
 
             if (pathname === '/admin/api-docs' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
-                sendJson(res, 200, apiDocs(port, authRequired));
+                sendJson(res, 200, { ...apiDocs(port, authRequired), ...await mcpCatalog(runtime) });
                 return;
             }
 
