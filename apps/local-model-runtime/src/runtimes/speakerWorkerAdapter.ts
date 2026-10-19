@@ -14,6 +14,12 @@ import { LocalModelError } from '../core/errors.js';
 import { fromProjectRoot } from '../core/paths.js';
 import { verifyModelPackage } from '../core/integrity.js';
 
+export const MIN_WORKER_INITIALIZATION_TIMEOUT_MS = 15_000;
+
+export function workerInitializationTimeoutMs(configuredTimeoutMs: number): number {
+  return Math.max(configuredTimeoutMs, MIN_WORKER_INITIALIZATION_TIMEOUT_MS);
+}
+
 interface Task {
   id: string;
   operation: 'embedding' | 'compare';
@@ -131,7 +137,7 @@ export class SpeakerWorkerAdapter implements ModelAdapter {
         'Model worker initialization timed out',
         { retryable: true, status: 504 },
       ));
-    }, this.config.resources.timeoutMs);
+    }, workerInitializationTimeoutMs(this.config.resources.timeoutMs));
     const request: WorkerRequest = {
       type: 'initialize',
       modelPath: fromProjectRoot(this.config.artifact.path),
