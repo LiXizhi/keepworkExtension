@@ -4,6 +4,7 @@ import { DEFAULT_TIMEOUT_MS, GLOBAL_TERMINAL_CAP, MAX_TIMEOUT_MS, OUTPUT_CHAR_CA
 import { PathEscapeError, resolveWorkdir } from './paths';
 import { tryRunInVscodeTerminal } from './vscodeBridge';
 import { cmdUtf8Command } from './terminalEncoding';
+import { resolveTerminalSpawnEnvironment } from './terminalEnvironment';
 
 export interface TerminalResult {
     ok: boolean;
@@ -33,6 +34,15 @@ const DENY_PATTERNS: RegExp[] = [
 let activeTerminals = 0;
 const waiters: Array<() => void> = [];
 const sessionTails = new Map<string, Promise<unknown>>();
+const SPAWN_ENV_CACHE_MS = 60_000;
+let spawnEnvCache: { expiresAt: number; value: Promise<NodeJS.ProcessEnv> } | undefined;
+
+function spawnEnvironment(): Promise<NodeJS.ProcessEnv> {
+    if (spawnEnvCache && spawnEnvCache.expiresAt > Date.now()) return spawnEnvCache.value;
+    const value = resolveTerminalSpawnEnvironment(process.env);
+    spawnEnvCache = { expiresAt: Date.now() + SPAWN_ENV_CACHE_MS, value };
+    return value;
+}
 
 export function assertAllowedCommand(command: string): void {
     const text = String(command || '').trim();
@@ -117,13 +127,15 @@ export async function runTerminal(opts: {
     });
 }
 
-function runSpawn(command: string, cwd: string, timeoutMs: number, abortSignal?: AbortSignal): Promise<TerminalResult> {
+async function runSpawn(command: string, cwd: string, timeoutMs: number, abortSignal?: AbortSignal): Promise<TerminalResult> {
+    const baseEnv = await spawnEnvironment();
+    const env = process.platform === 'win32' ? baseEnv : { ...baseEnv, PWD: cwd };
     return new Promise((resolve) => {
         const child = spawn(process.platform === 'win32' ? cmdUtf8Command(command) : command, {
             cwd,
             shell: true,
             windowsHide: true,
-            env: process.env,
+            env,
         });
         const abort = () => killProcessTree(child.pid);
         abortSignal?.addEventListener('abort',abort,{once:true});

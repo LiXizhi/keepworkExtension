@@ -389,7 +389,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
 
             if (pathname === '/admin/personas' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
-                sendJson(res, 200, personas.dashboard());
+                sendJson(res, 200, { ...personas.dashboard(), recentMessages: messaging.dashboardMessages() });
                 return;
             }
 

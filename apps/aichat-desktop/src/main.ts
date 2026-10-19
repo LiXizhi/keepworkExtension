@@ -477,10 +477,17 @@ else {
     autoUpdater.on('update-not-available', () => { updateError = ''; setUpdateState('current'); });
     autoUpdater.on('update-downloaded', () => { setUpdateState('pending restart', 100); });
     autoUpdater.on('error', e => { updateError = e.message; setUpdateState('error'); });
+    if (!disableDevMcp) {
+      // AIChat probes the local MCP server as soon as the remote page loads. Make
+      // the server ready first so its one-shot initial discovery includes tools
+      // such as run_terminal instead of caching an offline result for the chat.
+      try { await runtime.start(); }
+      catch (e: unknown) { updateError = e instanceof Error ? e.message : String(e); }
+      menu();
+    }
     if (process.argv.includes('--background')) tray.setToolTip(closedTip);
     else await ensureShown();
     if (!disableDevMcp) {
-      void runtime.start().then(menu).catch((e: Error) => { updateError = e.message; menu(); });
       void modelRuntime.start().then(menu).catch((e: Error) => { console.error('local-model startup failed:', e); updateError = e.message; menu(); });
       startRuntimeHeartbeat();
     }

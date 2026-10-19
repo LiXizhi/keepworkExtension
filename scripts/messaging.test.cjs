@@ -24,11 +24,47 @@ function fixture(t) {
         './messagingDingtalk':{loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){return '';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
         './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve('课程学习答案');};pending.push({input,end});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
     });
-    const service=new serviceModule.MessagingService(path.join(dir,'state'),8089);t.after(()=>service.close());
+    const createService=()=>{const instance=new serviceModule.MessagingService(path.join(dir,'state'),8089);t.after(()=>instance.close());return instance;};
+    const service=createService();
     const binding=service.configure({root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
-    return {service,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
+    return {service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('dashboard messages track processing and replies in memory only, newest first and capped at 500',async t=>{
+    const f=fixture(t);await f.service.start(f.binding.id);
+    f.events[0](message('diagnostic'));await tick();
+    let row=f.service.dashboardMessages()[0];
+    assert.equal(row.state,'running');assert.equal(row.text,'课程怎么学习');assert.equal(row.channel,'dingtalk');
+    assert.equal(row.relevant,true);assert.equal(row.kind,'direct');
+    assert.equal('receipt' in row,false);assert.equal('agentOwner' in row,false);
+    f.pending[0].end();await tick();
+    row=f.service.dashboardMessages()[0];assert.equal(row.state,'done');assert.match(row.reply,/课程学习答案/);
+    const receiptFile=JSON.parse(fs.readFileSync(path.join(path.dirname(f.root),'state',f.binding.id+'.json'),'utf8'));
+    assert.doesNotMatch(JSON.stringify(receiptFile),/课程学习答案|课程怎么学习|recentMessages/);
+    f.events[0](message('diagnostic'));assert.equal(f.service.dashboardMessages().length,1,'duplicate delivery is omitted');
+    for(let i=0;i<505;i++)f.events[0]({...message('ignored-'+i,'dm','owner'),content:'x'.repeat(9000)});
+    const rows=f.service.dashboardMessages();assert.equal(rows.length,500);
+    assert.equal(rows[0].state,'ignored');assert.equal(rows[0].reason,'self');assert.equal(rows[0].text.length,8000);
+    assert.equal(rows[0].relevant,false);
+    assert.equal(rows.some(r=>r.id===row.id),false,'oldest entry is evicted');
+    rows[0].text='changed';assert.equal(f.service.dashboardMessages()[0].text.length,8000,'snapshots cannot mutate history');
+    f.service.close();assert.deepEqual(f.createService().dashboardMessages(),[],'restart does not load persisted inbox into diagnostics');
+});
+
+test('dashboard relevance includes mentions and matching groups but excludes unrelated groups and echoes',async t=>{
+    const f=fixture(t);f.service.configure({root:f.root,profile:'corp:user',config:{...policy.defaultMessageConfig(),groups:['group'],keywords:['课程']},prompt:policy.DEFAULT_PROMPT});
+    await f.service.start(f.binding.id);
+    f.events[0]({...message('unrelated','group'),type:'user_im_message_receive_group',content:'普通聊天'});
+    assert.equal(f.service.dashboardMessages()[0].relevant,false);
+    f.events[0]({...message('matching','group'),type:'user_im_message_receive_group'});
+    assert.equal(f.service.dashboardMessages()[0].relevant,true);
+    f.events[0]({...message('mention'),type:'user_im_message_receive_at'});
+    assert.equal(f.service.dashboardMessages()[0].relevant,true);
+    f.events[0]({...message('echo'),content:'【AI 代答】测试'});
+    assert.equal(f.service.dashboardMessages()[0].relevant,false);
+    f.service.close();await tick();
+});
 
 test('default keywords empty; trigger by event identity, not claimed sender names',()=>{
     const config=policy.defaultMessageConfig();assert.deepEqual(config.keywords,[]);
@@ -69,7 +105,7 @@ test('parallelism and queue caps reject overflow',async t=>{
     f.service.stop(f.binding.id);await tick();assert.equal(f.sent.length,0);
 });
 test('existing consumer is not stolen, and start failure is visible',async t=>{
-    const f=fixture(t);f.conflict=true;await assert.rejects(f.service.start(f.binding.id),/已有个人消息桥/);assert.equal(f.events.length,0);assert.equal(f.service.view(f.binding.id).status,'error');
+    const f=fixture(t);f.conflict=true;await assert.rejects(f.service.start(f.binding.id),/已有个人消息桥/);assert.equal(f.events.length,0);assert.equal(f.service.view(f.binding.id).status,'reconnecting');
 });
 test('invalid manually edited rules pause reception; no prompt is run',async t=>{
     const f=fixture(t);await f.service.start(f.binding.id);fs.writeFileSync(path.join(f.root,policy.RULE_DIR,'config.json'),'{broken');f.events[0](message());await tick();assert.equal(f.pending.length,0);assert.equal(f.service.view(f.binding.id).status,'error');
@@ -311,13 +347,17 @@ test('empty public selection allows personal-event replies without reading any b
 });
 
 
-test('MCP retries initial failures beyond two attempts with capped backoff and no message replay',async t=>{
+test('MCP retries initial failures every five minutes with no early checks or message replay',async t=>{
     t.mock.timers.enable({apis:['setTimeout']});
     const f=fixture(t);f.connectionFailures=6;
     f.service.profiles=async()=>[{id:'corp:user',current:true}];
     const result=await f.service.connectAgent('owner','default-persona',f.root,'Persona');
     assert.equal(result.status,'reconnecting');assert.equal(result.needsRepair,false);
-    for(const delay of [5000,10000,20000,40000,60000,60000]){t.mock.timers.tick(delay);await tick();}
+    for(let attempt=0;attempt<6;attempt++){
+        const checks=f.statusChecks;
+        t.mock.timers.tick(299999);await tick();assert.equal(f.statusChecks,checks,'no retry before five minutes');
+        t.mock.timers.tick(1);await tick();assert.equal(f.statusChecks,checks+1);
+    }
     assert.equal(f.statusChecks,7);assert.equal(f.events.length,1);
     assert.equal(f.service.view(f.binding.id).status,'listening');
     assert.equal(f.service.view(f.binding.id).nextRetryAt,null);
@@ -327,10 +367,33 @@ test('disconnect recovery is single-flight and explicit stop cancels recovery',a
     t.mock.timers.enable({apis:['setTimeout']});
     const f=fixture(t);await f.service.start(f.binding.id);
     f.exits[0]();f.exits[0]();assert.equal(f.service.view(f.binding.id).status,'reconnecting');
-    t.mock.timers.tick(5000);await tick();assert.equal(f.events.length,2);
+    t.mock.timers.tick(300000);await tick();assert.equal(f.events.length,2);
     f.exits[1]();f.service.stop(f.binding.id);
     t.mock.timers.tick(600000);await tick();assert.equal(f.events.length,2);
     assert.equal(f.service.view(f.binding.id).status,'stopped');
+});
+test('restart restores enabled disk bindings without AIChat and waits for an existing listener to exit',async t=>{
+    t.mock.timers.enable({apis:['setTimeout']});
+    const f=fixture(t);await f.service.start(f.binding.id);
+    const paused=f.service.configure({root:f.root,profile:'corp:paused',config:policy.defaultMessageConfig(),prompt:policy.DEFAULT_PROMPT});
+    f.service.close();f.conflict=true;
+    const restored=f.createService();restored.resume();await tick();
+    assert.equal(restored.view(f.binding.id).status,'reconnecting');
+    assert.equal(restored.view(f.binding.id).enabled,true);
+    assert.equal(restored.view(f.binding.id).needsRepair,false);
+    assert.equal(restored.view(paused.id).enabled,false);
+    assert.equal(f.events.length,1,'does not displace the previous listener');
+    t.mock.timers.tick(300000);await tick();
+    assert.equal(f.events.length,1,'only checks occupancy while another listener exists');
+    f.conflict=false;t.mock.timers.tick(300000);await tick();
+    assert.equal(restored.view(f.binding.id).listening,true);
+    assert.equal(f.events.length,2);
+    assert.equal(restored.view(paused.id).status,'stopped');
+    assert.equal(f.logins.length,0);assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
+    restored.stop(f.binding.id);restored.close();
+    const stopped=f.createService();stopped.resume();await tick();
+    assert.equal(stopped.view(f.binding.id).status,'stopped','explicit stop survives another restart');
+    assert.equal(f.events.length,2);
 });
 test('authorization and missing CLI need repair; transient transport failures remain automatic',()=>{
     const {messagingNeedsRepair}=load('messaging',{'./aichatPresence':{latestAichatClient:()=>null},'./messagingExecutor':{}});

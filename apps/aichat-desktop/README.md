@@ -52,12 +52,15 @@ Use `npm start --prefix apps/aichat-desktop` for the live website. For local AIC
 set `AICHAT_DESKTOP_DEV_URL` to the actual loopback Live Server URL. This override is
 ignored in installed builds. Never use AIChat's Vite/build/upload commands for validation.
 Set `AICHAT_MCP_RUNTIME_DIR` to a staged native MCP runtime for development or packaging.
+The Electron builder packages the existing stage; it does not rebuild the MCP runtime.
+Restage after changing shared MCP source, then smoke-test it before packaging. Packaging
+checks that the staged runtime's source commit matches the checkout and rejects stale stages.
 Source mode remains usable without it: native files/terminal work and MCP reports unavailable.
 
 `npm run stage --prefix apps/mcp-runtime -- --platform win32 --arch x64` produces a Windows
 runtime. On native Mac runners use `darwin` and `arm64`/`x64`. Smoke-test that runtime, then
 set its absolute staging directory as `AICHAT_MCP_RUNTIME_DIR`. Use `make:win` or `make:mac`
-in the desktop package. Packaging rejects missing or wrong-platform runtimes.
+in the desktop package. Packaging rejects missing, stale, or wrong-platform runtimes.
 
 ## Lifecycle and data
 

@@ -11,8 +11,52 @@ The daemon's local `~/.keepwork-mcp/messaging-v1/` registry is a service binding
 registry: root/profile/enabled plus body-free receipts and dedup hashes. Secrets remain in DWS or
 CLI-native credential storage; AIChat login stays in process memory. Restart never replays jobs.
 
+## Startup recovery and multiple computers
+
+After the HTTP daemon starts, `MessagingService.resume()` reads the loaded disk bindings and
+starts every binding with `enabled: true`, including DingTalk and Feishu. No AIChat tab or click
+is required. Closing the daemon preserves this flag; an explicit Stop persists `enabled: false`
+and remains stopped across restarts. A CLI login alone is not a saved messaging binding.
+
+Transport failures and occupied listeners retain the enabled flag and retry every five minutes.
+Startup still attempts connection immediately. DingTalk checks status before starting a consumer: existing
+consumers or subscriptions are left untouched until the account is free. This also handles
+the shutdown overlap when the previous daemon's consumer has not finished exiting. Stale
+remote subscriptions can still require inspection in their owning application; MCP never
+deletes unknown subscriptions. Invalid credentials, missing CLI and invalid local rules need
+repair; automatic recovery does not launch an authorization flow.
+
+This is not a distributed lock. The in-memory identity guard and message deduplication are
+local to one daemon. DWS reports remote subscriptions as well as local consumers, but the
+status check and subscribe operation are not atomic across computers. Feishu polling has
+only local checkpoints and can run on multiple computers, producing duplicate replies.
+Use one enabled auto-reply computer per platform account until a shared lease and cross-device
+deduplication are implemented. Merely opening MCP on several computers does not enable a new
+binding, but previously enabled bindings on all of them will resume independently.
+
+Regression: `restart restores enabled disk bindings without AIChat and waits for an existing
+listener to exit` in `scripts/messaging.test.cjs` failed on the original recovery classifier
+(`error` instead of `reconnecting`), then passed after the fix. It uses temporary disk state
+and isolated CLI fixtures, covering restart, occupancy release, no job replay and explicit Stop;
+it is not a live multi-computer acceptance test.
+
 HTTP capability: `/health.messagingApi = "messaging-v1"`. Management routes require an allowed
 explicit Origin and the configured daemon authentication:
+
+The Dashboard Personas page also shows the latest 500 received channel messages across all bindings,
+newest first, in pages of 50. `/admin/personas.recentMessages` contains channel/account/persona,
+conversation/sender, received text, processing state, reason, executor and attempted reply text.
+Manual sends do not consume the received-message buffer; automatic reply status updates the incoming entry.
+The default filter shows all received entries; Related shows direct messages, mentions and group
+messages matching reply rules, excluding self/echo events. Filtering applies within the retained
+500 entries, resets pagination, and does not expand platform subscriptions.
+`unknown` means delivery is uncertain even when reply text is present. Duplicate deliveries are
+omitted; ignored/rejected/failed messages remain visible. Text and reply previews each retain up
+to 8000 characters and render as plain text. This additional diagnostic buffer is memory-only,
+is not restored from inbox files, and resets on daemon restart; existing inbox persistence is
+unchanged. It is exposed only through the existing authenticated/admin-Origin-checked endpoint,
+not ordinary messaging status or SSE. Tests cover retention, state updates, restart, pagination
+and HTML escaping (`scripts/messaging.test.cjs`, `scripts/dashboard.test.cjs`).
 
 | Method | Route | Payload / result |
 | --- | --- | --- |
@@ -62,7 +106,7 @@ Auto executor selection follows AIChat’s current workspace default backend and
 
 Persona Connect uses `POST /agents/personas/:id/channel-connect` with the verified local brain root. It reuses that persona's persisted binding, otherwise selects the current DWS profile and binds it, preserving existing rules. It starts the listener idempotently and returns real listening status. Empty public knowledge selections are permitted and expose no brain files. Saved enabled bindings resume on daemon restart. Messaging state changes notify persona SSE clients. The UI uses AI repair only on connection failure; unsupported daemon versions require an update, never another CLI install.
 
-Enabled listeners automatically recover from initial transient connection failures and disconnects with exponential backoff (5s to 60s, no retry-count limit). Status is `reconnecting`, includes `nextRetryAt`, and does not invoke AI. Explicit stop cancels retries. Invalid rules, unavailable CLI, invalid authorization and competing listeners require repair. Recovery only recreates subscriptions; it never replays model jobs or delivery attempts.
+Enabled listeners automatically recover from initial transient connection failures and disconnects every five minutes, with no retry-count limit. Status is `reconnecting`, includes `nextRetryAt`, and does not invoke AI. Explicit stop cancels retries. Invalid rules, unavailable CLI and invalid authorization require repair; competing listeners are checked again at the same interval. Recovery only recreates subscriptions; it never replays model jobs or delivery attempts.
 
 Known login failures return `needs-login` from persona channel-connect. Explicit `POST /agents/personas/:id/channel-login` runs native `dws auth login` (existing binding profile if present), deduplicates concurrent requests, discards CLI output, waits for completion and reconnects. Background recovery never repeatedly launches browser authorization. The UI handles authorization without an LLM and offers AI diagnosis only after programmatic recovery fails. New devices and revoked credentials can still require DingTalk approval.
 

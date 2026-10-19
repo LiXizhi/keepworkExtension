@@ -7,6 +7,7 @@ const { execFileSync } = require('node:child_process');
 const ts = require('typescript');
 require.extensions['.ts'] = (mod, filename) => mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText, filename);
 const { POWERSHELL_UTF8_INIT } = require('../src/core/terminalEncoding.ts');
+const { resolveTerminalSpawnEnvironment } = require('../src/core/terminalEnvironment.ts');
 // Exercise the spawn fallback without contacting the user's live editor terminal.
 const bridge = require('../src/core/vscodeBridge.ts');
 bridge.tryRunInVscodeTerminal = async () => null;
@@ -17,6 +18,42 @@ function fixture(t) {
     t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
     return root;
 }
+
+test('spawn fallback environment loads exported PATH from the login shell', { skip: process.platform === 'win32' }, async t => {
+    const root = fixture(t);
+    const shell = process.env.SHELL || os.userInfo().shell;
+    const shellName = path.basename(shell || '').toLowerCase();
+    if (!shell || !fs.existsSync(shell) || !['bash', 'fish', 'zsh'].includes(shellName)) t.skip('supported login shell unavailable');
+
+    const fakeBin = path.join(root, 'cli-bin');
+    fs.mkdirSync(fakeBin);
+    const fakeDws = path.join(fakeBin, 'dws');
+    fs.writeFileSync(fakeDws, '#!/bin/sh\nprintf "dws version test-fixture\\n"\n', 'utf8');
+    fs.chmodSync(fakeDws, 0o755);
+    const profile = shellName === 'zsh'
+        ? path.join(root, '.zshenv')
+        : shellName === 'bash'
+            ? path.join(root, '.bash_profile')
+            : path.join(root, '.config', 'fish', 'config.fish');
+    fs.mkdirSync(path.dirname(profile), { recursive: true });
+    const quotedBin = fakeBin.replace(/'/g, "'\\''");
+    const setup = shellName === 'fish'
+        ? `echo 'login profile banner'\nset -gx PATH '${quotedBin}' $PATH\nset -gx KEEPWORK_TEST_LOGIN_ENV loaded\n`
+        : `echo 'login profile banner'\nexport PATH='${quotedBin}':$PATH\nexport KEEPWORK_TEST_LOGIN_ENV=loaded\n`;
+    fs.writeFileSync(profile, setup, 'utf8');
+    const baseEnv = {
+        HOME: root,
+        SHELL: shell,
+        PATH: '/usr/bin:/bin',
+        ...(shellName === 'zsh' ? { ZDOTDIR: root } : {}),
+    };
+
+    const env = await resolveTerminalSpawnEnvironment(baseEnv);
+    assert.equal(env.KEEPWORK_TEST_LOGIN_ENV, 'loaded');
+    assert.ok(env.PATH.split(path.delimiter).includes(fakeBin));
+    const output = execFileSync('/bin/sh', ['-c', 'dws --version'], { cwd: root, env, encoding: 'utf8' });
+    assert.equal(output.trim(), 'dws version test-fixture');
+});
 
 test('owned PowerShell reads BOM-less UTF-8 without command hints; explicit encoding still wins', { skip: process.platform !== 'win32' }, t => {
     const root = fixture(t), expected = '中文任务：检查日历和待办事项。📅';
