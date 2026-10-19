@@ -26,7 +26,7 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 <section class="view" id="view-paracrafts" hidden><div id="paracrafts" class="scroll"></div><h2>Web Paracraft</h2><div id="webparacrafts" class="scroll"></div></section>
 <section class="view" id="view-api-docs" hidden><p>HTTP APIs, authentication, parameters and JavaScript fetch examples.</p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
 <section class="view" id="view-tools-skills" hidden><p>Built-in MCP tool calls, skills and skill references. Expand an entry to inspect its input schema or resource URI.</p><label for="catalog-filter">Filter tools and skills</label><input id="catalog-filter" type="search" placeholder="Name or description" style="width:100%;margin:12px 0"><div id="tools-skills"></div></section>
-<section class="view" id="view-personas" hidden><p id="persona-stats"></p><h2>Personas</h2><div id="personas" class="scroll"></div><h2>Managed sessions</h2><p class="muted">MCP conversation contexts and currently retained execution sessions. Completed execution sessions may be cleaned up.</p><div id="persona-sessions" class="scroll"></div></section>
+<section class="view" id="view-personas" hidden><p id="persona-stats"></p><h2>Personas</h2><div id="personas" class="scroll"></div><h2>Managed sessions</h2><p class="muted">MCP conversation contexts and currently retained execution sessions. Completed execution sessions may be cleaned up.</p><div id="persona-sessions" class="scroll"></div><h2>最近渠道消息 / Recent messages</h2><p class="muted">本次运行最多保留实际收到的 500 条，重启清空。内容与回复各显示最多 8000 字符；回复是否送达请查看状态。</p><label for="messages-filter">消息范围 </label><select id="messages-filter"><option value="all">全部收到</option><option value="related">与我有关（私聊、@我、命中代答规则）</option></select><div id="persona-messages" class="scroll"></div><div class="pager"><button id="messages-prev">上一页</button><span id="messages-range"></span><button id="messages-next">下一页</button></div></section>
 <section class="view" id="view-chat" hidden><iframe id="chat-frame" title="Keepwork MCP AI 对话" referrerpolicy="no-referrer" allow="clipboard-write"></iframe></section>
 </main>
 <script>
@@ -52,6 +52,27 @@ function startChat() {
   for (const [key,value] of Object.entries(params)) url.searchParams.set(key,value);
   byId('chat-frame').src = url.href;
 }
+let recentMessages = [], messageOffset = 0;
+function messageContent(value) {
+  const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('div');
+  summary.textContent=String(value||'—').slice(0,100);body.textContent=value||'—';body.style.whiteSpace='pre-wrap';
+  details.append(summary,body);return details;
+}
+function renderMessages() {
+  const filtered=recentMessages.filter(m=>m.direction!=='out'&&(byId('messages-filter').value==='all'||m.relevant));
+  messageOffset=Math.min(messageOffset,Math.max(0,Math.floor((filtered.length-1)/50)*50));
+  const rows=filtered.slice(messageOffset,messageOffset+50);
+  const states={ignored:'已忽略',queued:'排队中',running:'处理中',sending:'发送中',done:'已回复',sent:'已发送',unknown:'结果未知',cancelled:'已取消',error:'失败',rejected:'已拒绝'};
+  table('persona-messages',['时间','渠道 / 分身 / 账号','会话 / 发送者','状态','收到的内容','回复内容'],rows.map(m=>[
+    new Date(m.time).toLocaleString(),m.channel+' / '+(m.persona||'—')+' / '+m.profile,
+    m.conversation+' / '+m.sender,(states[m.state]||m.state)+(m.reason?' · '+m.reason:'')+(m.executor?' · '+m.executor:''),messageContent(m.text),messageContent(m.reply)
+  ]),'本次运行尚未收到或处理渠道消息。');
+  byId('messages-range').textContent=(rows.length?messageOffset+1:0)+'–'+(messageOffset+rows.length)+' / '+filtered.length+'（收到 '+recentMessages.length+' / 最多 500）';
+  byId('messages-prev').disabled=messageOffset===0;byId('messages-next').disabled=messageOffset+50>=filtered.length;
+}
+byId('messages-filter').onchange=()=>{messageOffset=0;renderMessages();};
+byId('messages-prev').onclick=()=>{messageOffset=Math.max(0,messageOffset-50);renderMessages();};
+byId('messages-next').onclick=()=>{messageOffset+=50;renderMessages();};
 const limit = 20;
 async function request(path, method = 'GET') {
   const response = await fetch(path, {method, cache:'no-store', headers:token ? {Authorization:'Bearer ' + token} : {}});
@@ -65,7 +86,7 @@ function table(target, headings, rows, empty) {
   const element = document.createElement('table'), head = element.createTHead().insertRow();
   headings.forEach(label => { const cell = document.createElement('th'); cell.textContent = label; head.append(cell); });
   const body = element.createTBody();
-  rows.forEach(values => { const row = body.insertRow(); values.forEach(value => { row.insertCell().textContent = String(value ?? ''); }); });
+  rows.forEach(values => { const row = body.insertRow(); values.forEach(value => { const cell=row.insertCell();if(value instanceof Node)cell.append(value);else cell.textContent=String(value ?? ''); }); });
   container.append(element);
 }
 function metadata(values) {
@@ -90,6 +111,8 @@ async function refresh() {
     }
     if (requestedView === 'personas') {
       const data = await request('/admin/personas');
+      const incomingMessages=data.recentMessages||[];
+      if(JSON.stringify(incomingMessages)!==JSON.stringify(recentMessages)||!byId('messages-range').textContent){recentMessages=incomingMessages;renderMessages();}
       byId('persona-stats').textContent = data.stats.total + ' personas · ' + data.stats.active + ' active · ' + data.stats.messages + ' messages · ' + data.stats.enabledSchedules + ' enabled schedules · ' + data.stats.sessions + ' managed sessions';
       table('personas',['Name','ID','State','Executor','Model','Messages','Unread','Schedules (enabled/total)','Channels','Last message'],data.personas.map(p=>[p.name,p.id,p.state,p.executor,p.model,p.messages,p.unread,p.enabledSchedules + '/' + p.schedules,p.channels,p.lastMessageAt ? new Date(p.lastMessageAt).toLocaleString() : '-']),'No personas managed by this service.');
       table('persona-sessions',['Persona','Session','Kind','Backend','State'],data.sessions.map(s=>[s.persona,s.id,s.kind,s.backend,s.state]),'No managed sessions.');

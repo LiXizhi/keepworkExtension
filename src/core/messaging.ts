@@ -9,16 +9,31 @@ import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAn
 
 interface Binding { channel?: 'dingtalk' | 'feishu'; id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; rulesDir?: string; agentPrompt?: string }
 interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; card?: string }
+interface RecentMessage { binding: string; channel: string; persona: string; profile: string; conversation: string; sender: string; direction: string; kind: string; relevant: boolean; text: string; reply: string; receipt: Receipt }
 interface Runtime { pollAbort?: AbortController; lastPollAt?: number; binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
 // Only failures requiring configuration/authorization repair leave automatic recovery.
 export function messagingNeedsRepair(error: any): boolean {
     const detail = typeof error?.detail === 'object' ? JSON.stringify(error.detail) : String(error?.detail || '');
-    return /identity does not match|already has a listener|已有个人消息桥|DWS CLI unavailable|Lark CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录/i.test(String(error?.message || error) + ' ' + detail);
+    // Occupancy can outlive a daemon restart briefly. Keep checking read-only
+    // status with backoff; never stop another listener or delete its subscriptions.
+    return /identity does not match|DWS CLI unavailable|Lark CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录/i.test(String(error?.message || error) + ' ' + detail);
 }
 export function messagingNeedsLogin(error: any): boolean {
     return /Select a current DingTalk CLI account|invalid.?grant|invalid.?token|token.*expired|unauthenticated|unauthorized|login.required|未登录/i.test(String(error?.message || error) + ' ' + JSON.stringify(error?.detail || ''));
 }
 export class MessagingService {
+    // Separate from persisted receipts/inbox: bounded diagnostics for this process only.
+    private recentMessages: RecentMessage[] = [];
+    private rememberMessage(r: Runtime, message: Incoming, receipt: Receipt, direction = 'in') {
+        const row: RecentMessage = { binding:r.binding.id,channel:r.binding.channel||'dingtalk',persona:r.binding.agentId||'',profile:r.binding.profile,
+            conversation:message.conversation,sender:message.sender,direction,kind:message.kind,relevant:false,text:message.text.slice(0,8000),reply:'',receipt };
+        this.recentMessages.push(row);
+        if(this.recentMessages.length>500)this.recentMessages.shift();
+        return row;
+    }
+    dashboardMessages() {
+        return this.recentMessages.slice().reverse().map(({receipt,...row})=>({...row,id:receipt.id,time:receipt.time,state:receipt.state,reason:receipt.reason||'',executor:receipt.executor||''}));
+    }
     private logins = new Map<string, Promise<any>>();
     private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; sends?: Record<string,string> }> = {};
     private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
@@ -216,7 +231,7 @@ export class MessagingService {
             const identity = status.identity;
             if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
             if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
-            if (status.bus?.live?.consumers?.length || status.subscriptions?.length) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；请先在其所属程序中检查并停止，不会自动抢占');
+            if (status.bus?.live?.consumers?.length || status.subscriptions?.length) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
             r.identity = r.binding.profile; r.self = identity.open_dingtalk_id || '';
             if (this.identities.has(r.identity)) throw new Error('This account already has a listener');
             this.identities.add(r.identity); r.ownsIdentity = true;
@@ -239,7 +254,7 @@ export class MessagingService {
         if (this.closed || !r.binding.enabled) return;
         r.status = 'reconnecting';
         if (!r.retry) {
-            const delay = Math.min(60000, 5000 * 2 ** Math.min(r.retries++, 4));
+            const delay = 5 * 60 * 1000;
             r.nextRetryAt = Date.now() + delay;
             r.retry = setTimeout(() => {
                 r.retry = undefined; r.nextRetryAt = undefined;
@@ -268,10 +283,12 @@ export class MessagingService {
         const message: Incoming | null = r.binding.channel==='feishu' ? event : incoming(event); if (!message) return;
         const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
         const receipt: Receipt = { id, time: Date.now(), state: 'ignored' }; r.receipts.push(receipt); r.receipts = r.receipts.slice(-200);
+        const recent=this.rememberMessage(r,message,receipt);
         try {
             const {config} = this.rules(r.binding.id);
             if (JSON.stringify([config.groups, config.keywords.length > 0]) !== r.subscriptions) throw new Error('监听群或称呼开关已变化，请重新启用服务');
             receipt.reason = trigger(message, config, r.since, r.self, r.binding.channel !== 'feishu');
+            recent.relevant = receipt.reason === 'reply' || (message.kind !== 'group' && !['self','echo'].includes(receipt.reason));
             if(!['old','self','echo'].includes(receipt.reason)) { const box=this.box(r.binding.id);if(!box.messages.some(m=>m.id===message.id&&m.direction==='in'))box.messages.push({...message,direction:'in'});this.saveInbox();if(box.paused.includes(message.conversation))receipt.reason='taken-over'; }
             // A group-keyword subscription can deliver before the @me subscription.
             // An ignored group event must not consume the accepted message's dedup key.
@@ -318,6 +335,7 @@ export class MessagingService {
             if (JSON.stringify(current.config) !== JSON.stringify(config) || current.prompt !== prompt || (r.binding.agentPrompt||'') !== agentPrompt) throw new Error('Rules changed during execution; answer withheld');
             if(this.box(r.binding.id).paused.includes(message.conversation))throw Error('会话已由本人接管');
             const text = answer.startsWith('【AI 代答】') ? answer : '【AI 代答】' + answer;
+            const recent=this.recentMessages.find(row=>row.receipt===receipt);if(recent)recent.reply=text.slice(0,8000);
             receipt.state = 'sending'; this.persist(r);
             if (card) await delivery.update(card,text,3); else await delivery.send(message,receipt.id,text);
             receipt.state = 'done';

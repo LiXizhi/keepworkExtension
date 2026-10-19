@@ -104,7 +104,7 @@ test('Personas hash opens dashboard statistics and managed sessions in a real br
             const url=new URL(route.request().url());
             if(url.pathname==='/dashboard')return route.fulfill({contentType:'text/html',body:mod.exports.dashboardHtml()});
             if(url.pathname==='/admin/status')return route.fulfill({json:{pid:1,port:8080,workspaceRoot:'fixture',uptimeMs:1000,clients:[]}});
-            if(url.pathname==='/admin/personas')return route.fulfill({json:empty?{stats:{total:0,active:0,messages:0,enabledSchedules:0,sessions:0},personas:[],sessions:[]}:{stats:{total:1,active:1,messages:4,enabledSchedules:2,sessions:1},personas:[{id:'default-persona',name:'<img src=x onerror=alert(1)>',state:'running',executor:'keepwork',messages:4,unread:1,enabledSchedules:2,schedules:3,channels:1}],sessions:[{persona:'My assistant',id:'default-persona',kind:'Conversation',backend:'MCP',state:'running'}]}});
+            if(url.pathname==='/admin/personas')return route.fulfill({json:empty?{stats:{total:0,active:0,messages:0,enabledSchedules:0,sessions:0},personas:[],sessions:[]}:{stats:{total:1,active:1,messages:4,enabledSchedules:2,sessions:1},personas:[{id:'default-persona',name:'<img src=x onerror=alert(1)>',state:'running',executor:'keepwork',messages:4,unread:1,enabledSchedules:2,schedules:3,channels:1}],recentMessages:Array.from({length:51},(_,i)=>({id:String(i),direction:'in',relevant:i%2===0,time:Date.now(),channel:'fixture-channel',persona:'default-persona',profile:'corp:user',conversation:'chat',sender:'sender',state:'done',text:'<img src=x onerror=alert(1)> '+i,reply:'Reply '+i})),sessions:[{persona:'My assistant',id:'default-persona',kind:'Conversation',backend:'MCP',state:'running'}]}});
             return route.fulfill({status:404,body:'{}'});
         });
         await page.goto('http://127.0.0.1:8080/dashboard#personas');
@@ -113,7 +113,25 @@ test('Personas hash opens dashboard statistics and managed sessions in a real br
         assert.match(await page.locator('#persona-stats').textContent(),/1 personas.*4 messages/);
         assert.match(await page.locator('#persona-sessions').textContent(),/default-persona.*Conversation.*MCP/);
         assert.equal(await page.locator('#personas img').count(),0);
+        assert.equal(await page.locator('#persona-messages tbody tr').count(),50);
+        assert.equal(await page.locator('#persona-messages img').count(),0);
+        assert.match(await page.locator('#persona-messages').textContent(),/已回复/);
+        await page.locator('#persona-messages details').first().locator('summary').click();
+        assert.equal(await page.locator('#persona-messages details').first().getAttribute('open'),'');
+        await page.locator('#messages-next').click();
+        assert.equal(await page.locator('#persona-messages tbody tr').count(),1);
+        assert.match(await page.locator('#persona-messages').textContent(),/Reply 50/);
+        await page.locator('#messages-prev').click();
+        assert.equal(await page.locator('#persona-messages tbody tr').count(),50);
+        await page.locator('#messages-next').click();
+        await page.locator('#messages-filter').selectOption('related');
+        assert.equal(await page.locator('#persona-messages tbody tr').count(),26);
+        assert.equal(await page.locator('#messages-prev').isDisabled(),true);
+        assert.match(await page.locator('#messages-range').textContent(),/1–26/);
+        await page.locator('#messages-filter').selectOption('all');
+        assert.equal(await page.locator('#persona-messages tbody tr').count(),50);
         empty=true;await page.getByText('No personas managed by this service.',{exact:true}).waitFor();
         assert.equal(await page.locator('#persona-sessions table').count(),0);
+        assert.equal(await page.locator('#persona-messages table').count(),0);
     }finally{await browser.close();}
 });
