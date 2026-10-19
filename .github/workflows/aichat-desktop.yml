@@ -70,6 +70,11 @@ jobs:
         run: |
           echo "AICHAT_MCP_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/mcp-runtime/staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
           echo "KP_LOCAL_MODEL_RUNTIME_DIR=$GITHUB_WORKSPACE/apps/local-model-runtime/runtime-staging/${{ matrix.runtime }}" >> "$GITHUB_ENV"
+      - name: Configure fallback Mac signing
+        if: matrix.platform == 'darwin'
+        run: |
+          echo "CSC_NAME=-" >> "$GITHUB_ENV"
+          echo "KP_MAC_RELEASE_SIGNED=false" >> "$GITHUB_ENV"
       - name: Configure signed Mac release
         if: matrix.platform == 'darwin' && (inputs.publish || inputs.release_build || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]')))
         env:
@@ -82,12 +87,14 @@ jobs:
           if [[ -n "$KP_MAC_CSC_LINK" && -n "$KP_MAC_CSC_KEY_PASSWORD" && -n "$KP_APPLE_ID" && -n "$KP_APPLE_APP_SPECIFIC_PASSWORD" && -n "$KP_APPLE_TEAM_ID" ]]; then
             echo "CSC_LINK=$KP_MAC_CSC_LINK" >> "$GITHUB_ENV"
             echo "CSC_KEY_PASSWORD=$KP_MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "CSC_NAME=" >> "$GITHUB_ENV"
             echo "APPLE_ID=$KP_APPLE_ID" >> "$GITHUB_ENV"
             echo "APPLE_APP_SPECIFIC_PASSWORD=$KP_APPLE_APP_SPECIFIC_PASSWORD" >> "$GITHUB_ENV"
             echo "APPLE_TEAM_ID=$KP_APPLE_TEAM_ID" >> "$GITHUB_ENV"
             echo "KP_MAC_RELEASE_SIGNED=true" >> "$GITHUB_ENV"
           else
             echo "Apple signing secrets unavailable; publishing Mac with a coherent ad-hoc signature. System Settings approval may be required."
+            echo "CSC_NAME=-" >> "$GITHUB_ENV"
             echo "KP_MAC_RELEASE_SIGNED=false" >> "$GITHUB_ENV"
           fi
       - name: Package desktop

@@ -482,7 +482,7 @@ else {
       // the server ready first so its one-shot initial discovery includes tools
       // such as run_terminal instead of caching an offline result for the chat.
       try { await runtime.start(); }
-      catch (e: Error) { updateError = e.message; }
+      catch (e: unknown) { updateError = e instanceof Error ? e.message : String(e); }
       menu();
     }
     if (process.argv.includes('--background')) tray.setToolTip(closedTip);
