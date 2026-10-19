@@ -153,7 +153,7 @@ It is **not** the open VS Code project. Configure the parent with `keepwork.mcp.
 - **Keepwork: Change MCP Working Directory** — pick another folder (saved globally, daemon restarts)
 - **Keepwork: Show Terminal** — open / reuse the **Keepwork** integrated terminal at the bottom of VS Code
 
-When the extension is active, `run_terminal` prefers that reused VS Code terminal (default profile). If VS Code is closed, the CLI daemon falls back to a hidden shell spawn.
+When the extension is active, `run_terminal` prefers that reused VS Code terminal (default profile). If VS Code is closed or its bridge is unavailable, the CLI daemon falls back to a hidden shell spawn. On macOS and Linux, spawn resolves exported variables from the user's login interactive `bash`, `fish`, or `zsh` environment first, so CLI paths configured in shell startup files are available; if environment capture fails, it falls back to the daemon's inherited environment.
 
 ## Run the MCP daemon
 
