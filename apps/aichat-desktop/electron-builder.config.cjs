@@ -2,6 +2,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const runtime = process.env.AICHAT_MCP_RUNTIME_DIR;
 const modelRuntime = process.env.KP_LOCAL_MODEL_RUNTIME_DIR;
+const updateTarget = process.env.AICHAT_DESKTOP_TARGET || `${process.platform}-${process.arch}`;
 module.exports = {
   appId: 'com.keepwork.aichat-desktop', productName: 'KeepWork 第二大脑',
   icon: 'assets/keepwork.png', directories: { output: 'release' }, files: ['dist/**/*', 'package.json'],
@@ -28,6 +29,6 @@ module.exports = {
   nsis: { oneClick: false, perMachine: false, allowElevation: false, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
   mac: { icon: 'assets/keepwork-mac.png', target: ['zip'], category: 'public.app-category.productivity', hardenedRuntime: true,
     entitlements: 'assets/entitlements.mac.plist', entitlementsInherit: 'assets/entitlements.mac.plist',
-    artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', extendInfo: { CFBundleName: 'Keepwork', CFBundleDisplayName: 'Keepwork', NSMicrophoneUsageDescription: 'AIChat uses the microphone for voice conversations.', NSCameraUsageDescription: 'AIChat uses the camera when you start a video conversation.' } },
-  publish: [{ provider: 'generic', url: `https://cdn.keepwork.com/keepwork/aichat-desktop/${process.platform}-${process.arch}/` }],
+    artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', extendInfo: { CFBundleDisplayName: 'Keepwork', NSMicrophoneUsageDescription: 'AIChat uses the microphone for voice conversations.', NSCameraUsageDescription: 'AIChat uses the camera when you start a video conversation.' } },
+  publish: [{ provider: 'generic', url: `https://cdn.keepwork.com/keepwork/aichat-desktop/${updateTarget}/` }],
 };

@@ -65,7 +65,7 @@ test('macOS native menus dispatch page commands and preserve native editing role
   assert.equal(h.app.name, 'Keepwork');
   assert.equal(bar[0].label, 'Keepwork');
   const config = require('../electron-builder.config.cjs');
-  assert.equal(config.mac.extendInfo.CFBundleName, 'Keepwork');
+  assert.equal(config.mac.extendInfo.CFBundleName, undefined);
   assert.equal(config.mac.extendInfo.CFBundleDisplayName, 'Keepwork');
   bar.find(item => item.label === 'File').submenu.find(item => item.label === '新对话').click();
   assert.deepEqual(h.calls, [['aichat-desktop:page-command', 'new-chat']]);
