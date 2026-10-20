@@ -40,6 +40,8 @@ jobs:
           releaseIdentity(version, process.env.GITHUB_SHA);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
           NODE
+      - name: Install runtime test dependencies
+        run: npm ci --ignore-scripts --prefix apps/mcp-runtime
       - name: Test release publication and existing Local Helper compatibility
         run: node --test apps/mcp-runtime/scripts/*.test.cjs apps/local-helper/scripts/publish-qiniu-release.test.cjs
 
