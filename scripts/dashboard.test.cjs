@@ -7,7 +7,7 @@ const net = require('node:net');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-test('dashboard routes, script syntax, auth and admin Origin protection', async () => {
+test('dashboard routes, script syntax, auth and admin Origin protection', async t => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-dashboard-test-'));
     const oldHome = os.homedir;
     const oldLoader = require.extensions['.ts'];
@@ -16,12 +16,18 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
         os.homedir = () => home;
         require.extensions['.ts'] = (mod, file) => mod._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText, file);
         const { startHttpServer } = require('../src/mcp/http.ts');
+        const { runtimeBuildInfo } = require('../src/core/runtimeBuildInfo.ts');
+        const originalBuildInfo = { ...runtimeBuildInfo };
+        t.after(() => Object.assign(runtimeBuildInfo, originalBuildInfo));
+        Object.assign(runtimeBuildInfo, { version: '9.8.7', commit: 'a'.repeat(40), builtAt: '2026-10-19T12:34:56.000Z' });
         for (const requireAuth of [true, false]) {
             const reservation = net.createServer();
             await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
             const port = reservation.address().port;
             await new Promise(resolve => reservation.close(resolve));
-            server = await startHttpServer({ port, root: home, requireAuth });
+            const hostKind = requireAuth ? 'local-helper' : 'vscode-extension';
+            const hostVersion = requireAuth ? '2.3.4' : undefined;
+            server = await startHttpServer({ port, root: home, requireAuth, hostKind, hostVersion });
             const base = `http://127.0.0.1:${port}`;
             const skillResponse = await fetch(base + '/dashboard/skills/keepwork-mcp-assistant/SKILL.md', { headers: { Origin: 'https://keepwork.com' } });
             assert.equal(skillResponse.status, 200);
@@ -35,6 +41,12 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
             assert.equal(dingSkillResponse.status, 404);
             const health = await (await fetch(base + '/health')).json();
             assert.equal('dingtalkApi' in health, false);
+            assert.equal(health.runtimeVersion, process.env.KEEPWORK_MCP_RUNTIME_VERSION || '9.8.7');
+            assert.equal(health.runtimeCommit, process.env.KEEPWORK_MCP_RUNTIME_COMMIT || 'a'.repeat(40));
+            assert.equal(health.runtimeBuiltAt, '2026-10-19T12:34:56.000Z');
+            assert.equal(health.hostKind, hostKind);
+            assert.equal(health.hostVersion, hostVersion);
+            for (const field of ['execPath', 'entryPath', 'nodeVersion', 'platform', 'arch']) assert.equal(field in health, false);
             for (const route of ['/admin/dingtalk', '/dingtalk/status']) {
                 assert.equal((await fetch(base + route, { headers: { Authorization: `Bearer ${server.token}`, Origin: base } })).status, 404);
             }
@@ -59,6 +71,21 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                 const response = await fetch(base + route, { headers });
                 assert.equal(response.status, 200);
                 assert.equal(response.headers.get('cache-control'), 'no-store');
+                if (route === '/admin/status') {
+                    const status = await response.json();
+                    for (const field of ['runtimeVersion', 'runtimeCommit', 'runtimeBuiltAt', 'hostKind', 'hostVersion']) {
+                        assert.equal(status[field], health[field], field);
+                    }
+                    assert.equal(status.version, health.version);
+                    assert.equal(status.nodeVersion, process.version);
+                    assert.equal(status.platform, process.platform);
+                    assert.equal(status.arch, process.arch);
+                    assert.equal(status.execPath, process.execPath);
+                    assert.equal(status.entryPath, path.resolve(process.argv[1]));
+                    assert.ok(Number.isFinite(Date.parse(status.startedAt)));
+                    assert.notEqual(status.startedAt, status.runtimeBuiltAt);
+                    assert.ok(!JSON.stringify(status).includes(server.token));
+                }
                 if (route === '/admin/api-docs') {
                     const catalog = await response.json();
                     assert.ok(catalog.endpoints.length > 40);
@@ -88,6 +115,68 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
         os.homedir = oldHome;
         if (oldLoader) require.extensions['.ts'] = oldLoader; else delete require.extensions['.ts'];
         fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+test('overview displays build identity, source and environment with safe legacy fallbacks', async t => {
+    const Module = require('node:module'), { chromium } = require('playwright-core');
+    function load(relative) {
+        const file = path.resolve(__dirname, relative), mod = new Module(file, module);
+        mod._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, file);
+        return mod.exports;
+    }
+    const executablePath = load('../src/core/headless.ts').resolveBrowser();
+    if (!executablePath) { t.skip('System Edge/Chrome unavailable'); return; }
+    const html = load('../src/mcp/dashboard.ts').dashboardHtml();
+    const browser = await chromium.launch({ executablePath, headless: true });
+    try {
+        const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, locale: 'en-US', timezoneId: 'Asia/Shanghai' });
+        const errors = [];
+        page.on('pageerror', error => errors.push(error.message));
+        let status = {
+            version: '0.1.2', runtimeVersion: '9.8.7', runtimeCommit: 'a'.repeat(40), runtimeBuiltAt: '2026-10-19T12:34:56.000Z',
+            hostKind: 'vscode-extension', nodeVersion: 'v24.19.0', platform: 'darwin', arch: 'arm64',
+            execPath: '/usr/local/bin/node', entryPath: '/extensions/<img src=x onerror=alert(1)>/dist/cli.js',
+            pid: 123, port: 8080, workspaceRoot: 'fixture', startedAt: '2026-10-20T01:00:00.000Z', uptimeMs: 1000, clients: [],
+        };
+        await page.route('**/*', route => {
+            const url = new URL(route.request().url());
+            if (url.pathname === '/dashboard') return route.fulfill({ contentType: 'text/html', body: html });
+            if (url.pathname === '/admin/status') return route.fulfill({ json: status });
+            return route.fulfill({ status: 404, body: '{}' });
+        });
+        const read = () => page.locator('#meta').evaluate(element =>
+            Object.fromEntries([...element.querySelectorAll('dt')].map(term => [term.textContent, term.nextElementSibling.textContent])));
+        await page.goto('http://127.0.0.1:8080/dashboard#overview');
+        await page.getByText('9.8.7', { exact: true }).waitFor();
+        const meta = await read();
+        assert.equal(meta['MCP version / 版本'], '9.8.7');
+        assert.equal(meta['Service API version'], '0.1.2');
+        assert.match(meta['Built at / 构建时间'], /10\/19\/2026.*8:34:56.*GMT\+8/);
+        assert.equal(meta['Source / 服务来源'], 'VS Code / Cursor 扩展');
+        assert.equal(meta['Git commit / 提交'], 'a'.repeat(40));
+        assert.equal(meta['Entry / 启动文件'], status.entryPath);
+        assert.equal(meta['Node.js'], 'v24.19.0');
+        assert.equal(meta.Platform, 'darwin / arm64');
+        assert.equal(await page.locator('#meta img').count(), 0);
+        for (const [kind, label] of [['local-helper', 'KP Local Helper'], ['standalone', 'Standalone / 独立运行时'], ['electron-node-runtime', 'AIChat Desktop / NodeRuntime']]) {
+            status = { ...status, hostKind: kind, hostVersion: '2.3.4' };
+            await page.locator('#refresh').click();
+            await page.getByText(label, { exact: true }).waitFor();
+            assert.equal((await read())['Host version / 宿主版本'], '2.3.4');
+        }
+        await page.setViewportSize({ width: 390, height: 844 });
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        status = { version: '0.1.2', pid: 123, port: 8080, workspaceRoot: 'fixture', uptimeMs: 1000, clients: [] };
+        await page.locator('#refresh').click();
+        await page.waitForFunction(() => document.querySelector('#meta').textContent.includes('Unknown / 未提供'));
+        const legacy = await read();
+        assert.equal(legacy['MCP version / 版本'], 'Unknown / 未提供');
+        assert.equal(legacy['Built at / 构建时间'], 'Unknown / 未提供');
+        assert.equal(legacy['Source / 服务来源'], 'Unknown / 未提供');
+        assert.equal(legacy.Status, 'Running');
+        assert.deepEqual(errors, []);
+    } finally {
+        await browser.close();
     }
 });
 test('Personas hash opens dashboard statistics and managed sessions in a real browser',async t=>{

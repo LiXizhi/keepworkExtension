@@ -8,6 +8,14 @@ Legacy `POST /aichat/presence` still returns `{ remembered: true }` for older cl
 
 Open `http://127.0.0.1:8089/dashboard` (or `/`) while the daemon is running.
 The dashboard refreshes service status, connected clients, and paginated tool history every two seconds.
+Overview shows the MCP application version, bundle build time (in the browser's local time zone), Git commit,
+server host (VS Code/Cursor extension, Local Helper, standalone or AIChat Desktop NodeRuntime),
+host version when reported, entry/executable paths, Node.js version, OS/architecture and start time.
+The service API version is shown separately from the application version. Missing metadata is marked as unavailable.
+Product builds and development watch rebuilds stamp their own package version, commit and UTC build time into the bundle;
+restarting a daemon does not change that build time. Update/rebuild and restart the running daemon to see source changes.
+`/health` and `/admin/status` share `runtimeVersion`, `runtimeCommit`, `runtimeBuiltAt`, `hostKind` and optional `hostVersion`;
+the executable/entry paths and Node.js environment are only added to the admin response.
 It also offers Copy MCP URL, Open AIChat, and Stop service with confirmation.
 When authentication is enabled, enter the pairing token from `~/.keepwork-mcp/token`; it stays in page memory only.
 Start/restart, workspace configuration, and the integrated terminal remain in VS Code or Local Helper.

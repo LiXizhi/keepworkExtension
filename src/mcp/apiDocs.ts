@@ -29,11 +29,11 @@ export function apiDocs(port: number, requireAuth: boolean) {
         endpoints.push({ group, method, path: route, description, auth, parameters,
             example: `fetch(${JSON.stringify(base + samplePath)}, ${JSON.stringify(options, null, 2)})\n  .then(response => response.text())\n  .then(console.log);` });
     };
-    add('Service', 'GET', '/health', 'Service identity, runtime capabilities, workspace and Web Paracraft instances. runtimeVersion/runtimeCommit identify the MCP build independently of protocol version and application hostVersion.', undefined, undefined, undefined, 'No token required');
+    add('Service', 'GET', '/health', 'Service identity, runtime capabilities, workspace and Web Paracraft instances. runtimeVersion/runtimeCommit/runtimeBuiltAt identify the MCP build independently of protocol version and application hostVersion; runtimeBuiltAt is the bundle build time in UTC ISO 8601.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/dashboard', 'Browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/dashboard/skills/keepwork-mcp-assistant/SKILL.md', 'Bundled MCP assistant instructions for the dashboard temporary AIChat. Contains no credentials or private runtime data.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/', 'Default browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
-    add('Admin', 'GET', '/admin/status', 'Daemon status and connected MCP sessions. Allowed Origin required when supplied.');
+    add('Admin', 'GET', '/admin/status', 'Daemon status, build identity (runtimeVersion/runtimeCommit/runtimeBuiltAt), hostKind/hostVersion, Node.js version, platform/architecture, executable and entry paths, start time and connected MCP sessions. Missing build metadata is omitted. Allowed Origin required when supplied.');
     add('Admin', 'GET', '/admin/history', 'Newest-first tool-call history.', 'Query: offset (default 0), limit (default 20, max 50).', '/admin/history?offset=0&limit=20');
     add('Admin', 'GET', '/admin/api-docs', 'Structured API catalog for the current daemon.');
     add('Admin', 'POST', '/admin/stop', 'Stops the daemon and disconnects clients. Restart externally.');
@@ -84,6 +84,7 @@ export function apiDocs(port: number, requireAuth: boolean) {
     add('Agents', 'POST', '/agents/personas/:id/schedules', 'Daily daemon schedule in an IANA timezone; disabled unless enabled explicitly.', 'id, title, prompt, time HH:mm, timezone, enabled; optional explicit target {binding,conversation}; remove:true deletes');
     add('Agents', 'POST', '/agents/personas/:id/clear', 'Clear owner conversation and context summary; preserves configuration, schedules, channels and request deduplication. Rejects active tasks.');
     add('Agents', 'POST', '/agents/personas/:id/cancel', 'Cancel this Agent task and pending approvals.');
+    add('Agents', 'POST', '/agents/personas/:id/approval-revoke', 'Revoke local persistent and conversation CLI auto-approval for this owned persona.');
     add('Agents', 'POST', '/agents/personas/:id/respond', 'Respond to an owned pending approval or question.', 'id, decision, answers');
     add('Agents', 'POST', '/agents/personas/:id/channel-connect', 'Reuse a personal CLI account and persist background reception. DingTalk uses events; Feishu uses polling. Snapshots/SSE never execute CLI probes.', 'root; optional channel: dingtalk (default) or feishu');
     add('Agents', 'POST', '/agents/personas/:id/bind', 'Explicitly attach an existing channel binding without starting it.', 'binding');

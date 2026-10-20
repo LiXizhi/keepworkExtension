@@ -402,7 +402,9 @@ function setupBridge() {
       const colors = titlebarColors(args.theme);
       if (typeof args.color === 'string' && /^#[0-9a-f]{6}$/i.test(args.color)) colors.color = args.color;
       if (typeof args.symbolColor === 'string' && /^#[0-9a-f]{6}$/i.test(args.symbolColor)) colors.symbolColor = args.symbolColor;
-      current.setTitleBarOverlay({ ...colors, height: 34 });
+      if (process.platform !== 'darwin' && typeof current.setTitleBarOverlay === 'function') {
+        current.setTitleBarOverlay({ ...colors, height: 34 });
+      }
       if (settings.theme !== args.theme) { settings.theme = args.theme; atomicJson(settingsFile, settings); }
       return;
     }

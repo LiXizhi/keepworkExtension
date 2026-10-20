@@ -7,6 +7,8 @@ import { AcpHarness } from './acpHarness';
 import { AntigravityHarness } from './antigravityHarness';
 import { CopilotHarness } from './copilotHarness';
 import { ClaudeHarness } from './claudeHarness';
+import { agentAccountDisplay } from './agentAccount';
+import { approvalDecision, execpolicyDecisions, canAutoApprove } from './agentApproval';
 import { AGENT_BACKENDS, AGENT_CLI } from './agentCliBackends';
 import { resolveAgentCli } from './agentCliProcess';
 import { AichatToolBridge } from './aichatToolBridge';
@@ -95,6 +97,7 @@ export class AgentSessions {
         return result;
     }
     private sessions = new Map<string, Session>();
+    private autoApproval = new Set<string>();
     private listeners = new Map<string, Set<(event: any) => void>>();
     private loaded = new Set<string>();
     private loading = new Map<string, Promise<void>>();
@@ -185,7 +188,10 @@ export class AgentSessions {
             const marker = '\n</aichat_context>\n<aichat_user_message>\n';
             return part.type === 'text' && part.text?.startsWith('<aichat_context ') && part.text.includes(marker) ? { ...part, text: part.text.slice(part.text.indexOf(marker) + marker.length) } : part;
         }) } : item);
-        return { ...bounded(view), ...(s.aichatContext ? { context: { ...this.toolBridge.snapshot(s.owner, s.conversationId), workspace: this.workspaceFiles.snapshot(s.owner, s.conversationId) } } : {}), items: includeItems ? bounded(visibleItems) : [], pending: includeItems ? bounded(pending, {remaining:500000}) : [], lastSubmission: last ? { requestId: last[0], ...last[1] } : null };
+        const visiblePending = pending.map(request => ({ ...request,
+            decisionCapabilities: { execpolicyAmendment: execpolicyDecisions(s.backend, request).length > 0, autoApproval: canAutoApprove(request) },
+        }));
+        return { ...bounded(view), ...(s.aichatContext ? { context: { ...this.toolBridge.snapshot(s.owner, s.conversationId), workspace: this.workspaceFiles.snapshot(s.owner, s.conversationId) } } : {}), items: includeItems ? bounded(visibleItems) : [], pending: includeItems ? bounded(visiblePending, {remaining:500000}) : [], lastSubmission: last ? { requestId: last[0], ...last[1] } : null };
     }
     private emit(s: Session, delayed = false) {
         if (this.closing) return;
@@ -221,7 +227,7 @@ export class AgentSessions {
             catch (error) { modelsError = (error as Error).message; }
             modelsError ||= result.modelsError;
             const loginRequired = !!modelsError && /^Authentication required[.!]?$/i.test(modelsError.trim());
-            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, probe: account.probe || 'protocol', available: true, cli: adapter.cliInfo?.(), authenticated: loginRequired ? false : account.authUnknown ? null : !!account.account || account.requiresOpenaiAuth === false, authState: loginRequired ? 'required' : account.authUnknown ? 'unknown' : 'verified', models: bounded(result.data || []), ...(modelsError ? { modelsError } : {}) };
+            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, probe: account.probe || 'protocol', account: loginRequired ? undefined : agentAccountDisplay(account.account), available: true, cli: adapter.cliInfo?.(), authenticated: loginRequired ? false : account.authUnknown ? null : !!account.account || account.requiresOpenaiAuth === false, authState: loginRequired ? 'required' : account.authUnknown ? 'unknown' : 'verified', models: bounded(result.data || []), ...(modelsError ? { modelsError } : {}) };
         } catch (error) { return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, available: false, cli: adapter?.cliInfo?.(), authenticated: false, models: [], error: (error as Error).message }; }
     }
     async login(backend: string = 'codex') {
@@ -386,9 +392,18 @@ export class AgentSessions {
             }
             if (archive) await this.forSession(s).call('thread/archive', { threadId: s.threadId });
             s.archived = !!archive; s.removed = input.remove === true;
-            if (archive) this.loaded.delete(s.id);
+            if (archive) { this.loaded.delete(s.id); this.autoApproval.delete(s.id); }
         }
         this.emit(s); return this.view(s);
+    }
+    configureAutoApproval(id: string, owner: string, enabled: boolean) {
+        const s = this.get(id, owner);
+        if (!enabled) { this.autoApproval.delete(id); return; }
+        if (s.mode === 'plan') throw Error('Plan sessions cannot auto-approve operations');
+        this.autoApproval.add(id);
+        for (const request of [...s.pending]) {
+            if (canAutoApprove(request)) this.respond(id, owner, { id: request.id, decision: 'accept' });
+        }
     }
     respond(id: string, owner: string, input: any) {
         const s = this.get(id, owner), p = s.pending.find(p => String(p.id) === String(input.id));
@@ -403,10 +418,10 @@ export class AgentSessions {
             }
             result = { answers };
         } else if (p.method === 'item/permissions/requestApproval') {
+            if (typeof input.decision !== 'string' || !['accept','decline','cancel'].includes(input.decision)) throw Error('Invalid permission decision');
             result = { permissions: input.decision === 'accept' ? p.params.permissions : {}, scope: 'turn' };
         } else {
-            if (!['accept','acceptForSession','decline','cancel'].includes(input.decision)) throw new Error('Invalid approval decision');
-            result = { decision: input.decision };
+            result = { decision: approvalDecision(s.backend, p, input.decision) };
         }
         this.forSession(s).respond(p.id, result); s.pending = s.pending.filter(x => x !== p); s.status = s.pending.length ? 'waiting' : 'running'; this.emit(s); return this.view(s);
     }
@@ -423,6 +438,12 @@ export class AgentSessions {
         if (!s || s.pending.length >= 32 || !RESPONDABLE.has(message.method)) {
             // Unknown interactive requests cannot hang or silently gain privileges.
             this.adapterFor(backend).respond(message.id, message.method === 'item/tool/call' ? { success: false, contentItems: [] } : { decision: 'decline' }); return;
+        }
+        if (this.autoApproval.has(s.id) && canAutoApprove(message)) {
+            this.forSession(s).respond(message.id, message.method === 'item/permissions/requestApproval'
+                ? { permissions: message.params?.permissions || {}, scope: 'turn' }
+                : { decision: 'accept' });
+            return;
         }
         // AIChat sessions default to Full access across all adapters. ACP and
         // Claude can still request tool approval despite approvalPolicy=never.
@@ -469,6 +490,7 @@ export class AgentSessions {
         this.emit(s, message.method.endsWith('/delta') || message.method.endsWith('/outputDelta'));
     }
     close() {
+        this.autoApproval.clear();
         this.toolBridge.close();
         this.closing = true;
         this.capabilities.clear();

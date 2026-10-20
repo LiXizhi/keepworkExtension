@@ -457,3 +457,35 @@ temporary-folder cleanup; it must not be reported as passing. macOS was not run.
 ### Configuration-only guide discovery
 
 Normal HTTP and stdio MCP sessions omit `agent-cli-verify` and all installation/provider references from resource discovery. `ServerRuntime.includeSetupGuides` explicitly opts a configuration or developer-catalog context into the existing resource URIs and read handlers. The dashboard uses this opt-in for inspection, without advertising setup resources to connected agents. Second Brain setup continues to load its selected provider configuration on demand.
+
+### Account display metadata (2026-10-20)
+
+Targeted backend status returns an optional `account` display object, whitelisted by
+`agentAccount.ts` to email, username, name and API-key type. Native credential objects
+are never forwarded. Codex uses its existing `account/read`; Claude attempts the
+read-only `auth status` JSON command with a five-second bound, preserving executable
+and unknown-auth fallback on unsupported versions. A valid signed-out JSON result
+(exit code 1) clears identity. Refresh invalidates the existing capability cache.
+Identity is not added to session snapshots or persisted history. Other adapters
+currently provide no identity; clients must label it unavailable, not infer it from
+connection success or the Keepwork user. No credential-file or keyring scraping.
+
+Validation: `node --test scripts/agent-account.test.cjs` covers every backend's
+response whitelist/refresh and Claude signed-in, signed-out and older-CLI behavior.
+Claude command source: https://code.claude.com/docs/en/cli-reference .
+
+### Persistent Codex command approval
+
+`POST /agents/personas/:id/respond` and the session respond route accept `decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } }` only for a live, owned Codex `item/commandExecution/requestApproval` that offered exactly that token array in `availableDecisions`. Empty, malformed, extra-field, changed-prefix, other-provider and other-operation objects are rejected without consuming the pending request. Native owner-tool approvals remain single-use only.
+
+Session snapshots add server-generated `decisionCapabilities.execpolicyAmendment` to each pending request; persona snapshots preserve it. This is an additive capability for new clients, not a native request field. Clients without it must keep persistent actions disabled. Once accepted, Codex receives its native decision unchanged and owns persistence and future policy matching; the daemon does not edit rules files or bypass native policy. Session grants and single approvals remain distinct. Verified against locally generated Codex CLI 0.162.1 app-server JSON schema on 2026-10-20.
+
+Tests: `scripts/agent-approval.test.cjs`, `scripts/agent-sessions.test.cjs`, `scripts/personas.test.cjs`; cross-repository UI/HTTP/stdio regression in AIChat `tests/e2e/persona_persistent_approval.test.mjs` starts `scripts/fixtures/persona-approval-server.cjs`. The fixture uses a separate fake Codex process and temporary simulated rules, never real credentials or native policy files. Actual installed Codex persistence has not been exercised.
+
+### Persona-scoped automatic CLI approval
+
+Persona `respond` additionally accepts `acceptForConversation` and `acceptAlwaysForPersona` when the current owned request has server-generated `decisionCapabilities.autoApproval`. Persona views advertise `personaApprovalScopes: ["session", "always"]` only for these requests. The choices are service policy, not native decision strings: AgentSessions sends ordinary `accept` (or turn-scoped permissions) for eligible requests across subsequent native tasks. Never persist these strings as CLI rules.
+
+Conversation grants live only in memory, expire on context clear/service restart, and persistent `cliApprovalGrant` lives only in the local persona record. Both bind owner/persona/root/backend, are never accepted via upsert, and can be revoked with `POST /agents/personas/:id/approval-revoke`. Persona snapshots expose `cliApproval.scope` for the persistent UI indicator. Questions, mandatory `requiresUserDecision`, unknown methods and explicitly unoffered accepts are excluded; worker `run_terminal` confirmation and terminal deny-list remain unchanged. AgentSessions automatic approval state itself is transient, removed on archive and reapplied by Personas only when the local scoped grant matches.
+
+Regression: AIChat `AICHAT-PERSONA-AUTO-APPROVAL-001` uses real persona UI/HTTP/session/stdio and restarts isolated backend instances; backend tests verify owner/root/backend isolation and mandatory question exclusions.

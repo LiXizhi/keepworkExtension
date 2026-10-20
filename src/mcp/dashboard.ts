@@ -7,6 +7,7 @@ export function dashboardHtml(): string {
 *{box-sizing:border-box}body{margin:0;padding:24px;max-width:1100px;margin-inline:auto;font-size:13px;line-height:1.6}h1{font-size:20px;margin:0 0 16px}h2{font-size:14px;margin:24px 0 8px}.toolbar,form,.pager{display:flex;gap:10px;align-items:center;flex-wrap:wrap}button,a,input{font:inherit}button,a{padding:6px 12px;border:1px solid #777;border-radius:3px;background:transparent;color:inherit;cursor:pointer}a{text-decoration:none}button:disabled{opacity:.45;cursor:default}input{padding:7px;max-width:100%;background:transparent;color:inherit;border:1px solid #777;border-radius:3px}form{margin-top:16px}form[hidden]{display:none}dl{display:grid;grid-template-columns:80px minmax(0,1fr);gap:3px 12px}dt{opacity:.7}dd{margin:0;overflow-wrap:anywhere}#notice{color:light-dark(#a32918,#ffb09f);min-height:1.6em}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:12px}th,td{text-align:left;padding:8px;border-bottom:1px solid #7775;vertical-align:top;overflow-wrap:anywhere;max-width:340px}th{white-space:nowrap}.empty{opacity:.65}.pager{margin-top:12px}.ok{color:light-dark(#15703b,#80ce9d)}.fail{color:light-dark(#ae261d,#ffb09f)}@media(max-width:600px){body{padding:16px}h1{font-size:18px}}
 body{max-width:none;padding:0;display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100vh;background:light-dark(#fafafa,#1f1f1f)}aside{padding:24px 16px;border-right:1px solid #7774;background:light-dark(#f0f2f3,#252526)}.brand{font-size:16px;font-weight:650;margin-bottom:24px}.tree{display:grid;gap:4px}.tree a{display:block;border:0;padding:8px 12px}.tree a[aria-current="page"]{background:light-dark(#dcecf1,#124353);color:light-dark(#164d60,#bce8f4)}.tree details{margin-top:12px}.tree summary{padding:8px 12px;cursor:pointer}.tree details a{margin-left:14px;border-left:1px solid #7775;border-radius:0}main{padding:28px;min-width:0;max-width:1400px;width:100%}.view[hidden]{display:none}.api-item{border-top:1px solid #7774;padding:16px 0}.api-item summary{cursor:pointer;overflow-wrap:anywhere}.api-item pre{white-space:pre-wrap;overflow-wrap:anywhere;background:light-dark(#edf1f2,#292d2e);padding:12px}.api-item code{overflow-wrap:anywhere}#api-filter{width:100%;margin:12px 0}.muted{opacity:.65}@media(max-width:600px){body{padding:0;grid-template-columns:128px minmax(0,1fr)}aside{padding:16px 8px}.brand{font-size:14px}.tree a,.tree summary{padding:8px 6px}main{padding:16px 12px}h1{font-size:18px}.toolbar{gap:6px}.toolbar button,.toolbar a{padding:5px 7px}dl{grid-template-columns:1fr;gap:0}dd{margin-bottom:8px}}
 body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-direction:column;overflow:hidden}body.chat-view #view-title{display:none}body.chat-view #notice:empty{display:none}body.chat-view #notice{margin:0;padding:8px 12px}body.chat-view #auth{margin:0;padding:8px 12px}body.chat-view #view-chat{flex:1;min-height:0}#chat-frame{display:block;width:100%;height:100%;border:0;background:white}
+@media(min-width:601px){#meta{grid-template-columns:180px minmax(0,1fr)}}
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP</div><nav class="tree" aria-label="Dashboard navigation">
 <a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#paracrafts">Paracrafts</a>
@@ -93,13 +94,39 @@ function metadata(values) {
   byId('meta').replaceChildren();
   Object.entries(values).forEach(([label,value]) => { const term = document.createElement('dt'), detail = document.createElement('dd'); term.textContent = label; detail.textContent = String(value); byId('meta').append(term,detail); });
 }
+function displayDate(value) {
+  const date = value ? new Date(value) : null;
+  return date && Number.isFinite(date.getTime()) ? date.toLocaleString(undefined, {timeZoneName:'short'}) : 'Unknown / 未提供';
+}
+function serverMetadata(status) {
+  const unknown = 'Unknown / 未提供';
+  const hosts = {'vscode-extension':'VS Code / Cursor 扩展','local-helper':'KP Local Helper','standalone':'Standalone / 独立运行时','electron-node-runtime':'AIChat Desktop / NodeRuntime'};
+  return {
+    Status:'Running',
+    'MCP version / 版本':status.runtimeVersion || unknown,
+    'Built at / 构建时间':displayDate(status.runtimeBuiltAt),
+    'Source / 服务来源':Object.hasOwn(hosts, status.hostKind) ? hosts[status.hostKind] : status.hostKind || unknown,
+    'Host version / 宿主版本':status.hostVersion || 'Not reported / 未提供',
+    'Git commit / 提交':status.runtimeCommit || unknown,
+    'Service API version':status.version || unknown,
+    URL:location.origin + '/mcp',
+    'Entry / 启动文件':status.entryPath || unknown,
+    'Executable / 执行程序':status.execPath || unknown,
+    'Node.js':status.nodeVersion || unknown,
+    Platform:[status.platform, status.arch].filter(Boolean).join(' / ') || unknown,
+    PID:status.pid, Port:status.port, Root:status.workspaceRoot,
+    'Started at / 启动时间':displayDate(status.startedAt),
+    Uptime:Math.round(status.uptimeMs / 1000) + 's',
+    Auth:status.requireAuth ? 'Token required' : 'Open (loopback only)',
+  };
+}
 async function refresh() {
   if (busy || stopped) return;
   busy = true; byId('refresh').disabled = true;
   const requestedView = view;
   try {
     const status = await request('/admin/status');
-    metadata({Status:'Running', URL:location.origin + '/mcp', PID:status.pid, Port:status.port, Root:status.workspaceRoot, Uptime:Math.round(status.uptimeMs / 1000) + 's', Auth:status.requireAuth ? 'Token required' : 'Open (loopback only)'});
+    metadata(serverMetadata(status));
     const clientRows = status.clients.map(client => [client.sessionId.slice(0,8),client.origin,client.connectedAt,client.lastSeenAt,client.callCount]);
     for (const target of ['clients','overview-clients']) table(target,['Session','Origin','Connected','Last seen','Calls'],clientRows,'No connected AIChat sessions.');
     if (requestedView === 'history') {

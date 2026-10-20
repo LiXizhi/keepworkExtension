@@ -330,3 +330,51 @@ test('provider retry notices clear on resumed output and do not replace a pendin
     fake.emit('notification',{method:'error',params:{threadId:s.threadId,willRetry:true,error:{message:'Reconnecting... 1/5'}}});
     assert.equal((await manager.read(s.id,owner)).status,'waiting');
 });
+
+test('persistent command rules require exact native proposal, owner and live request',async t=>{
+    const {root,fake,manager,owner}=setup(t);
+    const session=await manager.create(owner,{conversationId:'persistent-policy',roots:[root],mode:'ask'});
+    const decision={acceptWithExecpolicyAmendment:{execpolicy_amendment:['fixture-cli','send']}};
+    const request={id:771,method:'item/commandExecution/requestApproval',params:{threadId:session.threadId,command:'fixture-cli send --body hello',availableDecisions:['accept',decision,'cancel']}};
+    fake.emit('request',request);
+    assert.equal((await manager.read(session.id,owner)).pending[0].decisionCapabilities.execpolicyAmendment,true);
+    const input={id:771,decision};
+    assert.throws(()=>manager.respond(session.id,'other-owner',input),/not found/);
+    for(const bad of [null,{},[],{acceptWithExecpolicyAmendment:{execpolicy_amendment:['fixture-cli']}},{acceptWithExecpolicyAmendment:{execpolicy_amendment:[]}},{...decision,other:true},{acceptWithExecpolicyAmendment:{execpolicy_amendment:['fixture-cli','send'],extra:true}}]) {
+        assert.throws(()=>manager.respond(session.id,owner,{id:771,decision:bad}),/Persistent approval/);
+        assert.equal((await manager.read(session.id,owner)).pending.length,1);
+    }
+    assert.equal(fake.responses.length,0);
+    manager.respond(session.id,owner,input);
+    assert.deepEqual(fake.responses,[{id:771,result:{decision}}]);
+    assert.throws(()=>manager.respond(session.id,owner,input),/expired/);
+    assert.equal(fake.responses.length,1);
+    fake.emit('request',{...request,id:772,method:'item/fileChange/requestApproval'});
+    assert.equal((await manager.read(session.id,owner)).pending[0].decisionCapabilities.execpolicyAmendment,false);
+    assert.throws(()=>manager.respond(session.id,owner,{id:772,decision}),/Persistent approval/);
+    manager.respond(session.id,owner,{id:772,decision:'cancel'});
+    fake.emit('request',{...request,id:773,method:'item/permissions/requestApproval'});
+    assert.throws(()=>manager.respond(session.id,owner,{id:773,decision}),/Invalid permission/);
+    manager.respond(session.id,owner,{id:773,decision:'cancel'});
+});
+
+test('explicit automatic approval covers later native requests but not questions or mandatory decisions',async t=>{
+    const {root,fake,manager,owner}=setup(t);
+    const session=await manager.create(owner,{conversationId:'auto-approval',roots:[root],mode:'ask'});
+    const emit=(id,method='item/commandExecution/requestApproval',extra={})=>fake.emit('request',{id,method,params:{threadId:session.threadId,command:'fixture',...extra}});
+    emit(810);
+    assert.throws(()=>manager.configureAutoApproval(session.id,'other',true),/not found/);
+    manager.configureAutoApproval(session.id,owner,true);
+    assert.deepEqual(fake.responses.at(-1),{id:810,result:{decision:'accept'}});
+    emit(811,'item/fileChange/requestApproval');
+    emit(812,'item/permissions/requestApproval',{permissions:{network:{enabled:true}}});
+    assert.equal(fake.responses.length,3);
+    emit(813,'item/tool/requestUserInput',{questions:[{id:'q',question:'Which target?'}]});
+    emit(814,'item/commandExecution/requestApproval',{requiresUserDecision:true});
+    emit(815,'item/commandExecution/requestApproval',{availableDecisions:['cancel']});
+    assert.equal(fake.responses.length,3);
+    assert.equal((await manager.read(session.id,owner)).pending.length,3);
+    manager.configureAutoApproval(session.id,owner,false);emit(816);
+    assert.equal(fake.responses.length,3);
+    assert.equal((await manager.read(session.id,owner)).pending.length,4);
+});

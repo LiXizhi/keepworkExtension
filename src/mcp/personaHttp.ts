@@ -28,6 +28,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
             case 'clear':send(200,personas.clear(owner,id));return;
             case 'read':send(200,personas.markRead(owner,id));return;
             case 'cancel':send(200,await personas.cancel(owner,id));return;
+            case 'approval-revoke':send(200,personas.revokeApproval(owner,id));return;
             case 'respond':send(200,personas.respond(owner,id,input));return;
             case 'schedules':send(200,personas.schedule(owner,id,input));return;
             case 'remove':await personas.remove(owner,id);send(200,{ok:true});return;

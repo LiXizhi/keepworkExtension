@@ -1,5 +1,11 @@
 const readline=require('node:readline');
 if(process.argv.includes('--version')){console.log('fixture Claude 1.0');process.exit(0);}
+if(process.argv.includes('auth') && process.argv.includes('status')){
+ if(!process.argv.includes('--auth-status'))process.exit(2);
+ const loggedIn=!process.argv.includes('--signed-out');
+ console.log(JSON.stringify({loggedIn,email:loggedIn?'claude@example.test':null,authMethod:'oauth_token',accessToken:'DO-NOT-EXPOSE'}));
+ process.exit(loggedIn?0:1);
+}
 const session=process.argv.find(a=>a.startsWith('--session-id=')||a.startsWith('--resume='))?.split('=')[1];
 const log=process.argv.find(a=>a.startsWith('--log='))?.slice(6);
 if(log)require('node:fs').appendFileSync(log,JSON.stringify(process.argv.slice(2))+'\n');

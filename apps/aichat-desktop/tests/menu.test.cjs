@@ -10,7 +10,11 @@ function host(platform = 'win32') {
   const contents = { getURL: () => 'http://127.0.0.1:3002/AIChat.html?dev=true', send: (...args) => calls.push(args), reloadIgnoringCache: () => calls.push('reloadIgnoringCache') };
   const window = { webContents: contents, setMenu() {}, loadURL: async url => calls.push(url) };
   const updater = {};
+  const handlers = {};
+  const saved = [];
   const electron = {
+    ipcMain: { handle: (channel, handler) => { handlers[channel] = handler; } },
+    nativeTheme: {},
     app: { isPackaged: false, setAppUserModelId() {}, setName(name) { this.name = name; }, commandLine: { hasSwitch: () => true }, requestSingleInstanceLock: () => false, quit() {}, getVersion: () => '0.1.0' },
     Menu: { buildFromTemplate: items => { template = items; return { items }; }, setApplicationMenu() {} },
     dialog: { showErrorBox: (_title, message) => calls.push(message) },
@@ -19,6 +23,7 @@ function host(platform = 'win32') {
   const source = transformSync(fs.readFileSync(require.resolve('../src/main.ts'), 'utf8'), { loader: 'ts', format: 'cjs' }).code;
   const context = vm.createContext({ process: { env: { AICHAT_DESKTOP_DEV_URL: 'http://127.0.0.1:3002/AIChat.html' }, platform }, console,
     require: name => {
+      if (name === './files.cjs') return { ...require('../src/files.cjs'), atomicJson: (_file, settings) => saved.push(settings.theme) };
       if (name === 'electron') return electron;
       if (name === 'electron-updater') return { autoUpdater: updater };
       if (name.includes('terminalSessions')) return { TerminalSessionManager: class {} };
@@ -26,7 +31,7 @@ function host(platform = 'win32') {
       return require(name);
     }, windowFixture: window });
   vm.runInContext(source + '\nwin = windowFixture; runtime = { state: { state: "running", owner: "desktop" }, updateSnapshot: () => ({ state: "current" }) };', context);
-  return { context, calls, app: electron.app, menu: () => { vm.runInContext('menu()', context); return template; } };
+  return { context, calls, window, electron, handlers, saved, app: electron.app, menu: () => { vm.runInContext('menu()', context); return template; } };
 }
 
 test('desktop menus are File Edit View Help and expose a serializable page payload', async () => {
@@ -72,6 +77,27 @@ test('macOS native menus dispatch page commands and preserve native editing role
   assert.deepEqual(h.calls, [['aichat-desktop:page-command', 'new-chat']]);
   assert.ok(bar.find(item => item.label === 'Edit').submenu.some(item => item.role === 'copy'));
 });
+
+for (const platform of ['darwin', 'win32', 'linux']) {
+  test(`theme bridge tolerates unavailable title bar overlays on ${platform}`, async () => {
+    const h = host(platform);
+    const contents = h.window.webContents;
+    contents.isDestroyed = () => false;
+    contents.mainFrame = { url: contents.getURL() };
+    vm.runInContext('settings.theme = "light"; setupBridge()', h.context);
+    const event = { sender: contents, senderFrame: contents.mainFrame };
+    const theme = { theme: 'dark', color: '#112233', symbolColor: '#ddeeff' };
+    await h.handlers['aichat-desktop:v1'](event, 'theme', theme);
+    assert.equal(h.electron.nativeTheme.themeSource, 'dark');
+    assert.deepEqual(h.saved, ['dark']);
+    assert.equal(vm.runInContext('settings.theme', h.context), 'dark');
+    const overlays = [];
+    h.window.setTitleBarOverlay = options => overlays.push(options);
+    await h.handlers['aichat-desktop:v1'](event, 'theme', theme);
+    assert.equal(overlays.length, platform === 'darwin' ? 0 : 1);
+    if (overlays.length) assert.equal(JSON.stringify(overlays[0]), JSON.stringify({ color: '#112233', symbolColor: '#ddeeff', height: 34 }));
+  });
+}
 
 async function titlebar(platform) {
   const nodes = [], events = {}, ipc = {}, posts = [], calls = [];

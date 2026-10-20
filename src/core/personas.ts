@@ -9,7 +9,7 @@ import { runTerminal } from './terminal';
 
 type Message = { id: string; role: string; text: string; time: number; state?: string };
 type Schedule = { id: string; title: string; prompt: string; time: string; timezone: string; enabled: boolean; next: number; last?: string; lastDate?: string; target?: { binding: string; conversation: string } };
-type Persona = { id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; worker?: boolean; session?: string; error?: string; pending?: any[] }; };
+type Persona = { cliApprovalGrant?: {root:string;backend:string}; id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; worker?: boolean; session?: string; error?: string; pending?: any[] }; };
 const ID = /^[\w-]{1,160}$/;
 const active = (p: Persona) => !!p.job && ['queued','running','waiting'].includes(p.job.state);
 const ownerTools = [
@@ -30,6 +30,7 @@ export class Personas {
     private closed = false;
     private rows = new Map<string,Persona>();
     private aborts = new Map<string,AbortController>();
+    private sessionGrants = new Map<string,string>();
     private approvals = new Map<string,(accept:boolean)=>void>();
     private timer: NodeJS.Timeout;
     private stopMessagingWatch: () => void;
@@ -51,7 +52,21 @@ export class Personas {
     private save(p:Persona){if(this.closed||!this.rows.has(this.key(p.owner,p.id)))return;const file=path.join(this.home,this.key(p.owner,p.id)+'.json');fs.writeFileSync(file+'.tmp',JSON.stringify(p),{mode:0o600});fs.renameSync(file+'.tmp',file);for(const w of this.watchers)if(w.owner===p.owner)w.update();}
     watch(owner:string,update:()=>void,close:()=>void){const w={owner,update,close};this.watchers.add(w);return()=>this.watchers.delete(w);}
     private get(owner:string,id:string){const p=this.rows.get(this.key(owner,id));if(!p)throw Error('分身不存在');return p;}
-    private view(p:Persona){const {owner,messages,requests,summary,...rest}=p;return {...rest,unread:messages.filter(m=>m.role==='assistant'&&m.time>p.readAt).length,channels:this.messaging.agentBindings(p.owner,p.id)};}
+    private approvalBinding(p:Persona){return {root:p.root,backend:p.executor==='auto'?(p.preference?.backend||'keepwork'):p.executor};}
+    private approvalScope(p:Persona){
+        const binding=JSON.stringify(this.approvalBinding(p));
+        if(p.cliApprovalGrant&&JSON.stringify(p.cliApprovalGrant)===binding)return 'always';
+        return this.sessionGrants.get(this.key(p.owner,p.id))===binding?'session':'ask';
+    }
+    private view(p:Persona){const {owner,messages,requests,summary,cliApprovalGrant,...rest}=p;return {...rest,
+        cliApproval:{scope:this.approvalScope(p)},
+        ...(p.job?{job:{...p.job,pending:(p.job.pending||[]).map(request=>({...request,personaApprovalScopes:request.decisionCapabilities?.autoApproval===true?['session','always']:[]}))}}:{}),
+        unread:messages.filter(m=>m.role==='assistant'&&m.time>p.readAt).length,channels:this.messaging.agentBindings(p.owner,p.id)};}
+    revokeApproval(owner:string,id:string){
+        const p=this.get(owner,id);delete p.cliApprovalGrant;this.sessionGrants.delete(this.key(owner,id));
+        if(p.job?.session&&active(p))this.sessions.configureAutoApproval(p.job.session,this.key(owner,id),false);
+        this.save(p);return this.view(p);
+    }
     list(owner:string){return [...this.rows.values()].filter(p=>p.owner===owner).map(p=>this.view(p)).sort((a,b)=>a.order-b.order);}
     /** Admin-only metadata. Never expose prompts, transcript bodies or owner capabilities. */
     dashboard() {
@@ -88,6 +103,7 @@ export class Personas {
     clear(owner:string,id:string){
         const p=this.get(owner,id);
         if(active(p))throw Error('请先等待或取消当前任务再清空上下文');
+        this.sessionGrants.delete(this.key(owner,id));
         p.messages=[];p.summary='';p.readAt=0;p.job=undefined;
         // Keep request receipts: a delayed retry must not replay a cleared task.
         this.save(p);return this.read(owner,id);
@@ -124,7 +140,9 @@ export class Personas {
                     session=await this.sessions.create(runOwner,{conversationId:'persona-'+job.id,backend,roots:[cwd],model,mode:'ask'});
                 } catch { /* No prompt submitted: use keepwork-pro. */ }
                 if(session){
-                    job.session=session.id;this.save(p);
+                    job.session=session.id;
+                    if(this.approvalScope(p)!=='ask')this.sessions.configureAutoApproval(session.id,runOwner,true);
+                    this.save(p);
                     if(signal.aborted)throw Error('已取消');
                     submitted=true;
                     answer=await new Promise<string>((resolve,reject)=>{
@@ -161,7 +179,14 @@ export class Personas {
         if(job.session&&['done','error','cancelled'].includes(job.state)) { try { await this.sessions.update(job.session,runOwner,{remove:true}); } catch { /* Provider keeps uncertain native history; never replay. */ } }
     }
     async cancel(owner:string,id:string){const p=this.get(owner,id);this.aborts.get(this.key(owner,id))?.abort();if(p.job){p.job.state='cancelled';p.job.pending=[];}this.save(p);return this.view(p);}
-    respond(owner:string,id:string,input:any){const p=this.get(owner,id);if(p.job?.state!=='waiting')throw Error('没有待处理请求');const approval=this.approvals.get(this.key(owner,id)+':'+input.id);if(approval)approval(input.decision==='accept');else if(p.job.session)this.sessions.respond(p.job.session,this.key(owner,id),input);else throw Error('请求已失效');return this.view(p);}
+    respond(owner:string,id:string,input:any){const p=this.get(owner,id);if(p.job?.state!=='waiting')throw Error('没有待处理请求');if(['acceptForConversation','acceptAlwaysForPersona'].includes(input.decision)){
+        const request=p.job.pending?.find(r=>String(r.id)===String(input.id));
+        if(!p.job.session||request?.decisionCapabilities?.autoApproval!==true)throw Error('此请求不支持自动批准');
+        const binding=this.approvalBinding(p);
+        if(input.decision==='acceptAlwaysForPersona')p.cliApprovalGrant=binding;
+        else{delete p.cliApprovalGrant;this.sessionGrants.set(this.key(owner,id),JSON.stringify(binding));}
+        this.save(p);this.sessions.configureAutoApproval(p.job.session,this.key(owner,id),true);return this.view(p);
+    }const approval=this.approvals.get(this.key(owner,id)+':'+input.id);if(approval){if(!['accept','decline','cancel'].includes(input.decision))throw Error('此操作仅支持单次授权');approval(input.decision==='accept');}else if(p.job.session)this.sessions.respond(p.job.session,this.key(owner,id),input);else throw Error('请求已失效');return this.view(p);}
     private async ownerTool(p:Persona,name:string,args:any,signal:AbortSignal){
         if(signal.aborted)throw Error('已取消');
         if(name==='read_inbox')return this.messaging.inboxView(p.owner,p.id,String(args?.binding||''),String(args?.conversation||''));
@@ -200,6 +225,6 @@ export class Personas {
             if(s.target){const target={...s.target};const poll=setInterval(()=>{const result=p.requests[id];if(['queued','accepted','running'].includes(result))return;clearInterval(poll);this.deliveries.delete(poll);if(result==='done'){const answer=p.messages.find(m=>m.id===id+'-answer');if(answer)void this.messaging.manualReply(p.owner,p.id,target.binding,target.conversation,id,answer.text,false).catch(()=>{s.last='执行完成；发送失败或结果未知';this.save(p);});}},1000);this.deliveries.add(poll);poll.unref();}
         }
     }
-    async remove(owner:string,id:string){const p=this.get(owner,id);await this.cancel(owner,id);p.schedules=[];this.messaging.detachAgent(owner,id);this.rows.delete(this.key(owner,id));fs.rmSync(path.join(this.home,this.key(owner,id)+'.json'),{force:true});}
+    async remove(owner:string,id:string){const p=this.get(owner,id);await this.cancel(owner,id);p.schedules=[];this.messaging.detachAgent(owner,id);this.rows.delete(this.key(owner,id));this.sessionGrants.delete(this.key(owner,id));fs.rmSync(path.join(this.home,this.key(owner,id)+'.json'),{force:true});}
     close(){if(this.closed)return;this.stopMessagingWatch();clearInterval(this.timer);for(const timer of this.deliveries)clearInterval(timer);this.deliveries.clear();for(const p of this.rows.values())if(active(p)){p.job!.state='unknown';p.job!.pending=[];this.save(p);}this.closed=true;for(const w of this.watchers)w.close();this.watchers.clear();for(const controller of this.aborts.values())controller.abort();}
 }

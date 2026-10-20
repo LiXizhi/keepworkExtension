@@ -32,6 +32,7 @@ import { apiDocs } from './apiDocs';
 import { mcpCatalog } from './mcpCatalog';
 import { MessagingService } from '../core/messaging';
 import { handleMessagingHttp } from './messagingHttp';
+import { runtimeBuildInfo } from '../core/runtimeBuildInfo';
 
 export interface HttpServerHandle {
     port: number;
@@ -138,6 +139,13 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         startedAt: new Date().toISOString(),
         requireAuth: authRequired,
     };
+    const identity = {
+        runtimeVersion: process.env.KEEPWORK_MCP_RUNTIME_VERSION || runtimeBuildInfo.version || undefined,
+        runtimeCommit: process.env.KEEPWORK_MCP_RUNTIME_COMMIT || runtimeBuildInfo.commit || undefined,
+        runtimeBuiltAt: runtimeBuildInfo.builtAt || undefined,
+        hostKind: opts?.hostKind,
+        hostVersion: opts?.hostVersion || undefined,
+    };
     const token = readOrCreateToken();
     const transports = new Map<string, StreamableHTTPServerTransport>();
     const activeMcpStreams = new Set<string>();
@@ -191,14 +199,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     ok: true,
                     name: SERVER_NAME,
                     version: SERVER_VERSION,
-                    ...(process.env.KEEPWORK_MCP_RUNTIME_VERSION || process.env.KEEPWORK_MCP_BUILD_VERSION
-                        ? { runtimeVersion: process.env.KEEPWORK_MCP_RUNTIME_VERSION || process.env.KEEPWORK_MCP_BUILD_VERSION } : {}),
-                    ...(process.env.KEEPWORK_MCP_RUNTIME_COMMIT || process.env.KEEPWORK_MCP_BUILD_COMMIT
-                        ? { runtimeCommit: process.env.KEEPWORK_MCP_RUNTIME_COMMIT || process.env.KEEPWORK_MCP_BUILD_COMMIT } : {}),
-                    ...(opts?.hostKind ? { hostKind: opts.hostKind } : {}),
-                    ...(opts?.hostVersion
-                        ? { hostVersion: opts.hostVersion }
-                        : {}),
+                    ...identity,
                     port,
                     pid: process.pid,
                     clients: sessionCount(),
@@ -399,6 +400,12 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     ok: true,
                     name: SERVER_NAME,
                     version: SERVER_VERSION,
+                    ...identity,
+                    nodeVersion: process.version,
+                    platform: process.platform,
+                    arch: process.arch,
+                    execPath: process.execPath,
+                    entryPath: process.argv[1] ? path.resolve(process.argv[1]) : undefined,
                     pid: process.pid,
                     port,
                     uptimeMs: Date.now() - Date.parse(runtime.startedAt),

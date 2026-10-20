@@ -9,6 +9,7 @@ import { cacheValue } from './acpHarness';
 import { CliLaunch, resolveAgentCli, stopCli } from './agentCliProcess';
 import { cliProxyEnvironment } from './cliProxyEnvironment';
 import { unsupportedModeMethod } from './agentModes';
+import { agentAccountDisplay } from './agentAccount';
 
 type Thread = { id: string; cwd: string; roots: string[]; turns: any[]; native: boolean; planMode?: boolean; model?: string; effort?: string; mcpServers?: any[]; aichatInstructions?: string };
 type Run = { id: string; items: any[]; cancelled?: boolean; messageId?: string; timer: NodeJS.Timeout };
@@ -221,6 +222,23 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         if (method === 'account/read') {
             const command = resolveAgentCli('claude', [...this.prefix, '--version'], this.executable); this.launch = command;
             await promisify(execFile)(command.executable, command.args, { timeout: 10000, maxBuffer: 65536, windowsHide: true });
+            // Native auth status is read-only. Older CLIs may not implement it;
+            // their executable discovery must remain usable and auth unknown.
+            try {
+                const statusCommand = resolveAgentCli('claude', [...this.prefix, 'auth', 'status'], this.executable);
+                const output = await promisify(execFile)(statusCommand.executable, statusCommand.args, {
+                    timeout: 5000, maxBuffer: 65536, windowsHide: true,
+                }).catch(error => {
+                    // Claude exits 1 for a valid signed-out status document.
+                    if (error.code === 1 && error.stdout) return { stdout: error.stdout };
+                    throw error;
+                });
+                const status = JSON.parse(String(output.stdout));
+                if (status.loggedIn === false) return { account: null, probe: 'native-auth' };
+                if (status.loggedIn === true) return { account: ['api_key', 'api_key_helper'].includes(status.authMethod)
+                    ? { type: 'apiKey' }
+                    : { type: 'cli', ...agentAccountDisplay({ email: status.email }) }, probe: 'native-auth' };
+            } catch { /* No credential-file fallback or raw auth output in errors. */ }
             return { account: null, authUnknown: true, probe: 'executable' };
         }
         if (method === 'model/list') {

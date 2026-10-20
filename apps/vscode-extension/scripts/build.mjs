@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build, context } from 'esbuild';
 import { creationSkillPlugin } from '../../../scripts/creation-skill-build.mjs';
+import { runtimeBuildInfoPlugin } from '../../../scripts/runtime-build-info.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(here, '..');
@@ -11,10 +11,7 @@ const outdir = path.join(extensionRoot, 'dist');
 const watchMode = process.argv.includes('--watch');
 
 const common = {
-  define: {
-    'process.env.KEEPWORK_MCP_BUILD_VERSION': JSON.stringify(JSON.parse(await fs.readFile(path.join(extensionRoot, 'package.json'), 'utf8')).version),
-    'process.env.KEEPWORK_MCP_BUILD_COMMIT': JSON.stringify(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: extensionRoot, encoding: 'utf8' }).trim()),
-  },
+  plugins: [runtimeBuildInfoPlugin(extensionRoot)],
   bundle: true,
   platform: 'node',
   format: 'cjs',
@@ -35,7 +32,7 @@ const builds = [
     ...common,
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: path.join(outdir, 'cli.js'),
-    plugins: [creationSkillPlugin(outdir)],
+    plugins: [...common.plugins, creationSkillPlugin(outdir)],
     external: ['node-pty', 'playwright-core'],
   },
 ];

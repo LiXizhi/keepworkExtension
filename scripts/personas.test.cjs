@@ -36,7 +36,7 @@ test('owner fallback writes require approval; cancellation and path escape fail 
     const f=fixture(t);f.service.submit('owner','first',{requestId:'write',text:'write'});const worker=f.pending[0];
     await assert.rejects(worker.executeTool('read_file',{path:'../outside'}),/outside/);
     const write=worker.executeTool('write_file',{path:'result.txt',content:'approved'});assert.equal(fs.existsSync(path.join(f.home,'result.txt')),false);
-    const approval=f.service.read('owner','first').job.pending[0];f.service.respond('owner','first',{id:approval.id,decision:'accept'});await write;assert.equal(fs.readFileSync(path.join(f.home,'result.txt'),'utf8'),'approved');
+    const approval=f.service.read('owner','first').job.pending[0];assert.throws(()=>f.service.respond('owner','first',{id:approval.id,decision:{acceptWithExecpolicyAmendment:{execpolicy_amendment:['write_file']}}}),/仅支持单次授权/);assert.equal(f.service.read('owner','first').job.pending.length,1);f.service.respond('owner','first',{id:approval.id,decision:'accept'});await write;assert.equal(fs.readFileSync(path.join(f.home,'result.txt'),'utf8'),'approved');
     const denied=worker.executeTool('write_file',{path:'denied.txt',content:'no'});await f.service.cancel('owner','first');await assert.rejects(denied);await tick();assert.equal(fs.existsSync(path.join(f.home,'denied.txt')),false);
 });
 test('daily scheduling honors timezone and does not replay missed or overlapping work',async t=>{
@@ -88,4 +88,26 @@ test('dashboard snapshot shows owned conversation and native execution metadata 
     assert.doesNotMatch(JSON.stringify(snapshot),/private question|private body|hidden|owner-login/);
     f.pending[0].resolve('private reply');await tick();
     assert.equal(f.service.dashboard().stats.active,0);assert.equal(f.service.dashboard().sessions.some(s=>s.kind==='Worker'),false);
+});
+
+test('persona auto-approval cannot be injected by upsert and remains owner, root and executor scoped',async t=>{
+    const f=fixture(t,'codex');const configurations=[];
+    f.sessions.configureAutoApproval=(...args)=>configurations.push(args);
+    f.service.upsert('owner',{id:'first',name:'我的分身',root:f.home,executor:'codex',cliApprovalGrant:{root:f.home,backend:'codex'}});
+    assert.equal(f.service.read('owner','first').cliApproval.scope,'ask');
+    f.service.submit('owner','first',{requestId:'grant-test',text:'task'});await tick();
+    f.callbacks.get('native')({session:{status:'waiting',pending:[{id:91,method:'item/commandExecution/requestApproval',decisionCapabilities:{autoApproval:true}}]}});
+    assert.throws(()=>f.service.respond('other','first',{id:91,decision:'acceptAlwaysForPersona'}),/不存在/);
+    assert.throws(()=>f.service.respond('owner','first',{id:92,decision:'acceptAlwaysForPersona'}),/不支持/);
+    f.service.respond('owner','first',{id:91,decision:'acceptAlwaysForPersona'});
+    assert.equal(f.service.read('owner','first').cliApproval.scope,'always');assert.equal(configurations.at(-1)[2],true);
+    f.callbacks.get('native')({session:{status:'completed',items:[{type:'agentMessage',text:'done'}]}});await tick();
+    f.service.upsert('owner',{id:'first',name:'我的分身',root:f.home,executor:'claude'});
+    assert.equal(f.service.read('owner','first').cliApproval.scope,'ask');
+    f.service.upsert('owner',{id:'first',name:'我的分身',root:'',executor:'codex'});
+    assert.equal(f.service.read('owner','first').cliApproval.scope,'ask');
+    f.service.upsert('owner',{id:'first',name:'我的分身',root:f.home,executor:'codex'});
+    assert.equal(f.service.read('owner','first').cliApproval.scope,'always');
+    assert.throws(()=>f.service.revokeApproval('other','first'),/不存在/);
+    f.service.revokeApproval('owner','first');assert.equal(f.service.read('owner','first').cliApproval.scope,'ask');
 });

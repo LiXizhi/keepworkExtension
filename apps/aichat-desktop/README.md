@@ -79,6 +79,7 @@ The address stays visible (including fullscreen): `localhost:<port>` for local s
 or `keepwork.com/chat` for the published app. Click it to open the configured entry in
 the external browser; the adjacent refresh icon reloads the current desktop page.
 macOS uses its normal system application menu without duplicate in-window menus, and retains traffic-light window controls.
+Theme changes still update native appearance and saved preferences on macOS; title-bar overlay colors are applied only on Windows/Linux when Electron exposes the overlay API.
 
 The tray menu, and **Help** inside the window, include **Keepwork MCP Server**:
 **查看状态** probes the live service and displays ownership, version, PID and workspace;

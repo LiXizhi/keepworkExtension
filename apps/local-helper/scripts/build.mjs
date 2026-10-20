@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { creationSkillPlugin } from '../../../scripts/creation-skill-build.mjs';
+import { runtimeBuildInfoPlugin } from '../../../scripts/runtime-build-info.mjs';
 import pngjs from 'pngjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -49,7 +50,7 @@ await build({
   ...common,
   entryPoints: [path.join(helperRoot, 'src/worker.ts')],
   outfile: path.join(outdir, 'worker.js'),
-  plugins: [creationSkillPlugin(outdir)],
+  plugins: [runtimeBuildInfoPlugin(helperRoot), creationSkillPlugin(outdir)],
   external: ['node-pty', 'playwright-core'],
 });
 
