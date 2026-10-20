@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, shell, Tray } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { autoUpdater } from 'electron-updater';
@@ -6,6 +6,7 @@ import { TerminalSessionManager } from '../../../src/core/terminalSessions';
 const { NativeFiles, atomicJson } = require('./files.cjs');
 const { defaultBrainFolder } = require('./brainFolder.cjs');
 const { checkGit, installGit } = require('./gitSetup.cjs');
+const { createUpdateWindow } = require('./updateWindow.cjs');
 const { RuntimeSupervisor } = require('./runtime.cjs');
 const { ENTRY, trustedPage, assertSender, externalUrl } = require('./security.cjs');
 const { MediaGrants, installPermissions } = require('./permissions.cjs');
@@ -28,6 +29,8 @@ let opening: Promise<void> | null = null;
 let appIcon: ReturnType<typeof nativeImage.createFromPath> | undefined;
 const closedTip = `${PRODUCT_NAME}（窗口已关闭，点击重新打开）`;
 let updateState = 'idle', updateError = '', updateProgress = 0, checking: Promise<void> | null = null;
+let updatesWindow: any, shellLatest: any, shellCheckedAt = '', updateActionBusy = false;
+let shellStale = false;
 const terminals = new TerminalSessionManager();
 const terminalIds = new Set<string>();
 let settingsFile: string;
@@ -64,7 +67,7 @@ async function useLocalSource() {
   finally { switchingPage = false; }
 }
 async function mcpAction(action: 'status' | 'restart') {
-  if (serviceBusy || disableDevMcp) return;
+  if (serviceBusy || updateActionBusy || disableDevMcp) return;
   serviceBusy = true; menu();
   try {
     if (action === 'restart') {
@@ -92,7 +95,7 @@ function owner() {
 }
 function show() { void ensureShown(); }
 async function checkRuntimeHeartbeat() {
-  if (disableDevMcp || quitting) return;
+  if (disableDevMcp || quitting || serviceBusy || updateActionBusy || runtime?.restarting) return;
   const supervisors = [
     ['mcp', runtime],
     ['local-model', modelRuntime],
@@ -101,6 +104,7 @@ async function checkRuntimeHeartbeat() {
     if (!supervisor) continue;
     try {
       await supervisor.refresh();
+      if (serviceBusy || updateActionBusy || runtime?.restarting || quitting) return;
       if (!['running', 'attached'].includes(supervisor.state?.state)) await supervisor.start();
     } catch (error) {
       console.warn(`${name} heartbeat recovery failed:`, error);
@@ -117,21 +121,81 @@ function ensureShown() {
   if (!opening) opening = openWindow().finally(() => { opening = null; });
   return opening;
 }
+function updatesSnapshot() {
+  const mcp = runtime?.updateSnapshot() || { state: 'unavailable' };
+  return { checking: !!checking, mcp: { ...mcp,
+    state: updateActionBusy && serviceBusy ? 'applying' : mcp.state,
+    canApply: !updateActionBusy && !serviceBusy && (['available', 'ready'].includes(mcp.state) || (mcp.state === 'error' && !!runtime?.record.pending)) },
+    desktop: { state: app.isPackaged ? updateState : 'unavailable', currentVersion: app.getVersion(),
+      latest: shellLatest, checkedAt: shellCheckedAt, stale: shellStale, progress: updateProgress, error: updateError,
+      canApply: !updateActionBusy && ['available', 'pending restart'].includes(updateState) } };
+}
+function openUpdates() { updatesWindow?.open(); }
+function persistShellMetadata() {
+  if (settingsFile) atomicJson(path.join(path.dirname(settingsFile), 'update-metadata.json'), { latest: shellLatest, checkedAt: shellCheckedAt });
+}
+function receiveShellMetadata(info: any) {
+  shellLatest = { version: info.version, releaseDate: info.releaseDate };
+  shellCheckedAt = new Date().toISOString(); shellStale = false; persistShellMetadata();
+}
+function mcpUpdateChanged(snapshot: any) {
+  notifyUpdateStatus();
+  if (snapshot.state !== 'ready' || !runtime?.record.pending || runtime.record.notified === runtime.record.pending) return;
+  runtime.record.notified = runtime.record.pending; runtime.save();
+  if (Notification.isSupported()) {
+    const notification = new Notification({ title: 'Keepwork MCP 更新已就绪', body: `版本 ${snapshot.pending?.version || ''} 已下载。点击查看并确认更新，或在下次启动时生效。` });
+    notification.on('click', openUpdates); notification.show();
+  }
+}
+async function confirmUpdate(message: string, detail: string) {
+  const answer = await dialog.showMessageBox({ title: '检查更新', message, detail,
+    buttons: ['稍后', '立即更新'], defaultId: 0, cancelId: 0 });
+  return answer.response === 1;
+}
+async function applyMcpUpdate() {
+  if (updateActionBusy || serviceBusy || disableDevMcp) return;
+  updateActionBusy = true; notifyUpdateStatus();
+  try {
+    if (runtime.checking) await runtime.checking;
+    if (!runtime.record.pending) await runtime.check();
+    if (!runtime.record.pending) return;
+    if (!await confirmUpdate('现在重启 MCP 并更新？', '正在执行的 MCP 操作会被中断。桌面窗口保持打开；选择稍后将在退出应用并重新启动后更新。')) return;
+    if (quitting) return;
+    serviceBusy = true; runtime.setUpdate({ state: 'applying', error: '' });
+    await runtime.restart(true);
+    if (runtime.record.pending) throw new Error('更新尚未生效：当前服务由其他进程管理，请在管理应用中停止服务后重试。');
+    if (!runtime.record.rollbackError) runtime.setUpdate({ state: 'current', error: '', progress: 100 });
+  } catch (error) { runtime.setUpdate({ state: 'error', error: String(error) }); }
+  finally { serviceBusy = false; updateActionBusy = false; menu(); notifyUpdateStatus(); }
+}
+async function applyDesktopUpdate() {
+  if (updateActionBusy || !app.isPackaged) return;
+  updateActionBusy = true; notifyUpdateStatus();
+  try {
+    if (updateState === 'available') await autoUpdater.downloadUpdate();
+    if (updateState === 'pending restart' && await confirmUpdate('退出并更新桌面应用？', '应用将关闭并安装已下载的新版本。')) autoUpdater.quitAndInstall();
+  } catch (error) { updateError = String(error); setUpdateState('error'); }
+  finally { updateActionBusy = false; notifyUpdateStatus(); }
+}
 async function checkUpdates() {
   if (disableDevMcp) return;
+  if (updateActionBusy) return;
   if (checking) return checking;
   checking = (async () => {
-    updateError = '';
-    const results = await Promise.allSettled([runtime.check(), modelRuntime?.check(), ...(app.isPackaged ? [autoUpdater.checkForUpdates()] : [])]);
-    updateError = results.filter(r => r.status === 'rejected').map((r: any) => r.reason.message).join('; ');
-    menu();
-  })().finally(() => { checking = null; });
+    const jobs = [runtime.check()];
+    if (app.isPackaged) jobs.push(autoUpdater.checkForUpdates().catch((error: Error) => {
+      updateError = error.message; shellStale = true; setUpdateState('error');
+    }));
+    await Promise.allSettled(jobs);
+  })().finally(() => { checking = null; menu(); notifyUpdateStatus(); });
+  notifyUpdateStatus();
   return checking;
 }
 function updatePayload() {
-  return { state: updateState, progress: updateProgress, error: updateError || '' };
+  return { state: updateState, progress: updateProgress, error: updateError || '', mcp: runtime?.updateSnapshot() };
 }
 function notifyUpdateStatus() {
+  updatesWindow?.send();
   const current = liveWindow();
   if (current && trustedPage(current.webContents.getURL(), devUrl)) current.webContents.send('aichat-desktop:update-status', updatePayload());
 }
@@ -156,7 +220,7 @@ function runCommand(id: string) {
   const current = liveWindow();
   if (id === 'open-folder') { void openFolderFromMenu(); return; }
   if (id === 'reload') { reloadPage(); return; }
-  if (id === 'check-updates') { void checkUpdates(); return; }
+  if (id === 'check-updates') { openUpdates(); return; }
   if (id === 'toggle-login') {
     settings.openAtLogin = !settings.openAtLogin; atomicJson(settingsFile, settings);
     app.setLoginItemSettings({ openAtLogin: settings.openAtLogin, args: ['--background'] }); menu(); return;
@@ -200,7 +264,7 @@ function desktopMenus() {
       { type: 'separator' },
       key('CmdOrCtrl+R', '重新加载', 'reload'),
       { type: 'separator' },
-      { id: 'check-updates', label: '检查更新' },
+      { id: 'check-updates', label: '检查更新…' },
       { id: 'toggle-login', label: '登录后自动启动', checked: settings.openAtLogin === true },
       { type: 'separator' },
       key('CmdOrCtrl+Q', '退出', 'quit'),
@@ -233,6 +297,8 @@ function desktopMenus() {
       { id: 'open-settings', label: '设置' },
     ],
     help: [
+      { id: 'check-updates', label: '检查更新…' },
+      { type: 'separator' },
       { label: `MCP：${runtime?.state.state || 'starting'} ${runtime?.state.version || ''}（${runtime?.state.owner || 'desktop'}）`, enabled: false },
       ...(runtime?.state.error ? [{ label: String(runtime.state.error).slice(0, 80), enabled: false }] : []),
       { id: 'mcp-status', label: '查看状态…', enabled: !serviceBusy && !disableDevMcp },
@@ -296,7 +362,7 @@ function menu() {
     ] },
     { label: runtime?.state.pending ? 'MCP 更新将在退出并重新打开后生效' : `桌面更新: ${updateState}`, enabled: false },
     ...(updateError ? [{ label: `更新失败: ${updateError.slice(0, 100)}`, enabled: false }] : []),
-    { label: '检查更新', click: () => { void checkUpdates(); } },
+    { label: '检查更新…', click: openUpdates },
     { label: `${PRODUCT_NAME} ${app.getVersion()}`, enabled: false },
     { label: '登录电脑后自动启动', type: 'checkbox', checked: settings.openAtLogin, click: (item: any) => {
       settings.openAtLogin = item.checked; atomicJson(settingsFile, settings);
@@ -367,7 +433,7 @@ function setupBridge() {
     if (method === 'checkUpdates') { await checkUpdates(); return { mcp: runtime.state, shell: updateState, progress: updateProgress, error: updateError }; }
     if (method === 'installUpdate') {
       if (updateState !== 'pending restart') return updatePayload();
-      autoUpdater.quitAndInstall();
+      await applyDesktopUpdate();
       return updatePayload();
     }
     if (method === 'file') {
@@ -458,7 +524,7 @@ else {
     const target = `${process.platform === 'win32' ? 'windows' : 'macos'}-${process.arch}`;
     const stagedRuntime = path.resolve(__dirname, '../../mcp-runtime/staging', target);
     const stagedModelRuntime = path.resolve(__dirname, '../../local-model-runtime/runtime-staging', target);
-    runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion());
+    runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion(), {}, { onUpdate: mcpUpdateChanged });
     modelRuntime = new RuntimeSupervisor(path.join(home, 'local-model-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'local-model-runtime') : process.env.KP_LOCAL_MODEL_RUNTIME_DIR || (fs.existsSync(path.join(stagedModelRuntime, 'runtime.json')) ? stagedModelRuntime : ''), app.getVersion(), {}, {
       product: 'keepwork-local-model-node-runtime', entry: 'app/dist/src/cli.js', port: 18089, healthPath: '/v1/health', updates: false,
       matcher: (body: any) => body.service === 'keepwork-local-model' && body.protocolVersion === '1.0.0',
@@ -467,16 +533,23 @@ else {
     if (process.platform === 'darwin') {
       app.dock?.setIcon(nativeImage.createFromPath(path.join(__dirname, 'keepwork-mac.png')));
     }
+    try {
+      const stored = JSON.parse(fs.readFileSync(path.join(home, 'update-metadata.json'), 'utf8'));
+      shellLatest = stored.latest; shellCheckedAt = stored.checkedAt; shellStale = true;
+    } catch { /* no cached release information */ }
+    updatesWindow = createUpdateWindow({ BrowserWindow, ipcMain }, __dirname, {
+      status: updatesSnapshot, check: checkUpdates, mcp: applyMcpUpdate, desktop: applyDesktopUpdate,
+    });
     setupBridge();
     const icon = appIcon.resize({ width: process.platform === 'darwin' ? 22 : 16 });
     tray = new Tray(icon); tray.setToolTip(PRODUCT_NAME); tray.on('click', show); menu();
-    autoUpdater.autoDownload = true; autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoDownload = true; autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on('checking-for-update', () => { updateError = ''; setUpdateState('checking'); });
-    autoUpdater.on('update-available', () => { updateError = ''; setUpdateState('downloading'); });
+    autoUpdater.on('update-available', info => { receiveShellMetadata(info); updateError = ''; setUpdateState('downloading'); });
     autoUpdater.on('download-progress', info => { setUpdateState('downloading', info?.percent); });
-    autoUpdater.on('update-not-available', () => { updateError = ''; setUpdateState('current'); });
-    autoUpdater.on('update-downloaded', () => { setUpdateState('pending restart', 100); });
-    autoUpdater.on('error', e => { updateError = e.message; setUpdateState('error'); });
+    autoUpdater.on('update-not-available', info => { receiveShellMetadata(info); updateError = ''; setUpdateState('current'); });
+    autoUpdater.on('update-downloaded', info => { receiveShellMetadata(info); updateError = ''; setUpdateState('pending restart', 100); });
+    autoUpdater.on('error', e => { shellStale = true; updateError = e.message; setUpdateState('error'); });
     if (process.argv.includes('--background')) tray.setToolTip(closedTip);
     else await ensureShown();
     if (!disableDevMcp) {

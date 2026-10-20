@@ -2,6 +2,31 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "Keepwork MCP: Build",
+      "detail": "Build the standalone MCP server and bundled skills locally; does not publish or change versions.",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "build", "--prefix", "apps/mcp-runtime"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Keepwork MCP: Build & Publish Stable (GitHub Actions)",
+      "detail": "Dispatch the stable workflow on pushed origin/main: builds Windows/macOS MCP runtimes and publishes CDN, npm and matching VSIX. Requires gh auth login and configured release secrets. Task completion means dispatched, not published.",
+      "type": "process",
+      "command": "gh",
+      "args": [
+        "workflow", "run", "keepwork-stable.yml",
+        "--repo", "LiXizhi/keepworkExtension",
+        "--ref", "main"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
       "label": "keepwork VS code extension:Run",
       "type": "shell",
       "command": "code",
@@ -79,7 +104,7 @@
       }
     },
     {
-      "label": "KeepWork 第二大脑: Start",
+      "label": "keepwork Desktop: Start",
       "type": "shell",
       "command": "npm",
       "args": [
@@ -98,7 +123,7 @@
       }
     },
     {
-      "label": "KeepWork 第二大脑: Build",
+      "label": "keepwork Desktop: Build",
       "type": "shell",
       "command": "npm",
       "args": [

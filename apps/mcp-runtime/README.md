@@ -1,5 +1,28 @@
 # Keepwork MCP NodeRuntime
 
+## VS Code tasks
+
+Open the `keepworkExtension` repository folder and use **Terminal → Run Task**:
+
+- **Keepwork MCP: Build** builds the local MCP server and bundled skills with
+  `npm run build --prefix apps/mcp-runtime`. Install root and runtime dependencies
+  first (`npm ci` and `npm ci --prefix apps/mcp-runtime`). It does not stage a native
+  runtime, increment versions, or publish.
+- **Keepwork MCP: Build & Publish Stable (GitHub Actions)** dispatches
+  `keepwork-stable.yml` on remote `main`. Install GitHub CLI (`gh`) and run
+  `gh auth login` first, with access to this repository's Actions. Commit matching
+  MCP/VSIX release versions and push the intended changes to `origin/main` before
+  running this task; it does not commit, push, or include local uncommitted edits.
+  GitHub runners build Windows x64 and both Mac architectures, then publish the
+  stable MCP CDN feed, npm CLI, and matching VSIX using the existing release gates
+  and configured secrets. It does not publish a new AIChat Desktop installer.
+
+The publish task completes when the workflow is **dispatched**, not when publication
+finishes. Follow the run and any environment approval in
+[Coordinated Keepwork stable release](https://github.com/LiXizhi/keepworkExtension/actions/workflows/keepwork-stable.yml).
+Use that page's **Run workflow → main** when GitHub CLI is unavailable. The existing
+every-main `mcp-node-runtime.yml` feed is separate and is not the desktop stable feed.
+
 ## Stable desktop and npm releases
 
 The separate `keepwork-stable.yml` workflow publishes matching-version npm CLI, VSIX and

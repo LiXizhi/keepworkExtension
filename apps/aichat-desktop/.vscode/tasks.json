@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "KeepWork 第二大脑: Start",
+      "label": "keepwork Desktop: Start",
       "type": "shell",
       "command": "npm",
       "args": [
@@ -21,7 +21,7 @@
       }
     },
     {
-      "label": "KeepWork 第二大脑: Build",
+      "label": "keepwork Desktop: Build",
       "type": "shell",
       "command": "npm",
       "args": [

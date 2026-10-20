@@ -9,8 +9,8 @@ NodeRuntime. The existing KP Local Helper is not replaced; speaker models are no
 ### VS Code startup and debugging
 
 Open the `keepworkExtension` repository or this `apps/aichat-desktop` folder in VS Code.
-After installing dependencies, choose **Terminal → Run Task → KeepWork 第二大脑: Start**.
-For main-process breakpoints, choose **KeepWork 第二大脑: Debug** in Run and Debug and
+After installing dependencies, choose **Terminal → Run Task → keepwork Desktop: Start**.
+For main-process breakpoints, choose **keepwork Desktop: Debug** in Run and Debug and
 press **F5**; its pre-launch task builds the Electron source and source maps automatically.
 Windows and both Mac architectures use the locally installed Electron executable.
 Task/F5 sets `AICHAT_DESKTOP_LOCAL_SOURCE=1`: the app serves the sibling
@@ -125,8 +125,23 @@ previews do not receive the preload. No generic IPC, filesystem, shell or Node o
 
 ## Three independent update streams
 
-The live website changes on launch/reload. Shell and MCP updates download at startup and
-every six hours, and activate after **Quit** and restart. Closing the window is not a restart.
+The live website changes on launch/reload. Shell and MCP updates download at startup and every six hours. **Help → 检查更新…**
+opens a dedicated update window; File and tray entries open the same window. It shows
+installed and latest versions separately for MCP and desktop, MCP build date (`builtAt`),
+and desktop release date when supplied by the feed. Missing dates are shown as unavailable;
+failed checks retain the last successful metadata and mark it stale. External MCP ownership
+and its running version are shown separately from the desktop's installed runtime.
+
+A newly downloaded MCP release produces one notification. Click it, or **更新 MCP** in the
+window, to confirm restarting MCP now; running MCP operations are interrupted. **稍后**
+keeps it staged for the next full application launch. Closing/reopening the chat window,
+ordinary MCP restart, and heartbeat recovery do not activate pending updates. Manual apply
+never stops an externally owned service. Failed candidates roll back and are not downloaded
+again until a different release is published. The desktop shell version does not change.
+
+**更新桌面应用** asks for confirmation before quitting and installing a downloaded shell
+update. Closing the update window does not cancel downloads; ordinary Quit does not silently
+install a shell update. Local-model remains installer-managed.
 MCP updates verify platform, size, SHA-256, source commit and launch metadata before staging;
 health checks promote them on startup. Failed startup falls back to the prior installed or
 bundled runtime. At startup, the desktop checks the existing Keepwork MCP on the configured
@@ -182,3 +197,19 @@ neither npm nor a global Node installation. No VS Code Marketplace downloads occ
 Before public rollout, verify installed N→N+1 updates, signing/Gatekeeper, Keepwork login,
 microphone/camera prompts, local HTML previews, offline retry, tray lifecycle and coexistence
 with an already running extension on Windows and both Mac architectures.
+
+
+### Update-window verification
+
+Run `npm run check --prefix apps/aichat-desktop`, then
+`node apps/aichat-desktop/scripts/updates-smoke.cjs` for real Electron menu/window/IPC and
+version/date rendering with an isolated profile and no remote downloads. The smoke writes
+`.test-runtime/aichat-updates.png`. Runtime tests cover staged activation, metadata-only
+checks, integrity failures, health identity verification and rollback.
+
+To release MCP independently, publish a new version through **Coordinated Keepwork stable
+release** (the existing matching MCP/VSIX version and tag requirements still apply). Desktop
+clients check the stable manifests and download the immutable runtime archive without a
+new desktop package. This change itself needs one desktop release to deliver the window.
+Before rollout, verify packaged N→N+1 activation on all three supported targets; source
+Electron smoke does not substitute for installer/signing acceptance.

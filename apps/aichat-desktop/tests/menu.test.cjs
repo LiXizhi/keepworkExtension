@@ -9,6 +9,7 @@ function host(platform = 'win32') {
   let template;
   const contents = { getURL: () => 'http://127.0.0.1:3002/AIChat.html?dev=true', send: (...args) => calls.push(args), reloadIgnoringCache: () => calls.push('reloadIgnoringCache') };
   const window = { webContents: contents, setMenu() {}, loadURL: async url => calls.push(url) };
+  const updater = {};
   const electron = {
     app: { isPackaged: false, setAppUserModelId() {}, setName(name) { this.name = name; }, commandLine: { hasSwitch: () => true }, requestSingleInstanceLock: () => false, quit() {}, getVersion: () => '0.1.0' },
     Menu: { buildFromTemplate: items => { template = items; return { items }; }, setApplicationMenu() {} },
@@ -19,12 +20,12 @@ function host(platform = 'win32') {
   const context = vm.createContext({ process: { env: { AICHAT_DESKTOP_DEV_URL: 'http://127.0.0.1:3002/AIChat.html' }, platform }, console,
     require: name => {
       if (name === 'electron') return electron;
-      if (name === 'electron-updater') return { autoUpdater: {} };
+      if (name === 'electron-updater') return { autoUpdater: updater };
       if (name.includes('terminalSessions')) return { TerminalSessionManager: class {} };
       if (name.startsWith('./')) return require('../src/' + name.slice(2));
       return require(name);
     }, windowFixture: window });
-  vm.runInContext(source + '\nwin = windowFixture; runtime = { state: { state: "running", owner: "desktop" } };', context);
+  vm.runInContext(source + '\nwin = windowFixture; runtime = { state: { state: "running", owner: "desktop" }, updateSnapshot: () => ({ state: "current" }) };', context);
   return { context, calls, app: electron.app, menu: () => { vm.runInContext('menu()', context); return template; } };
 }
 
@@ -32,7 +33,7 @@ test('desktop menus are File Edit View Help and expose a serializable page paylo
   const h = host();
   const bar = h.menu().filter(item => ['File', 'Edit', 'View', 'Help'].includes(item.label));
   assert.equal(JSON.stringify(bar.map(item => item.label)), JSON.stringify(['File', 'Edit', 'View', 'Help']));
-  assert.equal(JSON.stringify(bar[0].submenu.map(item => item.label).filter(Boolean)), JSON.stringify(['新对话', '打开文件夹…', '重新加载', '检查更新', '登录后自动启动', '退出']));
+  assert.equal(JSON.stringify(bar[0].submenu.map(item => item.label).filter(Boolean)), JSON.stringify(['新对话', '打开文件夹…', '重新加载', '检查更新…', '登录后自动启动', '退出']));
   const help = bar[3].submenu;
   help.find(item => item.label === '打开 Dashboard').click();
   assert.deepEqual(h.calls, ['http://127.0.0.1:8089/dashboard']);
@@ -116,4 +117,71 @@ for (const platform of ['darwin', 'win32']) test(`${platform} titlebar has only 
     assert.equal(h.posts.at(-1)[0].type, 'show');
     assert.equal(h.posts.at(-1)[0].menu.id, 'file');
   }
+});
+
+
+test('Help and File update entries open the same update window on both platforms', () => {
+  for (const platform of ['win32', 'darwin']) {
+    const h = host(platform);
+    vm.runInContext('updatesWindow = { open: () => globalThis.updateOpens = (globalThis.updateOpens || 0) + 1 };', h.context);
+    for (const label of ['File', 'Help']) {
+      h.menu().find(item => item.label === label).submenu.find(item => item.label === '检查更新…').click();
+    }
+    assert.equal(vm.runInContext('updateOpens', h.context), 2);
+  }
+});
+
+test('MCP update cancellation preserves pending; confirmation coalesces and activates only MCP', async () => {
+  const h = host();
+  vm.runInContext(`
+    globalThis.answer = 0; globalThis.restarts = 0;
+    require('electron').dialog.showMessageBox = async () => ({ response: answer });
+    runtime.record = { pending: 'fixture' };
+    runtime.updateSnapshot = () => ({ state: 'ready' });
+    runtime.setUpdate = () => {};
+    runtime.restart = async activate => { if (!activate) throw Error('must activate'); restarts++; };
+  `, h.context);
+  await vm.runInContext('applyMcpUpdate()', h.context);
+  assert.equal(vm.runInContext('restarts', h.context), 0);
+  vm.runInContext('answer = 1', h.context);
+  await vm.runInContext('Promise.all([applyMcpUpdate(), applyMcpUpdate()])', h.context);
+  assert.equal(vm.runInContext('restarts', h.context), 1);
+  assert.equal(vm.runInContext('updateActionBusy || serviceBusy', h.context), false);
+});
+
+
+test('desktop installation requires confirmation and never restarts MCP', async () => {
+  const h = host();
+  vm.runInContext(`
+    require('electron').app.isPackaged = true;
+    globalThis.answer = 0; globalThis.installs = 0;
+    require('electron').dialog.showMessageBox = async () => ({ response: answer });
+    require('electron-updater').autoUpdater.quitAndInstall = () => installs++;
+    updateState = 'pending restart';
+  `, h.context);
+  await vm.runInContext('applyDesktopUpdate()', h.context);
+  assert.equal(vm.runInContext('installs', h.context), 0);
+  vm.runInContext('answer = 1', h.context);
+  await vm.runInContext('applyDesktopUpdate()', h.context);
+  assert.equal(vm.runInContext('installs', h.context), 1);
+});
+
+test('one MCP notification per staged identity opens update window', () => {
+  const h = host();
+  vm.runInContext(`
+    globalThis.notifications = []; globalThis.opened = 0;
+    require('electron').Notification = class {
+      static isSupported() { return true; }
+      constructor() { notifications.push(this); }
+      on(_event, listener) { this.click = listener; } show() {}
+    };
+    runtime.record = { pending: 'hash' }; runtime.save = () => {};
+    runtime.updateSnapshot = () => ({ state: 'ready' });
+    updatesWindow = { send() {}, open() { opened++; } };
+    mcpUpdateChanged({ state: 'ready', pending: { version: '2.0.0' } });
+    mcpUpdateChanged({ state: 'ready', pending: { version: '2.0.0' } });
+    notifications[0].click();
+  `, h.context);
+  assert.equal(vm.runInContext('notifications.length', h.context), 1);
+  assert.equal(vm.runInContext('opened', h.context), 1);
 });

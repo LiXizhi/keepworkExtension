@@ -1,3 +1,30 @@
+# Update window validation — 2026-10-20
+
+Verified locally on Windows x64 for the independent MCP update window:
+
+- `npm run check --prefix apps/aichat-desktop`: TypeScript, 50 passing tests,
+  one macOS-only test skipped, and desktop bundle/assets build passed.
+- `node apps/aichat-desktop/scripts/updates-smoke.cjs`: real Electron Help menu,
+  single-window routing, isolated preload, version/date/owner rendering, button
+  availability and window close passed. Screenshot visually checked at
+  `.test-runtime/aichat-updates.png` (version/date values are controlled fixtures).
+- `node apps/aichat-desktop/scripts/native-smoke.cjs`: Electron native PTY passed.
+- Runtime regressions cover verified ZIP staging, concurrent check coalescing,
+  persistent metadata, offline checks, corrupt downloads, deferred heartbeat
+  activation, explicit activation, health identity mismatch and rollback.
+- Menu regressions cover confirmation/cancellation, separate desktop installation,
+  deduplicated MCP notifications and notification navigation. Window tests reject
+  foreign senders, subframes and non-update IPC methods.
+- `git diff --check` passed. No website build, installer publication, version bump,
+  commit or deployment was performed.
+
+Packaged Windows N→N+1 and macOS arm64/x64 smoke tests were not run. This checkout
+has neither `apps/mcp-runtime/staging` nor the required local-model runtime staging,
+and this host is Windows. Installed/signing acceptance on all targets remains a
+release gate; fixture and source Electron tests do not establish those results.
+
+---
+
 # Validation — 2026-10-04
 
 Verified locally on Windows x64:

@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "KeepWork 第二大脑: Debug",
+      "name": "keepwork Desktop: Debug",
       "type": "node",
       "request": "launch",
       "cwd": "${workspaceFolder}/apps/aichat-desktop",
@@ -13,7 +13,7 @@
       "args": [
         "."
       ],
-      "preLaunchTask": "KeepWork 第二大脑: Build",
+      "preLaunchTask": "keepwork Desktop: Build",
       "console": "integratedTerminal",
       "outputCapture": "std",
       "sourceMaps": true,

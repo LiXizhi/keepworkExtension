@@ -5,6 +5,26 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { RuntimeSupervisor, validateManifest, validateRuntime, BASE } = require('../src/runtime.cjs');
+// Tiny stored ZIP fixture; no packaging tools or native runtime download needed.
+function zipFixture(files) {
+  const local = [], central = []; let offset = 0;
+  for (const [name, value] of Object.entries(files)) {
+    const filename = Buffer.from(name), data = Buffer.from(value);
+    let crc = 0xffffffff;
+    for (const byte of data) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    const header = Buffer.alloc(30); header.writeUInt32LE(0x04034b50); header.writeUInt16LE(20, 4);
+    header.writeUInt32LE(crc, 14); header.writeUInt32LE(data.length, 18); header.writeUInt32LE(data.length, 22); header.writeUInt16LE(filename.length, 26);
+    const entry = Buffer.alloc(46); entry.writeUInt32LE(0x02014b50); entry.writeUInt16LE(20, 4); entry.writeUInt16LE(20, 6);
+    entry.writeUInt32LE(crc, 16); entry.writeUInt32LE(data.length, 20); entry.writeUInt32LE(data.length, 24);
+    entry.writeUInt16LE(filename.length, 28); entry.writeUInt32LE(offset, 42);
+    local.push(header, filename, data); central.push(entry, filename); offset += header.length + filename.length + data.length;
+  }
+  const directory = Buffer.concat(central), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50);
+  end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10);
+  end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...local, directory, end]);
+}
 const manifest = { schemaVersion: 1, product: 'keepwork-mcp-node-runtime', version: '0.1.0', commit: 'a'.repeat(40), platform: 'windows', arch: 'x64', sha256: 'b'.repeat(64), size: 123, url: `${BASE}0.1.0/windows-x64.zip` };
 test('stable manifests reject wrong platform, arbitrary URLs and corrupt integrity metadata', () => {
   assert.equal(validateManifest(manifest, 'windows', 'x64'), manifest);
@@ -69,7 +89,8 @@ test('corrupt update bytes never replace the installed runtime', async t => {
     : new Response('bad');
   await assert.rejects(supervisor.check(), /integrity mismatch/);
   assert.equal(supervisor.record.current, 'c'.repeat(64)); assert.equal(supervisor.record.pending, undefined);
-  assert.deepEqual(fs.readdirSync(home), []);
+  assert.deepEqual(fs.readdirSync(home), ['state.json']);
+  assert.equal(supervisor.updateSnapshot().stale, true);
 });
 
 test('restart rejects external ownership and refreshes current status without stopping it', async () => {
@@ -196,4 +217,104 @@ test('stop accepts signal-based child exit before a subsequent restart', async (
   await supervisor.stop();
   assert.equal(kills, 1);
   assert.equal(supervisor.child, null);
+});
+
+
+test('heartbeat recovery excludes staged release; explicit activation verifies identity and promotes it', async t => {
+  const { supervisor, writeRuntime } = localRuntimeFixture(t, '1.0.0');
+  const pending = 'b'.repeat(64);
+  writeRuntime(supervisor.directory(pending), '2.0.0');
+  let health = null;
+  const launches = [];
+  supervisor.deps.probe = async () => health;
+  supervisor.deps.spawn = (_exe, _args, options) => {
+    launches.push(options.env.KEEPWORK_MCP_RUNTIME_VERSION);
+    const child = new EventEmitter(); child.pid = 123; child.exitCode = null;
+    health = { compatible: true, pid: 123, runtimeVersion: launches.at(-1) };
+    child.kill = () => { child.exitCode = 0; health = null; child.emit('exit', 0); };
+    return child;
+  };
+  await supervisor.start();
+  supervisor.record.pending = pending;
+  supervisor.record.pendingMetadata = { version: '2.0.0' };
+  await supervisor.stop(); await supervisor.start();
+  assert.deepEqual(launches, ['1.0.0', '1.0.0']);
+  assert.equal(supervisor.record.pending, pending);
+  await supervisor.restart(true);
+  assert.deepEqual(launches, ['1.0.0', '1.0.0', '2.0.0']);
+  assert.equal(supervisor.record.current, pending);
+  assert.equal(supervisor.record.pending, undefined);
+  assert.equal(supervisor.updateSnapshot().state, 'current');
+  await supervisor.stop();
+});
+
+test('metadata-only check retains remote date and last successful metadata after offline failure', async t => {
+  const { supervisor } = localRuntimeFixture(t, '1.0.0');
+  const original = global.fetch;
+  t.after(() => { global.fetch = original; });
+  const remote = { ...manifest, version: '2.0.0', platform: supervisor.platform, arch: supervisor.arch,
+    builtAt: '2026-10-20T00:00:00Z', url: `${BASE}2.0.0/${supervisor.platform}-${supervisor.arch}.zip` };
+  let requests = 0;
+  global.fetch = async () => { requests++; return new Response(JSON.stringify(remote)); };
+  await supervisor.check(false);
+  assert.equal(requests, 1);
+  assert.equal(supervisor.updateSnapshot().latest.builtAt, remote.builtAt);
+  assert.equal(supervisor.updateSnapshot().state, 'available');
+  const checkedAt = supervisor.record.checkedAt;
+  global.fetch = async () => { throw Error('offline'); };
+  await assert.rejects(supervisor.check(false), /offline/);
+  assert.equal(supervisor.updateSnapshot().stale, true);
+  assert.equal(supervisor.record.checkedAt, checkedAt);
+  assert.equal(supervisor.record.latest.version, '2.0.0');
+});
+
+
+test('wrong candidate health identity rolls back and remembers failed release', async t => {
+  const { supervisor, writeRuntime } = localRuntimeFixture(t, '1.0.0');
+  const pending = 'b'.repeat(64); writeRuntime(supervisor.directory(pending), '2.0.0');
+  supervisor.record.pending = pending;
+  let health = null; const launches = [];
+  supervisor.deps.probe = async () => health;
+  supervisor.deps.spawn = (_exe, _args, options) => {
+    launches.push(options.env.KEEPWORK_MCP_RUNTIME_VERSION);
+    const child = new EventEmitter(); child.pid = 321; child.exitCode = null;
+    health = { compatible: true, pid: 321, runtimeVersion: 'wrong-version' };
+    child.kill = () => { child.exitCode = 0; health = null; child.emit('exit', 0); };
+    return child;
+  };
+  await supervisor.start();
+  assert.deepEqual(launches, ['2.0.0', '1.0.0']);
+  assert.equal(supervisor.record.pending, undefined);
+  assert.equal(supervisor.record.failed, pending);
+  assert.equal(supervisor.state.version, '1.0.0');
+  assert.match(supervisor.updateSnapshot().error, /identity mismatch/);
+  await supervisor.stop();
+  await supervisor.download({ ...manifest, sha256: pending });
+  assert.equal(supervisor.record.pending, undefined);
+});
+
+test('verified download stages once, reports progress and restores pending metadata on next launch', async t => {
+  const { supervisor } = localRuntimeFixture(t, '1.0.0');
+  const original = global.fetch; t.after(() => { global.fetch = original; });
+  const launch = { schemaVersion: 1, product: 'keepwork-mcp-node-runtime', version: '2.0.0',
+    platform: supervisor.platform, arch: supervisor.arch, entry: 'app/cli.cjs', commit: 'a'.repeat(40) };
+  const archive = zipFixture({ 'runtime.json': JSON.stringify(launch), 'app/cli.cjs': 'fixture',
+    [supervisor.platform === 'windows' ? 'node.exe' : 'bin/node']: 'fixture' });
+  const remote = { ...manifest, ...launch, builtAt: '2026-10-20T00:00:00Z', size: archive.length,
+    sha256: require('node:crypto').createHash('sha256').update(archive).digest('hex'),
+    url: `${BASE}2.0.0/${supervisor.platform}-${supervisor.arch}.zip` };
+  let archives = 0; const states = [];
+  supervisor.options.onUpdate = value => states.push(value.state);
+  global.fetch = async url => String(url).endsWith('.json') ? new Response(JSON.stringify(remote))
+    : (archives++, new Response(archive));
+  await Promise.all([supervisor.check(), supervisor.check()]);
+  assert.equal(archives, 1);
+  assert.equal(supervisor.record.pending, remote.sha256);
+  assert.equal(supervisor.record.current, undefined);
+  assert.equal(supervisor.updateSnapshot().progress, 100);
+  assert.ok(states.includes('downloading')); assert.equal(states.at(-1), 'ready');
+  const restored = new RuntimeSupervisor(supervisor.home, supervisor.bundled, '0.1.0');
+  assert.equal(restored.updateSnapshot().pending.builtAt, remote.builtAt);
+  assert.equal(restored.updateSnapshot().currentVersion, '1.0.0');
+  await supervisor.check(); assert.equal(archives, 1);
 });
