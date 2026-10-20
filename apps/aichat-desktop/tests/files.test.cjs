@@ -34,14 +34,16 @@ test('remembered paths and traversal do not grant access', t => {
   }
   assert.throws(() => files.execute('delete', { rootId: grant.id, rel: '', folder: true }), /root/);
 });
-test('native files read and write above 16 MB and enforce the same PPT and generic limits', t => {
+test('native files read and write above 16 MB and enforce the same PPT/PDF and generic limits', t => {
   const { root, files } = fixture(t);
   const grant = files.grant(root);
   const call = (op, rel, args) => files.execute(op, { rootId: grant.id, rel, ...args });
   const payload = Buffer.alloc(17 * 1024 * 1024, 0x5a);
   call('write', '桂花雨.PPTX', { bytes: payload });
   assert.deepEqual(Buffer.from(call('read', '桂花雨.PPTX').bytes), payload);
-  for (const [name, limit] of [['oversize.pptx', 100 * 1024 * 1024], ['oversize.bin', 1024 * 1024 * 1024]]) {
+  call('write', '手册.PDF', { bytes: payload });
+  assert.deepEqual(Buffer.from(call('read', '手册.PDF').bytes), payload);
+  for (const [name, limit] of [['oversize.pptx', 100 * 1024 * 1024], ['oversize.pdf', 100 * 1024 * 1024], ['oversize.bin', 1024 * 1024 * 1024]]) {
     fs.writeFileSync(path.join(root, name), '');
     fs.truncateSync(path.join(root, name), limit + 1);
     assert.throws(() => call('read', name), new RegExp(`read limit \\(${limit / 1024 / 1024} MiB\\)`));

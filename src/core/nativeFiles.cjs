@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 function fileSizeLimit(filename) {
-  return /\.pptx?$/i.test(filename) ? 100 * 1024 * 1024 : 1024 * 1024 * 1024;
+  return /\.(?:pptx?|pdf)$/i.test(filename) ? 100 * 1024 * 1024 : 1024 * 1024 * 1024;
 }
 function inside(root, target) {
   const rel = path.relative(root, target);

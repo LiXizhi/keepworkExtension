@@ -7,7 +7,7 @@ const net = require('node:net');
 const { createHash } = require('node:crypto');
 const ts = require('typescript');
 
-test('local file HTTP reads and writes exceed the former 16 MB cap while enforcing PPT 100 MiB and other files 1 GiB', async () => {
+test('local file HTTP reads and writes exceed the former 16 MB cap while enforcing PPT/PDF 100 MiB and other files 1 GiB', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-fs-limit-'));
     const oldHome = os.homedir;
     const oldLoader = require.extensions['.ts'];
@@ -21,6 +21,8 @@ test('local file HTTP reads and writes exceed the former 16 MB cap while enforci
         const { localFileSizeLimit } = require('../src/core/fsServe.ts');
         assert.equal(localFileSizeLimit('课程.PPTX'), 100 * 1024 * 1024);
         assert.equal(localFileSizeLimit('课程.ppt'), 100 * 1024 * 1024);
+        assert.equal(localFileSizeLimit('手册.PDF'), 100 * 1024 * 1024);
+        assert.equal(localFileSizeLimit('archive.pdfx'), 1024 * 1024 * 1024);
         assert.equal(localFileSizeLimit('archive.bin'), 1024 * 1024 * 1024);
         const reservation = net.createServer();
         await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
@@ -31,7 +33,7 @@ test('local file HTTP reads and writes exceed the former 16 MB cap while enforci
         const url = name => `http://127.0.0.1:${port}/fs/file?` + new URLSearchParams({ root: home, path: name, links: 'include' });
         const payload = Buffer.alloc(17 * 1024 * 1024, 0x5a);
         const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-        for (const name of ['桂花雨.PPTX', 'nested/large.bin']) {
+        for (const name of ['桂花雨.PPTX', '手册.PDF', 'nested/large.bin']) {
             const saved = await fetch(url(name), { method: 'PUT', headers, body: payload });
             assert.equal(saved.status, 200, await saved.text());
             const read = await fetch(url(name), { headers });
@@ -39,7 +41,7 @@ test('local file HTTP reads and writes exceed the former 16 MB cap while enforci
             assert.equal(Number(read.headers.get('content-length')), payload.length);
             assert.equal(digest(Buffer.from(await read.arrayBuffer())), digest(payload));
         }
-        for (const [name, limit] of [['oversize.pptx', 100 * 1024 * 1024], ['oversize.bin', 1024 * 1024 * 1024]]) {
+        for (const [name, limit] of [['oversize.pptx', 100 * 1024 * 1024], ['oversize.pdf', 100 * 1024 * 1024], ['oversize.bin', 1024 * 1024 * 1024]]) {
             fs.writeFileSync(path.join(home, name), '');
             fs.truncateSync(path.join(home, name), limit + 1);
             const read = await fetch(url(name), { headers });
