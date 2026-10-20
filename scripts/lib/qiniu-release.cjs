@@ -207,11 +207,11 @@ function uploadPartOnce(config, entry, token, uploadId, part, totalParts) {
   });
 }
 
-async function uploadPart(config, entry, token, uploadId, part, totalParts) {
+async function uploadPart(config, entry, createToken, uploadId, part, totalParts) {
   let lastError;
   for (let attempt = 1; attempt <= PART_ATTEMPTS; attempt += 1) {
     try {
-      return await uploadPartOnce(config, entry, token, uploadId, part, totalParts);
+      return await uploadPartOnce(config, entry, createToken(), uploadId, part, totalParts);
     } catch (error) {
       lastError = error;
       if (attempt < PART_ATTEMPTS) {
@@ -236,12 +236,11 @@ async function mapConcurrent(values, concurrency, task) {
   return results;
 }
 
-async function uploadLargeEntry(config, entry, token) {
+async function uploadLargeEntry(config, entry, createToken) {
   const basePath = multipartBasePath(config, entry);
-  const authorization = `UpToken ${token}`;
   const initResponse = await requestBufferWithRetry(new URL(basePath, config.uploadHost), {
     method: 'POST',
-    headers: { Authorization: authorization },
+    headers: { Authorization: `UpToken ${createToken()}` },
   });
   const initResult = parseQiniuResponse(initResponse, `Qiniu multipart initialization failed for ${entry.name}`);
   const uploadId = required(initResult.uploadId, 'Qiniu uploadId');
@@ -251,7 +250,7 @@ async function uploadLargeEntry(config, entry, token) {
     const uploadedParts = await mapConcurrent(
       parts,
       PART_CONCURRENCY,
-      (part) => uploadPart(config, entry, token, uploadId, part, parts.length),
+      (part) => uploadPart(config, entry, createToken, uploadId, part, parts.length),
     );
     const body = Buffer.from(JSON.stringify({
       parts: uploadedParts,
@@ -263,7 +262,7 @@ async function uploadLargeEntry(config, entry, token) {
       {
         method: 'POST',
         headers: {
-          Authorization: authorization,
+          Authorization: `UpToken ${createToken()}`,
           'Content-Type': 'application/json',
           'Content-Length': body.length,
         },
@@ -275,19 +274,19 @@ async function uploadLargeEntry(config, entry, token) {
   } catch (error) {
     await requestBuffer(new URL(`${basePath}/${encodeURIComponent(uploadId)}`, config.uploadHost), {
       method: 'DELETE',
-      headers: { Authorization: authorization },
+      headers: { Authorization: `UpToken ${createToken()}` },
     }).catch(() => undefined);
     throw error;
   }
 }
 
 async function uploadEntry(config, entry) {
-  const token = createUploadToken(config.accessKey, config.secretKey, config.bucket, entry.remoteKey);
+  const createToken = () => createUploadToken(config.accessKey, config.secretKey, config.bucket, entry.remoteKey);
   if (entry.size > MULTIPART_THRESHOLD) {
-    await uploadLargeEntry(config, entry, token);
+    await uploadLargeEntry(config, entry, createToken);
     return;
   }
-  const response = await streamFormUpload(config.uploadHost, token, entry.remoteKey, entry);
+  const response = await streamFormUpload(config.uploadHost, createToken(), entry.remoteKey, entry);
   if (!response.ok) throw new Error(`Qiniu upload failed for ${entry.name}: HTTP ${response.status} ${response.text}`);
   const responseText = response.text;
   const result = JSON.parse(responseText);
@@ -361,5 +360,5 @@ function readArgs(argv) {
 module.exports = {
   required, normalizeHttpsUrl, normalizePrefix, normalizeVersion, sha256, readArgs,
   createMultipartParts, createPartRanges, createQBoxAuthorization, createUploadToken,
-  multipartBasePath, uploadEntry, refreshUrls, verifyEntriesWithRetry,
+  multipartBasePath, uploadLargeEntry, uploadEntry, refreshUrls, verifyEntriesWithRetry,
 };

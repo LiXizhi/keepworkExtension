@@ -9,6 +9,11 @@ on:
         description: Publish installers and promote desktop updates
         type: boolean
         default: false
+      publish_target:
+        description: Platform to publish when publishing is enabled
+        type: choice
+        options: [all, windows-x64, macos-arm64, macos-x64]
+        default: all
       release_build:
         description: Build release-quality artifacts for the local publisher (no CDN upload)
         type: boolean
@@ -61,6 +66,8 @@ jobs:
       - run: npm ci --prefix apps/aichat-desktop
       - run: npm run check:shared
       - run: npm run check --prefix apps/aichat-desktop
+      - name: Test desktop publisher
+        run: node --test scripts/publish-desktop.test.cjs scripts/qiniu-release.test.cjs
       - run: node apps/aichat-desktop/scripts/native-smoke.cjs
       - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
       - run: npm run smoke --prefix apps/mcp-runtime
@@ -140,7 +147,13 @@ jobs:
         env:
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          PUBLISH_TARGET: ${{ inputs.publish_target }}
         run: |
-          for target in win32-x64 darwin-arm64 darwin-x64; do
+          if [[ "$PUBLISH_TARGET" == "windows-x64" ]]; then targets=(win32-x64)
+          elif [[ "$PUBLISH_TARGET" == "macos-arm64" ]]; then targets=(darwin-arm64)
+          elif [[ "$PUBLISH_TARGET" == "macos-x64" ]]; then targets=(darwin-x64)
+          else targets=(win32-x64 darwin-arm64 darwin-x64)
+          fi
+          for target in "${targets[@]}"; do
             node scripts/publish-desktop.cjs --dir "desktop-release/desktop-$target" --target "$target"
           done
