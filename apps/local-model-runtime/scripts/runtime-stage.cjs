@@ -7,6 +7,11 @@ const { spawnSync } = require('node:child_process');
 const projectRoot = path.resolve(__dirname, '..');
 const packageJson = require(path.join(projectRoot, 'package.json'));
 const supported = new Set(['win32-x64', 'darwin-arm64', 'darwin-x64']);
+const sherpaPlatformPackages = [
+  'sherpa-onnx-darwin-arm64', 'sherpa-onnx-darwin-x64',
+  'sherpa-onnx-linux-arm64', 'sherpa-onnx-linux-x64',
+  'sherpa-onnx-win-ia32', 'sherpa-onnx-win-x64',
+];
 const defaultTargets = [
   { platform: 'darwin', arch: 'arm64' },
   { platform: 'darwin', arch: 'x64' },
@@ -159,12 +164,7 @@ function npmCi(appDir, target) {
 function pruneNativeDependencies(stageApp, target) {
   const nodeModules = path.join(stageApp, 'node_modules');
   const expectedSherpa = `sherpa-onnx-${target.nodePlatform}-${target.arch}`;
-  const sherpaNames = [
-    'sherpa-onnx-darwin-arm64', 'sherpa-onnx-darwin-x64',
-    'sherpa-onnx-linux-arm64', 'sherpa-onnx-linux-x64',
-    'sherpa-onnx-win-ia32', 'sherpa-onnx-win-x64',
-  ];
-  for (const name of sherpaNames) {
+  for (const name of sherpaPlatformPackages) {
     if (name !== expectedSherpa) fs.rmSync(path.join(nodeModules, name), { recursive: true, force: true });
   }
   for (const name of ['.package-lock.json']) fs.rmSync(path.join(nodeModules, name), { force: true });
@@ -174,7 +174,9 @@ function validateNativeDependencies(stageApp, target) {
   const nodeModules = path.join(stageApp, 'node_modules');
   const expectedSherpa = `sherpa-onnx-${target.nodePlatform}-${target.arch}`;
   const sherpaDirs = fs.readdirSync(nodeModules, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && entry.name.startsWith('sherpa-onnx-'))
+    .filter(entry => entry.isDirectory()
+      && entry.name.startsWith('sherpa-onnx-')
+      && entry.name !== 'sherpa-onnx-node')
     .map(entry => entry.name);
   if (sherpaDirs.length !== 1 || sherpaDirs[0] !== expectedSherpa) {
     throw new Error(`staged local-model runtime contains foreign sherpa packages: ${sherpaDirs.join(', ')}`);
