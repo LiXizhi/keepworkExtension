@@ -1,5 +1,5 @@
 import * as http from 'node:http';
-import { MessagingService } from '../core/messaging';
+import { MessagingService, channelConflict } from '../core/messaging';
 import { messagingWorkerHtml } from '../core/messagingExecutor';
 export async function handleMessagingHttp(req: http.IncomingMessage, res: http.ServerResponse, url: URL, service: MessagingService) {
     res.setHeader('Cache-Control','no-store'); res.setHeader('Referrer-Policy','no-referrer');
@@ -30,8 +30,8 @@ export async function handleMessagingHttp(req: http.IncomingMessage, res: http.S
         if (route === '/messaging/profiles' && req.method === 'POST') { json(200,{profiles:await service.profiles(String((await body()).root || ''))}); return; }
         if (route === '/messaging/groups' && req.method === 'POST') { const data=await body();json(200,{groups:await service.groups(String(data.root||''),String(data.profile||''),String(data.query||''))});return; }
         if (route === '/messaging/status' && req.method === 'GET') { json(200,{bindings:service.list()}); return; }
-        if (route === '/messaging/start' && req.method === 'POST') { const {id} = await body(); await service.start(id); json(200,service.view(id)); return; }
+        if (route === '/messaging/start' && req.method === 'POST') { const {id,switchFromRoot} = await body(); const binding=service.view(id); if(switchFromRoot !== undefined) await service.switchChannel(binding.channel as 'dingtalk'|'feishu',binding.root,String(switchFromRoot)); await service.start(id); json(200,service.view(id)); return; }
         if (route === '/messaging/stop' && req.method === 'POST') { const {id} = await body(); service.stop(id); json(200,service.view(id)); return; }
         json(404,{error:'Messaging route not found'});
-    } catch(error) { json(400,{error:(error as Error).message}); }
+    } catch(error) { const conflict=channelConflict(error); json(conflict?409:400,conflict||{error:(error as Error).message}); }
 }

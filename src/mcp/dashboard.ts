@@ -83,7 +83,7 @@ const limit = 20;
 async function request(path, method = 'GET', body, signal) {
   const response = await fetch(path, {method, signal, cache:'no-store', headers:{...(path.startsWith('/agents/') ? {'X-Agent-Owner':cliOwner} : {}),...(token ? {Authorization:'Bearer ' + token} : {}),...(body ? {'Content-Type':'application/json'} : {})},body:body ? JSON.stringify(body) : undefined});
   if (response.status === 401) { byId('auth').hidden = false; throw new Error('Pairing token required. Use the token from ~/.keepwork-mcp/token.'); }
-  if (!response.ok) throw new Error('Request failed (' + response.status + ')');
+  if (!response.ok) {const detail=await response.json().catch(()=>({}));throw Object.assign(new Error(detail.error||('Request failed (' + response.status + ')')),detail);}
   return response.json();
 }
 ${dashboardCliScript}
@@ -149,6 +149,7 @@ function renderChannels(channels) {
     else if(channel.error&&channel.installed)badge('授权待检查','warning');
     else if(channel.accounts.length&&!channel.accounts.some(a=>['active','ready'].includes(a.status)))badge('未登录','');
     card.append(head);
+    const brainLine=document.createElement('p');brainLine.className='channel-brain';brainLine.style.overflowWrap='anywhere';brainLine.textContent='第二大脑：'+(channel.root||'未绑定');brainLine.title=channel.root||'';card.append(brainLine);
     const accountLine=document.createElement('p');accountLine.className='channel-account';
     accountLine.textContent=channel.accounts.map(a=>[a.name,a.organization].filter(Boolean).join(' · ')||'已配置账号').join('、')||'未登录账号';accountLine.title=accountLine.textContent;card.append(accountLine);
     const actions=document.createElement('div');actions.className='channel-actions';
@@ -160,7 +161,12 @@ function renderChannels(channels) {
       action.onclick=async()=>{
         channelActions.add(binding.id);action.disabled=true;
         try{await request('/admin/channels/connection','POST',{id:binding.id,action:binding.enabled?'disconnect':'connect'});}
-        catch{byId('notice').textContent='连接操作未完成，请检查客户端和 CLI 授权；可使用「AIChat 排查」。';}
+        catch(error){
+          if(error.code==='CHANNEL_OCCUPIED'&&error.occupiedRoot!==error.requestedRoot&&confirm(error.error+'\\n切换会停止原目录的监听和自动回复。')) {
+            try {await request('/admin/channels/connection','POST',{id:binding.id,action:'connect',switchFromRoot:error.occupiedRoot});}
+            catch(next){byId('notice').textContent=next.message;}
+          } else byId('notice').textContent=error.message;
+        }
         finally{channelActions.delete(binding.id);await refreshChannels();}
       };actions.append(action);
     }

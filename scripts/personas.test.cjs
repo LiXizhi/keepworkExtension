@@ -9,9 +9,9 @@ function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/persona
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
-    const {Personas,nextPersonaRun}=moduleFor({'./aichatPresence':{latestAichatClient:owner=>owner==='owner'?client:null},'./messagingPolicy':{defaultMessageConfig:()=>({}),knowledgeContext:()=>''},'./terminal':{runTerminal:async opts=>{calls.push(opts);return {ok:true};}}});
+    const {Personas,nextPersonaRun}=moduleFor({'./aichatPresence':{latestAichatBrainRoot:()=>home,latestAichatClient:owner=>owner==='owner'?client:null},'./messagingPolicy':{defaultMessageConfig:()=>({}),knowledgeContext:()=>''},'./terminal':{runTerminal:async opts=>{calls.push(opts);return {ok:true};}}});
     const callbacks=new Map();const sessions={async create(owner,input){calls.push({owner,input});return {id:'native'};},subscribe(id,owner,fn){callbacks.set(id,fn);return()=>callbacks.delete(id);},async turn(id,owner,input){calls.push({owner,input});callbacks.get(id)?.({session:{status:'running',pending:[]}});},async interrupt(){callbacks.get('native')?.({session:{status:'interrupted'}});},respond(id,owner,input){calls.push({owner,input});}};
-    const messaging={watch:()=>()=>{},setAgentPrompt:()=>{},agentBindings:()=>[],detachAgent:()=>{},assertAgentBinding:()=>{},inboxView:()=>({conversations:[]}),workers:{answer(input,signal,login,executeTool){if(!login)return Promise.reject(Error('需要登录 AIChat'));return new Promise((resolve,reject)=>{pending.push({input,resolve,reject,executeTool});signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});});}}};
+    const messaging={setAgentRootResolver:resolve=>{messaging.resolveRoot=resolve;},watch:()=>()=>{},setAgentPrompt:()=>{},agentBindings:()=>[],detachAgent:()=>{},assertAgentBinding:()=>{},inboxView:()=>({conversations:[]}),workers:{answer(input,signal,login,executeTool){if(!login)return Promise.reject(Error('需要登录 AIChat'));return new Promise((resolve,reject)=>{pending.push({input,resolve,reject,executeTool});signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});});}}};
     const service=new Personas(home,sessions,messaging);t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
     service.upsert('owner',{id:'first',name:'我的分身',root:home,executor:'auto'});
     return {service,home,pending,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,setClient:value=>{client=value;}};
@@ -110,4 +110,21 @@ test('persona auto-approval cannot be injected by upsert and remains owner, root
     assert.equal(f.service.read('owner','first').cliApproval.scope,'always');
     assert.throws(()=>f.service.revokeApproval('other','first'),/不存在/);
     f.service.revokeApproval('owner','first');assert.equal(f.service.read('owner','first').cliApproval.scope,'ask');
+});
+
+
+test('new persona inherits shared brain while explicit clearing remains possible', t => {
+    const f = fixture(t);
+    const created = f.service.upsert('owner', {id:'shared',name:'Shared'});
+    assert.equal(created.root, fs.realpathSync(f.home));
+    assert.equal(f.service.upsert('owner', {id:'shared',name:'Shared',root:''}).root, '');
+});
+
+
+test('channel scope follows current persona brain, including restored clients and explicit clearing',t=>{
+ const f=fixture(t);
+ assert.equal(f.messaging.resolveRoot('owner','first'),fs.realpathSync(f.home));
+ assert.equal(f.messaging.resolveRoot('unknown','first'),'');
+ f.service.upsert('owner',{id:'first',name:'Persona',root:''});
+ assert.equal(f.messaging.resolveRoot('owner','first'),'');
 });

@@ -7,7 +7,7 @@ import { FeishuDelivery, feishuIdentity, pollFeishu, feishuConversation } from '
 import { DingTalkDelivery, dws, listenDws, loginDws, dingtalkConversation } from './messagingDingtalk';
 import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
 
-interface Binding { channel?: 'dingtalk' | 'feishu'; id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; rulesDir?: string; agentPrompt?: string }
+interface Binding { channel?: 'dingtalk' | 'feishu'; id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; peers?: {owner:string;agentId:string}[]; rulesDir?: string; agentPrompt?: string }
 interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; card?: string }
 interface RecentMessage { binding: string; channel: string; persona: string; profile: string; conversation: string; sender: string; direction: string; kind: string; relevant: boolean; text: string; reply: string; receipt: Receipt }
 interface Runtime { pollAbort?: AbortController; lastPollAt?: number; binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
@@ -38,7 +38,60 @@ export function messagingNeedsRepair(error: any): boolean {
 export function messagingNeedsLogin(error: any): boolean {
     return /Select a current DingTalk CLI account|invalid.?grant|invalid.?token|token.*expired|unauthenticated|unauthorized|login.required|未登录/i.test(String(error?.message || error) + ' ' + JSON.stringify(error?.detail || ''));
 }
+type Channel = 'dingtalk' | 'feishu';
+export class ChannelOccupiedError extends Error {
+    readonly code = 'CHANNEL_OCCUPIED';
+    readonly confirmationRequired: boolean;
+    constructor(readonly channel: Channel, readonly occupiedRoot: string, readonly requestedRoot: string) {
+        super(`${channel === 'dingtalk' ? 'DingTalk' : 'Feishu'} CLI is already occupied by ${occupiedRoot}. ${occupiedRoot === requestedRoot ? 'Stop its current listener before connecting another account.' : `Switch to ${requestedRoot}?`}`);
+        this.confirmationRequired = occupiedRoot !== requestedRoot;
+    }
+}
+export function channelConflict(error: unknown) {
+    return error instanceof ChannelOccupiedError ? {error:error.message,code:error.code,channel:error.channel,occupiedRoot:error.occupiedRoot,requestedRoot:error.requestedRoot,confirmationRequired:error.confirmationRequired} : null;
+}
 export class MessagingService {
+    private channelPaths: Partial<Record<Channel, string>> = {};
+    private switching = new Set<Channel>();
+    channelRoots() { return {...this.channelPaths}; }
+    private saveChannelRoots() {
+        const file = path.join(this.home, 'channel-roots.json');
+        fs.writeFileSync(file + '.tmp', JSON.stringify(this.channelPaths), {mode:0o600});
+        fs.renameSync(file + '.tmp', file);
+    }
+    private validRoot(root: string) {
+        if (!root || !path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw Error('Existing local second-brain directory required');
+        return fs.realpathSync(root);
+    }
+    private claimChannel(channel: Channel, value: string) {
+        const root = this.validRoot(value);
+        if (this.switching.has(channel)) throw Error('Channel switch in progress; retry after completion');
+        const occupied = this.channelPaths[channel];
+        if (occupied && occupied !== root) throw new ChannelOccupiedError(channel, occupied, root);
+        if (!occupied) { this.channelPaths[channel] = root; this.saveChannelRoots(); }
+        return root;
+    }
+    /** Explicit compare-and-switch only: ordinary connects and refreshes cannot rebind a CLI. */
+    async switchChannel(channel: Channel, value: string, expectedRoot: string) {
+        if (!['dingtalk','feishu'].includes(channel)) throw Error('Unknown channel');
+        const root = this.validRoot(value), occupied = this.channelPaths[channel];
+        if (!occupied || occupied !== expectedRoot) throw new ChannelOccupiedError(channel, occupied || '', root);
+        if (this.switching.has(channel)) throw Error('Channel switch in progress; retry after completion');
+        if (root === occupied) return;
+        this.switching.add(channel);
+        try {
+            const pending: Promise<unknown>[] = [];
+            for (const r of this.runs.values()) if ((r.binding.channel || 'dingtalk') === channel) {
+                if (r.starting) pending.push(r.starting);
+                this.stop(r.binding.id);
+            }
+            if (channel === 'dingtalk') pending.push(...this.logins.values());
+            await Promise.allSettled(pending);
+            if (this.closed) throw Error('Service closed');
+            this.channelPaths[channel] = root; this.saveChannelRoots();
+        } finally { this.switching.delete(channel); }
+    }
+
     private startGuard?: (binding: Binding) => Promise<boolean>;
     setStartGuard(guard: (binding: Binding) => Promise<boolean>) { this.startGuard = guard; }
     private suspended = new Set<string>();
@@ -65,13 +118,48 @@ export class MessagingService {
     private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; sends?: Record<string,string>; autoReplyTimes?: Record<string,number[]> }> = {};
     private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
     private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
-    agentBindings(owner:string,agentId:string){return this.list().filter(b=>b.agentOwner===owner&&b.agentId===agentId).map(b=>({...b,unread:this.box(b.id).messages.filter(m=>m.direction==='in'&&m.time>(this.box(b.id).read[m.conversation]||0)).length}));}
-    assertAgentBinding(owner:string,agentId:string,id:string){const b=this.get(id).binding;if(b.agentOwner!==owner||b.agentId!==agentId)throw Error('渠道不属于此分身');}
-    bindAgent(owner:string,agentId:string,id:string){const r=this.get(id);for(const other of this.runs.values())if((other.binding.channel||'dingtalk')===(r.binding.channel||'dingtalk')&&other.binding.profile===r.binding.profile&&other.binding.agentId&&(other.binding.agentOwner!==owner||other.binding.agentId!==agentId))throw Error('该身份已由其他分身使用');if(!/^[\w-]{1,160}$/.test(agentId))throw Error('Invalid Agent ID');
+    private agentRoot?: (owner:string,agentId:string)=>string;
+    setAgentRootResolver(resolve:(owner:string,agentId:string)=>string){this.agentRoot=resolve;}
+    private hasAgent(b:Binding,owner:string,agentId:string){
+        // In persona-backed clients the current verified brain is the shared channel scope.
+        // Reading status must not require a prior Connect action or persist a new peer.
+        if(this.agentRoot){try{return this.validRoot(this.agentRoot(owner,agentId))===this.validRoot(b.root);}catch{return false;}}
+        return (b.agentOwner===owner&&b.agentId===agentId)||!!b.peers?.some(p=>p.owner===owner&&p.agentId===agentId);
+    }
+    agentBindings(owner:string,agentId:string){return this.list().filter(b=>this.hasAgent(b,owner,agentId)).sort((a,b)=>(a.listening?0:a.enabled?1:2)-(b.listening?0:b.enabled?1:2)).map(b=>({...b,unread:this.box(b.id).messages.filter(m=>m.direction==='in'&&m.time>(this.box(b.id).read[m.conversation]||0)).length}));}
+    assertAgentBinding(owner:string,agentId:string,id:string){const b=this.get(id).binding;if(!this.hasAgent(b,owner,agentId))throw Error('渠道不属于此分身');}
+    bindAgent(owner:string,agentId:string,id:string,shareRoot=false){
+        const r=this.get(id);
+        if(!/^[\w-]{1,160}$/.test(agentId))throw Error('Invalid Agent ID');
+        if(r.binding.agentId && (r.binding.agentOwner!==owner || r.binding.agentId!==agentId)) {
+            if(!shareRoot)throw Error('该身份已由其他分身使用');
+            this.claimChannel(r.binding.channel||'dingtalk',r.binding.root);
+            if(!this.hasAgent(r.binding,owner,agentId)) (r.binding.peers ||= []).push({owner,agentId});
+            this.persist(r);return this.view(id);
+        }
         if(!r.binding.agentId){const rules=this.rules(id);const directory=RULE_DIR+'/agents/'+agentId+(r.binding.channel==='feishu'?'/feishu':'');let dir=r.binding.root;for(const part of directory.split('/')){dir=path.join(dir,part);if(fs.existsSync(dir))confined(r.binding.root,path.relative(r.binding.root,dir));else fs.mkdirSync(dir);}for(const [name,data] of [['config.json',JSON.stringify(rules.config,null,2)],['SKILL.md',rules.prompt]]){const file=path.join(dir,name);if(!fs.existsSync(file))fs.writeFileSync(file,data,{mode:0o600});else confined(r.binding.root,path.relative(r.binding.root,file));}r.binding.rulesDir=directory;}
         r.binding.agentOwner=owner;r.binding.agentId=agentId;this.persist(r);return this.view(id);}
     setAgentPrompt(owner:string,agentId:string,prompt:string){for(const r of this.runs.values())if(r.binding.agentOwner===owner&&r.binding.agentId===agentId){r.binding.agentPrompt=prompt;this.persist(r);}}
-    detachAgent(owner:string,agentId:string){for(const r of this.runs.values())if(r.binding.agentOwner===owner&&r.binding.agentId===agentId){this.stop(r.binding.id);delete r.binding.agentId;delete r.binding.agentOwner;delete r.binding.agentPrompt;delete this.inbox[r.binding.id];}this.saveInbox();this.persist();}
+    detachAgent(owner:string,agentId:string){
+        for(const r of this.runs.values()) {
+            r.binding.peers=r.binding.peers?.filter(p=>p.owner!==owner||p.agentId!==agentId);
+            if(r.binding.agentOwner!==owner||r.binding.agentId!==agentId)continue;
+            this.stop(r.binding.id);
+            const next=r.binding.peers?.shift();
+            if(next){r.binding.agentOwner=next.owner;r.binding.agentId=next.agentId;}
+            else {delete r.binding.agentId;delete r.binding.agentOwner;delete this.inbox[r.binding.id];}
+            delete r.binding.agentPrompt;
+        }
+        this.saveInbox();this.persist();
+    }
+    private async reuseChannel(channel:Channel,owner:string,agentId:string,root:string,prompt:string) {
+        const binding=[...this.runs.values()].find(r=>(r.binding.channel||'dingtalk')===channel&&r.binding.root===root&&r.binding.agentId)?.binding;
+        if(!binding)return null;
+        this.bindAgent(owner,agentId,binding.id,true);
+        this.setAgentPrompt(owner,agentId,prompt);
+        try{await this.start(binding.id);}catch(error){if(this.get(binding.id).status!=='reconnecting')throw error;}
+        return this.view(binding.id);
+    }
     inboxView(owner:string,agentId:string,id:string,conversation='',before=Infinity){this.assertAgentBinding(owner,agentId,id);const box=this.box(id);if(conversation){const rows=box.messages.filter(m=>m.conversation===conversation&&m.time<before).slice(-50);return {messages:rows,before:rows.length===50?rows[0].time:null,paused:box.paused.includes(conversation)};}
         const ids=[...new Set(box.messages.map(m=>m.conversation))];return {conversations:ids.map(key=>({id:key,last:box.messages.filter(m=>m.conversation===key).at(-1),unread:box.messages.filter(m=>m.conversation===key&&m.direction==='in'&&m.time>(box.read[key]||0)).length,paused:box.paused.includes(key)}))};}
     inboxAction(owner:string,agentId:string,id:string,conversation:string,action:string){this.assertAgentBinding(owner,agentId,id);const box=this.box(id),r=this.get(id);if(action==='read')box.read[conversation]=Date.now();
@@ -92,6 +180,18 @@ export class MessagingService {
         fs.mkdirSync(home, { recursive: true });
         try { this.inbox=JSON.parse(fs.readFileSync(path.join(home,'inbox.json'),'utf8'));for(const box of Object.values(this.inbox))for(const m of box.messages)if(m.state==='sending')m.state='unknown'; } catch { /* first run */ }
         try { for (const b of JSON.parse(fs.readFileSync(path.join(home, 'bindings.json'), 'utf8'))) this.add(b); } catch { /* no configuration */ }
+        try {
+            const saved = JSON.parse(fs.readFileSync(path.join(home, 'channel-roots.json'), 'utf8'));
+            for (const channel of ['dingtalk','feishu'] as Channel[]) if (typeof saved[channel] === 'string' && path.isAbsolute(saved[channel])) this.channelPaths[channel] = saved[channel];
+        } catch { /* Upgrade: retain the first enabled binding, never follow chat presence. */ }
+        const restored = new Set<Channel>();
+        for (const r of this.runs.values()) if (r.binding.enabled) {
+            const channel = r.binding.channel || 'dingtalk';
+            if (!this.channelPaths[channel]) { try { this.channelPaths[channel] = this.validRoot(r.binding.root); } catch { r.binding.enabled = false; } }
+            if (this.channelPaths[channel] !== r.binding.root || restored.has(channel)) r.binding.enabled = false;
+            if (r.binding.enabled) restored.add(channel);
+        }
+        this.saveChannelRoots();
     }
     resume() { for (const r of this.runs.values()) if (r.binding.enabled) void this.start(r.binding.id).catch(() => {}); }
     private add(binding: Binding) {
@@ -131,6 +231,8 @@ export class MessagingService {
     configure(input: { channel?: 'dingtalk' | 'feishu'; root: string; profile: string; config: MessageConfig; prompt: string }) {
         if (!path.isAbsolute(input.root) || !fs.statSync(input.root).isDirectory()) throw new Error('Existing local second-brain directory required');
         const root = fs.realpathSync(input.root);
+        const channel = input.channel || 'dingtalk', occupied = this.channelPaths[channel];
+        if (occupied && occupied !== root) throw new ChannelOccupiedError(channel, occupied, root);
         if(input.channel && !['dingtalk','feishu'].includes(input.channel))throw Error('Unknown channel');
         if (!/^[^\s,:]+:[^\s,:]+$/.test(input.profile)) throw new Error('Select a stable corpId:userId profile');
         const config = configValue(input.config);
@@ -149,10 +251,10 @@ export class MessagingService {
     }
     async loginAgent(owner: string, agentId: string, root: string, prompt: string) {
         if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Existing local second-brain directory required');
-        root = fs.realpathSync(root);
+        root = this.claimChannel('dingtalk', root);
         const key = owner + '\0' + agentId;
         if (this.logins.has(key)) return this.logins.get(key);
-        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root && (b.channel||'dingtalk') === 'dingtalk');
+        const existing = this.list().filter(b => this.hasAgent(b,owner,agentId) && b.root === root && (b.channel||'dingtalk') === 'dingtalk');
         if (existing.length > 1) throw new Error('Multiple DingTalk bindings; select the account in settings');
         const pending = loginDws(root, existing[0]?.profile).then(() => {
             if (this.closed) throw new Error('Service closed');
@@ -162,20 +264,22 @@ export class MessagingService {
     }
     async connectAgent(owner: string, agentId: string, root: string, prompt: string) {
         if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Existing local second-brain directory required');
-        root = fs.realpathSync(root);
-        const existing = this.list().filter(b => b.agentOwner === owner && b.agentId === agentId && b.root === root && (b.channel||'dingtalk') === 'dingtalk');
+        root = this.claimChannel('dingtalk', root);
+        const shared=await this.reuseChannel('dingtalk',owner,agentId,root,prompt);if(shared)return shared;
+        const existing = this.list().filter(b => this.hasAgent(b,owner,agentId) && b.root === root && (b.channel||'dingtalk') === 'dingtalk');
         if (existing.length > 1) throw new Error('Multiple DingTalk bindings; select the account in settings');
         let binding = existing[0];
         if (!binding) {
             const profiles = await this.profiles(root);
+            this.claimChannel('dingtalk',root);
             const current = profiles.filter(p => p.current);
             const selected = current.length === 1 ? current[0] : profiles.length === 1 ? profiles[0] : null;
             if (!selected) throw new Error('Select a current DingTalk CLI account before connecting');
-            const occupied = this.list().find(b => b.profile === selected.id && b.agentId && (b.agentOwner !== owner || b.agentId !== agentId));
-            if (occupied) throw new Error('该身份已由其他分身使用');
+            const occupied = this.list().find(b => b.root === root && (b.channel || 'dingtalk') === 'dingtalk' && b.profile === selected.id && b.agentId && (b.agentOwner !== owner || b.agentId !== agentId));
+            if (occupied) return this.reuseChannel('dingtalk',owner,agentId,root,prompt);
             binding = this.list().find(b => b.root === root && b.profile === selected.id)!;
             if (!binding) binding = this.configure({ root, profile: selected.id, ...this.defaults(root) });
-            this.bindAgent(owner, agentId, binding.id);
+            this.bindAgent(owner, agentId, binding.id,true);
         }
         this.setAgentPrompt(owner, agentId, prompt);
         try { await this.start(binding.id); } catch(error) { if (this.get(binding.id).status !== 'reconnecting') throw error; }
@@ -183,21 +287,24 @@ export class MessagingService {
     }
     async connectFeishuAgent(owner:string,agentId:string,root:string,prompt:string) {
         if(!path.isAbsolute(root)||!fs.statSync(root).isDirectory())throw Error('Existing local second-brain directory required');
-        root=fs.realpathSync(root);
+        root=this.claimChannel('feishu', root);
+        const shared=await this.reuseChannel('feishu',owner,agentId,root,prompt);if(shared)return shared;
         let binding=this.list().find(b=>b.channel==='feishu'&&b.agentOwner===owner&&b.agentId===agentId&&b.root===root);
         if(!binding){
             const identity=await feishuIdentity(root);
+            this.claimChannel('feishu',root);
             binding=this.list().find(b=>b.channel==='feishu'&&b.root===root&&b.profile===identity.id);
             if(!binding)binding=this.configure({channel:'feishu',root,profile:identity.id,...this.defaults(root)});
-            this.bindAgent(owner,agentId,binding.id);
+            this.bindAgent(owner,agentId,binding.id,true);
         }
         this.setAgentPrompt(owner,agentId,prompt);
         try{await this.start(binding.id);}catch(error){if(this.get(binding.id).status!=='reconnecting')throw error;}
         return this.view(binding.id);
     }
-    private delivery(r:Runtime){return r.binding.channel==='feishu'?new FeishuDelivery(r.binding.root,r.binding.profile):new DingTalkDelivery(r.binding.root,r.binding.profile);}
+    private delivery(r:Runtime){this.claimChannel(r.binding.channel||'dingtalk',r.binding.root);return r.binding.channel==='feishu'?new FeishuDelivery(r.binding.root,r.binding.profile):new DingTalkDelivery(r.binding.root,r.binding.profile);}
     async profiles(root: string) {
         if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Local second-brain directory required');
+        root = this.claimChannel('dingtalk', root);
         let result: any;
         for (let attempt = 0; ; attempt++) {
             try { result = await dws(['profile','list','-f','json'], root); break; }
@@ -216,6 +323,7 @@ export class MessagingService {
         if (!path.isAbsolute(root) || !fs.statSync(root).isDirectory()) throw new Error('Local second-brain directory required');
         if (!/^[^\s,:]+:[^\s,:]+$/.test(profile)) throw new Error('Select a stable corpId:userId profile');
         if (query.length > 200) throw new Error('Group query too long');
+        root = this.claimChannel('dingtalk', root);
         const args = query ? ['chat','+chat-search','--query',query,'--limit','50'] : ['chat','+chat-list','--types','group','--page-size','50'];
         const result = await dws([...args,'--profile',profile,'-f','json'],root);
         const groups = new Map<string,{id:string;name:string}>();
@@ -223,7 +331,11 @@ export class MessagingService {
         walk(result); return [...groups.values()].slice(0,50);
     }
     async start(id: string) {
-        const r = this.get(id); if (r.starting) return r.starting;
+        const r = this.get(id);
+        this.claimChannel(r.binding.channel || 'dingtalk', r.binding.root);
+        for (const other of this.runs.values()) if (other !== r && (other.binding.channel || 'dingtalk') === (r.binding.channel || 'dingtalk') && (other.binding.enabled || other.starting))
+            throw new ChannelOccupiedError(r.binding.channel || 'dingtalk', other.binding.root, r.binding.root);
+        if (r.starting) return r.starting;
         if (r.status === 'listening') return;
         clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined;
         r.binding.enabled = true; this.persist(r);

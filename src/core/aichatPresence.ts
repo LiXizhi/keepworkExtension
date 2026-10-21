@@ -1,5 +1,7 @@
 import * as http from 'node:http';
 import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 function presenceOriginAllowed(origin: string): boolean {
     try {
@@ -25,6 +27,20 @@ interface StoredClient extends AichatClient {
 
 let current: StoredClient | null = null;
 const owners = new Map<string,StoredClient>();
+const connectionOrder = new Map<string, number>();
+let nextConnection = 0;
+let brain = { order: 0, root: '' };
+
+function validBrainPath(value: unknown): string {
+    if (typeof value !== 'string' || !path.isAbsolute(value)) return '';
+    try { return fs.statSync(value).isDirectory() ? fs.realpathSync(value) : ''; }
+    catch { return ''; }
+}
+
+/** Shared local default, independent of login ownership and periodic refresh order. */
+export function latestAichatBrainRoot(): string {
+    return validBrainPath(brain.root);
+}
 
 export function sanitizeClientUrl(value: string): string {
     const url = new URL(value);
@@ -49,16 +65,22 @@ function sanitizeDefaultExecutor(value: { backend?: string; model?: string } | u
     return { backend: String(value.backend), model: typeof value.model === 'string' ? value.model.slice(0,256) : '' };
 }
 
-export function rememberAichatClient(input: { sessionId: string; url: string; token: string; baseURL?: string; owner?: string; origin?: string; handler?: boolean; defaultExecutor?: { backend?: string; model?: string } }): void {
+export function rememberAichatClient(input: { sessionId: string; url: string; token: string; baseURL?: string; owner?: string; origin?: string; handler?: boolean; brainRoot?: string; defaultExecutor?: { backend?: string; model?: string } }): void {
     if (input.handler) return;
     const token = String(input.token || '');
     if (!input.sessionId || !token || token.length > 8192) throw new Error('AIChat login required');
     current = { sessionId: input.sessionId, url: sanitizeClientUrl(input.url), token, baseURL: sanitizeBase(input.baseURL), defaultExecutor: sanitizeDefaultExecutor(input.defaultExecutor), seenAt: Date.now() };
+    if (!connectionOrder.has(input.sessionId)) connectionOrder.set(input.sessionId, ++nextConnection);
+    const order = connectionOrder.get(input.sessionId)!;
+    const root = validBrainPath(input.brainRoot);
+    if (root && order >= brain.order) brain = { order, root };
     if (/^[a-zA-Z0-9-]{32,128}$/.test(input.owner || '') && input.origin) owners.set(createHash('sha256').update(input.origin+'\0'+input.owner).digest('hex'),current);
 }
 
 /** Closing or pruning the MCP session must not drop the last page URL and login. */
-export function noteAichatSessionClosed(_sessionId?: string): void {}
+export function noteAichatSessionClosed(sessionId?: string): void {
+    if (sessionId) connectionOrder.delete(sessionId);
+}
 
 export function latestAichatClient(owner?: string): AichatClient | null {
     const client = owner ? owners.get(owner) : current;
@@ -94,8 +116,8 @@ export async function tryHandleAichatPresence(req: http.IncomingMessage, res: ht
             if (size > 16384) throw new Error('Request too large');
             chunks.push(Buffer.from(chunk));
         }
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { url?: string; token?: string; baseURL?: string; owner?: string; origin?: string; handler?: boolean; defaultExecutor?: { backend?: string; model?: string } };
-        rememberAichatClient({ sessionId, url: String(body?.url || ''), token: String(body?.token || ''), baseURL: body?.baseURL, handler: body?.handler === true, defaultExecutor: body?.defaultExecutor, owner: body?.owner, origin: String(req.headers.origin||'') });
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { url?: string; token?: string; baseURL?: string; owner?: string; origin?: string; handler?: boolean; brainRoot?: string; defaultExecutor?: { backend?: string; model?: string } };
+        rememberAichatClient({ sessionId, url: String(body?.url || ''), token: String(body?.token || ''), baseURL: body?.baseURL, handler: body?.handler === true, brainRoot: body?.brainRoot, defaultExecutor: body?.defaultExecutor, owner: body?.owner, origin: String(req.headers.origin||'') });
         if (new URL(req.url || '/', 'http://localhost').searchParams.get('stream') !== '1') {
             respond(200, aichatPresenceView());
         } else {

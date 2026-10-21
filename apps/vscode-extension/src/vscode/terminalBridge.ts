@@ -81,6 +81,12 @@ async function runInVscodeTerminal(opts: {
     timeoutMs: number;
 }): Promise<TerminalResult> {
     const terminal = getKeepworkTerminal(opts.cwd);
+    // cmd.exe can display output but does not provide VS Code shell-integration
+    // completion markers. Never dispatch there and then replay after a timeout.
+    const shellPath = (terminal.creationOptions as vscode.TerminalOptions).shellPath || vscode.env.shell || '';
+    if (process.platform === 'win32' && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(shellPath)) {
+        throw new Error('vscode-terminal-unavailable');
+    }
     terminal.show(true);
     const si = await waitForShellIntegration(terminal, 4000) as {
         executeCommand?: (commandLine: string) => { read(): AsyncIterable<string> };
@@ -89,48 +95,75 @@ async function runInVscodeTerminal(opts: {
         throw new Error('vscode-terminal-unavailable');
     }
     const line = commandWithCwd(opts.command, opts.cwd);
-    const execution = si.executeCommand(line);
     let stdout = '';
     let truncated = false;
     let timedOut = false;
     let exitCode: number | null = null;
-
-    const windowAny = vscode.window as unknown as {
-        onDidEndTerminalShellExecution?: (
-            listener: (e: { execution: unknown; exitCode?: number | undefined }) => void,
-        ) => vscode.Disposable;
-    };
-    const endListener = windowAny.onDidEndTerminalShellExecution?.((e) => {
-        if (e.execution === execution) exitCode = typeof e.exitCode === 'number' ? e.exitCode : null;
+    let failure = '';
+    let finished = false;
+    let ended = false;
+    let streamEnded = false;
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    let finish!: () => void;
+    const done = new Promise<void>(resolve => { finish = () => { finished = true; resolve(); }; });
+    let execution: { read(): AsyncIterable<string> } | undefined;
+    const endListener = vscode.window.onDidEndTerminalShellExecution?.(e => {
+        if (e.execution !== execution) return;
+        exitCode = e.exitCode ?? null;
+        ended = true;
+        // Drain already queued output, but do not depend on the reader closing.
+        clearTimeout(timer);
+        if (streamEnded) finish();
+        else drainTimer = setTimeout(finish, 50);
     });
-
-    const timer = setTimeout(() => { timedOut = true; }, opts.timeoutMs);
+    const closeListener = vscode.window.onDidCloseTerminal(t => {
+        if (t !== terminal) return;
+        failure = 'VS Code terminal closed before command completion; command not retried.';
+        finish();
+    });
+    // A real deadline resolves independently of iterator.next(), including when
+    // output has appeared but shell integration never closes its stream.
+    const timer = setTimeout(() => {
+        timedOut = true;
+        failure = 'Timeout waiting for VS Code terminal completion; command may still be running and was not retried.';
+        finish();
+    }, opts.timeoutMs);
     try {
-        for await (const chunk of execution.read()) {
-            stdout += chunk;
+        execution = si.executeCommand(line);
+        const iterator = execution.read()[Symbol.asyncIterator]();
+        while (!finished) {
+            const next = await Promise.race([iterator.next(), done.then(() => null)]);
+            if (!next || finished) break;
+            if (next.done) {
+                streamEnded = true;
+                // Completion/exit code comes from onDidEndTerminalShellExecution.
+                if (ended) finish();
+                else await done;
+                break;
+            }
+            stdout += next.value;
             if (stdout.length > OUTPUT_CHAR_CAP) {
                 stdout = stdout.slice(0, OUTPUT_CHAR_CAP);
                 truncated = true;
-                break;
+                failure = 'VS Code terminal output limit reached; command not retried.';
+                finish();
             }
-            if (timedOut) break;
         }
+    } catch (err) {
+        // Once dispatch was attempted, never signal safe-to-replay to the daemon.
+        failure = `VS Code terminal execution could not be observed: ${err instanceof Error ? err.message : String(err)}. Command not retried.`;
     } finally {
+        finished = true;
         clearTimeout(timer);
+        if (drainTimer) clearTimeout(drainTimer);
         endListener?.dispose();
+        closeListener.dispose();
     }
-
     return {
-        ok: !timedOut && (exitCode ?? 0) === 0,
-        command: opts.command,
-        cwd: opts.cwd,
-        exitCode: timedOut ? 1 : (exitCode ?? 0),
-        signal: null,
-        stdout,
-        stderr: timedOut ? 'timeout waiting for VS Code terminal' : '',
-        timedOut,
-        truncated,
-        via: 'vscode-terminal',
+        ok: !failure && exitCode === 0,
+        command: opts.command, cwd: opts.cwd, exitCode, signal: null,
+        stdout, stderr: failure || (exitCode === null ? 'VS Code did not report an exit code; command not retried.' : ''),
+        timedOut, truncated, via: 'vscode-terminal',
     };
 }
 
@@ -170,7 +203,7 @@ export function startTerminalBridge(): TerminalBridgeHandle {
             sendJson(res, 200, result);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            sendJson(res, 503, { error: msg });
+            sendJson(res, 503, { error: msg, executed: false });
         }
     });
 

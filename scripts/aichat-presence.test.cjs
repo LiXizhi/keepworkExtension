@@ -73,3 +73,30 @@ test('owner worker login is scoped by Origin and owner capability',()=>{
     const key=createHash('sha256').update(origin+'\0'+owner).digest('hex');
     assert.equal(latestAichatClient(key).token,'owner-only');assert.equal(latestAichatClient('different-owner'),null);
 });
+
+
+test('latest connected valid brain survives old refreshes, invalid paths, handlers and disconnect', t => {
+    const os = require('node:os');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'presence-brain-'));
+    t.after(() => fs.rmSync(home, {recursive:true, force:true}));
+    const first = path.join(home, 'first'), second = path.join(home, 'second');
+    fs.mkdirSync(first); fs.mkdirSync(second);
+    const {latestAichatBrainRoot, noteAichatSessionClosed} = mod.exports;
+    const register = (sessionId, brainRoot, extra = {}) => rememberAichatClient({sessionId, brainRoot, url:'https://keepwork.com/chat', token:'fixture', ...extra});
+    register('brain-old', first);
+    register('brain-new', second);
+    assert.equal(latestAichatBrainRoot(), fs.realpathSync(second));
+    register('brain-old', first);
+    register('brain-missing', path.join(home, 'missing'));
+    register('brain-relative', '.');
+    register('brain-file', __filename);
+    register('brain-handler', first, {handler:true});
+    register('brain-empty', '');
+    assert.equal(latestAichatBrainRoot(), fs.realpathSync(second));
+    noteAichatSessionClosed('brain-new');
+    assert.equal(latestAichatBrainRoot(), fs.realpathSync(second));
+    register('brain-reconnect', first);
+    assert.equal(latestAichatBrainRoot(), fs.realpathSync(first));
+    fs.rmdirSync(first);
+    assert.equal(latestAichatBrainRoot(), '');
+});

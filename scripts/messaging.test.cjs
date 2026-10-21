@@ -21,7 +21,7 @@ function fixture(t, channel = 'dingtalk') {
     class BeforeSubmission extends Error {}
     const serviceModule=load('messaging',{
         './messagingFeishu':{feishuContext:load('messagingFeishu').feishuContext,feishuConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},feishuIdentity:async()=>({id:'corp:user',self:'owner'}),pollFeishu:async(_r,_p,_f,event)=>{events.push(event);return()=>{};},FeishuDelivery:class{async create(){cards.push('created');return 'test-card';}async send(...args){sent.push(args);}}},
-        './aichatPresence':{latestAichatClient:()=>null},
+        './aichatPresence':{latestAichatClient:()=>null,latestAichatBrainRoot:()=>root},
         './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
         './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve(answerText);};pending.push({input,end});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
     });
@@ -334,7 +334,9 @@ test('connectAgent reuses current CLI account and saved rules, starts once and p
     assert.deepEqual(f.service.rules(first.id).config.knowledge,['public']);
     const again=await f.service.connectAgent('owner','default-persona',f.root,'Persona prompt');
     assert.equal(again.id,first.id);assert.equal(f.events.length,1);assert.equal(profiles,1);
-    await assert.rejects(f.service.connectAgent('another','default-persona',f.root,'Other'),/其他分身/);
+    const shared=await f.service.connectAgent('another','default-persona',f.root,'Other');
+    assert.equal(shared.id,first.id);assert.equal(f.events.length,1);assert.equal(profiles,1);
+    assert.equal(shared.agentOwner,'owner');assert.equal(shared.agentPrompt,'Persona prompt');
 });
 test('empty public selection allows personal-event replies without reading any brain files',async t=>{
     const f=fixture(t);
@@ -397,7 +399,7 @@ test('restart restores enabled disk bindings without AIChat and waits for an exi
     assert.equal(f.events.length,2);
 });
 test('authorization and missing CLI need repair; transient transport failures remain automatic',()=>{
-    const {messagingNeedsRepair}=load('messaging',{'./aichatPresence':{latestAichatClient:()=>null},'./messagingExecutor':{}});
+    const {messagingNeedsRepair}=load('messaging',{'./aichatPresence':{latestAichatClient:()=>null,latestAichatBrainRoot:()=>root},'./messagingExecutor':{}});
     assert.equal(messagingNeedsRepair(Error('DWS CLI unavailable')),true);
     assert.equal(messagingNeedsRepair({message:'DWS rejected the operation',detail:{code:'invalid_grant'}}),true);
     assert.equal(messagingNeedsRepair(Error('Listener disconnected')),false);
@@ -439,7 +441,7 @@ test('Feishu persisted binding owns polling, inbox, delivery and cached status i
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-feishu-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const root=path.join(dir,'brain');fs.mkdirSync(root);let checks=0,stops=0,receive;const sent=[];
  const module=load('messaging',{
-  './aichatPresence':{latestAichatClient:()=>null},
+  './aichatPresence':{latestAichatClient:()=>null,latestAichatBrainRoot:()=>root},
   './messagingFeishu':{feishuContext:load('messagingFeishu').feishuContext,feishuConversation:async(_r,_p,target)=>[target],feishuIdentity:async()=>{checks++;return {id:'app:person',self:'person'};},pollFeishu:async(_r,_p,_f,onMessage,_error,onPoll)=>{receive=onMessage;onPoll(Date.now());return()=>stops++;},FeishuDelivery:class{async create(){return '';}async send(...args){sent.push(args);}}},
   './messagingExecutor':{messagingExecutorChoice:()=>({backend:'aichat'}),MessagingWorkers:class{async answer(){return 'fixture answer';}close(){}}}
  });
@@ -656,4 +658,110 @@ test('DingTalk reader verifies identity, normalizes own userId, deduplicates thr
  assert.ok(calls[1].includes('--open-dingtalk-id'));assert.ok(calls[2].includes('cid'));assert.ok(calls.every(args=>args.includes('corp:user')));
  fail=true;await assert.rejects(dingtalkConversation('.','corp:user',target,undefined,call),/不完整/);
  fail=false;identityChanged=true;const count=calls.length;await assert.rejects(dingtalkConversation('.','corp:user',target,undefined,call),/identity/);assert.equal(calls.length,count+1);
+});
+
+
+
+test('channels reject missing roots and never borrow a recent chat brain', async t => {
+    const f=fixture(t);
+    assert.throws(()=>f.service.configure({root:'',profile:'corp:user',config:policy.defaultMessageConfig(),prompt:policy.DEFAULT_PROMPT}),/directory required/);
+    await assert.rejects(f.service.profiles(''),/directory required/);
+    await assert.rejects(f.service.connectFeishuAgent('owner','agent','','prompt'),/directory required/);
+    assert.deepEqual(f.service.channelRoots(),{});
+});
+
+for(const channel of ['dingtalk','feishu']) test(channel+' pins its brain, conflicts without side effects, and switches only with the expected old root',async t=>{
+ const f=fixture(t,channel), next=path.join(path.dirname(f.root),'next');fs.mkdirSync(next);
+ const connect=root=>channel==='feishu'?f.service.connectFeishuAgent('owner','agent',root,'prompt'):f.service.connectAgent('owner','agent',root,'prompt');
+ const first=await connect(f.root);
+ assert.equal(f.service.channelRoots()[channel],fs.realpathSync(f.root));
+ await assert.rejects(connect(next),e=>e.code==='CHANNEL_OCCUPIED'&&e.occupiedRoot===fs.realpathSync(f.root)&&e.requestedRoot===fs.realpathSync(next)&&e.confirmationRequired);
+ assert.equal(f.service.view(first.id).enabled,true);
+ await assert.rejects(f.service.switchChannel(channel,next,'stale-root'),e=>e.code==='CHANNEL_OCCUPIED');
+ assert.equal(f.service.view(first.id).enabled,true);
+ await f.service.switchChannel(channel,next,fs.realpathSync(f.root));
+ assert.equal(f.service.view(first.id).enabled,false);
+ const second=await connect(next);assert.equal(second.root,fs.realpathSync(next));
+ await assert.rejects(f.service.start(first.id),e=>e.code==='CHANNEL_OCCUPIED');
+ f.service.stop(second.id);
+ assert.equal(f.createService().channelRoots()[channel],fs.realpathSync(next),'restart and stop retain ownership');
+});
+
+test('concurrent different brains cannot both claim DingTalk and stale switch confirmation cannot steal it',async t=>{
+ const f=fixture(t),next=path.join(path.dirname(f.root),'other');fs.mkdirSync(next);
+ const results=await Promise.allSettled([f.service.connectAgent('owner','one',f.root,'prompt'),f.service.connectAgent('other','two',next,'prompt')]);
+ assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+ assert.equal(results[1].reason.code,'CHANNEL_OCCUPIED');
+ const a=f.service.switchChannel('dingtalk',next,fs.realpathSync(f.root));
+ await assert.rejects(f.service.connectAgent('third','three',f.root,'prompt'),/switch in progress/);
+ await a;
+ await assert.rejects(f.service.switchChannel('dingtalk',f.root,fs.realpathSync(f.root)),e=>e.code==='CHANNEL_OCCUPIED');
+});
+
+
+for(const channel of ['dingtalk','feishu'])test(channel+' shares one listener across chat owners at the same brain, persisting access without replacing the responder',async t=>{
+ const f=fixture(t,channel);
+ const connect=(service,owner,id,prompt)=>channel==='feishu'?service.connectFeishuAgent(owner,id,f.root,prompt):service.connectAgent(owner,id,f.root,prompt);
+ const first=await connect(f.service,'first','main','Original prompt');
+ const second=await connect(f.service,'second','other','Must not replace original');
+ assert.equal(second.id,first.id);assert.equal(f.events.length,1);
+ assert.equal(second.agentOwner,'first');assert.equal(second.agentPrompt,'Original prompt');
+ assert.equal(f.service.agentBindings('second','other')[0].id,first.id);
+ assert.doesNotThrow(()=>f.service.assertAgentBinding('second','other',first.id));
+ assert.throws(()=>f.service.assertAgentBinding('stranger','other',first.id));
+ await connect(f.service,'second','other','Repeated');assert.equal(f.service.view(first.id).peers.length,1);
+ const restarted=f.createService();assert.equal(restarted.agentBindings('second','other')[0].id,first.id);
+ f.service.detachAgent('second','other');assert.equal(f.service.view(first.id).listening,true);assert.equal(f.service.agentBindings('second','other').length,0);
+ const otherRoot=path.join(path.dirname(f.root),'different');fs.mkdirSync(otherRoot);
+ const different=channel==='feishu'?f.service.connectFeishuAgent('third','third',otherRoot,'x'):f.service.connectAgent('third','third',otherRoot,'x');
+ await assert.rejects(different,e=>e.code==='CHANNEL_OCCUPIED');
+});
+
+
+for(const channel of ['dingtalk','feishu'])test(channel+' status is shared by current brain before Connect and follows live state without CLI probes',async t=>{
+ const f=fixture(t,channel), roots=new Map([['first',f.root],['second',path.join(f.root,'.')],['foreign',path.dirname(f.root)]]);
+ f.service.setAgentRootResolver(owner=>roots.get(owner)||'');
+ await f.service.start(f.binding.id);
+ const checks=f.statusChecks,events=f.events.length;
+ const first=f.service.agentBindings('first','default-persona'),second=f.service.agentBindings('second','default-persona');
+ assert.deepEqual(second,first);assert.equal(second[0].status,'listening');assert.equal(second[0].listening,true);
+ assert.equal(f.service.agentBindings('foreign','default-persona').length,0);
+ assert.equal(f.service.agentBindings('unknown','default-persona').length,0);
+ assert.doesNotThrow(()=>f.service.assertAgentBinding('second','default-persona',f.binding.id));
+ let notifications=0;const unwatch=f.service.watch(()=>notifications++,()=>{});
+ f.service.stop(f.binding.id);
+ assert.equal(f.service.agentBindings('first','default-persona')[0].status,'stopped');
+ assert.equal(f.service.agentBindings('second','default-persona')[0].status,'stopped');assert.ok(notifications>0);
+ assert.equal(f.statusChecks,checks);assert.equal(f.events.length,events);assert.equal(f.service.view(f.binding.id).peers,undefined);
+ roots.set('second','');assert.equal(f.service.agentBindings('second','default-persona').length,0);
+ assert.throws(()=>f.service.assertAgentBinding('second','default-persona',f.binding.id));
+ unwatch();
+});
+
+
+test('persona snapshots and notifications agree across clients before either client connects',async t=>{
+ const f=fixture(t);
+ const {Personas}=load('personas',{'./aichatPresence':{latestAichatBrainRoot:()=>'',latestAichatClient:()=>null},'./terminal':{}});
+ const personas=new Personas(path.join(path.dirname(f.root),'personas'),{},f.service);t.after(()=>personas.close());
+ for(const owner of ['one','two'])personas.upsert(owner,{id:'default-persona',name:owner,root:f.root});
+ let first=0,second=0;personas.watch('one',()=>first++,()=>{});personas.watch('two',()=>second++,()=>{});
+ await f.service.start(f.binding.id);
+ const checks=f.statusChecks;
+ assert.deepEqual(personas.list('one')[0].channels,personas.read('two','default-persona').channels);
+ assert.equal(personas.read('two','default-persona').channels[0].status,'listening');
+ assert.ok(first>0&&second>0);first=second=0;
+ f.service.stop(f.binding.id);
+ assert.equal(personas.read('one','default-persona').channels[0].status,'stopped');
+ assert.equal(personas.read('two','default-persona').channels[0].status,'stopped');assert.ok(first>0&&second>0);
+ personas.upsert('two',{id:'default-persona',name:'two',root:''});
+ assert.deepEqual(personas.read('two','default-persona').channels,[]);
+ assert.equal(f.statusChecks,checks);assert.equal(f.service.view(f.binding.id).agentOwner,undefined);
+});
+
+test('shared channel snapshot places the live binding before old stopped profiles',async t=>{
+ const f=fixture(t,'feishu');f.service.setAgentRootResolver(()=>f.root);
+ const newer=f.service.configure({channel:'feishu',root:f.root,profile:'corp:new',config:policy.defaultMessageConfig(),prompt:policy.DEFAULT_PROMPT});
+ await f.service.start(newer.id);
+ const rows=f.service.agentBindings('new-client','default-persona');
+ assert.equal(rows[0].id,newer.id);assert.equal(rows[0].listening,true);assert.equal(rows[1].status,'stopped');
 });

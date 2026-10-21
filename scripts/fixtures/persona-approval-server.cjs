@@ -8,7 +8,7 @@ const {handlePersonaHttp}=require('../../src/mcp/personaHttp.ts');
 const home=fs.mkdtempSync(path.join(os.tmpdir(),'persona-approval-e2e-'));
 let native=new CodexHarness(process.execPath,[path.join(__dirname,'fake-codex-approval.cjs'),path.join(home,'fixture-rules.json')]);
 let sessions=new AgentSessions(path.join(home,'sessions.json'),native);
-const messaging={watch:()=>()=>{},agentBindings:()=>[],setAgentPrompt:()=>{},detachAgent:()=>{}};
+const messaging={setAgentRootResolver:()=>{},watch:()=>()=>{},agentBindings:()=>[],setAgentPrompt:()=>{},detachAgent:()=>{}};
 let personas=new Personas(path.join(home,'personas'),sessions,messaging);
 let rejectNext=false;
 const server=http.createServer(async(req,res)=>{

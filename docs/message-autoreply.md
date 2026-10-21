@@ -201,3 +201,26 @@ Dashboard 渠道卡片默认展示账号与公司名。已启用的绑定只提�
 
 
 钉钉扩展验证：两渠道定向回归 23 项全部通过，`npm run check:shared` 和 `git diff --check` 通过。消息/分身完整套件 75 项中 74 项通过，既有 `real headless browser completes sequential worker handshakes and retains the browser` 用例在 30 秒后超时；不能将本次完整套件报告为通过。该浏览器用例单独复核通过（1/1），保留完整运行的超时记录。未做真实账号发消息验收。
+
+
+## Single channel brain binding
+
+Each daemon-managed DingTalk/Feishu channel reserves one canonical existing local second-brain directory before invoking its CLI. There is no recent-chat/default-workspace fallback. The two channels have independent reservations, persisted in `channel-roots.json`; disconnect, browser close, daemon restart and new chat presence do not clear or replace them. Dashboard channel cards display `root`; account status probes do not execute without a valid pinned root.
+
+A different directory returns HTTP 409 `{code:"CHANNEL_OCCUPIED", channel, occupiedRoot, requestedRoot, confirmationRequired:true, error}` before starting another listener. AIChat must show the paths and ask whether to switch. After explicit user confirmation, retry persona `channel-connect`/`channel-login`, `/messaging/start`, or dashboard `/admin/channels/connection` with `switchFromRoot` equal to the displayed occupied root. The server checks that value again, stops old channel bindings and pending starts, and persists the new reservation before connecting. A stale confirmation cannot overwrite a newer reservation. Configuration and old-binding restarts cannot silently restore the old directory. Login/session ownership and explicit persona roots remain unchanged.
+
+Verification: `node --test scripts/messaging.test.cjs scripts/channel-status.test.cjs scripts/client-supervisor.test.cjs scripts/dashboard.test.cjs`; isolated UI fixture: `node --test scripts/channel-binding-http.test.cjs scripts/channel-binding-browser.test.cjs`. The fixture exercises displayed paths, cancel and confirm without real accounts or messages.
+
+
+### Same-brain connection reuse regression
+
+A browser's owner capability and persona ID are not a second-brain path conflict. `channel-connect` for the same canonical brain now joins the existing DingTalk/Feishu binding and reuses its listener. The joining owner/persona is persisted as an authorized peer so subsequent status and inbox requests succeed; repeated joins are idempotent. The original automatic responder and prompt remain unchanged, preventing duplicate replies or a second chat silently replacing the responder. Removing a peer leaves the listener running; removing the primary responder stops it before another peer can resume. Different brain paths still require the explicit switch flow above.
+
+Regression: `scripts/messaging.test.cjs` cases `connectAgent reuses...` and both `shares one listener...` cases cover cross-owner reuse, one listener, unchanged responder, persistent membership, unauthorized access rejection, peer removal and different-root conflicts. This fixes the false “该身份已由其他分身使用” shown when AIChat and the dashboard already used the same brain directory.
+
+
+### Brain-scoped state display
+
+Persona channel snapshots and channel access resolve the persona's current canonical local brain path from the server's persona registry, rather than requiring a previous Connect call or a matching browser owner. All clients on that path see the same runtime status, errors, enabled state and shared inbox counts immediately. Existing messaging events notify all persona subscribers, so disconnect/reconnect changes refresh every client. Snapshot reads never invoke a CLI, create a peer or start a listener. Live bindings precede historical stopped profiles for clients that display one badge per channel. Clearing/changing a persona's brain immediately removes access to the previous brain even if an old peer association remains on disk.
+
+Regression cases in `scripts/messaging.test.cjs`: `status is shared...` (both channels), `persona snapshots and notifications agree...`, and `shared channel snapshot places...`; `scripts/personas.test.cjs` verifies the current-root resolver. This addresses a grey AIChat channel badge while the dashboard reports the same brain as listening.

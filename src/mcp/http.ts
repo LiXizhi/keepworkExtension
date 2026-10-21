@@ -30,7 +30,7 @@ import { dashboardHtml } from './dashboard';
 import { dashboardSkill } from './dashboardSkill';
 import { apiDocs } from './apiDocs';
 import { mcpCatalog } from './mcpCatalog';
-import { MessagingService } from '../core/messaging';
+import { MessagingService, channelConflict } from '../core/messaging';
 import { ChannelStatus } from '../core/channelStatus';
 import { ClientSupervisor } from '../core/clientSupervisor';
 import { handleMessagingHttp } from './messagingHttp';
@@ -407,7 +407,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
 
             if (pathname === '/admin/channels' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
-                sendJson(res, 200, { channels: await channelStatus.snapshot(messaging.list()), supervisor: clientSupervisor.snapshot() });
+                sendJson(res, 200, { channels: await channelStatus.snapshot(messaging.list(), messaging.channelRoots()), supervisor: clientSupervisor.snapshot() });
                 return;
             }
             if (pathname === '/admin/channels/connection' && req.method === 'POST') {
@@ -417,8 +417,8 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 if (!binding || !['connect', 'disconnect'].includes(body.action)) { sendJson(res, 400, { error: 'Invalid binding or action' }); return; }
                 if (body.action === 'connect') {
                     if (binding.enabled || binding.transitioning) { sendJson(res, 409, { error: 'Disconnect first and wait for completion' }); return; }
-                    try { await messaging.start(binding.id); }
-                    catch { sendJson(res, 409, { error: 'Connection failed; check CLI authorization and client status', needsHelp: true }); return; }
+                    try { if(body.switchFromRoot !== undefined) await messaging.switchChannel(binding.channel as 'dingtalk'|'feishu',binding.root,String(body.switchFromRoot)); await messaging.start(binding.id); }
+                    catch(error) { sendJson(res, 409, channelConflict(error) || { error: 'Connection failed; check CLI authorization and client status', needsHelp: true }); return; }
                 } else messaging.stop(binding.id);
                 sendJson(res, 200, { ok: true });
                 return;

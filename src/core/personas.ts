@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { AgentSessions } from './agentSessions';
-import { latestAichatClient } from './aichatPresence';
+import { latestAichatClient, latestAichatBrainRoot } from './aichatPresence';
 import { MessagingService } from './messaging';
 import { defaultMessageConfig, knowledgeContext } from './messagingPolicy';
 import { runTerminal } from './terminal';
@@ -45,6 +45,7 @@ export class Personas {
                 this.rows.set(this.key(p.owner,p.id),p);this.save(p);
             } catch { /* Invalid records are not executed. */ }
         }
+        this.messaging.setAgentRootResolver((owner,id)=>this.closed?'':this.rows.get(this.key(owner,id))?.root||'');
         this.stopMessagingWatch=this.messaging.watch(() => { for(const w of this.watchers) w.update(); }, () => {});
         this.timer=setInterval(()=>this.tick(),15000);this.timer.unref();
     }
@@ -93,7 +94,7 @@ export class Personas {
         const old=this.rows.get(this.key(owner,input.id));
         if(old&&active(old))throw Error('请先等待或取消当前任务再修改分身');
         const name=String(input.name||'').trim().slice(0,80);if(!name)throw Error('请输入分身名称');
-        const root=String(input.root||'');if(root&&(!path.isAbsolute(root)||!fs.statSync(root).isDirectory()))throw Error('请选择现有本机第二大脑目录');
+        const root=String(input.root === undefined ? (old ? old.root : latestAichatBrainRoot()) : (input.root || ''));if(root&&(!path.isAbsolute(root)||!fs.statSync(root).isDirectory()))throw Error('请选择现有本机第二大脑目录');
         const executor=String(input.executor||'auto');if(!['auto','keepwork','copilot','codex','claude','workbuddy','cursor','trae','qwen','gemini','kimi','codebuddy','opencode'].includes(executor))throw Error('Invalid executor');
         const p:Persona={...(old||{owner,id:input.id,messages:[],requests:{},schedules:[],summary:'',readAt:0}),name,avatar:String(input.avatar||'🧠').slice(0,16),prompt:String(input.prompt||'').slice(0,16000),root:root?fs.realpathSync(root):'',executor,model:String(input.model||'').slice(0,256),pinned:input.pinned!==false,order:Number.isFinite(input.order)?input.order:Date.now()};
         this.rows.set(this.key(owner,p.id),p);this.messaging.setAgentPrompt(owner,p.id,p.prompt);this.save(p);return this.view(p);
