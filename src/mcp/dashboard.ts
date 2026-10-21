@@ -1,3 +1,4 @@
+import { dashboardCliHtml, dashboardCliScript, dashboardCliStyles } from './dashboardCli';
 export function dashboardHtml(): string {
     return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -10,10 +11,11 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 @media(min-width:601px){#meta{grid-template-columns:180px minmax(0,1fr)}}
 .channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;align-items:start}.channel-card{border:1px solid #7774;border-radius:8px;padding:10px 12px;min-width:0}.channel-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.channel-card h3{margin:0 auto 0 0;font-size:14px}.channel-account{margin:4px 0;color:light-dark(#666,#aaa);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.channel-card dl{grid-template-columns:90px minmax(0,1fr)}.channel-card details{font-size:12px}.channel-card summary{cursor:pointer;color:light-dark(#666,#aaa);width:fit-content}.channel-card details[open]{margin-top:8px}.channel-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;color:light-dark(#626970,#aeb5bc)}.channel-badge:before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}.channel-badge.connected{color:light-dark(#15703b,#80ce9d)}.channel-badge.warning{color:light-dark(#946200,#edc56b)}.channel-badge.error{color:light-dark(#ae261d,#ffb09f)}.channel-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 0 10px;font-size:12px}.channel-controls label{display:flex;align-items:center;gap:5px}.channel-actions{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}.channel-actions button{font-size:12px;padding:2px 8px}.channel-help{font-size:12px;margin:0 0 10px}.channel-help summary{cursor:pointer;opacity:.65}.channel-help p{margin:4px 0}
 
+${dashboardCliStyles}
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP</div><nav class="tree" aria-label="Dashboard navigation">
 <a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#paracrafts">Paracrafts</a>
-<a href="#personas">Personas / 分身</a><a href="#chat">AI 对话</a>
+<a href="#cli-accounts">CLI 账号</a><a href="#personas">Personas / 分身</a><a href="#chat">AI 对话</a>
 <details open><summary>Developer</summary><a href="#api-docs">API docs</a><a href="#tools-skills">Tools &amp; skills</a></details>
 </nav></aside><main>
 <h1 id="view-title">Overview / 概览</h1>
@@ -30,12 +32,13 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 <section class="view" id="view-api-docs" hidden><p>HTTP APIs, authentication, parameters and JavaScript fetch examples.</p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
 <section class="view" id="view-tools-skills" hidden><p>Built-in MCP tool calls, skills and skill references. Expand an entry to inspect its input schema or resource URI.</p><label for="catalog-filter">Filter tools and skills</label><input id="catalog-filter" type="search" placeholder="Name or description" style="width:100%;margin:12px 0"><div id="tools-skills"></div></section>
 <section class="view" id="view-personas" hidden><p id="persona-stats"></p><h2>Personas</h2><div id="personas" class="scroll"></div><h2>Managed sessions</h2><p class="muted">MCP conversation contexts and currently retained execution sessions. Completed execution sessions may be cleaned up.</p><div id="persona-sessions" class="scroll"></div><h2>最近渠道消息 / Recent messages</h2><p class="muted">本次运行最多保留实际收到的 500 条，重启清空。内容与回复各显示最多 8000 字符；回复是否送达请查看状态。</p><label for="messages-filter">消息范围 </label><select id="messages-filter"><option value="all">全部收到</option><option value="related">与我有关（私聊、@我、命中代答规则）</option></select><div id="persona-messages" class="scroll"></div><div class="pager"><button id="messages-prev">上一页</button><span id="messages-range"></span><button id="messages-next">下一页</button></div></section>
+${dashboardCliHtml}
 <section class="view" id="view-chat" hidden><iframe id="chat-frame" title="Keepwork MCP AI 对话" referrerpolicy="no-referrer" allow="clipboard-write"></iframe></section>
 </main>
 <script>
 const byId = id => document.getElementById(id);
 let token = '', offset = 0, busy = false, stopped = false, view = 'overview', apiCatalog = null;
-const viewNames = {personas:'Personas / 分身',overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs','tools-skills':'Tools & skills',chat:'AI 对话'};
+const viewNames = {'cli-accounts':'CLI 状态与账号',personas:'Personas / 分身',overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs','tools-skills':'Tools & skills',chat:'AI 对话'};
 function startChat(channel = '') {
   let url = new URL('https://keepwork.com/chat');
   const override = new URLSearchParams(location.search).get('aichat');
@@ -77,12 +80,13 @@ byId('messages-filter').onchange=()=>{messageOffset=0;renderMessages();};
 byId('messages-prev').onclick=()=>{messageOffset=Math.max(0,messageOffset-50);renderMessages();};
 byId('messages-next').onclick=()=>{messageOffset+=50;renderMessages();};
 const limit = 20;
-async function request(path, method = 'GET', body) {
-  const response = await fetch(path, {method, cache:'no-store', headers:{...(token ? {Authorization:'Bearer ' + token} : {}),...(body ? {'Content-Type':'application/json'} : {})},body:body ? JSON.stringify(body) : undefined});
+async function request(path, method = 'GET', body, signal) {
+  const response = await fetch(path, {method, signal, cache:'no-store', headers:{...(path.startsWith('/agents/') ? {'X-Agent-Owner':cliOwner} : {}),...(token ? {Authorization:'Bearer ' + token} : {}),...(body ? {'Content-Type':'application/json'} : {})},body:body ? JSON.stringify(body) : undefined});
   if (response.status === 401) { byId('auth').hidden = false; throw new Error('Pairing token required. Use the token from ~/.keepwork-mcp/token.'); }
   if (!response.ok) throw new Error('Request failed (' + response.status + ')');
   return response.json();
 }
+${dashboardCliScript}
 function table(target, headings, rows, empty) {
   const container = byId(target); container.replaceChildren();
   if (!rows.length) { const paragraph = document.createElement('p'); paragraph.className = 'empty'; paragraph.textContent = empty; container.append(paragraph); return; }
@@ -272,6 +276,7 @@ function selectView() {
   for (const link of document.querySelectorAll('.tree a')) { if (link.hash === '#' + view) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); }
   byId('view-title').textContent = viewNames[view];
   document.body.classList.toggle('chat-view', view === 'chat');
+  if (view === 'cli-accounts' && !cliCatalog) void loadCliAccounts();
   if (view === 'chat' && !byId('chat-frame').hasAttribute('src')) startChat();
   refresh();
 }

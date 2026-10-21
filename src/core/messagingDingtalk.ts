@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
-import { Incoming, MessageConfig, splitReply } from './messagingPolicy';
+import { Incoming, MessageConfig, splitReply, automatedSender, automatedText } from './messagingPolicy';
 
 export function resolveDws(): string {
     const dirs = (process.env.PATH || process.env.Path || '').split(path.delimiter);
@@ -64,6 +64,40 @@ export async function listenDws(root: string, profile: string, config: MessageCo
         return stop;
     } catch(e) { stop(); throw e; }
 }
+// On-demand context reads complement the event listener; they never enqueue replies.
+export async function dingtalkConversation(root: string, profile: string, target: Incoming, signal?: AbortSignal, call = dws): Promise<Incoming[]> {
+    const check = () => { if(signal?.aborted)throw Error('Cancelled'); };
+    check();
+    const status = await call(['event','status','--profile',profile,'--format','json'],root);
+    const identity = status.identity;
+    if(!identity?.open_dingtalk_id || `${identity.corp_id}:${identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
+    const read = async (selector: string[]) => {
+        check();
+        const result = await call(['chat',...selector,'--limit','50','--order','desc','--no-reactions','--profile',profile,'--format','json'],root);
+        check();
+        // A bounded single page may have older pages; failed/ambiguous reads are not usable context.
+        if(result.contractVersion!=='im.message-list.v1' || !Array.isArray(result.messages) || result.partial || result.failedCount || result.failures?.length ||
+            (result.complete===false && result.hasMore!==true))throw Error('钉钉会话上下文读取不完整');
+        return result.messages;
+    };
+    const rows = await read(['+chat-messages',...(target.kind==='direct' ? ['--open-dingtalk-id',target.sender] : ['--group',target.conversation])]);
+    const thread=target.thread || rows.find((row:any)=>row.messageId===target.id)?.threadId;
+    const conversation=rows.find((row:any)=>row.messageId===target.id)?.conversationId;
+    if(thread)rows.push(...await read(['+thread-replies','--group',conversation || target.conversation,'--thread-id',thread]));
+    const messages=new Map<string,Incoming>();
+    for(const row of rows) {
+        const numeric=Number(row.createTime),time=Number.isFinite(numeric)?numeric:Date.parse(row.createTime);
+        if(typeof row.messageId!=='string' || typeof row.senderId!=='string' || !Number.isFinite(time) || time<=0)throw Error('钉钉消息缺少身份或时间');
+        if(conversation && row.conversationId && row.conversationId!==conversation)throw Error('钉钉会话上下文不匹配');
+        const text=typeof row.text==='string'?row.text:'[非文本消息]';
+        messages.set(row.messageId,{id:row.messageId,conversation:target.conversation,
+            sender:row.senderId===identity.user_id?identity.open_dingtalk_id:row.senderId,
+            time:time<1e12?time*1000:time,text,kind:target.kind,thread:row.threadId || undefined,
+            automated:automatedSender(row)||automatedText(text)});
+    }
+    return [...messages.values()].sort((a,b)=>a.time-b.time || a.id.localeCompare(b.id));
+}
+
 function bizId(value: any): string {
     if (!value || typeof value !== 'object') return '';
     if (typeof value.bizId === 'string') return value.bizId;

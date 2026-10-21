@@ -51,6 +51,7 @@ export function feishuIncoming(row: any, chat: any, self: string): Incoming | nu
     let content=row.content;
     try {const parsed=JSON.parse(content);if(typeof parsed.text==='string')content=parsed.text;} catch { /* shortcuts render plain text */ }
     return {id:row.message_id,conversation:chat.chat_id,sender,text:content,time:time<1e12?time*1000:time,automated:automatedText(content),
+        thread:typeof row.thread_id === 'string' ? row.thread_id : undefined,
         kind:chat.chat_mode==='p2p'?'direct':row.mentions?.some((m:any)=>(typeof m.id==='string'?m.id:m.id?.open_id)===self)?'mention':'group'};
 }
 // One sweep at a time; bounded pages fail visibly instead of advancing past unread data.
@@ -91,6 +92,31 @@ export async function pollFeishu(root:string, profile:string, file:string, onMes
     try{await sweep();schedule();}catch(error){controller.abort();throw error;}
     return ()=>{abort();signal?.removeEventListener('abort',abort);};
 }
+// Read only the active conversation, never other chats. Bounds are explicit in the model prompt.
+export async function feishuConversation(root: string, profile: string, target: Incoming, signal?: AbortSignal, call = lark): Promise<Incoming[]> {
+    const identity = await feishuIdentity(root, profile, (args, cwd) => call(args, cwd, signal));
+    const read = async (selector: string[]) => {
+        const result = await call(['im', ...selector, '--order', 'desc', '--page-size', '50', '--no-reactions', '--as', 'user', '--profile', profile.split(':')[0], '--format', 'json'], root, signal);
+        const data = result.data || result;
+        if (!Array.isArray(data.messages)) throw Error('Unexpected Feishu conversation response');
+        return data.messages;
+    };
+    const rows = await read(['+chat-messages-list', '--chat-id', target.conversation]);
+    const thread = target.thread || rows.find((row: any) => row.message_id === target.id)?.thread_id;
+    if (thread) rows.push(...await read(['+threads-messages-list', '--thread', thread]));
+    const messages = new Map<string, Incoming>();
+    for (const row of rows) {
+        // Include bot/AI messages and media placeholders as context, never as reply triggers.
+        const normalized = feishuIncoming({...row, sender_type:undefined, senderType:undefined, sender:{id:row.sender?.id || row.sender?.open_id},
+            msg_type:'text', content:typeof row.content === 'string' ? row.content : '[非文本消息]'},
+            {chat_id:target.conversation, chat_mode:target.kind === 'direct' ? 'p2p' : 'group'}, identity.self);
+        if (normalized) messages.set(normalized.id, {...normalized, automated:automatedSender(row) || normalized.automated});
+    }
+    if (signal?.aborted) throw Error('Cancelled');
+    return [...messages.values()].sort((a,b) => a.time-b.time || a.id.localeCompare(b.id));
+}
+export { conversationContext as feishuContext } from './messagingPolicy';
+
 export class FeishuDelivery {
     constructor(private root:string,private profile:string){}
     async create(_message:Incoming){return '';}

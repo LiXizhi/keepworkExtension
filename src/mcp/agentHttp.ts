@@ -1,4 +1,5 @@
 import * as http from 'node:http';
+import { agentAccountCatalog } from '../core/agentAccountActions';
 import { AgentSessions, ownerKey } from '../core/agentSessions';
 
 export async function handleAgentHttp(req: http.IncomingMessage, res: http.ServerResponse, url: URL, manager: AgentSessions) {
@@ -26,6 +27,7 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
             if (action === 'result' && req.method === 'POST') { send(200, manager.toolBridge.result(owner, id, input)); return; }
             send(404, { error: 'Unknown context operation' }); return;
         }
+        if (parts.join('/') === 'agents/accounts' && req.method === 'GET') { send(200, agentAccountCatalog()); return; }
         if (parts.join('/') === 'agents/backends' && req.method === 'GET') {
             if (url.searchParams.get('probe') === 'executable') { send(200, manager.inventory()); return; }
             const backend = url.searchParams.get('backend');

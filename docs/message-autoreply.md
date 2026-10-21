@@ -34,14 +34,25 @@ including `【AI 代答】` after mentions/whitespace, DingTalk `[interactiveCar
 placeholders and unsupported-message notices. These checks run before generation
 or delivery; no acknowledgement is sent for an ignored automated message.
 
-For bots without usable identity metadata or markers, each binding/conversation
-allows at most six automatic attempts in a rolling ten-minute window. The next
-attempt pauses that conversation and cancels its waiting jobs before creating a
-reply or calling a model. Diagnostics report `auto-reply-loop-guard`; the Agent
-inbox shows the conversation paused. The attempt window and pause persist in the
-local inbox store, including across Stop/Start and daemon restarts. Explicit inbox
-Resume clears the pause and budget. Other conversations and manual replies remain
-available. Busy human conversations can also reach this limit.
+Automatic replies share one budget per binding/conversation (all group senders
+combined). The first six attempts can run immediately. Further attempts are
+spaced at least one minute apart and paced across the remaining rolling-hour
+budget, normally allowing at most 20 attempts per hour. Ten minutes idle restores
+the fast burst but never clears the hourly budget. Reservations are persisted
+before generation; actual delivery moves the timestamp forward, and failed or
+unknown attempts still count conservatively. Stop/Start, restart and inbox Resume
+do not clear this budget. Manual replies are unaffected.
+
+Throttled jobs remain queued (`auto-reply-rate-limit`), without occupying global
+execution slots or pausing the inbox. A timer resumes eligible work automatically.
+When a conversation has pending work and ten minutes have elapsed since its last
+reply attempt, one reply is allowed regardless of the minute/hour budget. This
+conversation deadline takes priority: messages are not dropped for rate-limit
+expiry. The attempt still counts toward the hourly budget and resets the ten-minute
+deadline, so overdue queued messages cannot all burst at once. Model execution,
+transport failures and global concurrency may still delay actual delivery. Stop, takeover and shutdown cancel
+waiting work; restarts never replay it. The limit counts logical automatic replies,
+not the transport's text fragments or card updates.
 
 This bounds rapid unmarked exchanges, not arbitrary bot detection: a bot posing
 as a human and replying slowly can still pass these checks. The guard is local to
@@ -154,7 +165,7 @@ Every ten minutes, one tick makes one cross-conversation `im +messages-search` r
 
 Verification: `node --test scripts/messaging.test.cjs scripts/personas.test.cjs`, `npm run check:shared`. Read-only live MCP verification on 2026-10-19 confirmed valid personal user authentication and successful chat/message reads. No real message was sent by acceptance tests.
 
-DingTalk uses event subscriptions only; no self-chat or message-history polling. Self-authored group @me events are accepted, while ordinary self messages and AI reply echoes remain filtered. Live upstream delivery of self mentions still requires verification.
+DingTalk uses event subscriptions for triggers; it reads the active conversation on demand before generation and again before delivery, without periodic history polling. Self-authored group @me events are accepted, while ordinary self messages and AI reply echoes remain filtered. Live upstream delivery of self mentions still requires verification.
 
 ### 本机客户端自动监督
 
@@ -167,3 +178,26 @@ Dashboard 首页的“自动随钉钉 / 飞书客户端运行监督”开关保�
 `GET /admin/channels` 包含 `supervisor` 检测结果；`POST /admin/channels/supervisor` 接收 `{ "enabled": boolean }`。沿用管理 API 的 Origin / pairing token 检查。
 
 Dashboard 渠道卡片默认展示账号与公司名。已启用的绑定只提供“断开连接”，断开后才能再次“连接”；断开会持久关闭该绑定的监听/自动回复，不退出 CLI 账号。连接操作仍受客户端自动监督条件约束。未绑定渠道通过“连接设置”进入内置 AIChat；“AIChat 排查”加载指定渠道的排查上下文，不携带凭据、不自动调用模型或发送测试消息。`POST /admin/channels/connection` 使用 `{id, action: "connect" | "disconnect"}`，拒绝未先断开的连接请求。
+
+
+### 飞书完整参与者上下文与静默（2026-10-21）
+
+飞书触发规则仍忽略本人消息和 AI 回声，不会回复自己。轮询收到的本人消息保留在该绑定的本机会话记录中，作为发出消息展示，不计入收件未读。每次准备代答时，通过个人 CLI `+chat-messages-list` 读取当前聊天最新 50 条消息；如果目标消息带有话题 ID，再用 `+threads-messages-list` 读取该话题最新 50 条回复。按消息 ID 去重、时间排序，明确标记本人（人类）、其他参与者及 AI/机器人，不再仅使用单个发言者的历史往返。其他聊天不进入上下文；新增读取不触发自动回复，也不把远端聊天历史导入第二大脑。
+
+这里的完整指覆盖所有参与者，并非无限历史：更早分页不自动追溯，每条正文最多给模型 1000 字符并标注截断，图片等仅显示 CLI 提供的占位信息，不下载附件。目标消息不在当前窗口或已撤回时保持沉默；读取、授权或身份检查失败时不发送无上下文回复。目标正文以本次读取的最新版本为准。
+
+提示词要求本人已回答、讨论已结束或没有必要补充时仅输出 `(...)`。服务吞掉这个独立输出（兼容前置 `【AI 代答】`），记录“模型判断无需回复”，不会向飞书发送该符号。正文中普通提及 `(...)` 不会被当作静默。
+
+非静默答案在发送前再次读取同一聊天及当前话题。若时间线出现新增、修改或撤回，或本机已收到目标消息之后的本人发言，本次答案取消并记录原因；不自动重试旧答案。下一条符合触发规则的新消息按正常队列处理。读取失败同样阻止发送。此机制不能提供飞书服务器上的原子“检查并发送”：最后读取与实际发送之间仍有极短竞态窗口，消息可见性也取决于飞书接口。
+
+验证：`TMPDIR=/private/tmp node --test --test-timeout=30000 scripts/messaging.test.cjs scripts/personas.test.cjs` 全部 68 项通过，`npm run check:shared` 与 `git diff --check` 通过。macOS 默认临时目录的 `/var` 与 `/private/var` 别名会触发现有登录测试路径断言，使用真实临时目录后通过。模拟覆盖本人和多人上下文、话题去重、机器人/媒体占位、静默、自我回声、生成期间本人/他人插话、编辑/撤回及读取失败。未向真实联系人发送测试消息。源码修改需要由运行中的 MCP 加载更新后才生效。
+
+
+### 钉钉同步采用会话上下文与静默（2026-10-21）
+
+钉钉继续使用事件监听作为触发源，准备代答及发送前通过 `dws chat +chat-messages` 读取当前会话最新 50 条消息，存在话题 ID 时再读取 `+thread-replies` 最新 50 条。单聊使用事件发送者的 openDingTalkId 定位，群聊使用事件会话 ID；全程固定绑定 profile，并验证账号身份。读取结果遵循 `im.message-list.v1`，有失败项或异常不完整结果时不发送；允许单页之后还有更早历史，但不宣称已经读取全部历史。正文长度和附件占位限制与飞书一致。
+
+本人消息保留为本机发出记录，不触发普通自动回复；本人群内显式 @自己的既有入口保留，AI 回声仍被过滤。两渠道共享上下文格式、独立 `(...)` 静默规则及发送前时间线变化检查。模型可在本人已完成回答时选择沉默；生成期间出现新消息、正文变化或读取失败时不会发送过时答案。没有新增全账号轮询，也不会向真实联系人发送测试消息。生效需要 MCP 加载更新后的构建。
+
+
+钉钉扩展验证：两渠道定向回归 23 项全部通过，`npm run check:shared` 和 `git diff --check` 通过。消息/分身完整套件 75 项中 74 项通过，既有 `real headless browser completes sequential worker handshakes and retains the browser` 用例在 30 秒后超时；不能将本次完整套件报告为通过。该浏览器用例单独复核通过（1/1），保留完整运行的超时记录。未做真实账号发消息验收。

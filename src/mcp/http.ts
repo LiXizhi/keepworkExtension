@@ -171,6 +171,19 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         applyCors(req, res);
         const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
         const pathname = url.pathname.replace(/\/+$/, '') || '/';
+        // Same-origin browser GETs omit Origin. Recover only the dashboard's
+        // exact loopback origin so its reads keep the same PTY owner as POSTs.
+        if (!req.headers.origin && req.headers['sec-fetch-site'] === 'same-origin'
+            && (pathname.startsWith('/agents/') || pathname.startsWith('/terminal/'))) {
+            try {
+                const referrer = new URL(String(req.headers.referer || ''));
+                if ([`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(referrer.origin)
+                    && referrer.host === req.headers.host && ['/', '/dashboard', '/dashboard/'].includes(referrer.pathname)) {
+                    req.headers.origin = referrer.origin;
+                }
+            } catch { /* No trusted same-origin dashboard referrer. */ }
+        }
+
 
         if (req.method === 'OPTIONS') {
             res.writeHead(204);
@@ -370,7 +383,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 res.writeHead(200, {
                     'Content-Type': 'text/html; charset=utf-8',
                     'Cache-Control': 'no-store',
-                    'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src https://keepwork.com http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+                    'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline' https://cdn.keepwork.com/keepwork/cdn/aichat/vendor/xterm/xterm-6.0.0.js https://cdn.keepwork.com/keepwork/cdn/aichat/vendor/xterm/addon-fit-0.11.0.js; style-src 'unsafe-inline' https://cdn.keepwork.com/keepwork/cdn/aichat/vendor/xterm/xterm-6.0.0.css; connect-src 'self'; frame-src https://keepwork.com http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
                     'X-Content-Type-Options': 'nosniff',
                 });
                 res.end(dashboardHtml());

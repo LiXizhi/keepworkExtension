@@ -489,3 +489,24 @@ Persona `respond` additionally accepts `acceptForConversation` and `acceptAlways
 Conversation grants live only in memory, expire on context clear/service restart, and persistent `cliApprovalGrant` lives only in the local persona record. Both bind owner/persona/root/backend, are never accepted via upsert, and can be revoked with `POST /agents/personas/:id/approval-revoke`. Persona snapshots expose `cliApproval.scope` for the persistent UI indicator. Questions, mandatory `requiresUserDecision`, unknown methods and explicitly unoffered accepts are excluded; worker `run_terminal` confirmation and terminal deny-list remain unchanged. AgentSessions automatic approval state itself is transient, removed on archive and reapplied by Personas only when the local scoped grant matches.
 
 Regression: AIChat `AICHAT-PERSONA-AUTO-APPROVAL-001` uses real persona UI/HTTP/session/stdio and restarts isolated backend instances; backend tests verify owner/root/backend isolation and mandatory question exclusions.
+
+
+## Dashboard CLI 账号页（2026-10-21）
+
+Dashboard 的“CLI 账号”分类页展示全部 11 个后端，支持全部、已安装、已登录、未登录、待确认筛选。
+首次只发现安装路径，不自动启动全部 CLI；“检测账号”和“检测全部账号”调用现有原生状态查询，显示可确认的用户名、名称或邮箱。
+未提供身份字段时明确标注，不能将 CLI 可执行文件存在当作已登录；不读取凭据文件。Antigravity 当前没有已核实的独立用户名查询命令。
+
+`GET /agents/accounts` 返回发现结果和经过登记的登录／登出操作步骤，不执行命令。
+Dashboard 复用按来源隔离的 `/terminal/sessions`：登录或登出打开可见 xterm，使用解析得到的本机可执行文件；需要 `/logout` 等原生交互时，等 CLI 菜单出现后点击下一步。
+Qwen 通过 `/auth` 管理账号，不提供未经核实的独立登出命令。用户完成授权后点击“完成并检测账号”；命令成功发送不等于登录／登出成功。
+终端输入失败不自动重发；关闭只结束本页账号终端，不停止其他任务或共享 MCP。关闭浏览器后未清理的终端沿用服务现有闲置回收机制。
+
+浏览器同源 GET 不携带 Origin 时，仅在 Fetch Metadata 为 same-origin、Referer 为当前监听端口的 localhost/127.0.0.1 Dashboard 且 Host 一致时补齐来源。
+外部 Origin、不同端口和不同 Referer 均不能获得该兼容路径；原有 token 校验不变。终端组件按需加载，CSP 仅增加 Keepwork CDN 已使用的三个固定 xterm 资源。
+
+验证：`scripts/agent-account-actions.test.cjs` 覆盖全部后端步骤及平台路径引用；`scripts/dashboard-cli.test.cjs` 覆盖浏览器筛选、身份转义、交互、故障不重发和窄屏布局；`scripts/dashboard.test.cjs` 覆盖实际 HTTP 账号入口鉴权及 PTY 归属。模拟账号验证不代表真实平台登录验收。
+
+本次源码验证：共享 TypeScript / 仓库布局检查通过；相关 MCP 回归 125 项通过（macOS 临时目录使用 `/private/tmp`，避免系统 `/var` 别名导致既有路径断言差异）；最终 Dashboard / 操作目录 6 项通过。AIChat 相关浏览器 5 项通过，Node 24 项通过、Windows 专用 1 项跳过。未发布或重启在用服务，未执行真实账号登出。
+
+CLI 账号页使用紧凑卡片与顶部状态计数，已确认在线优先。绿色“在线”仅表示原生检测已登录、可用且无模型／连接错误，不代表有后台任务运行；待确认／未登录为琥珀色，异常为红色，未安装为灰色，检测中为蓝色。颜色始终配文字，未知状态不会显示为在线；详情默认折叠。
