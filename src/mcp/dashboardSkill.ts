@@ -4,7 +4,7 @@ export const dashboardSkillMetadata = {
     description: 'Answer Keepwork local MCP questions, diagnose connections and help perform user-requested actions involving the dashboard, clients, files, terminal and Paracraft.',
 };
 
-export function dashboardSkill(baseUrl: string): string {
+export function dashboardSkill(baseUrl: string, channel = ''): string {
     return `---
 name: ${dashboardSkillMetadata.name}
 description: ${dashboardSkillMetadata.description}
@@ -13,6 +13,8 @@ description: ${dashboardSkillMetadata.description}
 # Keepwork MCP Assistant
 
 You assist users from the local MCP dashboard. Current daemon: ${baseUrl}.
+
+${['dingtalk', 'feishu'].includes(channel) ? 'The user opened connection help for ' + channel + '. Focus on its CLI authorization, desktop-process supervision and persona binding. Use deterministic checks first. Do not create a binding without the user choosing a persona, and do not send test messages. Ask what they want to repair before making changes.' : ''}
 
 ## Diagnose and explain
 - Use connected Keepwork MCP tools and their live schemas. Start connection diagnosis with mcp_status.

@@ -31,6 +31,8 @@ import { dashboardSkill } from './dashboardSkill';
 import { apiDocs } from './apiDocs';
 import { mcpCatalog } from './mcpCatalog';
 import { MessagingService } from '../core/messaging';
+import { ChannelStatus } from '../core/channelStatus';
+import { ClientSupervisor } from '../core/clientSupervisor';
 import { handleMessagingHttp } from './messagingHttp';
 import { runtimeBuildInfo } from '../core/runtimeBuildInfo';
 
@@ -154,6 +156,8 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     const agentSessions = new AgentSessions(path.join(mcpHomeDir(), 'agent-sessions-v1.json'));
     const messaging = new MessagingService(path.join(mcpHomeDir(), 'messaging-v1'), port);
     runtime.messaging = messaging;
+    const channelStatus = new ChannelStatus(runtime.root);
+    const clientSupervisor = new ClientSupervisor(messaging);
     const personas = new Personas(path.join(mcpHomeDir(),'personas-v1'),agentSessions,messaging);
 
     const assertAuth = (req: http.IncomingMessage, url: URL, res: http.ServerResponse): boolean => {
@@ -375,7 +379,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
 
             if (pathname === '/dashboard/skills/keepwork-mcp-assistant/SKILL.md' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-                res.end(dashboardSkill(`http://127.0.0.1:${port}`));
+                res.end(dashboardSkill(`http://127.0.0.1:${port}`, url.searchParams.get('channel') || ''));
                 return;
             }
 
@@ -388,6 +392,31 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 }
             }
 
+            if (pathname === '/admin/channels' && req.method === 'GET') {
+                if (!assertAuth(req, url, res)) return;
+                sendJson(res, 200, { channels: await channelStatus.snapshot(messaging.list()), supervisor: clientSupervisor.snapshot() });
+                return;
+            }
+            if (pathname === '/admin/channels/connection' && req.method === 'POST') {
+                if (!assertAuth(req, url, res)) return;
+                const body = JSON.parse((await readBodyBuffer(req, 2048)).toString('utf8'));
+                const binding = messaging.list().find(row => row.id === body.id);
+                if (!binding || !['connect', 'disconnect'].includes(body.action)) { sendJson(res, 400, { error: 'Invalid binding or action' }); return; }
+                if (body.action === 'connect') {
+                    if (binding.enabled || binding.transitioning) { sendJson(res, 409, { error: 'Disconnect first and wait for completion' }); return; }
+                    try { await messaging.start(binding.id); }
+                    catch { sendJson(res, 409, { error: 'Connection failed; check CLI authorization and client status', needsHelp: true }); return; }
+                } else messaging.stop(binding.id);
+                sendJson(res, 200, { ok: true });
+                return;
+            }
+            if (pathname === '/admin/channels/supervisor' && req.method === 'POST') {
+                if (!assertAuth(req, url, res)) return;
+                const body = JSON.parse((await readBodyBuffer(req, 1024)).toString('utf8'));
+                if (typeof body.enabled !== 'boolean') { sendJson(res, 400, { error: 'enabled must be boolean' }); return; }
+                sendJson(res, 200, { supervisor: await clientSupervisor.configure(body.enabled) });
+                return;
+            }
             if (pathname === '/admin/personas' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, { ...personas.dashboard(), recentMessages: messaging.dashboardMessages() });
@@ -558,9 +587,10 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     });
     startParacraftWatch();
     startCalendarWatch();
-    messaging.resume();
+    clientSupervisor.start();
 
     const close = async () => {
+        clientSupervisor.close();
         clearInterval(pruneTimer);
         stopParacraftWatch();
         stopCalendarWatch();

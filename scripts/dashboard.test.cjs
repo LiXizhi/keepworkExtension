@@ -59,12 +59,14 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                 assert.match(html, /Keepwork local MCP/);
                 assert.match(html, /href="#history"/);
                 assert.match(html, /id="view-history" hidden/);
-                assert.doesNotMatch(html, /dingtalk/i);
+                assert.match(html, /id="channel-status"/);
                 assert.match(html, /href="#api-docs"/);
                 assert.ok(!html.includes(server.token));
                 assert.ok(!html.includes(home));
                 new vm.Script(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
             }
+            assert.equal((await fetch(base + '/admin/channels', {headers:{Origin:'https://evil.example'}})).status, 403);
+            if(requireAuth)assert.equal((await fetch(base + '/admin/channels')).status,401);
             for (const route of ['/admin/status', '/admin/history', '/admin/api-docs', '/admin/personas']) {
                 assert.equal((await fetch(base + route)).status, requireAuth ? 401 : 200);
                 const headers = { Authorization: `Bearer ${server.token}`, Origin: base };
@@ -106,6 +108,17 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                 }
                 assert.equal((await fetch(base + route, { headers: { ...headers, Origin: 'https://untrusted.example' } })).status, 403);
             }
+            const connectionUrl=base+'/admin/channels/connection';
+            assert.equal((await fetch(connectionUrl,{method:'POST',headers:{Origin:'https://untrusted.example'},body:'{}'})).status,403);
+            assert.equal((await fetch(connectionUrl,{method:'POST',headers:{Authorization:`Bearer ${server.token}`,Origin:base},body:'{"id":"missing","action":"connect"}'})).status,400);
+            const supervisorUrl = base + '/admin/channels/supervisor';
+            assert.equal((await fetch(supervisorUrl, {method:'POST',headers:{Origin:'https://untrusted.example','Content-Type':'application/json'},body:'{"enabled":false}'})).status,403);
+            if(requireAuth)assert.equal((await fetch(supervisorUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"enabled":false}'})).status,401);
+            const configHeaders={Authorization:`Bearer ${server.token}`,Origin:base,'Content-Type':'application/json'};
+            assert.equal((await fetch(supervisorUrl,{method:'POST',headers:configHeaders,body:'{"enabled":"false"}'})).status,400);
+            const configured=await fetch(supervisorUrl,{method:'POST',headers:configHeaders,body:'{"enabled":false}'});
+            assert.equal(configured.status,200);assert.equal((await configured.json()).supervisor.enabled,false);
+            assert.equal(JSON.parse(fs.readFileSync(path.join(home,'.keepwork-mcp/config.json'),'utf8')).autoFollowImClients,false);
             assert.equal((await fetch(base + '/admin/stop', { method: 'POST', headers: { Origin: 'https://untrusted.example' } })).status, 403);
             await server.close();
             server = undefined;
@@ -138,16 +151,47 @@ test('overview displays build identity, source and environment with safe legacy 
             execPath: '/usr/local/bin/node', entryPath: '/extensions/<img src=x onerror=alert(1)>/dist/cli.js',
             pid: 123, port: 8080, workspaceRoot: 'fixture', startedAt: '2026-10-20T01:00:00.000Z', uptimeMs: 1000, clients: [],
         };
+        let followEnabled=true,channelEnabled=true;const supervisorWrites=[],connectionWrites=[];
         await page.route('**/*', route => {
             const url = new URL(route.request().url());
             if (url.pathname === '/dashboard') return route.fulfill({ contentType: 'text/html', body: html });
             if (url.pathname === '/admin/status') return route.fulfill({ json: status });
+            if(url.pathname==='/admin/channels/connection'){const body=route.request().postDataJSON();connectionWrites.push(body);channelEnabled=body.action==='connect';return route.fulfill({json:{ok:true}});}
+            if(url.pathname==='/admin/channels/supervisor'){const body=route.request().postDataJSON();supervisorWrites.push(body);followEnabled=body.enabled;return route.fulfill({json:{supervisor:{enabled:followEnabled}}});}
+            if (url.pathname === '/admin/channels') return route.fulfill({json:{supervisor:{enabled:followEnabled,clients:{dingtalk:true,feishu:false,checkedAt:Date.now()},accounts:[]},channels:[
+                {channel:'dingtalk',installed:true,checkedAt:Date.now(),accounts:[{profile:'corp:user',name:'<img src=x onerror=alert(1)>',organization:'示例公司',status:'expired',expiresAt:'2020-01-01T00:00:00Z',refreshExpiresAt:null}],bindings:[{id:'test-binding',profile:'corp:user',enabled:channelEnabled,status:channelEnabled?'listening':'stopped'}]},
+                {channel:'feishu',installed:false,checkedAt:Date.now(),accounts:[],bindings:[],error:'CLI 未安装或不可访问'}
+            ]}});
             return route.fulfill({ status: 404, body: '{}' });
         });
         const read = () => page.locator('#meta').evaluate(element =>
             Object.fromEntries([...element.querySelectorAll('dt')].map(term => [term.textContent, term.nextElementSibling.textContent])));
         await page.goto('http://127.0.0.1:8080/dashboard#overview');
         await page.getByText('9.8.7', { exact: true }).waitFor();
+        await page.locator('#channel-status .channel-card').nth(1).waitFor();
+        assert.match(await page.locator('#channel-status').textContent(),/已过期/);
+        assert.match(await page.locator('#channel-status').textContent(),/CLI 未提供/);
+        assert.match(await page.locator('#channel-status').textContent(),/未绑定分身/);
+        assert.equal(await page.locator('#channel-status img').count(),0);
+        await page.screenshot({path:path.join(os.tmpdir(),'keepwork-channels-desktop.png'),fullPage:true});
+        assert.equal(await page.locator('#follow-im-clients').isChecked(),true);
+        await page.locator('#follow-im-clients').uncheck();
+        await page.waitForFunction(()=>!document.querySelector('#follow-im-clients').disabled);
+        assert.deepEqual(supervisorWrites,[{enabled:false}]);
+        assert.equal(await page.locator('#follow-im-clients').isChecked(),false);
+        assert.match(await page.locator('#supervisor-status').textContent(),/钉钉进程：运行中.*飞书进程：未运行/);
+        assert.match(await page.locator('.channel-account').first().textContent(),/示例公司/);
+        assert.equal(await page.locator('.channel-badge.connected').count(),1);
+        await page.getByRole('button',{name:'断开连接',exact:true}).click();
+        await page.getByRole('button',{name:'连接',exact:true}).waitFor();
+        await page.getByRole('button',{name:'连接',exact:true}).click();
+        await page.getByRole('button',{name:'断开连接',exact:true}).waitFor();
+        assert.deepEqual(connectionWrites,[{id:'test-binding',action:'disconnect'},{id:'test-binding',action:'connect'}]);
+        await page.locator('.channel-card details summary').first().click();
+        await page.locator('#refresh').click();
+        await page.waitForTimeout(100);
+        assert.equal(await page.locator('.channel-card details').first().getAttribute('open'),'');
+        await page.locator('.channel-card details summary').first().click();
         const meta = await read();
         assert.equal(meta['MCP version / 版本'], '9.8.7');
         assert.equal(meta['Service API version'], '0.1.2');
@@ -166,6 +210,7 @@ test('overview displays build identity, source and environment with safe legacy 
         }
         await page.setViewportSize({ width: 390, height: 844 });
         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        await page.screenshot({path:path.join(os.tmpdir(),'keepwork-channels-mobile.png'),fullPage:true});
         status = { version: '0.1.2', pid: 123, port: 8080, workspaceRoot: 'fixture', uptimeMs: 1000, clients: [] };
         await page.locator('#refresh').click();
         await page.waitForFunction(() => document.querySelector('#meta').textContent.includes('Unknown / 未提供'));
@@ -174,6 +219,8 @@ test('overview displays build identity, source and environment with safe legacy 
         assert.equal(legacy['Built at / 构建时间'], 'Unknown / 未提供');
         assert.equal(legacy['Source / 服务来源'], 'Unknown / 未提供');
         assert.equal(legacy.Status, 'Running');
+        await page.getByRole('button',{name:'AIChat 排查',exact:true}).click();
+        assert.match(await page.locator('#chat-frame').getAttribute('src'),/channel%3Ddingtalk/);
         assert.deepEqual(errors, []);
     } finally {
         await browser.close();

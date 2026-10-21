@@ -44,7 +44,14 @@ export function readRules(root: string, directory = RULE_DIR) {
     for (const dir of config.knowledge) knowledgeDirectory(root,dir);
     return { config, prompt };
 }
-export interface Incoming { id: string; conversation: string; sender: string; text: string; time: number; kind: 'direct' | 'mention' | 'group' }
+export interface Incoming { id: string; conversation: string; sender: string; text: string; time: number; kind: 'direct' | 'mention' | 'group'; automated?: boolean }
+export function automatedSender(event: any): boolean {
+    return [event?.sender_type, event?.senderType, event?.sender?.sender_type, event?.sender?.type]
+        .some(value => typeof value === 'string' && /^(app|bot|robot)$/i.test(value));
+}
+export function automatedText(text: string): boolean {
+    return /【AI\s*代答】|\[interactiveCard\]|暂不支持解析|类型消息暂不支持解析|收到非文本消息，请用文字再说一下/i.test(text);
+}
 export function incoming(event: any): Incoming | null {
     const type = event?.type || event?.event_type;
     const kind = type === 'user_im_message_receive_at' ? 'mention' : /^user_im_message_receive_o2o(?:_all)?$/.test(type) ? 'direct' : type === 'user_im_message_receive_group' ? 'group' : null;
@@ -54,12 +61,13 @@ export function incoming(event: any): Incoming | null {
     if (time > 0 && time < 1e12) time *= 1000;
     const id = event.message_id || event.event_id;
     if (!id || !event.sender_open_dingtalk_id || (kind !== 'direct' && !event.conversation_id) || !Number.isFinite(time)) return null;
-    return { id: String(id), conversation: String(event.conversation_id || event.sender_open_dingtalk_id), sender: String(event.sender_open_dingtalk_id), text: event.content.slice(0, 16000), time, kind };
+    return { id: String(id), conversation: String(event.conversation_id || event.sender_open_dingtalk_id), sender: String(event.sender_open_dingtalk_id), text: event.content.slice(0, 16000), time, kind,
+        automated: automatedSender(event) || automatedText(event.content) || /^(interactivecard|card)$/i.test(event.msg_type || event.message_type || '') };
 }
 export function trigger(message: Incoming, config: MessageConfig, since: number, self: string, allowSelfMention = false) {
     if (message.time < since) return 'old';
     if (self && message.sender === self && !(allowSelfMention && message.kind === 'mention')) return 'self';
-    if (message.text.startsWith('【AI 代答】')) return 'echo';
+    if (message.automated || automatedText(message.text)) return 'echo';
     if (message.kind === 'direct' || message.kind === 'mention') return 'reply';
     return config.groups.includes(message.conversation) && config.keywords.some(word => message.text.includes(word)) ? 'reply' : 'not-triggered';
 }

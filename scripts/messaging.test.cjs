@@ -14,19 +14,20 @@ function load(name, mocks = {}) {
 }
 const policy = load('messagingPolicy');
 const message = (id='1', conversation='dm', sender='sender') => ({type:'user_im_message_receive_o2o_all',message_id:id,conversation_id:conversation,sender_open_dingtalk_id:sender,content:'课程怎么学习',create_time:Date.now()+1000});
-function fixture(t) {
+function fixture(t, channel = 'dingtalk') {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-messaging-test-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
     const root=path.join(dir,'brain');fs.mkdirSync(path.join(root,'public'),{recursive:true});fs.writeFileSync(path.join(root,'public','lesson.md'),'课程学习计划：先读教材，再练习。');
     const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0;
     class BeforeSubmission extends Error {}
     const serviceModule=load('messaging',{
+        './messagingFeishu':{feishuIdentity:async()=>({id:'corp:user',self:'owner'}),pollFeishu:async(_r,_p,_f,event)=>{events.push(event);return()=>{};},FeishuDelivery:class{async create(){cards.push('created');return 'test-card';}async send(...args){sent.push(args);}}},
         './aichatPresence':{latestAichatClient:()=>null},
-        './messagingDingtalk':{loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){return '';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
+        './messagingDingtalk':{loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
         './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve('课程学习答案');};pending.push({input,end});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
     });
     const createService=()=>{const instance=new serviceModule.MessagingService(path.join(dir,'state'),8089);t.after(()=>instance.close());return instance;};
     const service=createService();
-    const binding=service.configure({root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
+    const binding=service.configure({channel,root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
     return {service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -512,4 +513,64 @@ test('self mention exception is explicit and does not allow ordinary self group 
     assert.equal(policy.trigger(m,config,0,'owner',false),'self');
     for(const kind of ['group','direct'])assert.equal(policy.trigger({...m,kind},config,0,'owner',true),'self');
     assert.equal(policy.trigger({...m,text:'【AI 代答】reply'},config,0,'owner',true),'echo');
+});
+
+test('bot identities and automated cards/notices are ignored by channel policy',()=>{
+ const {feishuIncoming}=load('messagingFeishu');
+ for(const text of ['  @owner 【AI 代答】answer','[interactiveCard]','@owner 暂不支持解析「interactiveCard」类型的消息。']){
+  assert.equal(policy.trigger(policy.incoming({...message(),content:text}),policy.defaultMessageConfig(),0,'owner'),'echo');
+  const row=feishuIncoming({message_id:'f',sender:{id:'peer'},create_time:Date.now(),msg_type:'text',content:JSON.stringify({text})},{chat_id:'chat',chat_mode:'p2p'},'owner');
+  assert.equal(policy.trigger(row,policy.defaultMessageConfig(),0,'owner'),'echo');
+ }
+ for(const type of ['app','bot','robot']){
+  assert.equal(policy.trigger(policy.incoming({...message(),sender_type:type}),policy.defaultMessageConfig(),0,'owner'),'echo');
+  assert.equal(feishuIncoming({message_id:'f',sender:{id:'bot',sender_type:type},create_time:Date.now(),msg_type:'text',content:'hello'},{chat_id:'chat',chat_mode:'p2p'},'owner'),null);
+ }
+});
+
+for(const channel of ['dingtalk','feishu'])test(channel+' pauses unmarked bot exchanges persistently and only resumes explicitly',async t=>{
+ const f=fixture(t,channel);f.service.bindAgent('owner','agent',f.binding.id);await f.service.start(f.binding.id);
+ const event=(id,text='unmarked bot reply',conversation='dm')=>channel==='feishu'?{id,conversation,sender:'peer',text,time:Date.now()+1000,kind:'direct'}:{...message(id,conversation),content:text};
+ f.events.at(-1)(event('card','[interactiveCard]'));await tick();assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
+ for(let i=0;i<6;i++){f.events.at(-1)(event('loop-'+i));await tick();assert.equal(f.pending.length,i+1);f.pending[i].end();await tick();await tick();}
+ assert.equal(f.sent.length,6);
+ f.events.at(-1)(event('blocked'));await tick();assert.equal(f.pending.length,6);assert.equal(f.sent.length,6);
+ assert.equal(f.service.inboxView('owner','agent',f.binding.id,'dm').paused,true);
+ assert.equal(f.service.dashboardMessages()[0].reason,'auto-reply-loop-guard');
+ f.service.close();const resumed=f.createService();await resumed.start(f.binding.id);
+ f.events.at(-1)(event('after-restart'));await tick();assert.equal(f.pending.length,6);assert.equal(f.sent.length,6);
+ f.events.at(-1)(event('other','human question','other-chat'));await tick();assert.equal(f.pending.length,7);f.pending[6].end();await tick();await tick();
+ resumed.inboxAction('owner','agent',f.binding.id,'dm','resume');f.events.at(-1)(event('human-resume','human question'));await tick();assert.equal(f.pending.length,8);f.pending[7].end();await tick();await tick();
+});
+
+test('loop budget survives restart before threshold and drains already queued replies',async t=>{
+ const f=fixture(t);f.service.bindAgent('owner','agent',f.binding.id);await f.service.start(f.binding.id);
+ for(let i=0;i<3;i++){f.events.at(-1)(message('first-'+i));await tick();f.pending[i].end();await tick();await tick();}
+ f.service.close();const resumed=f.createService();await resumed.start(f.binding.id);
+ for(let i=0;i<8;i++)f.events.at(-1)(message('queued-'+i));
+ for(let i=3;i<6;i++){await tick();assert.equal(f.pending.length,i+1);f.pending[i].end();await tick();await tick();}
+ assert.equal(f.pending.length,6);assert.equal(f.sent.length,6);
+ assert.equal(resumed.view(f.binding.id).queued,0);
+ assert.equal(resumed.inboxView('owner','agent',f.binding.id,'dm').paused,true);
+});
+
+for(const channel of ['dingtalk','feishu'])test(channel+' automatic replies send final text only, never progress or error cards',async t=>{
+ const f=fixture(t,channel);await f.service.start(f.binding.id);
+ const event=id=>channel==='feishu'?{id,conversation:'chat',sender:'peer',text:'human question',time:Date.now()+1000,kind:'direct'}:message(id);
+ f.events.at(-1)(event('text-only'));await tick();
+ assert.equal(f.pending.length,1);assert.deepEqual(f.cards,[]);assert.deepEqual(f.updates,[]);assert.deepEqual(f.sent,[]);
+ f.pending[0].end();await tick();await tick();
+ assert.equal(f.sent.length,1);assert.match(f.sent[0][2],/^【AI 代答】/);assert.deepEqual(f.cards,[]);assert.deepEqual(f.updates,[]);
+ f.failure=true;f.events.at(-1)(event('generation-failure'));await tick();f.pending[1].end();await tick();await tick();
+ assert.equal(f.sent.length,1);assert.deepEqual(f.cards,[]);assert.deepEqual(f.updates,[]);
+});
+
+for (const channel of ['dingtalk','feishu']) test(channel+' desktop suspension preserves enabled intent, blocks stale events and resumes explicitly',async t=>{
+ const f=fixture(t,channel);let allowed=false;f.service.setStartGuard(async()=>allowed);
+ await f.service.start(f.binding.id);assert.equal(f.service.list()[0].status,'waiting-client');assert.equal(f.events.length,0);
+ allowed=true;await f.service.start(f.binding.id);assert.equal(f.service.list()[0].status,'listening');
+ f.service.suspend(f.binding.id);assert.equal(f.service.list()[0].enabled,true);assert.equal(f.service.list()[0].status,'waiting-client');
+ f.events[0](channel==='dingtalk'?message('stale'):{id:'stale',conversation:'dm',sender:'sender',text:'hello',kind:'direct',time:Date.now()+1000});await tick();assert.equal(f.pending.length,0);
+ await f.service.start(f.binding.id);assert.equal(f.events.length,2);
+ f.service.stop(f.binding.id);assert.equal(f.service.list()[0].enabled,false);
 });

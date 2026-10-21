@@ -8,6 +8,8 @@ export function dashboardHtml(): string {
 body{max-width:none;padding:0;display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100vh;background:light-dark(#fafafa,#1f1f1f)}aside{padding:24px 16px;border-right:1px solid #7774;background:light-dark(#f0f2f3,#252526)}.brand{font-size:16px;font-weight:650;margin-bottom:24px}.tree{display:grid;gap:4px}.tree a{display:block;border:0;padding:8px 12px}.tree a[aria-current="page"]{background:light-dark(#dcecf1,#124353);color:light-dark(#164d60,#bce8f4)}.tree details{margin-top:12px}.tree summary{padding:8px 12px;cursor:pointer}.tree details a{margin-left:14px;border-left:1px solid #7775;border-radius:0}main{padding:28px;min-width:0;max-width:1400px;width:100%}.view[hidden]{display:none}.api-item{border-top:1px solid #7774;padding:16px 0}.api-item summary{cursor:pointer;overflow-wrap:anywhere}.api-item pre{white-space:pre-wrap;overflow-wrap:anywhere;background:light-dark(#edf1f2,#292d2e);padding:12px}.api-item code{overflow-wrap:anywhere}#api-filter{width:100%;margin:12px 0}.muted{opacity:.65}@media(max-width:600px){body{padding:0;grid-template-columns:128px minmax(0,1fr)}aside{padding:16px 8px}.brand{font-size:14px}.tree a,.tree summary{padding:8px 6px}main{padding:16px 12px}h1{font-size:18px}.toolbar{gap:6px}.toolbar button,.toolbar a{padding:5px 7px}dl{grid-template-columns:1fr;gap:0}dd{margin-bottom:8px}}
 body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-direction:column;overflow:hidden}body.chat-view #view-title{display:none}body.chat-view #notice:empty{display:none}body.chat-view #notice{margin:0;padding:8px 12px}body.chat-view #auth{margin:0;padding:8px 12px}body.chat-view #view-chat{flex:1;min-height:0}#chat-frame{display:block;width:100%;height:100%;border:0;background:white}
 @media(min-width:601px){#meta{grid-template-columns:180px minmax(0,1fr)}}
+.channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;align-items:start}.channel-card{border:1px solid #7774;border-radius:8px;padding:10px 12px;min-width:0}.channel-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.channel-card h3{margin:0 auto 0 0;font-size:14px}.channel-account{margin:4px 0;color:light-dark(#666,#aaa);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.channel-card dl{grid-template-columns:90px minmax(0,1fr)}.channel-card details{font-size:12px}.channel-card summary{cursor:pointer;color:light-dark(#666,#aaa);width:fit-content}.channel-card details[open]{margin-top:8px}.channel-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;color:light-dark(#626970,#aeb5bc)}.channel-badge:before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}.channel-badge.connected{color:light-dark(#15703b,#80ce9d)}.channel-badge.warning{color:light-dark(#946200,#edc56b)}.channel-badge.error{color:light-dark(#ae261d,#ffb09f)}.channel-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 0 10px;font-size:12px}.channel-controls label{display:flex;align-items:center;gap:5px}.channel-actions{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}.channel-actions button{font-size:12px;padding:2px 8px}.channel-help{font-size:12px;margin:0 0 10px}.channel-help summary{cursor:pointer;opacity:.65}.channel-help p{margin:4px 0}
+
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP</div><nav class="tree" aria-label="Dashboard navigation">
 <a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#paracrafts">Paracrafts</a>
@@ -19,7 +21,7 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 <p id="notice" role="status" aria-live="polite"></p>
 <section class="view" id="view-overview">
 <nav class="toolbar" aria-label="Service controls"><button id="refresh">Refresh</button><button id="copy">Copy MCP URL</button><a href="https://keepwork.com/chat" target="_blank" rel="noopener noreferrer">Open AIChat</a><button id="stop" disabled>Stop service</button></nav>
-<dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl><h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
+<h2>通讯渠道</h2><div class="channel-controls"><label><input id="follow-im-clients" type="checkbox" disabled> 随客户端自动监督</label><span class="muted">每 5 分钟检查</span></div><details class="channel-help"><summary>监督设置说明</summary><p class="muted">本机默认开启：客户端进程运行且 CLI 授权有效时，恢复已启用的分身；这不代表桌面客户端已登录。关闭后，分身可独立运行。授权时间由 CLI 提供，每分钟更新。</p><p id="supervisor-status" class="muted"></p></details><div id="channel-status" class="channel-grid" aria-live="polite">正在读取渠道状态…</div><h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl><h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
 <section class="view" id="view-clients" hidden><div id="clients" class="scroll"></div></section>
 <section class="view" id="view-history" hidden><div id="history" class="scroll"></div>
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div>
@@ -34,7 +36,7 @@ body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-dir
 const byId = id => document.getElementById(id);
 let token = '', offset = 0, busy = false, stopped = false, view = 'overview', apiCatalog = null;
 const viewNames = {personas:'Personas / 分身',overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs','tools-skills':'Tools & skills',chat:'AI 对话'};
-function startChat() {
+function startChat(channel = '') {
   let url = new URL('https://keepwork.com/chat');
   const override = new URLSearchParams(location.search).get('aichat');
   if (override) {
@@ -48,7 +50,7 @@ function startChat() {
       return;
     }
   }
-  const skill = {skill:'keepwork-mcp-assistant',skillUrl:location.origin + '/dashboard/skills/keepwork-mcp-assistant/SKILL.md',skillName:'Keepwork MCP Assistant'};
+  const skill = {skill:'keepwork-mcp-assistant',skillUrl:location.origin + '/dashboard/skills/keepwork-mcp-assistant/SKILL.md'+(['dingtalk','feishu'].includes(channel)?'?channel='+channel:''),skillName:'Keepwork MCP Assistant'};
   const params = {layout:'thin',chat:'new',persist:'0',frontpage:'hide',disable_automation:'1',hide:'sidebar,pet,share,history,search',...skill};
   for (const [key,value] of Object.entries(params)) url.searchParams.set(key,value);
   byId('chat-frame').src = url.href;
@@ -75,8 +77,8 @@ byId('messages-filter').onchange=()=>{messageOffset=0;renderMessages();};
 byId('messages-prev').onclick=()=>{messageOffset=Math.max(0,messageOffset-50);renderMessages();};
 byId('messages-next').onclick=()=>{messageOffset+=50;renderMessages();};
 const limit = 20;
-async function request(path, method = 'GET') {
-  const response = await fetch(path, {method, cache:'no-store', headers:token ? {Authorization:'Bearer ' + token} : {}});
+async function request(path, method = 'GET', body) {
+  const response = await fetch(path, {method, cache:'no-store', headers:{...(token ? {Authorization:'Bearer ' + token} : {}),...(body ? {'Content-Type':'application/json'} : {})},body:body ? JSON.stringify(body) : undefined});
   if (response.status === 401) { byId('auth').hidden = false; throw new Error('Pairing token required. Use the token from ~/.keepwork-mcp/token.'); }
   if (!response.ok) throw new Error('Request failed (' + response.status + ')');
   return response.json();
@@ -120,6 +122,72 @@ function serverMetadata(status) {
     Auth:status.requireAuth ? 'Token required' : 'Open (loopback only)',
   };
 }
+const channelActions=new Set();
+function channelHelp(channel){startChat(channel);location.hash='chat';}
+function renderChannels(channels) {
+  const target=byId('channel-status');const expanded=new Set([...target.querySelectorAll('details[open]')].map(el=>el.dataset.channel));target.replaceChildren();
+  const names={active:'已登录',ready:'已登录',expired:'已过期',missing:'未登录',unknown:'未知',listening:'监听中',stopped:'已停止',error:'异常',retrying:'等待重试','waiting-client':'等待客户端运行或 CLI 授权'};
+  function date(value){if(!value)return 'CLI 未提供';const remaining=new Date(value).getTime()-Date.now();return new Date(value).toLocaleString()+'（'+(remaining<=0?'已过期':'剩余 '+Math.ceil(remaining/3600000)+' 小时')+'）';}
+  for(const channel of channels){
+    const card=document.createElement('article');card.className='channel-card';
+    const head=document.createElement('div');head.className='channel-head';
+    const title=document.createElement('h3');title.textContent=channel.channel==='dingtalk'?'钉钉':'飞书';head.append(title);
+    function badge(text,tone){const el=document.createElement('span');el.className='channel-badge '+tone;el.textContent=text;head.append(el);}
+    const listening=channel.bindings.filter(b=>b.status==='listening').length;
+    const failed=channel.bindings.some(b=>b.status==='error');
+    const waiting=channel.bindings.some(b=>b.enabled&&b.status!=='listening');
+    if(listening)badge('监听中'+(listening>1?' · '+listening:''),'connected');
+    else if(failed)badge('连接异常','error');
+    else if(waiting)badge('等待连接','warning');
+    else badge(channel.installed?'未连接':'未安装','');
+    const expired=channel.accounts.some(a=>a.status==='expired'||(a.expiresAt&&new Date(a.expiresAt).getTime()<=Date.now()));
+    if(expired)badge('授权过期','warning');
+    else if(channel.error&&channel.installed)badge('授权待检查','warning');
+    else if(channel.accounts.length&&!channel.accounts.some(a=>['active','ready'].includes(a.status)))badge('未登录','');
+    card.append(head);
+    const accountLine=document.createElement('p');accountLine.className='channel-account';
+    accountLine.textContent=channel.accounts.map(a=>[a.name,a.organization].filter(Boolean).join(' · ')||'已配置账号').join('、')||'未登录账号';accountLine.title=accountLine.textContent;card.append(accountLine);
+    const actions=document.createElement('div');actions.className='channel-actions';
+    for(const binding of channel.bindings){
+      const action=document.createElement('button');
+      action.textContent=binding.enabled?'断开连接':binding.transitioning?'断开中…':'连接';
+      action.title=(binding.enabled?'停止此分身的监听和自动回复，不退出 CLI 登录':'连接已配置的分身')+' · '+binding.profile;
+      action.disabled=!binding.id||channelActions.has(binding.id)||(!binding.enabled&&binding.transitioning);
+      action.onclick=async()=>{
+        channelActions.add(binding.id);action.disabled=true;
+        try{await request('/admin/channels/connection','POST',{id:binding.id,action:binding.enabled?'disconnect':'connect'});}
+        catch{byId('notice').textContent='连接操作未完成，请检查客户端和 CLI 授权；可使用「AIChat 排查」。';}
+        finally{channelActions.delete(binding.id);await refreshChannels();}
+      };actions.append(action);
+    }
+    const help=document.createElement('button');help.textContent=channel.bindings.length?'AIChat 排查':'连接设置';
+    help.title=channel.bindings.length?'打开内置 AIChat 排查此渠道':'打开内置 AIChat，选择分身并配置连接';help.onclick=()=>channelHelp(channel.channel);actions.append(help);card.append(actions);
+    const details=document.createElement('details');details.dataset.channel=channel.channel;details.open=expanded.has(channel.channel);
+    const more=document.createElement('summary');more.textContent='详情';details.append(more);
+    const summary=document.createElement('p');summary.textContent=(channel.channel==='dingtalk'?'dingtalk-cli':'lark-cli')+' · '+(channel.installed?'CLI 已安装':'CLI 未安装');details.append(summary);
+    function row(list,key,value){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=key;dd.textContent=value;list.append(dt,dd);}
+    for(const account of channel.accounts){const list=document.createElement('dl');row(list,'账号',[account.name,account.organization,account.profile].filter(Boolean).join(' / '));row(list,'登录状态',names[account.status]||account.status);row(list,'Access token',date(account.expiresAt));row(list,'Refresh token',date(account.refreshExpiresAt));details.append(list);}
+    if(!channel.accounts.length){const note=document.createElement('p');note.textContent=channel.error||'未发现个人登录账号';details.append(note);}
+    else if(channel.error){const note=document.createElement('p');note.className='fail';note.textContent=channel.error;details.append(note);}
+    for(const binding of channel.bindings){const list=document.createElement('dl');row(list,'绑定账号',binding.profile);row(list,'监听状态',names[binding.status]||binding.status);row(list,'自动回复',binding.enabled?'已启用':'已关闭');if(binding.lastPollAt)row(list,'最近收件检查',new Date(binding.lastPollAt).toLocaleString());details.append(list);}
+    if(!channel.bindings.length){const note=document.createElement('p');note.textContent='未绑定分身 · 自动回复未启用';details.append(note);}
+    const checked=document.createElement('small');checked.textContent='授权检查：'+new Date(channel.checkedAt).toLocaleString();details.append(checked);card.append(details);target.append(card);
+  }
+}
+let supervisorSaving=false;
+function renderSupervisor(state){
+  if(!state||supervisorSaving)return;
+  byId('follow-im-clients').checked=state.enabled;byId('follow-im-clients').disabled=false;
+  const clients=state.clients||{};
+  byId('supervisor-status').textContent=(clients.error||('钉钉进程：'+(clients.dingtalk?'运行中':'未运行')+'；飞书进程：'+(clients.feishu?'运行中':'未运行')))+(clients.checkedAt?' · 最近检查：'+new Date(clients.checkedAt).toLocaleString():' · 等待首次检查')+(state.accounts||[]).map(a=>' · '+a.profile+' CLI 授权：'+(a.authorized?'有效':'不可用')).join('');
+}
+byId('follow-im-clients').onchange=async()=>{
+  supervisorSaving=true;byId('follow-im-clients').disabled=true;
+  try{await request('/admin/channels/supervisor','POST',{enabled:byId('follow-im-clients').checked});}
+  catch{byId('notice').textContent='自动监督设置保存失败，请重试。';}
+  finally{supervisorSaving=false;await refreshChannels();}
+};
+async function refreshChannels(){try{const data=await request('/admin/channels');renderChannels(data.channels||[]);renderSupervisor(data.supervisor);}catch{byId('channel-status').textContent='渠道状态读取失败，请检查服务或登录授权。';}}
 async function refresh() {
   if (busy || stopped) return;
   busy = true; byId('refresh').disabled = true;
@@ -127,6 +195,7 @@ async function refresh() {
   try {
     const status = await request('/admin/status');
     metadata(serverMetadata(status));
+    if(requestedView==='overview')void refreshChannels();
     const clientRows = status.clients.map(client => [client.sessionId.slice(0,8),client.origin,client.connectedAt,client.lastSeenAt,client.callCount]);
     for (const target of ['clients','overview-clients']) table(target,['Session','Origin','Connected','Last seen','Calls'],clientRows,'No connected AIChat sessions.');
     if (requestedView === 'history') {

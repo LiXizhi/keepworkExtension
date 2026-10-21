@@ -22,6 +22,16 @@ export function messagingNeedsLogin(error: any): boolean {
     return /Select a current DingTalk CLI account|invalid.?grant|invalid.?token|token.*expired|unauthenticated|unauthorized|login.required|未登录/i.test(String(error?.message || error) + ' ' + JSON.stringify(error?.detail || ''));
 }
 export class MessagingService {
+    private startGuard?: (binding: Binding) => Promise<boolean>;
+    setStartGuard(guard: (binding: Binding) => Promise<boolean>) { this.startGuard = guard; }
+    private suspended = new Set<string>();
+    private canRun(r: Runtime) { return r.binding.enabled && !this.suspended.has(r.binding.id); }
+    suspend(id: string) {
+        const r = this.get(id);
+        this.suspended.add(id);
+        this.halt(r);
+        r.status = 'waiting-client'; this.persist(r);
+    }
     // Separate from persisted receipts/inbox: bounded diagnostics for this process only.
     private recentMessages: RecentMessage[] = [];
     private rememberMessage(r: Runtime, message: Incoming, receipt: Receipt, direction = 'in') {
@@ -35,7 +45,7 @@ export class MessagingService {
         return this.recentMessages.slice().reverse().map(({receipt,...row})=>({...row,id:receipt.id,time:receipt.time,state:receipt.state,reason:receipt.reason||'',executor:receipt.executor||''}));
     }
     private logins = new Map<string, Promise<any>>();
-    private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; sends?: Record<string,string> }> = {};
+    private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; sends?: Record<string,string>; autoReplyTimes?: Record<string,number[]> }> = {};
     private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
     private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
     agentBindings(owner:string,agentId:string){return this.list().filter(b=>b.agentOwner===owner&&b.agentId===agentId).map(b=>({...b,unread:this.box(b.id).messages.filter(m=>m.direction==='in'&&m.time>(this.box(b.id).read[m.conversation]||0)).length}));}
@@ -50,7 +60,7 @@ export class MessagingService {
     inboxAction(owner:string,agentId:string,id:string,conversation:string,action:string){this.assertAgentBinding(owner,agentId,id);const box=this.box(id),r=this.get(id);if(action==='read')box.read[conversation]=Date.now();
         else if(action==='clear')box.messages=box.messages.filter(m=>conversation&&m.conversation!==conversation);
         else if(action==='pause'){if(!box.paused.includes(conversation))box.paused.push(conversation);r.active.get(conversation)?.abort();for(const job of r.queues.get(conversation)||[])job.receipt.state='cancelled';r.queues.delete(conversation);}
-        else if(action==='resume')box.paused=box.paused.filter(x=>x!==conversation);else throw Error('Unknown inbox action');this.saveInbox();this.persist(r);return {ok:true};}
+        else if(action==='resume'){box.paused=box.paused.filter(x=>x!==conversation);delete box.autoReplyTimes?.[conversation];}else throw Error('Unknown inbox action');this.saveInbox();this.persist(r);return {ok:true};}
     async manualReply(owner:string,agentId:string,id:string,conversation:string,requestId:string,text:string,takeover=true){this.assertAgentBinding(owner,agentId,id);if(!/^[\w-]{1,160}$/.test(requestId)||!text.trim()||text.length>60000)throw Error('Invalid reply');const box=this.box(id);const previous=box.messages.find(m=>m.id===requestId&&m.direction==='out');if(previous)return previous;if(box.sends?.[requestId])return {id:requestId,state:box.sends[requestId]};
         const target=[...box.messages].reverse().find(m=>m.conversation===conversation&&m.direction==='in');if(!target)throw Error('请选择已有会话');if(takeover)this.inboxAction(owner,agentId,id,conversation,'pause');
         const row={...target,id:requestId,text,time:Date.now(),direction:'out',state:'sending'};box.messages.push(row);(box.sends||={})[requestId]='unknown';this.saveInbox();const r=this.get(id);
@@ -85,7 +95,7 @@ export class MessagingService {
     list() { return [...this.runs.values()].map(r => this.view(r.binding.id)); }
     view(id: string) {
         const r = this.get(id);
-        return { ...r.binding, channel:r.binding.channel||'dingtalk', transport:r.binding.channel==='feishu'?'polling':'events', pollIntervalMs:r.binding.channel==='feishu'?600000:undefined, lastPollAt:r.lastPollAt||null, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', autoReply: r.binding.enabled };
+        return { ...r.binding, transitioning: !!r.starting, channel:r.binding.channel||'dingtalk', transport:r.binding.channel==='feishu'?'polling':'events', pollIntervalMs:r.binding.channel==='feishu'?600000:undefined, lastPollAt:r.lastPollAt||null, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', autoReply: r.binding.enabled };
     }
     rules(id: string) { const b=this.get(id).binding;return readRules(b.root,b.rulesDir); }
     defaults(root?: string | null) {
@@ -204,6 +214,12 @@ export class MessagingService {
     }
     private async startRun(r: Runtime) {
         if (this.closed) throw new Error('Service closed');
+        if (this.startGuard && !await this.startGuard(r.binding)) {
+            if (r.binding.enabled && !this.closed) this.suspend(r.binding.id);
+            return;
+        }
+        if (!r.binding.enabled || this.closed) return;
+        this.suspended.delete(r.binding.id);
         r.status = 'connecting'; r.error = '';
         let rulesLoaded = false;
         try {
@@ -214,16 +230,16 @@ export class MessagingService {
                 r.identity='feishu:'+identity.id;r.self=identity.self;
                 if(this.identities.has(r.identity))throw Error('This account already has a listener');
                 this.identities.add(r.identity);r.ownsIdentity=true;
-                if(!r.binding.enabled||this.closed)throw Error('Start cancelled');
+                if(!this.canRun(r)||this.closed)throw Error('Start cancelled');
                 // The adapter's persisted checkpoint excludes historical messages on first enable.
                 r.since=0;r.subscriptions=JSON.stringify([config.groups,config.keywords.length>0]);
                 r.pollAbort=new AbortController();
                 r.stop=await pollFeishu(r.binding.root,r.binding.profile,path.join(this.home,r.binding.id+'.cursor.json'),m=>this.receive(r,m),error=>{
                     r.stop?.();r.stop=undefined;this.releaseIdentity(r);r.error=error.message;
-                    if(this.closed||!r.binding.enabled)return;
+                    if(this.closed||!this.canRun(r))return;
                     if(messagingNeedsRepair(error)){r.status='error';this.persist(r);}else this.scheduleReconnect(r);
                 },time=>{r.lastPollAt=time;this.persist(r);},undefined,undefined,r.pollAbort.signal);
-                if(!r.binding.enabled||this.closed){r.stop();r.stop=undefined;this.releaseIdentity(r);r.status='stopped';return;}
+                if(!this.canRun(r)||this.closed){r.stop();r.stop=undefined;this.releaseIdentity(r);r.status='stopped';return;}
                 r.status='listening';r.retries=0;this.persist(r);return;
             }
             // Empty selection exposes no brain files; message-only replies remain usable.
@@ -235,14 +251,14 @@ export class MessagingService {
             r.identity = r.binding.profile; r.self = identity.open_dingtalk_id || '';
             if (this.identities.has(r.identity)) throw new Error('This account already has a listener');
             this.identities.add(r.identity); r.ownsIdentity = true;
-            if (!r.binding.enabled || this.closed) throw new Error('Start cancelled');
+            if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
             r.since = Date.now(); r.subscriptions = JSON.stringify([config.groups, config.keywords.length > 0]);
             r.stop = await listenDws(r.binding.root, r.binding.profile, config, e => this.receive(r,e), () => this.disconnected(r));
-            if (!r.binding.enabled || this.closed) { r.stop(); r.stop = undefined; this.releaseIdentity(r); r.status = 'stopped'; return; }
+            if (!this.canRun(r) || this.closed) { r.stop(); r.stop = undefined; this.releaseIdentity(r); r.status = 'stopped'; return; }
             r.status = 'listening'; r.retries = 0; this.persist(r);
         } catch(error) {
             this.releaseIdentity(r);
-            if (this.closed || !r.binding.enabled) { r.status = 'stopped'; r.error = ''; return; }
+            if (this.closed || !this.canRun(r)) { r.status = 'stopped'; r.error = ''; return; }
             r.error = error instanceof Error ? error.message : 'Listener failed';
             if (rulesLoaded && !messagingNeedsRepair(error)) this.scheduleReconnect(r);
             else { clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.status = 'error'; this.persist(r); }
@@ -251,14 +267,14 @@ export class MessagingService {
     }
     private releaseIdentity(r: Runtime) { if (r.ownsIdentity) this.identities.delete(r.identity); r.ownsIdentity = false; }
     private scheduleReconnect(r: Runtime) {
-        if (this.closed || !r.binding.enabled) return;
+        if (this.closed || !this.canRun(r)) return;
         r.status = 'reconnecting';
         if (!r.retry) {
             const delay = 5 * 60 * 1000;
             r.nextRetryAt = Date.now() + delay;
             r.retry = setTimeout(() => {
                 r.retry = undefined; r.nextRetryAt = undefined;
-                if (!this.closed && r.binding.enabled) void this.start(r.binding.id).catch(() => {});
+                if (!this.closed && this.canRun(r)) void this.start(r.binding.id).catch(() => {});
             }, delay);
             r.retry.unref();
         }
@@ -266,20 +282,24 @@ export class MessagingService {
     }
     private disconnected(r: Runtime) {
         r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
-        if (this.closed || !r.binding.enabled) return;
+        if (this.closed || !this.canRun(r)) return;
         r.error = 'Listener disconnected';
         // Reconnect subscriptions only. Never replay model work or message sends.
         this.scheduleReconnect(r);
     }
     stop(id: string) {
-        const r = this.get(id); r.binding.enabled = false; clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.retries = 0;
+        const r = this.get(id); r.binding.enabled = false;
+        this.halt(r); this.persist(r);
+    }
+    private halt(r: Runtime) {
+        clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.retries = 0;
         r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
         for (const q of r.queues.values()) for (const job of q) job.receipt.state = 'cancelled';
         r.queues.clear(); for (const controller of r.active.values()) controller.abort();
-        r.status = 'stopped'; r.error = ''; this.persist(r);
+        r.status = 'stopped'; r.error = '';
     }
     private receive(r: Runtime, event: any) {
-        if (!r.binding.enabled || this.closed) return;
+        if (!this.canRun(r) || this.closed) return;
         const message: Incoming | null = r.binding.channel==='feishu' ? event : incoming(event); if (!message) return;
         const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
         const receipt: Receipt = { id, time: Date.now(), state: 'ignored' }; r.receipts.push(receipt); r.receipts = r.receipts.slice(-200);
@@ -304,15 +324,27 @@ export class MessagingService {
         let active = [...this.runs.values()].reduce((n,r) => n+r.active.size,0);
         for (const r of this.runs.values()) for (const [key,q] of r.queues) {
             if (active >= 4 || this.closed) return;
-            if (!r.binding.enabled) continue;
+            if (!this.canRun(r)) continue;
             if (!q.length || r.active.has(key)) continue;
             const job = q.shift()!, controller = new AbortController(); r.active.set(key,controller); active++;
             void this.execute(r,job.message,job.receipt,controller.signal).finally(() => { r.active.delete(key); if (!q.length) r.queues.delete(key); this.pump(); });
         }
     }
     private async execute(r: Runtime, message: Incoming, receipt: Receipt, signal: AbortSignal) {
-        const delivery = this.delivery(r); let card = '';
+        const delivery = this.delivery(r);
         try {
+            // Bound exchanges with bots whose platform identity/markers are missing.
+            // Reserve before any model call and persist across daemon restarts.
+            const box = this.box(r.binding.id), now = Date.now();
+            const times = (box.autoReplyTimes ||= {})[message.conversation] = (box.autoReplyTimes[message.conversation] || []).filter(time => time > now - 600000);
+            if (box.paused.includes(message.conversation) || times.length >= 6) {
+                if (!box.paused.includes(message.conversation)) box.paused.push(message.conversation);
+                receipt.state = 'ignored'; receipt.reason = 'auto-reply-loop-guard';
+                for (const job of r.queues.get(message.conversation) || []) { job.receipt.state = 'cancelled'; job.receipt.reason = receipt.reason; }
+                r.queues.get(message.conversation)?.splice(0);
+                this.saveInbox(); return;
+            }
+            times.push(now); this.saveInbox();
             receipt.state = 'running'; this.persist(r);
             const {config,prompt} = this.rules(r.binding.id);
             const agentPrompt=r.binding.agentPrompt||'';
@@ -321,8 +353,6 @@ export class MessagingService {
             const scope = createHash('sha256').update(JSON.stringify(config)+prompt).digest('hex');
             const historyKey = scope + '\0' + message.conversation + '\0' + message.sender;
             const input: AnswerInput = { brain: path.basename(r.binding.root), prompt: agentPrompt+'\n'+prompt, question: message.text, knowledge: knowledgeContext(r.binding.root,config,message.text), history: r.history.get(historyKey) || [] };
-            card = await delivery.create(message); receipt.card = card || undefined;
-            if (card) await delivery.update(card,'【AI 代答】正在查阅获准公开的资料…',1);
             let answer = '';
             const choice = messagingExecutorChoice(config, r.binding.agentOwner ? latestAichatClient(r.binding.agentOwner)?.defaultExecutor || null : undefined);
             if (!['keepwork','aichat'].includes(choice.backend)) {
@@ -337,7 +367,7 @@ export class MessagingService {
             const text = answer.startsWith('【AI 代答】') ? answer : '【AI 代答】' + answer;
             const recent=this.recentMessages.find(row=>row.receipt===receipt);if(recent)recent.reply=text.slice(0,8000);
             receipt.state = 'sending'; this.persist(r);
-            if (card) await delivery.update(card,text,3); else await delivery.send(message,receipt.id,text);
+            await delivery.send(message,receipt.id,text);
             receipt.state = 'done';
             this.box(r.binding.id).messages.push({...message,id:receipt.id+'-answer',text,time:Date.now(),direction:'out',state:'sent'});this.saveInbox();
             r.history.set(historyKey,[...input.history,{role:'user',content:message.text},{role:'assistant',content:answer}].slice(-8));
@@ -345,7 +375,6 @@ export class MessagingService {
         } catch(error) {
             const sending = receipt.state === 'sending';
             receipt.state = sending ? 'unknown' : signal.aborted ? 'cancelled' : 'error'; receipt.reason = (error as Error).message;
-            if (card && !sending) { try { await delivery.update(card,'【AI 代答】本次处理未完成，请联系本人查看自动回复状态。',5); } catch { /* no duplicate final message */ } }
             r.error = receipt.reason || 'Task failed';
         } finally { this.persist(r); }
     }

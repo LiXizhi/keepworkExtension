@@ -11,7 +11,41 @@ The daemon's local `~/.keepwork-mcp/messaging-v1/` registry is a service binding
 registry: root/profile/enabled plus body-free receipts and dedup hashes. Secrets remain in DWS or
 CLI-native credential storage; AIChat login stays in process memory. Restart never replays jobs.
 
+## Dashboard channel status
+
+Overview shows separate DingTalk (`dingtalk-cli`) and Feishu (`lark-cli`) cards above
+daemon details. `/admin/channels` uses the normal admin authentication and Origin
+checks. Read-only `dws profile list` and `lark-cli auth status --json` checks are
+single-flight and cached for 60 seconds; binding enabled/listening state is read
+fresh on each request. These probes never log in, enable listeners or send messages.
+DingTalk lists its returned profiles; Feishu checks bound app profiles (up to ten),
+or the default app when unbound. CLI-reported login status is not an online token
+validation. Access/refresh expiry timestamps are displayed only when returned by
+the CLI; missing timestamps say “CLI 未提供”, not “never expires”. Only selected
+account/status/time fields reach the browser; raw responses and credential values
+are excluded. Errors in channel checks do not block the rest of Overview.
+
 ## Startup recovery and multiple computers
+
+### Bot loop protection
+
+Both channels ignore identified app/bot/robot senders and automated reply markers,
+including `【AI 代答】` after mentions/whitespace, DingTalk `[interactiveCard]`
+placeholders and unsupported-message notices. These checks run before generation
+or delivery; no acknowledgement is sent for an ignored automated message.
+
+For bots without usable identity metadata or markers, each binding/conversation
+allows at most six automatic attempts in a rolling ten-minute window. The next
+attempt pauses that conversation and cancels its waiting jobs before creating a
+reply or calling a model. Diagnostics report `auto-reply-loop-guard`; the Agent
+inbox shows the conversation paused. The attempt window and pause persist in the
+local inbox store, including across Stop/Start and daemon restarts. Explicit inbox
+Resume clears the pause and budget. Other conversations and manual replies remain
+available. Busy human conversations can also reach this limit.
+
+This bounds rapid unmarked exchanges, not arbitrary bot detection: a bot posing
+as a human and replying slowly can still pass these checks. The guard is local to
+each daemon; use one enabled computer per account as described below.
 
 After the HTTP daemon starts, `MessagingService.resume()` reads the loaded disk bindings and
 starts every binding with `enabled: true`, including DingTalk and Feishu. No AIChat tab or click
@@ -91,10 +125,11 @@ restrictions are implemented; use AIChat instead. No fallback after submission/u
 Copilot custom-agent behavior follows the [official configuration reference](https://docs.github.com/en/copilot/reference/custom-agents-configuration)
 and [CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference), checked 2026-10-16.
 
-The native DWS streaming-card interface accepts text, not arbitrary A2UI components. An explicit
-creation rejection falls back to ordinary messages; an unknown result does not. Final update
-uncertainty stays visible and never produces a second final reply. Ordinary messages use 6000-byte
-UTF-8 chunks with per-part idempotency keys. Calls and progress do not expose hidden reasoning.
+Automatic persona replies on DingTalk and Feishu use ordinary text. No thinking/progress card
+is created, and failures remain in local status rather than sending another message to the peer.
+The final answer retains the AI reply marker. DingTalk messages use 6000-byte UTF-8 chunks
+with per-part idempotency keys. Unknown delivery outcomes are not automatically retried.
+The low-level DWS card adapter remains available in source, but automatic replies do not call it.
 
 Tests: `node --test scripts/messaging.test.cjs scripts/aichat-presence.test.cjs` and
 `npm run check:shared`. AIChat's `tests/e2e/messaging.test.mjs` uses Live Server and isolated fixtures.
@@ -120,3 +155,15 @@ Every ten minutes, one tick makes one cross-conversation `im +messages-search` r
 Verification: `node --test scripts/messaging.test.cjs scripts/personas.test.cjs`, `npm run check:shared`. Read-only live MCP verification on 2026-10-19 confirmed valid personal user authentication and successful chat/message reads. No real message was sent by acceptance tests.
 
 DingTalk uses event subscriptions only; no self-chat or message-history polling. Self-authored group @me events are accepted, while ordinary self messages and AI reply echoes remain filtered. Live upstream delivery of self mentions still requires verification.
+
+### 本机客户端自动监督
+
+Dashboard 首页的“自动随钉钉 / 飞书客户端运行监督”开关保存到 `~/.keepwork-mcp/config.json` 的 `autoFollowImClients`，默认 `true`。Windows 使用进程名，macOS 使用 `ps` 中主程序路径检测 DingTalk / Feishu / Lark；不读取聊天内容、不调用模型，也不将此信号称为桌面登录验证。
+
+启动时立即检查，此后每 5 分钟检查。对应客户端进程存在时，钉钉运行指定 profile 的 `dws auth status`（可由 CLI 刷新已有 token），飞书运行指定 profile 的 `auth status --verify`。认证失败或检测失败时暂停监听并取消排队/进行中的自动回复；不会自动执行交互登录。条件恢复后只恢复已启用的绑定；手动停止和会话防循环暂停不会被覆盖。未配置分身时不会自动创建绑定。
+
+关闭此开关后，已启用的绑定按原有行为独立运行，不再受客户端进程限制。设置是本机设置，并非跨设备锁：两台电脑都运行客户端时仍可能同时满足条件。Windows/macOS 以外系统在开关开启时保持等待，可关闭开关使用独立监听。
+
+`GET /admin/channels` 包含 `supervisor` 检测结果；`POST /admin/channels/supervisor` 接收 `{ "enabled": boolean }`。沿用管理 API 的 Origin / pairing token 检查。
+
+Dashboard 渠道卡片默认展示账号与公司名。已启用的绑定只提供“断开连接”，断开后才能再次“连接”；断开会持久关闭该绑定的监听/自动回复，不退出 CLI 账号。连接操作仍受客户端自动监督条件约束。未绑定渠道通过“连接设置”进入内置 AIChat；“AIChat 排查”加载指定渠道的排查上下文，不携带凭据、不自动调用模型或发送测试消息。`POST /admin/channels/connection` 使用 `{id, action: "connect" | "disconnect"}`，拒绝未先断开的连接请求。

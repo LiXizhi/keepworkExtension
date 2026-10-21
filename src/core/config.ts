@@ -17,6 +17,8 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 export const MAX_TIMEOUT_MS = 120_000;
 
 export interface McpConfigFile {
+    /** Follow running DingTalk/Feishu desktop clients and valid CLI auth. Default true. */
+    autoFollowImClients?: boolean;
     workspaceRoot?: string;
     port?: number;
     /** When true, /mcp and /admin require the pairing token. Default false. */

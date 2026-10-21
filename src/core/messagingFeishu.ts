@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { Incoming, splitReply } from './messagingPolicy';
+import { Incoming, splitReply, automatedSender, automatedText } from './messagingPolicy';
 
 export const FEISHU_MESSAGE_SCOPES = 'contact:user.basic_profile:readonly offline_access search:message im:chat:read im:message:readonly im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.send_as_user';
 export function resolveLark(): string {
@@ -47,10 +47,10 @@ export function feishuIncoming(row: any, chat: any, self: string): Incoming | nu
     const sender=row.sender?.id||row.sender?.open_id;
     const numeric=Number(row.create_time);const time=Number.isFinite(numeric)?numeric:Date.parse(row.create_time);
     if(row.deleted||!row.message_id||!sender||!Number.isFinite(time)||!time||!['text','post'].includes(row.msg_type||row.message_type)||typeof row.content!=='string')return null;
-    if(row.sender?.sender_type==='app'||row.sender?.type==='app')return null;
+    if(automatedSender(row))return null;
     let content=row.content;
     try {const parsed=JSON.parse(content);if(typeof parsed.text==='string')content=parsed.text;} catch { /* shortcuts render plain text */ }
-    return {id:row.message_id,conversation:chat.chat_id,sender,text:content,time:time<1e12?time*1000:time,
+    return {id:row.message_id,conversation:chat.chat_id,sender,text:content,time:time<1e12?time*1000:time,automated:automatedText(content),
         kind:chat.chat_mode==='p2p'?'direct':row.mentions?.some((m:any)=>(typeof m.id==='string'?m.id:m.id?.open_id)===self)?'mention':'group'};
 }
 // One sweep at a time; bounded pages fail visibly instead of advancing past unread data.
