@@ -181,7 +181,12 @@ test('overview displays build identity, source and environment with safe legacy 
             Object.fromEntries([...element.querySelectorAll('dt')].map(term => [term.textContent, term.nextElementSibling.textContent])));
         await page.goto('http://127.0.0.1:8080/dashboard#overview');
         await page.getByText('9.8.7', { exact: true }).waitFor();
+        assert.equal(await page.locator('#channel-status').isVisible(), false);
+        await page.getByRole('link', { name: 'Instance Messaging', exact: true }).click();
         await page.locator('#channel-status .channel-card').nth(1).waitFor();
+        assert.equal(await page.locator('#view-title').textContent(), 'Instance Messaging');
+        assert.equal(await page.locator('a[href="#instance-messaging"]').getAttribute('aria-current'), 'page');
+        assert.equal(await page.locator('#view-overview').isVisible(), false);
         assert.match(await page.locator('#channel-status').textContent(),/已过期/);
         assert.match(await page.locator('#channel-status').textContent(),/CLI 未提供/);
         assert.match(await page.locator('#channel-status').textContent(),/未绑定分身/);
@@ -201,10 +206,13 @@ test('overview displays build identity, source and environment with safe legacy 
         await page.getByRole('button',{name:'断开连接',exact:true}).waitFor();
         assert.deepEqual(connectionWrites,[{id:'test-binding',action:'disconnect'},{id:'test-binding',action:'connect'}]);
         await page.locator('.channel-card details summary').first().click();
-        await page.locator('#refresh').click();
+        await page.evaluate(() => refresh());
         await page.waitForTimeout(100);
         assert.equal(await page.locator('.channel-card details').first().getAttribute('open'),'');
         await page.locator('.channel-card details summary').first().click();
+        await page.getByRole('link', { name: 'Overview / 概览', exact: true }).click();
+        await page.locator('#meta').waitFor();
+        assert.equal(await page.locator('#channel-status').isVisible(), false);
         const meta = await read();
         assert.equal(meta['MCP version / 版本'], '9.8.7');
         assert.equal(meta['Service API version'], '0.1.2');
@@ -232,6 +240,7 @@ test('overview displays build identity, source and environment with safe legacy 
         assert.equal(legacy['Built at / 构建时间'], 'Unknown / 未提供');
         assert.equal(legacy['Source / 服务来源'], 'Unknown / 未提供');
         assert.equal(legacy.Status, 'Running');
+        await page.goto('http://127.0.0.1:8080/dashboard#instance-messaging');
         await page.getByRole('button',{name:'AIChat 排查',exact:true}).click();
         assert.match(await page.locator('#chat-frame').getAttribute('src'),/channel%3Ddingtalk/);
         assert.deepEqual(errors, []);

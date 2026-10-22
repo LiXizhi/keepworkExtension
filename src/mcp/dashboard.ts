@@ -15,7 +15,7 @@ ${dashboardCliStyles}
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP</div><nav class="tree" aria-label="Dashboard navigation">
 <a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#paracrafts">Paracrafts</a>
-<a href="#cli-accounts">CLI 账号</a><a href="#personas">Personas / 分身</a><a href="#chat">AI 对话</a>
+<a href="#instance-messaging">Instance Messaging</a><a href="#cli-accounts">CLI 账号</a><a href="#personas">Personas / 分身</a><a href="#chat">AI 对话</a>
 <details open><summary>Developer</summary><a href="#api-docs">API docs</a><a href="#tools-skills">Tools &amp; skills</a></details>
 </nav></aside><main>
 <h1 id="view-title">Overview / 概览</h1>
@@ -23,7 +23,8 @@ ${dashboardCliStyles}
 <p id="notice" role="status" aria-live="polite"></p>
 <section class="view" id="view-overview">
 <nav class="toolbar" aria-label="Service controls"><button id="refresh">Refresh</button><button id="copy">Copy MCP URL</button><a href="https://keepwork.com/chat" target="_blank" rel="noopener noreferrer">Open AIChat</a><button id="stop" disabled>Stop service</button></nav>
-<h2>通讯渠道</h2><div class="channel-controls"><label><input id="follow-im-clients" type="checkbox" disabled> 随客户端自动监督</label><span class="muted">每 5 分钟检查</span></div><details class="channel-help"><summary>监督设置说明</summary><p class="muted">本机默认开启：客户端进程运行且 CLI 授权有效时，恢复已启用的分身；这不代表桌面客户端已登录。关闭后，分身可独立运行。授权时间由 CLI 提供，每分钟更新。</p><p id="supervisor-status" class="muted"></p></details><div id="channel-status" class="channel-grid" aria-live="polite">正在读取渠道状态…</div><h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl><h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
+<h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl><h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
+<section class="view" id="view-instance-messaging" hidden><h2>通讯渠道</h2><div class="channel-controls"><label><input id="follow-im-clients" type="checkbox" disabled> 随客户端自动监督</label><span class="muted">每 5 分钟检查</span></div><details class="channel-help"><summary>监督设置说明</summary><p class="muted">本机默认开启：客户端进程运行且 CLI 授权有效时，恢复已启用的分身；这不代表桌面客户端已登录。关闭后，分身可独立运行。授权时间由 CLI 提供，每分钟更新。</p><p id="supervisor-status" class="muted"></p></details><div id="channel-status" class="channel-grid" aria-live="polite">正在读取渠道状态…</div></section>
 <section class="view" id="view-clients" hidden><div id="clients" class="scroll"></div></section>
 <section class="view" id="view-history" hidden><div id="history" class="scroll"></div>
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div>
@@ -38,7 +39,7 @@ ${dashboardCliHtml}
 <script>
 const byId = id => document.getElementById(id);
 let token = '', offset = 0, busy = false, stopped = false, view = 'overview', apiCatalog = null;
-const viewNames = {'cli-accounts':'CLI 状态与账号',personas:'Personas / 分身',overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs','tools-skills':'Tools & skills',chat:'AI 对话'};
+const viewNames = {'instance-messaging':'Instance Messaging','cli-accounts':'CLI 状态与账号',personas:'Personas / 分身',overview:'Overview / 概览',history:'History',clients:'Clients',paracrafts:'Paracrafts','api-docs':'API docs','tools-skills':'Tools & skills',chat:'AI 对话'};
 function startChat(channel = '') {
   let url = new URL('https://keepwork.com/chat');
   const override = new URLSearchParams(location.search).get('aichat');
@@ -205,7 +206,7 @@ async function refresh() {
   try {
     const status = await request('/admin/status');
     metadata(serverMetadata(status));
-    if(requestedView==='overview')void refreshChannels();
+    if(requestedView==='instance-messaging')void refreshChannels();
     const clientRows = status.clients.map(client => [client.sessionId.slice(0,8),client.origin,client.connectedAt,client.lastSeenAt,client.callCount]);
     for (const target of ['clients','overview-clients']) table(target,['Session','Origin','Connected','Last seen','Calls'],clientRows,'No connected AIChat sessions.');
     if (requestedView === 'history') {
