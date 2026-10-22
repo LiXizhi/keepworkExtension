@@ -18,8 +18,8 @@ Task/F5 sets `AICHAT_DESKTOP_LOCAL_SOURCE=1`: the app serves the sibling
 and skipping occupied ports. Set `AICHAT_SOURCE_DIR` if that checkout lives elsewhere.
 The terminal prints the actual source URL. An explicit `AICHAT_DESKTOP_DEV_URL` takes
 priority for an existing Live Server. Missing source fails visibly instead of opening
-the published website. The owned HTTP server stops on Quit. Closing the window destroys
-the page and leaves that server running so the tray can open a new window.
+the published website. The owned HTTP server stops on Quit. Closing the window hides
+the page and shows the floating pet; the tray restores the same live window.
 The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arch>` and
 `apps/local-model-runtime/runtime-staging/<platform>-<arch>` if present;
 `AICHAT_MCP_RUNTIME_DIR` and `KP_LOCAL_MODEL_RUNTIME_DIR` override them. No runtime is required for native files
@@ -95,12 +95,13 @@ without cache via the refresh icon, menu or Ctrl/Cmd+R, and automatically after 
 MCP restart. Local source changes are read directly from disk. Only the selected entry
 gets the desktop bridge; Dashboard and embedded pages do not gain native privileges.
 
-- Single application instance. Closing the window destroys it and releases the page,
-  renderer process, and native terminal sessions. The tray process stays, and Keepwork MCP
-  keeps running (including a daemon owned by VS Code or Local Helper). The tray icon remains
-  in the taskbar notification area; **打开 KeepWork 第二大脑** or a tray click creates a new
-  window. Login startup (`--background`) starts the tray and MCP without loading the page.
-  **退出** closes native terminals and desktop-owned MCP only.
+- Single application instance. Closing hides the main window and shows the floating pet;
+  its renderer, draft, terminals, active call and text/agent tasks remain alive. Simple and
+  PRO are unchanged. **打开 KeepWork 第二大脑** or a tray click restores the same window.
+  The tray's **显示桌面宠物** preference is device-local and defaults on; disabling it
+  ends dictation, live calling and wake-word capture without cancelling text tasks.
+  Re-enabling never starts recording. Login startup (`--background`) remains tray-only.
+  **退出** destroys both windows and closes native terminals and desktop-owned MCP only.
 - Login startup is off by default and optional in the application menu.
 - Electron's per-user application directory stores the persistent `aichat` browser session,
   `folder-grants.json`, `media-grants.json`, settings, and MCP runtime installation records. Never upload grants.
@@ -217,3 +218,20 @@ clients check the stable manifests and download the immutable runtime archive wi
 new desktop package. This change itself needs one desktop release to deliver the window.
 Before rollout, verify packaged N→N+1 activation on all three supported targets; source
 Electron smoke does not substitute for installer/signing acceptance.
+
+
+### Floating pet verification
+
+`src/petWindow.cjs` owns a packaged, transparent, always-on-top companion with its own
+sandboxed preload. Only its exact main frame may call the restricted pet IPC channel;
+files, terminals and arbitrary Node APIs are absent. The main AIChat renderer publishes
+bounded presentation snapshots and handles commands through optional v1 `floatingPet`
+capability methods. Closing retains one chat runtime; a pet is never a second conversation.
+No native credential or model configuration is projected into the pet window.
+
+Run `node --test apps/aichat-desktop/tests/pet-*.test.cjs` from the repository root.
+`node apps/aichat-desktop/scripts/pet-smoke.cjs` exercises the real sandboxed pet window
+without building, starting MCP or using real accounts. Set `PET_SCREENSHOT` to an absolute
+PNG path for a visual artifact. Speech/call responses in this smoke use fixtures; real
+microphone permissions/audio, multi-monitor movement and OS focus behavior require native
+acceptance on Windows and macOS.

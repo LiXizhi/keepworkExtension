@@ -112,3 +112,19 @@ test('latest connected valid brain survives old refreshes, invalid paths, handle
     fs.rmdirSync(first);
     assert.equal(latestAichatBrainRoot(), '');
 });
+
+test('shared MCP heartbeats refresh their own presence without taking over the latest page', t => {
+    const { touchAichatPresence } = mod.exports;
+    const owner = '12345678-1234-1234-1234-123456789099', origin = 'https://keepwork.com';
+    const key = require('node:crypto').createHash('sha256').update(origin + '\0' + owner).digest('hex');
+    t.mock.method(Date, 'now', () => 1000);
+    rememberAichatClient({ sessionId: 'heartbeat-old', url: origin + '/chat', token: 'old', owner, origin });
+    rememberAichatClient({ sessionId: 'heartbeat-new', url: origin + '/chat', token: 'new' });
+    t.mock.method(Date, 'now', () => 2000);
+    touchAichatPresence('heartbeat-old');
+    assert.equal(latestAichatClient(key).seenAt, 2000);
+    assert.equal(latestAichatClient().token, 'new');
+    assert.equal(latestAichatClient().seenAt, 1000);
+    touchAichatPresence('heartbeat-new');
+    assert.equal(latestAichatClient().seenAt, 2000);
+});

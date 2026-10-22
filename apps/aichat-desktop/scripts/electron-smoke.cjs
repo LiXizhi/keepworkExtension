@@ -109,9 +109,9 @@ async function main() {
     const closed = await application.evaluate(({ BrowserWindow }) => {
       const w = BrowserWindow.getAllWindows()[0];
       w.close();
-      return { destroyed: w.isDestroyed(), windows: BrowserWindow.getAllWindows().length };
+      return { destroyed: w.isDestroyed(), visible: w.isVisible(), windows: BrowserWindow.getAllWindows().length };
     });
-    assert.deepEqual(closed, { destroyed: true, windows: 0 });
+    assert.deepEqual(closed, { destroyed: false, visible: false, windows: 2 });
     const reopened = await application.evaluate(async ({ app, BrowserWindow }) => {
       app.emit('activate');
       for (let i = 0; i < 50; i++) {

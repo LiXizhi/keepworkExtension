@@ -92,7 +92,14 @@ if (process.isMainFrame) {
     } catch { /* Untrusted/offline documents never receive native chrome controls. */ }
   }, { once: true });
   contextBridge.exposeInMainWorld('aichatDesktop', Object.freeze({
-    version: 1, capabilities: Object.freeze({ files: true, terminal: true, defaultBrainFolder: true, gitSetup: true }),
+    version: 1, capabilities: Object.freeze({ files: true, terminal: true, defaultBrainFolder: true, gitSetup: true, floatingPet: true }),
+    publishPetState: state => call('petState', state),
+    petResult: result => call('petResult', result),
+    onPetCommand: callback => {
+      const listener = (_event, command) => callback(command);
+      ipcRenderer.on('aichat-desktop:pet-command', listener);
+      return () => ipcRenderer.removeListener('aichat-desktop:pet-command', listener);
+    },
     checkGit: () => call('checkGit'), installGit: () => call('installGit'),
     roots: () => call('roots'), pickFolder: () => call('pickFolder'),
     defaultBrainFolder: prepare => call('defaultBrainFolder', { prepare: prepare === true }),

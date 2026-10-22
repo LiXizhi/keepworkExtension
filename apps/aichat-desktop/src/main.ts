@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, Tray } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { autoUpdater } from 'electron-updater';
@@ -7,6 +7,7 @@ const { NativeFiles, atomicJson } = require('./files.cjs');
 const { defaultBrainFolder } = require('./brainFolder.cjs');
 const { checkGit, installGit } = require('./gitSetup.cjs');
 const { createUpdateWindow } = require('./updateWindow.cjs');
+const { createPetWindow } = require('./petWindow.cjs');
 const { RuntimeSupervisor } = require('./runtime.cjs');
 const { ENTRY, trustedPage, assertSender, externalUrl } = require('./security.cjs');
 const { MediaGrants, installPermissions } = require('./permissions.cjs');
@@ -29,13 +30,14 @@ let opening: Promise<void> | null = null;
 let appIcon: ReturnType<typeof nativeImage.createFromPath> | undefined;
 const closedTip = `${PRODUCT_NAME}（窗口已关闭，点击重新打开）`;
 let updateState = 'idle', updateError = '', updateProgress = 0, checking: Promise<void> | null = null;
+let floatingPet: any;
 let updatesWindow: any, shellLatest: any, shellCheckedAt = '', updateActionBusy = false;
 let shellStale = false;
 const terminals = new TerminalSessionManager();
 const terminalIds = new Set<string>();
 let settingsFile: string;
 let mediaGrants: InstanceType<typeof MediaGrants>;
-let settings = { openAtLogin: false, theme: 'light' };
+let settings = { openAtLogin: false, theme: 'light', petVisible: true, petPosition: null as null | { x: number; y: number } };
 let serviceBusy = false, switchingPage = false;
 function liveWindow() {
   if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed())) return undefined;
@@ -116,8 +118,14 @@ function startRuntimeHeartbeat() {
   runtimeHeartbeat.unref?.();
 }
 function ensureShown() {
+  floatingPet?.hide();
   const current = liveWindow();
-  if (current) { current.show(); current.focus(); return Promise.resolve(); }
+  if (current) {
+    if (current.isMinimized()) current.restore();
+    current.show(); current.focus();
+    if (current.webContents.isCrashed?.()) return current.loadURL(devUrl || ENTRY).catch((error: Error) => dialog.showErrorBox(PRODUCT_NAME, error.message));
+    return Promise.resolve();
+  }
   if (!opening) opening = openWindow().finally(() => { opening = null; });
   return opening;
 }
@@ -335,6 +343,13 @@ function templateFrom(items: any[]) {
 function menu() {
   const items: any[] = [
     { label: `打开 ${PRODUCT_NAME}`, click: show },
+    { label: '显示桌面宠物', type: 'checkbox', checked: settings.petVisible, click: (item: any) => {
+      settings.petVisible = item.checked; atomicJson(settingsFile, settings);
+      if (!item.checked) floatingPet?.hide(true);
+      else if (liveWindow() && !liveWindow()!.isVisible()) floatingPet?.show();
+      else if (!liveWindow() && !opening) opening = openWindow(true).finally(() => { opening = null; });
+      menu();
+    } },
     { label: '打开文件夹…', click: async () => {
       await ensureShown();
       const current = liveWindow();
@@ -396,6 +411,8 @@ function setupBridge() {
     if (!current) throw new Error('window closed');
     assertSender(event, current.webContents, devUrl);
     if (!args || typeof args !== 'object') throw new Error('Invalid request');
+    if (method === 'petState') return floatingPet?.update(args);
+    if (method === 'petResult') return floatingPet?.result(args);
     if (method === 'theme') {
       if (!['light', 'dark'].includes(args.theme)) throw new Error('Invalid theme');
       nativeTheme.themeSource = args.theme;
@@ -469,7 +486,8 @@ function setupBridge() {
     throw new Error('Unknown desktop operation');
   });
 }
-function openWindow() {
+function openWindow(startHidden = false) {
+  let keepHidden = startHidden;
   const created = new BrowserWindow({ title: PRODUCT_NAME, icon: appIcon, width: 1360, height: 900, show: false,
     backgroundColor: settings.theme === 'dark' ? '#0a0a0f' : '#ffffff',
     titleBarStyle: 'hidden', titleBarOverlay: { ...titlebarColors(settings.theme), height: 34 },
@@ -479,28 +497,34 @@ function openWindow() {
   win = created;
   if (process.platform !== 'darwin') created.setMenu(null);
   created.on('page-title-updated', event => event.preventDefault());
-  // Destroy past the page's beforeunload so the renderer process is released. Quit still closes normally.
+  // Keep one page/runtime alive: the pet is only a projection of this window.
   created.on('close', event => {
     if (quitting || created.isDestroyed()) return;
     event.preventDefault();
-    clearTerminals();
-    try { created.webContents.session.flushStorageData(); } catch { /* page already gone */ }
-    created.destroy();
+    keepHidden = true;
+    created.hide();
+    if (settings.petVisible) floatingPet?.show();
+    else floatingPet?.hide(true);
+    tray?.setToolTip(`${PRODUCT_NAME}（后台运行）`);
   });
   created.on('closed', () => {
     if (win === created) win = undefined;
     if (!quitting) tray?.setToolTip(closedTip);
   });
-  created.webContents.on('did-start-navigation', (_e, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) clearTerminals(); });
+  created.webContents.on('did-start-navigation', (_e, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { clearTerminals(); floatingPet?.reset(); } });
   created.webContents.on('will-navigate', (e, url) => { if (!trustedPage(url, devUrl)) { e.preventDefault(); if (externalUrl(url)) void shell.openExternal(url); } });
   created.webContents.on('will-redirect', (e, url, _inPlace, mainFrame) => { if (mainFrame && !trustedPage(url, devUrl)) e.preventDefault(); });
   created.webContents.setWindowOpenHandler(({ url }) => { if (externalUrl(url)) void shell.openExternal(url); return { action: 'deny' }; });
+  created.webContents.on('render-process-gone', () => floatingPet?.reset());
   installPermissions(created, mediaGrants, () => devUrl, dialog);
   return created.loadURL(devUrl || ENTRY).catch(() => {
     // No native privileges on this offline error page. Reload retries the official entry.
     if (!created.isDestroyed()) void dialog.showMessageBox(created, { message: '无法连接 AIChat，请检查网络后从菜单重新加载。' });
   }).then(() => {
-    if (!created.isDestroyed()) { created.show(); created.focus(); tray?.setToolTip(PRODUCT_NAME); }
+    if (!created.isDestroyed()) {
+      if (!keepHidden) { created.show(); created.focus(); tray?.setToolTip(PRODUCT_NAME); }
+      else if (!created.isVisible() && settings.petVisible) floatingPet?.show();
+    }
   });
 }
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -542,6 +566,16 @@ else {
     updatesWindow = createUpdateWindow({ BrowserWindow, ipcMain }, __dirname, {
       status: updatesSnapshot, check: checkUpdates, mcp: applyMcpUpdate, desktop: applyDesktopUpdate,
     });
+    floatingPet = createPetWindow({ BrowserWindow, ipcMain, screen }, __dirname, {
+      position: () => settings.petPosition,
+      savePosition: (position: { x: number; y: number }) => { settings.petPosition = position; atomicJson(settingsFile, settings); },
+      open: show,
+      command: (command: unknown) => {
+        const current = liveWindow();
+        if (!current || !trustedPage(current.webContents.getURL(), devUrl)) throw new Error('AIChat unavailable');
+        current.webContents.send('aichat-desktop:pet-command', command);
+      },
+    });
     setupBridge();
     const icon = appIcon.resize({ width: process.platform === 'darwin' ? 22 : 16 });
     tray = new Tray(icon); tray.setToolTip(PRODUCT_NAME); tray.on('click', show); menu();
@@ -573,7 +607,7 @@ else {
   app.on('window-all-closed', () => { /* Tray and Keepwork MCP stay after the window is destroyed. */ });
   app.on('before-quit', event => {
     if (quitting) return;
-    event.preventDefault(); quitting = true; clearTerminals(); developmentServer?.close();
+    event.preventDefault(); quitting = true; floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
     if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }
     void (async () => {
       try { await runtime?.restarting; await runtime?.starting; } catch { /* Finish shutdown after failed startup. */ }

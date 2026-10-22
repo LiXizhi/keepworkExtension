@@ -1,3 +1,5 @@
+import { registerMcpPresence } from './aichatPresence';
+import { attachAichatEvents } from './aichatEvents';
 import { Personas } from '../core/personas';
 import { handlePersonaHttp } from './personaHttp';
 import { managedBrowsers } from '../core/browser';
@@ -23,7 +25,7 @@ import { liveClientCount, listWebserverRoots, setHubListenPort, startParacraftWa
 import { tryHandleWebserver } from '../core/webserverProxy';
 import { startCalendarWatch, stopCalendarWatch, tryHandleCalendar } from '../core/calendarReminders';
 import { TerminalSessionManager } from '../core/terminalSessions';
-import { AgentSessions } from '../core/agentSessions';
+import { AgentSessions, ownerKey } from '../core/agentSessions';
 import { handleAgentHttp } from './agentHttp';
 import { tryHandleAichatPresence, aichatClientRemembered } from '../core/aichatPresence';
 import { dashboardHtml } from './dashboard';
@@ -506,12 +508,20 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     if (sessionId && transports.has(sessionId)) {
                         touchSession(sessionId);
                         const transport = transports.get(sessionId)!;
-                        if (req.method === 'GET') activeMcpStreams.add(sessionId);
-                        try {
-                            await transport.handleRequest(req, res, parsedBody);
-                        } finally {
-                            if (req.method === 'GET') activeMcpStreams.delete(sessionId);
+                        if (req.method === 'GET') {
+                            const rawOwner = String(req.headers['x-agent-owner'] || '');
+                            if (rawOwner && !origin) { sendJson(res, 403, { error: 'Explicit allowed Origin required' }); return; }
+                            let owner = '';
+                            try { if (rawOwner) owner = ownerKey(origin, rawOwner); }
+                            catch { sendJson(res, 400, { error: 'Agent owner key required' }); return; }
+                            // A duplicate GET must not steal notifications or clear the
+                            // live session's pruning exemption when its 409 closes.
+                            if (activeMcpStreams.has(sessionId)) { sendJson(res, 409, { error: 'MCP stream already open' }); return; }
+                            activeMcpStreams.add(sessionId);
+                            res.once('close', () => activeMcpStreams.delete(sessionId));
+                            attachAichatEvents(res, transport, personas, owner);
                         }
+                        await transport.handleRequest(req, res, parsedBody);
                         return;
                     }
 
@@ -539,6 +549,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                             }
                         };
                         const mcp = createMcpServer(runtime);
+                        registerMcpPresence(mcp, hasSession);
                         await mcp.connect(transport);
                         await transport.handleRequest(req, res, parsedBody);
                         return;

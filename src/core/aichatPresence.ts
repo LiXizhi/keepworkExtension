@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-function presenceOriginAllowed(origin: string): boolean {
+export function presenceOriginAllowed(origin: string): boolean {
     try {
         const url = new URL(origin);
         return url.origin === origin && ((url.protocol === 'https:' && ['keepwork.com', 'cdn.keepwork.com'].includes(url.hostname))
@@ -75,6 +75,13 @@ export function rememberAichatClient(input: { sessionId: string; url: string; to
     const root = validBrainPath(input.brainRoot);
     if (root && order >= brain.order) brain = { order, root };
     if (/^[a-zA-Z0-9-]{32,128}$/.test(input.owner || '') && input.origin) owners.set(createHash('sha256').update(input.origin+'\0'+input.owner).digest('hex'),current);
+}
+
+/** Shared MCP heartbeat refreshes only its own remembered clients, never latest-page ordering. */
+export function touchAichatPresence(sessionId: string): void {
+    const now = Date.now();
+    if (current?.sessionId === sessionId) current.seenAt = now;
+    for (const client of owners.values()) if (client.sessionId === sessionId) client.seenAt = now;
 }
 
 /** Closing or pruning the MCP session must not drop the last page URL and login. */
