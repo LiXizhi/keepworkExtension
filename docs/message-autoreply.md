@@ -4,7 +4,7 @@
 `messagingPolicy.ts` validates second-brain rules, restricts knowledge reads and selects triggers.
 `messagingDingtalk.ts` uses the native DWS executable with argument arrays (no shell), ready markers,
 NDJSON, stable profile IDs and exact reply targets. Existing consumers are never displaced.
-`messagingExecutor.ts` owns tool-free Copilot ACP and task-scoped AIChat workers.
+`messagingExecutor.ts` owns agent CLI turns, the Copilot adapter, and task-scoped AIChat workers.
 
 AIChat owns the configuration UI and Skill prompt under `.github/skills/message-autoreply/`.
 The daemon's local `~/.keepwork-mcp/messaging-v1/` registry is a service binding, not a second brain
@@ -126,13 +126,15 @@ Daemon shutdown closes the browser, including launches still in progress. Browse
 in-flight tasks without replay; a later request starts a replacement. Missing browser/startup failures
 are reported without opening a visible browser or falling back to the notify bridge. Install Edge/Chrome
 or configure `EDGE_PATH` / `CHROME_PATH`. The legacy Local Helper notify endpoint is no longer used.
-The iframe uses the existing versioned AIChat bridge, empty tool catalog and an SDK execution sandbox
-that rejects every tool call, including unsolicited calls.
+The iframe uses the existing versioned AIChat bridge and an SDK execution sandbox.
+Automatic replies grant second-brain read, list, write and terminal tools, still confined to that folder.
+Tasks with no granted catalog keep an empty tool list, and the sandbox rejects every other tool call.
 
-Copilot runs in a private per-task directory with a unique custom agent (`tools: []`), no custom
-instructions or built-in MCP, explicit tool deny rules and denied permission requests. Only
-preselected public text enters the prompt. Other CLI adapters are ineligible until equivalent
-restrictions are implemented; use AIChat instead. No fallback after submission/unknown result.
+When the shared agent runner is unavailable, Copilot still runs in a private per-task directory
+with a unique custom agent (`tools: []`), no custom instructions or built-in MCP, explicit tool
+deny rules and denied permission requests. Installed IM replies use the runner instead: craft mode
+in the second brain, with native tools accepted and questions declined. No fallback after
+submission/unknown result.
 Copilot custom-agent behavior follows the [official configuration reference](https://docs.github.com/en/copilot/reference/custom-agents-configuration)
 and [CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference), checked 2026-10-16.
 
@@ -147,7 +149,7 @@ Tests: `node --test scripts/messaging.test.cjs scripts/aichat-presence.test.cjs`
 Actual Copilot/DWS/Keepwork login and reply acceptance require a dedicated account/conversation;
 do not count fixture tests as live acceptance or steal an existing listener for verification.
 
-Auto executor selection follows AIChat’s current workspace default backend and its saved model via authenticated presence metadata (memory only). It never substitutes another installed CLI. Missing defaults, unavailable CLI or an adapter without enforced tool denial fall back to keepwork-pro before submission only. Currently Copilot is the implemented tool-free CLI adapter; other defaults are recognized but use the restricted iframe fallback. Explicit executor/model overrides remain supported.
+DingTalk and Feishu replies follow the bound persona's executor and always run in that persona's second-brain folder. `keepwork` or `aichat` is a client persona: that owner's connected AIChat page answers, and no agent CLI is started for it. Any other executor uses that agent CLI in craft mode, with its native tools enabled in the brain. `auto` still follows the persona owner's saved AIChat backend and model. A different installed CLI is never substituted. The persona prompt, auto-reply rules and silence instruction still apply; message text, knowledge and tool results cannot cancel them. If the selected CLI is missing or cannot start before submission, the reply uses a connected AIChat client. The persona's own page is preferred, and another page is used only when the owner has none. If no connected client is available, the same reply runs in headless AIChat with the second-brain tools. After a CLI or client turn has been submitted, failure does not fall through to another responder. Explicit executor and model overrides remain supported. The Instance Messaging dashboard shows the current second-brain folder at the top, with the responder (`CLI`, `AIChat 客户端`, or `无界面 AIChat`) and model that served the current or latest reply. When the next reply would use a different route, that route is shown beside it.
 
 
 Persona Connect uses `POST /agents/personas/:id/channel-connect` with the verified local brain root. It reuses that persona's persisted binding, otherwise selects the current DWS profile and binds it, preserving existing rules. It starts the listener idempotently and returns real listening status. Empty public knowledge selections are permitted and expose no brain files. Saved enabled bindings resume on daemon restart. Messaging state changes notify persona SSE clients. The UI uses AI repair only on connection failure; unsupported daemon versions require an update, never another CLI install.
@@ -182,7 +184,7 @@ Dashboard 渠道卡片默认展示账号与公司名。已启用的绑定只提�
 
 ### 飞书完整参与者上下文与静默（2026-10-21）
 
-飞书触发规则仍忽略本人消息和 AI 回声，不会回复自己。轮询收到的本人消息保留在该绑定的本机会话记录中，作为发出消息展示，不计入收件未读。每次准备代答时，通过个人 CLI `+chat-messages-list` 读取当前聊天最新 50 条消息；如果目标消息带有话题 ID，再用 `+threads-messages-list` 读取该话题最新 50 条回复。按消息 ID 去重、时间排序，明确标记本人（人类）、其他参与者及 AI/机器人，不再仅使用单个发言者的历史往返。其他聊天不进入上下文；新增读取不触发自动回复，也不把远端聊天历史导入第二大脑。
+飞书触发规则忽略普通本人消息和 AI 回声；2026-10-22 起，平台 mentions 中明确 @本人 ID 的本人消息可触发分身回复（单聊和群聊），不将手输的 @名字当作真实提及。轮询收到的本人消息保留在该绑定的本机会话记录中，作为发出消息展示，不计入收件未读。每次准备代答时，通过个人 CLI `+chat-messages-list` 读取当前聊天最新 50 条消息；如果目标消息带有话题 ID，再用 `+threads-messages-list` 读取该话题最新 50 条回复。按消息 ID 去重、时间排序，明确标记本人（人类）、其他参与者及 AI/机器人，不再仅使用单个发言者的历史往返。其他聊天不进入上下文；新增读取不触发自动回复，也不把远端聊天历史导入第二大脑。
 
 这里的完整指覆盖所有参与者，并非无限历史：更早分页不自动追溯，每条正文最多给模型 1000 字符并标注截断，图片等仅显示 CLI 提供的占位信息，不下载附件。目标消息不在当前窗口或已撤回时保持沉默；读取、授权或身份检查失败时不发送无上下文回复。目标正文以本次读取的最新版本为准。
 
@@ -224,3 +226,12 @@ Regression: `scripts/messaging.test.cjs` cases `connectAgent reuses...` and both
 Persona channel snapshots and channel access resolve the persona's current canonical local brain path from the server's persona registry, rather than requiring a previous Connect call or a matching browser owner. All clients on that path see the same runtime status, errors, enabled state and shared inbox counts immediately. Existing messaging events notify all persona subscribers, so disconnect/reconnect changes refresh every client. Snapshot reads never invoke a CLI, create a peer or start a listener. Live bindings precede historical stopped profiles for clients that display one badge per channel. Clearing/changing a persona's brain immediately removes access to the previous brain even if an old peer association remains on disk.
 
 Regression cases in `scripts/messaging.test.cjs`: `status is shared...` (both channels), `persona snapshots and notifications agree...`, and `shared channel snapshot places...`; `scripts/personas.test.cjs` verifies the current-root resolver. This addresses a grey AIChat channel badge while the dashboard reports the same brain as listening.
+
+
+### 本人通过 @本人对话（2026-10-22）
+
+无需创建机器人。飞书使用原个人 CLI 和绑定分身，在单聊（包括平台可读取的自己会话）或群聊中，本人发送且 mentions 指向当前账号 ID 的消息可触发分身；单聊仍按单聊读取上下文。普通本人消息、@其他人、纯文本 @名字、AI 回复回声不触发。重复消息仍按 ID 去重，发送前仍检查会话变化。模型提示明确这是本人向分身提问，避免误判为本人已经回答。
+
+钉钉沿用已有本人 @本人事件入口；CLI 上游是否投递仍待真实账号验证。飞书仍约十分钟轮询，不保证即时响应，自己会话的检索可见性及客户端是否提供真实 @操作也需实测。未增加别名配置或任意 @XXX 文本触发。
+
+验证：新增飞书单聊/群聊本人 @本人用例均通过，覆盖真实 mention ID、普通本人消息、@其他人、去重和 AI 回声。`npm run check:shared`、`git diff --check` 通过。消息与分身套件 92 项中 91 项通过，既有真实无头浏览器握手用例超过 30 秒超时；不报告整套通过。未发送真实消息，未重启或部署运行中的 MCP。

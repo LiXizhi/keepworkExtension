@@ -82,9 +82,17 @@ export function noteAichatSessionClosed(sessionId?: string): void {
     if (sessionId) connectionOrder.delete(sessionId);
 }
 
+function present(client: StoredClient | null | undefined): AichatClient | null {
+    return client?.token ? { url: client.url, token: client.token, baseURL: client.baseURL, defaultExecutor: client.defaultExecutor, seenAt: client.seenAt } : null;
+}
+
 export function latestAichatClient(owner?: string): AichatClient | null {
-    const client = owner ? owners.get(owner) : current;
-    return client ? { url: client.url, token: client.token, baseURL: client.baseURL, defaultExecutor: client.defaultExecutor, seenAt: client.seenAt } : null;
+    return present(owner ? owners.get(owner) : current);
+}
+
+/** Prefer the persona's own page. Otherwise use the newest connected client on this machine. */
+export function anyAichatClient(preferOwner?: string): AichatClient | null {
+    return (preferOwner ? latestAichatClient(preferOwner) : null) || latestAichatClient() || [...owners.values()].map(present).find(client => client?.token) || null;
 }
 
 export function aichatClientRemembered(): boolean {

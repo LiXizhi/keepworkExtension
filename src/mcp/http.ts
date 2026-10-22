@@ -31,6 +31,7 @@ import { dashboardSkill } from './dashboardSkill';
 import { apiDocs } from './apiDocs';
 import { mcpCatalog } from './mcpCatalog';
 import { MessagingService, channelConflict } from '../core/messaging';
+import { runMessagingAgentTurn, setMessagingAgentRunner } from '../core/messagingExecutor';
 import { ChannelStatus } from '../core/channelStatus';
 import { ClientSupervisor } from '../core/clientSupervisor';
 import { handleMessagingHttp } from './messagingHttp';
@@ -154,7 +155,9 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     const presenceStreams = new Map<string, http.ServerResponse>();
     const terminalSessions = new TerminalSessionManager();
     const agentSessions = new AgentSessions(path.join(mcpHomeDir(), 'agent-sessions-v1.json'));
-    const messaging = new MessagingService(path.join(mcpHomeDir(), 'messaging-v1'), port);
+    const messagingHome = path.join(mcpHomeDir(), 'messaging-v1');
+    setMessagingAgentRunner((backend, model, input, signal) => runMessagingAgentTurn(agentSessions, path.join(messagingHome, 'readers'), backend, model, input, signal));
+    const messaging = new MessagingService(messagingHome, port);
     runtime.messaging = messaging;
     const channelStatus = new ChannelStatus(runtime.root);
     const clientSupervisor = new ClientSupervisor(messaging);

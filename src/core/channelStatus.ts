@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 type Channel = 'dingtalk' | 'feishu';
-interface BindingStatus { id?: string; transitioning?: boolean; channel?: string; root?: string; profile: string; enabled: boolean; status: string; lastPollAt?: number | null }
+interface BindingStatus { id?: string; transitioning?: boolean; channel?: string; root?: string; profile: string; enabled: boolean; status: string; lastPollAt?: number | null; serving?: { server?: string; executor?: string; model?: string; active?: boolean; next?: { server?: string; executor?: string; model?: string } | null } | null }
 const label = (value: unknown) => typeof value === 'string' ? value.slice(0, 160) : '';
 export function expiry(value: unknown): string | null {
     if (value === undefined || value === null || value === '') return null;
@@ -59,7 +59,7 @@ export class ChannelStatus {
             const rows = bindings.filter(b => (b.channel || 'dingtalk') === channel);
             const root = roots[channel] || '';
             const auth = await this.probe(channel, rows.filter(b => b.root === root).map(b => b.profile), root);
-            return { ...auth, root, bindings: rows.map(b => ({ id: b.id, root:b.root, transitioning: !!b.transitioning, profile: b.profile, enabled: b.enabled, status: b.status, lastPollAt: b.lastPollAt || null })) };
+            return { ...auth, root, bindings: rows.map(b => ({ id: b.id, root:b.root, transitioning: !!b.transitioning, profile: b.profile, enabled: b.enabled, status: b.status, lastPollAt: b.lastPollAt || null, serving: b.serving || null })) };
         }));
     }
 }

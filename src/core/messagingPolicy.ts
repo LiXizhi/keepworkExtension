@@ -44,7 +44,7 @@ export function readRules(root: string, directory = RULE_DIR) {
     for (const dir of config.knowledge) knowledgeDirectory(root,dir);
     return { config, prompt };
 }
-export interface Incoming { id: string; conversation: string; sender: string; text: string; time: number; kind: 'direct' | 'mention' | 'group'; automated?: boolean; thread?: string }
+export interface Incoming { id: string; conversation: string; sender: string; text: string; time: number; kind: 'direct' | 'mention' | 'group'; automated?: boolean; thread?: string; mentionedSelf?: boolean }
 export function automatedSender(event: any): boolean {
     return [event?.sender_type, event?.senderType, event?.sender?.sender_type, event?.sender?.type]
         .some(value => typeof value === 'string' && /^(app|bot|robot)$/i.test(value));
@@ -66,7 +66,7 @@ export function incoming(event: any): Incoming | null {
 }
 export function trigger(message: Incoming, config: MessageConfig, since: number, self: string, allowSelfMention = false) {
     if (message.time < since) return 'old';
-    if (self && message.sender === self && !(allowSelfMention && message.kind === 'mention')) return 'self';
+    if (self && message.sender === self && !(allowSelfMention && (message.kind === 'mention' || message.mentionedSelf === true))) return 'self';
     if (message.automated || automatedText(message.text)) return 'echo';
     if (message.kind === 'direct' || message.kind === 'mention') return 'reply';
     return config.groups.includes(message.conversation) && config.keywords.some(word => message.text.includes(word)) ? 'reply' : 'not-triggered';

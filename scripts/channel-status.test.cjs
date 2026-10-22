@@ -18,7 +18,9 @@ test('channel status caches read-only checks, strips credentials and retains liv
  assert.equal(a[1].accounts[0].expiresAt,null);assert.doesNotMatch(JSON.stringify(a),/SECRET|accessToken/);
  assert.deepEqual(a,b);assert.equal(commands.some(args=>args.includes('--verify')||args.includes('login')),false);
  const fresh=await status.snapshot([{...binding,enabled:false,status:'stopped'}],roots);
- assert.equal(calls,2);assert.equal(fresh[1].bindings[0].enabled,false);
+ assert.equal(calls,2);assert.equal(fresh[1].bindings[0].enabled,false);assert.equal(fresh[1].bindings[0].serving,null);
+ const carried=await status.snapshot([{...binding,serving:{server:'cli',executor:'codex',model:'gpt-5.4',active:false,recent:null}}],roots);
+ assert.equal(carried[1].bindings[0].serving.executor,'codex');assert.equal(carried[1].bindings[0].serving.model,'gpt-5.4');
 });
 test('missing CLI and failed auth checks are distinct without leaking raw errors',async()=>{
  const result=await new ChannelStatus('.',{

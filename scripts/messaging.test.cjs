@@ -9,7 +9,14 @@ const { EventEmitter } = require('node:events');
 function load(name, mocks = {}) {
     const file = path.resolve(__dirname, '../src/core', name + '.ts');
     const m = new Module(file, module); m.filename = file; m.paths = module.paths;
-    m.require = id => Object.hasOwn(mocks,id) ? mocks[id] : (id.startsWith('./messaging') || id === './headless') ? load(path.basename(id),mocks) : require(id);
+    m.require = id => {
+        if (Object.hasOwn(mocks, id)) return mocks[id];
+        if (id.startsWith('./')) {
+            const base = path.basename(id).replace(/\.ts$/, '');
+            if (fs.existsSync(path.resolve(__dirname, '../src/core', base + '.ts'))) return load(base, mocks);
+        }
+        return require(id);
+    };
     m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file); return m.exports;
 }
 const policy = load('messagingPolicy');
@@ -207,6 +214,116 @@ test('auto follows AIChat backend/model; unsupported default falls back before s
     await assert.rejects(restrictedCliAnswer('',{...config,executor:'workbuddy'},{},new AbortController().signal),BeforeSubmission);
 });
 
+test('selected agent CLI answers in the second brain with tools and is not replaced by another CLI', async t => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-agent-reply-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const brain = path.join(dir, 'brain'); fs.mkdirSync(brain);
+    const { restrictedCliAnswer, setMessagingAgentRunner, runMessagingAgentTurn, BeforeSubmission } = load('messagingExecutor', {
+        './acpHarness': {}, './config': {}, './aichatPresence': {},
+        './agentCliProcess': { resolveAgentCli: backend => { if (backend !== 'codex') throw Error('missing'); return {}; } },
+    });
+    let ran;
+    setMessagingAgentRunner(async backend => { ran = backend; return 'cli-answer'; });
+    const input = { prompt: 'rule', question: 'q', knowledge: 'public', history: [], brain: 'label', root: brain };
+    assert.equal(await restrictedCliAnswer(dir, { ...policy.defaultMessageConfig(), executor: 'codex', model: 'chosen' }, input, new AbortController().signal), 'cli-answer');
+    assert.equal(ran, 'codex');
+    setMessagingAgentRunner(null);
+    await assert.rejects(restrictedCliAnswer(dir, { ...policy.defaultMessageConfig(), executor: 'workbuddy' }, input, new AbortController().signal), BeforeSubmission);
+    const sessions = {
+        async create(owner, value) { this.created = { owner, value }; return { id: 'session' }; },
+        subscribe(_id, _owner, fn) { fn({ session: { status: 'idle', pending: [], items: [{ type: 'agentMessage', text: 'too early' }] } }); this.fn = fn; return () => { this.unsubscribed = true; }; },
+        async turn(_id, _owner, value) { this.turnInput = value; this.fn({ session: { status: 'running', pending: [{ id: 7, method: 'item/permissions/requestApproval' }], items: [] } }); this.fn({ session: { status: 'completed', pending: [], items: [{ type: 'reasoning', text: 'secret' }, { type: 'agentMessage', text: 'hello' }] } }); },
+        respond(_id, _owner, value) { this.decision = value; },
+        async interrupt() { this.interrupted = true; },
+        async update(_id, _owner, value) { this.removed = value.remove; },
+    };
+    assert.equal(await runMessagingAgentTurn(sessions, dir, 'codex', 'chosen', input, new AbortController().signal), 'hello');
+    assert.equal(sessions.created.value.mode, 'craft');
+    assert.deepEqual(sessions.created.value.roots, [fs.realpathSync(brain)]);
+    assert.equal(sessions.decision.decision, 'accept');
+    assert.equal(sessions.turnInput.mode, 'craft');
+    assert.equal(sessions.removed, true);
+    assert.match(sessions.turnInput.text, /public/);
+    assert.match(sessions.turnInput.text, /全部工具/);
+    assert.doesNotMatch(sessions.turnInput.text, /secret|too early|没有工具权限/);
+    await assert.rejects(runMessagingAgentTurn({ ...sessions, async create() { throw Error('CLI down'); } }, dir, 'codex', '', input, new AbortController().signal), BeforeSubmission);
+});
+
+test('Feishu replies use the persona agent CLI, while a client persona is answered by its own client', async t => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-channel-reply-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const root = path.join(dir, 'brain'); fs.mkdirSync(root);
+    let backend = 'keepwork', own = { url: 'https://keepwork.com/chat', token: 'own-token', baseURL: '' }, anyClient = { url: 'https://keepwork.com/chat', token: 'any-token', baseURL: '' }, remembered = null, cliFails = false, receive;
+    const cliCalls = [], cliInputs = [], clientLogins = [], workerInputs = [], sent = [];
+    class BeforeSubmission extends Error {}
+    const module = load('messaging', {
+        './aichatPresence': { latestAichatClient: owner => owner === 'owner' ? own : remembered, anyAichatClient: () => anyClient, latestAichatBrainRoot: () => root },
+        './messagingFeishu': { feishuContext: load('messagingFeishu').feishuContext, feishuConversation: async (_r, _p, target) => [target], feishuIdentity: async () => ({ id: 'app:person', self: 'person' }), pollFeishu: async (_r, _p, _f, onMessage) => { receive = onMessage; return () => {}; }, FeishuDelivery: class { async create() { return ''; } async send(...args) { sent.push(args); } } },
+        './messagingExecutor': { BeforeSubmission, messagingExecutorChoice: () => ({ backend: 'copilot', model: '' }), restrictedCliAnswer: async (_home, config, input) => { cliCalls.push(config.executor); cliInputs.push(input); if (cliFails) throw new BeforeSubmission('unavailable'); return '来自 ' + config.executor; }, MessagingWorkers: class { async answer(input, _signal, login) { workerInputs.push(input); clientLogins.push(login || null); return '客户端回复'; } close() {} } },
+    });
+    const service = new module.MessagingService(path.join(dir, 'state'), 8089);
+    t.after(() => service.close());
+    service.setPersonaLookup(() => ({ backend, model: backend === 'codex' ? 'gpt-5.4' : '' }));
+    const connected = await service.connectFeishuAgent('owner', 'agent', root, 'prompt');
+    const serving = () => service.view(connected.id).serving;
+    const deliver = async text => { receive({ id: 'm-' + sent.length + '-' + cliCalls.length, conversation: 'chat', sender: 'peer', text, time: Date.now() + 1000, kind: 'direct' }); for (let i = 0; i < 20 && sent.length === before; i++) await tick(); };
+    let before = 0;
+    await deliver('client persona');
+    assert.deepEqual(cliCalls, []);
+    assert.equal(clientLogins[0].token, 'own-token');
+    assert.equal(workerInputs[0].root, fs.realpathSync(root));
+    assert.deepEqual(workerInputs[0].tools.map(tool => tool.function.name), ['read_file', 'list_dir', 'write_file', 'run_terminal']);
+    assert.equal(serving().server, 'client');
+    assert.equal(serving().model, 'keepwork-pro');
+    assert.equal(serving().active, false);
+    assert.match(sent[0][2], /客户端回复/);
+    backend = 'codex'; before = sent.length;
+    await deliver('agent cli');
+    assert.deepEqual(cliCalls, ['codex']);
+    assert.equal(cliInputs[0].root, fs.realpathSync(root));
+    assert.equal(cliInputs[0].tools.length, 4);
+    assert.equal(clientLogins.length, 1);
+    assert.equal(serving().server, 'cli');
+    assert.equal(serving().executor, 'codex');
+    assert.equal(serving().model, 'gpt-5.4');
+    assert.equal(serving().next, null);
+    assert.match(sent[1][2], /来自 codex/);
+    cliFails = true; own = null; before = sent.length;
+    await deliver('fallback client');
+    assert.deepEqual(cliCalls, ['codex', 'codex']);
+    assert.equal(clientLogins[1].token, 'any-token');
+    anyClient = null; remembered = null; before = sent.length;
+    await deliver('headless');
+    assert.equal(clientLogins.at(-1), null);
+    assert.equal(workerInputs.at(-1).root, fs.realpathSync(root));
+    assert.equal(workerInputs.at(-1).tools.length, 4);
+    assert.equal(serving().server, 'headless');
+    assert.equal(serving().model, 'keepwork-pro');
+    assert.equal(serving().next.server, 'cli');
+    assert.equal(serving().next.model, 'gpt-5.4');
+    backend = 'aichat'; own = { url: 'https://keepwork.com/chat', token: 'own-token', baseURL: '' }; anyClient = { url: 'https://keepwork.com/chat', token: 'any-token', baseURL: '' }; before = sent.length;
+    await deliver('own client again');
+    assert.deepEqual(cliCalls, ['codex', 'codex', 'codex']);
+    assert.equal(clientLogins.at(-1).token, 'own-token');
+});
+
+
+test('IM brain tools stay inside the second brain', async t => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-brain-tools-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const root = path.join(dir, 'brain'); fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, 'note.txt'), 'inside');
+    fs.writeFileSync(path.join(dir, 'secret.txt'), 'outside');
+    const { messagingBrainTool } = load('messaging', {
+        './aichatPresence': {},
+        './messagingExecutor': { MessagingWorkers: class { close() {} } },
+    });
+    const signal = new AbortController().signal;
+    assert.equal(await messagingBrainTool(root, 'read_file', { path: 'note.txt' }, signal), 'inside');
+    await assert.rejects(messagingBrainTool(root, 'read_file', { path: '../secret.txt' }, signal), /outside/);
+    assert.deepEqual(await messagingBrainTool(root, 'write_file', { path: 'out.txt', content: 'saved' }, signal), { written: true });
+    assert.equal(fs.readFileSync(path.join(root, 'out.txt'), 'utf8'), 'saved');
+});
 
 test('Agent inbox is owner scoped; takeover aborts automatic reply and manual delivery stays idempotent after clear',async t=>{
     const f=fixture(t);f.service.bindAgent('owner','agent',f.binding.id);await f.service.start(f.binding.id);
@@ -764,4 +881,25 @@ test('shared channel snapshot places the live binding before old stopped profile
  await f.service.start(newer.id);
  const rows=f.service.agentBindings('new-client','default-persona');
  assert.equal(rows[0].id,newer.id);assert.equal(rows[0].listening,true);assert.equal(rows[1].status,'stopped');
+});
+
+for(const chatMode of ['p2p','group'])test('Feishu explicit self mention in '+chatMode+' reaches persona once without reply loops',async t=>{
+ const f=fixture(t,'feishu');await f.service.start(f.binding.id);
+ const {feishuIncoming}=load('messagingFeishu');
+ const row={message_id:'self-request',sender:{id:'owner'},create_time:Date.now()+1000,msg_type:'text',content:'@本人 帮我整理思路',mentions:[{id:{open_id:'owner'}}]};
+ const chat={chat_id:'self-chat',chat_mode:chatMode};
+ const target=feishuIncoming(row,chat,'owner');
+ assert.equal(target.kind,chatMode==='p2p'?'direct':'mention');
+ assert.equal(target.mentionedSelf,true);
+ for(const mentions of [[],[{id:'other'}]]) {
+  f.events[0](feishuIncoming({...row,message_id:'ignored-'+mentions.length,create_time:row.create_time-100,mentions},chat,'owner'));
+ }
+ await tick();assert.equal(f.pending.length,0);
+ f.events[0](target);f.events[0](target);await tick();assert.equal(f.pending.length,1);
+ assert.match(f.pending[0].input.prompt,/本人明确 @本人/);
+ f.pending[0].end();await tick();await tick();assert.equal(f.sent.length,1);
+ assert.equal(f.sent[0][0].conversation,'self-chat');assert.equal(f.sent[0][0].id,'self-request');
+ f.events[0](feishuIncoming({...row,message_id:'echo',content:f.sent[0][2]},chat,'owner'));
+ await tick();assert.equal(f.pending.length,1);
+ assert.equal(feishuIncoming({...row,mentions:[{id:'owner'}]},chat,'owner').mentionedSelf,true);
 });

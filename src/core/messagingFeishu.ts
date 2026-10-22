@@ -50,9 +50,10 @@ export function feishuIncoming(row: any, chat: any, self: string): Incoming | nu
     if(automatedSender(row))return null;
     let content=row.content;
     try {const parsed=JSON.parse(content);if(typeof parsed.text==='string')content=parsed.text;} catch { /* shortcuts render plain text */ }
+    const mentionedSelf=!!self && Array.isArray(row.mentions) && row.mentions.some((m:any)=>(typeof m.id==='string'?m.id:m.id?.open_id)===self);
     return {id:row.message_id,conversation:chat.chat_id,sender,text:content,time:time<1e12?time*1000:time,automated:automatedText(content),
-        thread:typeof row.thread_id === 'string' ? row.thread_id : undefined,
-        kind:chat.chat_mode==='p2p'?'direct':row.mentions?.some((m:any)=>(typeof m.id==='string'?m.id:m.id?.open_id)===self)?'mention':'group'};
+        mentionedSelf, thread:typeof row.thread_id === 'string' ? row.thread_id : undefined,
+        kind:chat.chat_mode==='p2p'?'direct':mentionedSelf?'mention':'group'};
 }
 // One sweep at a time; bounded pages fail visibly instead of advancing past unread data.
 export async function pollFeishu(root:string, profile:string, file:string, onMessage:(message:Incoming)=>void, onError:(error:Error)=>void, onPoll:(time:number)=>void, call=lark, interval=600000, signal?:AbortSignal) {

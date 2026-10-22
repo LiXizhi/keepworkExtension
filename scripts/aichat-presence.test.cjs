@@ -67,6 +67,18 @@ test('presence retains validated current default without echoing credentials',()
 });
 
 
+test('any available client prefers the persona owner, otherwise another connected page',()=>{
+    const {createHash}=require('node:crypto'),{anyAichatClient}=mod.exports;
+    const origin='https://keepwork.com',owner='12345678-1234-1234-1234-1234567890ab';
+    const key=createHash('sha256').update(origin+'\0'+owner).digest('hex');
+    rememberAichatClient({sessionId:'fallback-client',url:origin+'/chat',token:'fallback-login'});
+    assert.equal(anyAichatClient('missing-owner').token,'fallback-login');
+    rememberAichatClient({sessionId:'owned-client',url:origin+'/chat',token:'owned-login',owner,origin});
+    assert.equal(anyAichatClient(key).token,'owned-login');
+    assert.equal(anyAichatClient('missing-owner').token,'owned-login');
+});
+
+
 test('owner worker login is scoped by Origin and owner capability',()=>{
     const {createHash}=require('node:crypto'),origin='https://keepwork.com',owner='12345678-1234-1234-1234-123456789012';
     rememberAichatClient({sessionId:'owned',url:origin+'/chat',token:'owner-only',owner,origin});

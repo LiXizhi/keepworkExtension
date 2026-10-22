@@ -9,7 +9,7 @@ export function dashboardHtml(): string {
 body{max-width:none;padding:0;display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100vh;background:light-dark(#fafafa,#1f1f1f)}aside{padding:24px 16px;border-right:1px solid #7774;background:light-dark(#f0f2f3,#252526)}.brand{font-size:16px;font-weight:650;margin-bottom:24px}.tree{display:grid;gap:4px}.tree a{display:block;border:0;padding:8px 12px}.tree a[aria-current="page"]{background:light-dark(#dcecf1,#124353);color:light-dark(#164d60,#bce8f4)}.tree details{margin-top:12px}.tree summary{padding:8px 12px;cursor:pointer}.tree details a{margin-left:14px;border-left:1px solid #7775;border-radius:0}main{padding:28px;min-width:0;max-width:1400px;width:100%}.view[hidden]{display:none}.api-item{border-top:1px solid #7774;padding:16px 0}.api-item summary{cursor:pointer;overflow-wrap:anywhere}.api-item pre{white-space:pre-wrap;overflow-wrap:anywhere;background:light-dark(#edf1f2,#292d2e);padding:12px}.api-item code{overflow-wrap:anywhere}#api-filter{width:100%;margin:12px 0}.muted{opacity:.65}@media(max-width:600px){body{padding:0;grid-template-columns:128px minmax(0,1fr)}aside{padding:16px 8px}.brand{font-size:14px}.tree a,.tree summary{padding:8px 6px}main{padding:16px 12px}h1{font-size:18px}.toolbar{gap:6px}.toolbar button,.toolbar a{padding:5px 7px}dl{grid-template-columns:1fr;gap:0}dd{margin-bottom:8px}}
 body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-direction:column;overflow:hidden}body.chat-view #view-title{display:none}body.chat-view #notice:empty{display:none}body.chat-view #notice{margin:0;padding:8px 12px}body.chat-view #auth{margin:0;padding:8px 12px}body.chat-view #view-chat{flex:1;min-height:0}#chat-frame{display:block;width:100%;height:100%;border:0;background:white}
 @media(min-width:601px){#meta{grid-template-columns:180px minmax(0,1fr)}}
-.channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;align-items:start}.channel-card{border:1px solid #7774;border-radius:8px;padding:10px 12px;min-width:0}.channel-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.channel-card h3{margin:0 auto 0 0;font-size:14px}.channel-account{margin:4px 0;color:light-dark(#666,#aaa);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.channel-card dl{grid-template-columns:90px minmax(0,1fr)}.channel-card details{font-size:12px}.channel-card summary{cursor:pointer;color:light-dark(#666,#aaa);width:fit-content}.channel-card details[open]{margin-top:8px}.channel-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;color:light-dark(#626970,#aeb5bc)}.channel-badge:before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}.channel-badge.connected{color:light-dark(#15703b,#80ce9d)}.channel-badge.warning{color:light-dark(#946200,#edc56b)}.channel-badge.error{color:light-dark(#ae261d,#ffb09f)}.channel-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 0 10px;font-size:12px}.channel-controls label{display:flex;align-items:center;gap:5px}.channel-actions{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}.channel-actions button{font-size:12px;padding:2px 8px}.channel-help{font-size:12px;margin:0 0 10px}.channel-help summary{cursor:pointer;opacity:.65}.channel-help p{margin:4px 0}
+.channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:10px;align-items:start}.channel-card{border:1px solid #7774;border-radius:8px;padding:10px 12px;min-width:0}.channel-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.channel-card h3{margin:0 auto 0 0;font-size:14px}.channel-account{margin:4px 0;color:light-dark(#666,#aaa);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.channel-card dl{grid-template-columns:90px minmax(0,1fr)}.channel-card details{font-size:12px}.channel-card summary{cursor:pointer;color:light-dark(#666,#aaa);width:fit-content}.channel-card details[open]{margin-top:8px}.channel-badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;color:light-dark(#626970,#aeb5bc)}.channel-badge:before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}.channel-badge.connected{color:light-dark(#15703b,#80ce9d)}.channel-badge.warning{color:light-dark(#946200,#edc56b)}.channel-badge.error{color:light-dark(#ae261d,#ffb09f)}.channel-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 0 10px;font-size:12px}.channel-controls label{display:flex;align-items:center;gap:5px}.channel-actions{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}.channel-actions button{font-size:12px;padding:2px 8px}.channel-help{font-size:12px;margin:0 0 10px}.channel-help summary{cursor:pointer;opacity:.65}.channel-help p{margin:4px 0}.im-serving{border:1px solid #7774;border-radius:8px;padding:10px 12px;margin:0 0 12px}.im-serving p{margin:0}.im-brain{font-weight:650;overflow-wrap:anywhere}.im-serving-line{overflow-wrap:anywhere}
 
 ${dashboardCliStyles}
 </style></head><body>
@@ -24,7 +24,7 @@ ${dashboardCliStyles}
 <section class="view" id="view-overview">
 <nav class="toolbar" aria-label="Service controls"><button id="refresh">Refresh</button><button id="copy">Copy MCP URL</button><a href="https://keepwork.com/chat" target="_blank" rel="noopener noreferrer">Open AIChat</a><button id="stop" disabled>Stop service</button></nav>
 <h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl><h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
-<section class="view" id="view-instance-messaging" hidden><h2>通讯渠道</h2><div class="channel-controls"><label><input id="follow-im-clients" type="checkbox" disabled> 随客户端自动监督</label><span class="muted">每 5 分钟检查</span></div><details class="channel-help"><summary>监督设置说明</summary><p class="muted">本机默认开启：客户端进程运行且 CLI 授权有效时，恢复已启用的分身；这不代表桌面客户端已登录。关闭后，分身可独立运行。授权时间由 CLI 提供，每分钟更新。</p><p id="supervisor-status" class="muted"></p></details><div id="channel-status" class="channel-grid" aria-live="polite">正在读取渠道状态…</div></section>
+<section class="view" id="view-instance-messaging" hidden><div id="im-serving" class="im-serving"><p class="im-brain">当前第二大脑：正在读取…</p></div><h2>通讯渠道</h2><div class="channel-controls"><label><input id="follow-im-clients" type="checkbox" disabled> 随客户端自动监督</label><span class="muted">每 5 分钟检查</span></div><details class="channel-help"><summary>监督设置说明</summary><p class="muted">本机默认开启：客户端进程运行且 CLI 授权有效时，恢复已启用的分身；这不代表桌面客户端已登录。关闭后，分身可独立运行。授权时间由 CLI 提供，每分钟更新。</p><p id="supervisor-status" class="muted"></p></details><div id="channel-status" class="channel-grid" aria-live="polite">正在读取渠道状态…</div></section>
 <section class="view" id="view-clients" hidden><div id="clients" class="scroll"></div></section>
 <section class="view" id="view-history" hidden><div id="history" class="scroll"></div>
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div>
@@ -65,6 +65,14 @@ function messageContent(value) {
   summary.textContent=String(value||'—').slice(0,100);body.textContent=value||'—';body.style.whiteSpace='pre-wrap';
   details.append(summary,body);return details;
 }
+function routeText(route, active) {
+  if (!route || !route.server) return '尚未确定';
+  const kinds = { cli: 'CLI', client: 'AIChat 客户端', headless: '无界面 AIChat' };
+  const ai = kinds[route.server] || route.server;
+  const named = route.server === 'cli' && route.executor ? ai + ' · ' + route.executor : ai;
+  const model = route.model || (route.server === 'cli' ? '默认模型' : '—');
+  return named + ' · 模型 ' + model + (active ? ' · 正在回复' : '');
+}
 function renderMessages() {
   const filtered=recentMessages.filter(m=>m.direction!=='out'&&(byId('messages-filter').value==='all'||m.relevant));
   messageOffset=Math.min(messageOffset,Math.max(0,Math.floor((filtered.length-1)/50)*50));
@@ -72,7 +80,7 @@ function renderMessages() {
   const states={ignored:'已忽略',queued:'排队中',running:'处理中',sending:'发送中',done:'已回复',sent:'已发送',unknown:'结果未知',cancelled:'已取消',error:'失败',rejected:'已拒绝'};
   table('persona-messages',['时间','渠道 / 分身 / 账号','会话 / 发送者','状态','收到的内容','回复内容'],rows.map(m=>[
     new Date(m.time).toLocaleString(),m.channel+' / '+(m.persona||'—')+' / '+m.profile,
-    m.conversation+' / '+m.sender,(states[m.state]||m.state)+(m.reason?' · '+m.reason:'')+(m.executor?' · '+m.executor:''),messageContent(m.text),messageContent(m.reply)
+    m.conversation+' / '+m.sender,(states[m.state]||m.state)+(m.reason?' · '+m.reason:'')+(m.server?' · '+routeText(m,false):(m.executor?' · '+m.executor:'')),messageContent(m.text),messageContent(m.reply)
   ]),'本次运行尚未收到或处理渠道消息。');
   byId('messages-range').textContent=(rows.length?messageOffset+1:0)+'–'+(messageOffset+rows.length)+' / '+filtered.length+'（收到 '+recentMessages.length+' / 最多 500）';
   byId('messages-prev').disabled=messageOffset===0;byId('messages-next').disabled=messageOffset+50>=filtered.length;
@@ -129,7 +137,26 @@ function serverMetadata(status) {
 }
 const channelActions=new Set();
 function channelHelp(channel){startChat(channel);location.hash='chat';}
+function renderImServing(channels) {
+  const box=byId('im-serving');box.replaceChildren();
+  const names={dingtalk:'钉钉',feishu:'飞书'};
+  const roots=[...new Set(channels.map(channel=>channel.root).filter(Boolean))];
+  const brain=document.createElement('p');brain.className='im-brain';
+  if(!roots.length)brain.textContent='当前第二大脑：未绑定';
+  else if(roots.length===1){brain.textContent='当前第二大脑：'+roots[0];brain.title=roots[0];}
+  else{brain.textContent='当前第二大脑：'+channels.filter(channel=>channel.root).map(channel=>(names[channel.channel]||channel.channel)+' '+channel.root).join('；');brain.title=roots.join('\\n');}
+  box.append(brain);
+  for(const channel of channels){
+    const line=document.createElement('p');line.className='im-serving-line';
+    const binding=(channel.bindings||[]).find(row=>row.enabled&&row.serving)||(channel.bindings||[]).find(row=>row.serving)||null;
+    const serving=binding&&binding.serving;
+    let text=(names[channel.channel]||channel.channel)+'：'+routeText(serving,!!(serving&&serving.active));
+    if(serving&&serving.next&&serving.next.server)text+='（下次：'+routeText(serving.next,false)+'）';
+    line.textContent=text;if(channel.root)line.title=channel.root;box.append(line);
+  }
+}
 function renderChannels(channels) {
+  renderImServing(channels);
   const target=byId('channel-status');const expanded=new Set([...target.querySelectorAll('details[open]')].map(el=>el.dataset.channel));target.replaceChildren();
   const names={active:'已登录',ready:'已登录',expired:'已过期',missing:'未登录',unknown:'未知',listening:'监听中',stopped:'已停止',error:'异常',retrying:'等待重试','waiting-client':'等待客户端运行或 CLI 授权'};
   function date(value){if(!value)return 'CLI 未提供';const remaining=new Date(value).getTime()-Date.now();return new Date(value).toLocaleString()+'（'+(remaining<=0?'已过期':'剩余 '+Math.ceil(remaining/3600000)+' 小时')+'）';}
@@ -198,7 +225,7 @@ byId('follow-im-clients').onchange=async()=>{
   catch{byId('notice').textContent='自动监督设置保存失败，请重试。';}
   finally{supervisorSaving=false;await refreshChannels();}
 };
-async function refreshChannels(){try{const data=await request('/admin/channels');renderChannels(data.channels||[]);renderSupervisor(data.supervisor);}catch{byId('channel-status').textContent='渠道状态读取失败，请检查服务或登录授权。';}}
+async function refreshChannels(){try{const data=await request('/admin/channels');renderChannels(data.channels||[]);renderSupervisor(data.supervisor);}catch{byId('im-serving').textContent='当前第二大脑：读取失败';byId('channel-status').textContent='渠道状态读取失败，请检查服务或登录授权。';}}
 async function refresh() {
   if (busy || stopped) return;
   busy = true; byId('refresh').disabled = true;

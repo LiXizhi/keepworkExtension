@@ -46,6 +46,7 @@ export class Personas {
             } catch { /* Invalid records are not executed. */ }
         }
         this.messaging.setAgentRootResolver((owner,id)=>this.closed?'':this.rows.get(this.key(owner,id))?.root||'');
+        if (typeof this.messaging.setPersonaLookup === 'function') this.messaging.setPersonaLookup((owner,id)=>{const p=this.rows.get(this.key(owner,id));return p?{backend:p.executor,model:p.model||''}:null;});
         this.stopMessagingWatch=this.messaging.watch(() => { for(const w of this.watchers) w.update(); }, () => {});
         this.timer=setInterval(()=>this.tick(),15000);this.timer.unref();
     }

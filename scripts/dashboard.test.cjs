@@ -172,7 +172,7 @@ test('overview displays build identity, source and environment with safe legacy 
             if(url.pathname==='/admin/channels/connection'){const body=route.request().postDataJSON();connectionWrites.push(body);channelEnabled=body.action==='connect';return route.fulfill({json:{ok:true}});}
             if(url.pathname==='/admin/channels/supervisor'){const body=route.request().postDataJSON();supervisorWrites.push(body);followEnabled=body.enabled;return route.fulfill({json:{supervisor:{enabled:followEnabled}}});}
             if (url.pathname === '/admin/channels') return route.fulfill({json:{supervisor:{enabled:followEnabled,clients:{dingtalk:true,feishu:false,checkedAt:Date.now()},accounts:[]},channels:[
-                {channel:'dingtalk',installed:true,checkedAt:Date.now(),accounts:[{profile:'corp:user',name:'<img src=x onerror=alert(1)>',organization:'示例公司',status:'expired',expiresAt:'2020-01-01T00:00:00Z',refreshExpiresAt:null}],bindings:[{id:'test-binding',profile:'corp:user',enabled:channelEnabled,status:channelEnabled?'listening':'stopped'}]},
+                {channel:'dingtalk',root:'/brains/demo',installed:true,checkedAt:Date.now(),accounts:[{profile:'corp:user',name:'<img src=x onerror=alert(1)>',organization:'示例公司',status:'expired',expiresAt:'2020-01-01T00:00:00Z',refreshExpiresAt:null}],bindings:[{id:'test-binding',root:'/brains/demo',profile:'corp:user',enabled:channelEnabled,status:channelEnabled?'listening':'stopped',serving:{server:'cli',executor:'codex',model:'gpt-5.4',active:true,next:{server:'headless',executor:'keepwork-pro',model:'keepwork-pro'}}}]},
                 {channel:'feishu',installed:false,checkedAt:Date.now(),accounts:[],bindings:[],error:'CLI 未安装或不可访问'}
             ]}});
             return route.fulfill({ status: 404, body: '{}' });
@@ -190,6 +190,11 @@ test('overview displays build identity, source and environment with safe legacy 
         assert.match(await page.locator('#channel-status').textContent(),/已过期/);
         assert.match(await page.locator('#channel-status').textContent(),/CLI 未提供/);
         assert.match(await page.locator('#channel-status').textContent(),/未绑定分身/);
+        assert.match(await page.locator('#im-serving').textContent(),/当前第二大脑：\/brains\/demo/);
+        assert.match(await page.locator('#im-serving').textContent(),/钉钉：CLI · codex · 模型 gpt-5\.4 · 正在回复/);
+        assert.match(await page.locator('#im-serving').textContent(),/下次：无界面 AIChat · 模型 keepwork-pro/);
+        assert.match(await page.locator('#im-serving').textContent(),/飞书：尚未确定/);
+        assert.equal(await page.locator('#im-serving img').count(),0);
         assert.equal(await page.locator('#channel-status img').count(),0);
         await page.screenshot({path:path.join(os.tmpdir(),'keepwork-channels-desktop.png'),fullPage:true});
         assert.equal(await page.locator('#follow-im-clients').isChecked(),true);
