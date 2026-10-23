@@ -151,7 +151,7 @@ MCP updates verify platform, size, SHA-256, source commit and launch metadata be
 health checks promote them on startup. Failed startup falls back to the prior installed or
 bundled runtime. At startup, the desktop checks the existing Keepwork MCP on the configured
 loopback port (currently **8089**, not 8099) against the newest valid local runtime, including
-the bundled and staged copies. If its `runtimeVersion` (or legacy `version`) is lower, the
+the bundled and staged copies. If its `runtimeVersion` (never the protocol `version`) is lower, the
 desktop rechecks service identity, forcibly terminates that specific PID, waits for the
 listener to disappear, and starts its own runtime. Equal/newer or unknown versions remain
 attached; unrelated services, local-model services and invalid/self PIDs are never killed.
@@ -235,3 +235,37 @@ without building, starting MCP or using real accounts. Set `PET_SCREENSHOT` to a
 PNG path for a visual artifact. Speech/call responses in this smoke use fixtures; real
 microphone permissions/audio, multi-monitor movement and OS focus behavior require native
 acceptance on Windows and macOS.
+
+Desktop pet menu and click stability (2026-10-23): right-click opens a native
+menu with 0.5–4× size, current AIChat pet/default dragon appearance, a MagicHaqi
+appearance-management link, Open AIChat, and Hide. Size/appearance are desktop
+preferences saved in settings.json. Hide persists the tray visibility setting and
+stops capture without canceling work; use the tray to restore the pet.
+
+The transparent work-area canvas stays fixed on composer toggles and incoming
+replies. Only pet/chat pixels intercept input; dragging moves those layers and the
+composer fits above or below the pet. Artwork styles update only on changes.
+Opening the composer plays a 460 ms jelly animation and a short composer entrance;
+reduced-motion users get neither animation.
+
+Regression `DESKTOP-PET-CLICK-STABILITY-001` is covered by
+`tests/pet-window.test.cjs` (no native bounds changes on click, including drag-end;
+movement to the display top; menu settings/hide), `tests/pet-renderer.test.cjs`,
+and `scripts/pet-smoke.cjs` (real native popup, saved settings, unchanged click
+bounds and jelly/reduced-motion behavior). All 10 focused tests, Electron smoke,
+and TypeScript checking passed. A temporary copy of HEAD's old petWindow.cjs
+fails the new click-stability test; evidence is in
+`.test-runtime/proofs/pet-click-stability/historical.log`. No build, packaging,
+publication, live microphone or multi-monitor hardware acceptance was performed.
+
+Full exit from the pet menu (2026-10-23): “完全退出…” opens a confirmation bubble
+above the pet (or below when there is no room). It requests the current account's
+persona names and enabled channel labels through the existing host bridge and
+shows Feishu/DingTalk labels without credentials or workspace paths. A loading
+state disables confirmation, failures explicitly report an unavailable list,
+and shared MCP runtimes get different impact wording. Continue/Escape cancels;
+Confirm calls the existing app.quit shutdown path once. Hide/reset/account changes
+invalidate the prompt. `pet-window.test.cjs` and `pet-smoke.cjs` cover native
+confirmation, cancellation, stale IDs and displayed names. App quit is stubbed in
+the smoke; live services were not stopped. 11 native tests and TypeScript checks
+passed, along with the AIChat host's 7 unit and Edge integration tests.

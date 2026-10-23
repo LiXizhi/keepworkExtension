@@ -96,10 +96,19 @@ class NativeFiles {
       while (queue.length && result.length < max && scanned < 8000) {
         const current = queue.shift(); let dir;
         try { dir = this.resolve(rootId, current, { followLinks: true }); } catch { continue; }
-        const real = fs.realpathSync(dir);
-        if (visited.has(real)) continue;
+        let real, entries;
+        try {
+          real = fs.realpathSync(dir);
+          if (visited.has(real)) continue;
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch (error) {
+          // Optional directories (for example _wiki during onboarding) and
+          // folders removed during a scan are normal misses, not IPC failures.
+          if (error.code === 'ENOENT') continue;
+          throw error;
+        }
         visited.add(real);
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a,b) => a.name.localeCompare(b.name))) {
+        for (const entry of entries.sort((a,b) => a.name.localeCompare(b.name))) {
           if (++scanned > 8000 || result.length >= max) break;
           const relative = path.posix.join(current.replace(/\\/g, '/'), entry.name);
           let directory = entry.isDirectory();

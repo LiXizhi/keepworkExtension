@@ -37,7 +37,7 @@ const terminals = new TerminalSessionManager();
 const terminalIds = new Set<string>();
 let settingsFile: string;
 let mediaGrants: InstanceType<typeof MediaGrants>;
-let settings = { openAtLogin: false, theme: 'light', petVisible: true, petPosition: null as null | { x: number; y: number } };
+let settings = { openAtLogin: false, theme: 'light', petVisible: true, petPosition: null as null | { x: number; y: number }, petPreferences: { scale: 1, appearance: 'current' } };
 let serviceBusy = false, switchingPage = false;
 function liveWindow() {
   if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed())) return undefined;
@@ -566,7 +566,13 @@ else {
     updatesWindow = createUpdateWindow({ BrowserWindow, ipcMain }, __dirname, {
       status: updatesSnapshot, check: checkUpdates, mcp: applyMcpUpdate, desktop: applyDesktopUpdate,
     });
-    floatingPet = createPetWindow({ BrowserWindow, ipcMain, screen }, __dirname, {
+    floatingPet = createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, __dirname, {
+      preferences: () => settings.petPreferences,
+      savePreferences: (value: { scale: number; appearance: string }) => { settings.petPreferences = value; atomicJson(settingsFile, settings); },
+      appearance: () => { void shell.openExternal('https://keepwork.com/api/raw/official/apps/MagicHaqi/release/MagicHaqi_v1.html'); },
+      hide: () => { settings.petVisible = false; atomicJson(settingsFile, settings); floatingPet?.hide(true); menu(); },
+      quit: () => app.quit(),
+      sharedRuntime: () => runtime?.state.owner !== 'desktop',
       position: () => settings.petPosition,
       savePosition: (position: { x: number; y: number }) => { settings.petPosition = position; atomicJson(settingsFile, settings); },
       open: show,

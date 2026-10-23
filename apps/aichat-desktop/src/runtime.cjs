@@ -101,8 +101,8 @@ class RuntimeSupervisor {
     const current = await this.deps.probe();
     if (!current) return null;
     if (!current.compatible || current.pid !== existing.pid
-        || !semver.valid(current.runtimeVersion || current.version)
-        || !semver.lt(current.runtimeVersion || current.version, localVersion)) return current;
+        || !semver.valid(current.runtimeVersion)
+        || !semver.lt(current.runtimeVersion, localVersion)) return current;
     if (!Number.isSafeInteger(current.pid) || current.pid <= 0 || current.pid === process.pid) {
       throw new Error('旧版 Keepwork MCP 未提供有效 PID，无法安全替换');
     }
@@ -131,8 +131,8 @@ class RuntimeSupervisor {
     let existing = await this.deps.probe();
     const localVersion = versions.get(candidates[0]);
     if (takeover && this.options.product === PRODUCT && existing?.compatible && localVersion
-        && semver.valid(existing.runtimeVersion || existing.version)
-        && semver.lt(existing.runtimeVersion || existing.version, localVersion)) {
+        && semver.valid(existing.runtimeVersion)
+        && semver.lt(existing.runtimeVersion, localVersion)) {
       try {
         existing = await this.replaceOlderRuntime(existing, localVersion);
       } catch (e) {

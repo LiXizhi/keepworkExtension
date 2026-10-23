@@ -149,7 +149,7 @@ test('startup forcibly replaces an older compatible MCP and owns the new runtime
   const current = 'c'.repeat(64);
   writeRuntime(supervisor.directory(current), '1.0.0');
   supervisor.record.current = current;
-  let health = { compatible: true, pid: 42123, hostKind: 'vscode-extension', version: '1.9.0' };
+  let health = { compatible: true, pid: 42123, hostKind: 'vscode-extension', runtimeVersion: '1.9.0' };
   const calls = [];
   supervisor.deps.probe = async () => health;
   supervisor.deps.kill = (pid, signal) => { calls.push(['kill', pid, signal]); health = null; };
@@ -169,7 +169,7 @@ test('startup forcibly replaces an older compatible MCP and owns the new runtime
 
 test('startup preserves equal, newer, unknown and incompatible external services', async t => {
   for (const change of [{ runtimeVersion: '2.0.0' }, { runtimeVersion: '10.0.0' },
-    { runtimeVersion: 'unknown' }, { runtimeVersion: undefined }, { compatible: false, runtimeVersion: '1.0.0' }]) {
+    { runtimeVersion: 'unknown' }, { runtimeVersion: undefined }, { runtimeVersion: undefined, version: '0.1.2' }, { compatible: false, runtimeVersion: '1.0.0' }]) {
     const { supervisor } = localRuntimeFixture(t);
     const health = { compatible: true, pid: 42123, hostKind: 'local-helper', ...change };
     supervisor.deps.probe = async () => health;

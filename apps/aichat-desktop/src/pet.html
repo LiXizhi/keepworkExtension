@@ -1,13 +1,25 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src https://cdn.keepwork.com; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: https://cdn.keepwork.com; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>AIChat 桌面宠物</title><link rel="stylesheet" href="pet.css"></head><body>
+<div id="stack">
+<section id="exit-bubble" hidden role="alertdialog" aria-modal="true" aria-labelledby="exit-title" aria-describedby="exit-summary">
+<strong id="exit-title">完全退出？</strong>
+<p id="exit-summary"></p>
+<ul id="exit-personas"></ul>
+<p id="exit-status" role="status"></p>
+<div class="actions"><button id="exit-cancel">继续运行</button><button id="exit-confirm">确认退出</button></div>
+</section>
+<section id="bubble" hidden aria-label="宠物回复">
+<div id="reply" role="button" tabindex="0" aria-label="打开完整回复" title="点击查看完整回复"></div>
+<div id="options" aria-label="快捷回复"></div>
+</section>
 <section id="panel" hidden aria-label="宠物聊天">
-<header><strong id="title">AIChat</strong><button id="collapse" aria-label="收起">−</button></header>
-<div id="messages" role="log" aria-live="polite"></div>
+<header><button id="collapse" aria-label="收起">−</button></header>
 <div id="status" role="status"></div><div id="error" role="alert"></div>
 <textarea id="draft" rows="3" maxlength="32000" placeholder="说点什么…" aria-label="消息"></textarea>
 <div class="actions"><button id="dictation">语音输入</button><button id="call">通话</button><button id="mute" hidden>静音</button><button id="send">发送</button></div>
 <button id="open">打开 AIChat ↗</button>
 </section>
-<button id="pet" aria-label="点击聊天，拖动移动" title="点击聊天 · 拖动移动"><span id="art">🥚</span><span id="badge" hidden>●</span></button>
+</div>
+<button id="pet" aria-label="点击聊天，拖动移动" title="点击聊天 · 拖动移动"><span id="art"></span><span id="badge" hidden>●</span></button>
 <script src="pet.js"></script></body></html>

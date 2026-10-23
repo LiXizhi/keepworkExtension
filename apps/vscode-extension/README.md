@@ -28,6 +28,14 @@ For F5 debugging, open `apps/vscode-extension` as the VS Code workspace so its a
 
 The daemon binds to `127.0.0.1:8089` by default. It can be started through the extension or from the repository root with `npm start --prefix apps/vscode-extension`. Its default workspace is `~/.keepwork-mcp/workspace`.
 
+On startup the extension compares the bundled MCP build version with the listener's
+`runtimeVersion`. If the local build is newer, it rechecks the Keepwork service and
+PID, terminates that older process, waits for it to stop, and launches the local CLI.
+The protocol `version` is not an application version. Equal or unknown versions do
+not trigger version takeover; newer services remain attached even if the configured
+workspace differs. Unrelated listeners and invalid/self PIDs are never terminated.
+Missing local prerequisites or termination failures do not start a competing daemon.
+
 See the [repository README](https://github.com/LiXizhi/keepworkExtension#readme) for the complete API, security boundaries and KP Local Helper documentation.
 
 ## Second Brain / 第二大脑

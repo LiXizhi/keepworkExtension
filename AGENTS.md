@@ -210,7 +210,7 @@ This rebuilds the app-local `dist/cli.js` in watch mode and runs it on `127.0.0.
 
 Use `http://127.0.0.1:8089/health` to verify the listener and `http://127.0.0.1:8089/admin/status` to inspect the PID, workspace root, clients, and auth state. This workflow is for debugging the MCP HTTP server and AIChat integration without publishing the extension, pressing F5, or reloading an Extension Development Host.
 
-Open `apps/vscode-extension` as the VS Code workspace, then run F5 **Run Extension**: on `onStartupFinished` the extension probes `:8089` and spawns its app-local CLI if free. Status bar **Keepwork MCP** → click for clients/history.
+Open `apps/vscode-extension` as the VS Code workspace, then run F5 **Run Extension**: on `onStartupFinished` the extension probes `:8089` and spawns its app-local CLI if free. A newer bundled runtime replaces an identified older Keepwork MCP PID after rechecking health; compare `runtimeVersion`, never the protocol `version`. Newer running versions must not be downgraded for a workspace preference. Test with `node --test apps/vscode-extension/scripts/daemon.test.cjs apps/aichat-desktop/tests/runtime.test.cjs`. Status bar **Keepwork MCP** → click for clients/history.
 
 Cursor stdio (does not replace the HTTP daemon AIChat needs):
 

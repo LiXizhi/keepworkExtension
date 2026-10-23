@@ -4,11 +4,14 @@ import * as path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 import { DEFAULT_WORKSPACE_SLOT, SERVER_NAME, mcpHomeDir, readToken, resolvePort } from '../../../../src/core/config';
 import { resolveWorkspaceRoot } from '../../../../src/core/paths';
+import { runtimeBuildInfo } from '../../../../src/core/runtimeBuildInfo';
+import { valid, gt } from 'semver';
 
 export interface HealthInfo {
     ok: boolean;
     name?: string;
     version?: string;
+    runtimeVersion?: string;
     port?: number;
     pid?: number;
     clients?: number;
@@ -84,10 +87,10 @@ export function configuredRoot(_context?: vscode.ExtensionContext): string {
 export async function probeHealth(): Promise<HealthInfo> {
     const url = `${mcpBaseUrl()}/health`;
     try {
-        const res = await fetch(url, { method: 'GET' });
+        const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(1500) });
         const body = await res.json() as HealthInfo;
         if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
-        if (body.name && body.name !== SERVER_NAME) {
+        if (body.name !== SERVER_NAME) {
             return { ...body, ok: false, stranger: true, error: `port in use by ${body.name}` };
         }
         return { ...body, ok: true };
@@ -162,9 +165,43 @@ export function ensureDaemon(context: vscode.ExtensionContext): Promise<HealthIn
 async function ensureDaemonOnce(context: vscode.ExtensionContext): Promise<HealthInfo> {
     if (!mcpEnabled()) return { ok: false, error: 'disabled' };
     const wanted = configuredRoot(context);
-    const health = await probeHealth();
+    let health = await probeHealth();
+    // Compare the bundled daemon build, never the protocol or desktop shell version.
+    const localVersion = runtimeBuildInfo.version;
+    const newer = (running: HealthInfo) => !!(running.ok && running.name === SERVER_NAME
+        && valid(localVersion || '') && valid(running.runtimeVersion || '')
+        && gt(localVersion!, running.runtimeVersion!));
+    if (newer(health)) {
+        const cli = path.join(context.extensionPath, 'dist', 'cli.js');
+        if (!fs.existsSync(cli)) return { ok: false, error: `CLI missing: ${cli}` };
+        try { await findNode(); } catch { return { ok: false, error: 'node not found on PATH' }; }
+        const current = await probeHealth();
+        // Another client may have replaced the listener while we checked our runtime.
+        if (current.pid !== health.pid || !newer(current)) return current;
+        if (!Number.isSafeInteger(current.pid) || current.pid! <= 0 || current.pid === process.pid) {
+            return { ok: false, error: 'Older Keepwork MCP has no valid PID; cannot replace it' };
+        }
+        try { process.kill(current.pid!, 'SIGKILL'); }
+        catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+                return { ok: false, error: `Cannot stop older Keepwork MCP: ${String(err)}` };
+            }
+        }
+        for (let i = 0; i < 40; i++) {
+            health = await probeHealth();
+            if (!health.ok || health.pid !== current.pid) break;
+            await new Promise(r => setTimeout(r, 250));
+        }
+        if (health.ok || health.stranger) {
+            return health.pid === current.pid
+                ? { ok: false, error: 'Older Keepwork MCP did not stop; no second service started' } : health;
+        }
+    }
     if (health.ok) {
         const current = String(health.workspaceRoot || '').trim();
+        // A workspace preference must not downgrade a newer shared runtime.
+        if (valid(localVersion || '') && valid(health.runtimeVersion || '')
+            && gt(health.runtimeVersion!, localVersion!)) return health;
         if (!current || path.resolve(current) === path.resolve(wanted)) return health;
         await stopDaemon();
         await new Promise(r => setTimeout(r, 400));
