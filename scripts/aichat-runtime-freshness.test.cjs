@@ -13,6 +13,8 @@ function fixture(t) {
   const git = (...args) => execFileSync('git', ['-C', repo, ...args], {encoding:'utf8', stdio:['ignore','pipe','pipe']}).trim();
   execFileSync('git', ['init', '--bare', '-q', path.join(root, 'remote')]);
   git('init', '-q', '-b', 'main'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid'); git('config', 'commit.gpgsign', 'false');
+  // Reset must restore the same source bytes, regardless of developer Git settings.
+  git('config', 'core.autocrlf', 'false');
   const commit = value => {
     fs.writeFileSync(path.join(source, 'agent.mjs'), `export const value = ${value};\n`);
     git('add', '.'); git('commit', '-qm', `Runtime ${value}`); return git('rev-parse', 'HEAD');

@@ -39,6 +39,37 @@ test('checks reject stale source without repairing it; sync handles added/delete
 test('default source resolves independently of current working directory', () => {
   execFileSync(process.execPath, [path.join(__dirname, 'sync-aichat-runtime.cjs'), '--check'], { cwd: os.tmpdir() });
 });
+
+test('Git checkout with autocrlf preserves packaged runtime integrity', t => {
+  const options = fixture(t);
+  syncRuntime(options);
+  const repo = path.join(options.root, 'checkout');
+  const dest = path.join(repo, 'src/core/vendor/aichat-runtime');
+  fs.mkdirSync(dest, { recursive: true });
+  fs.copyFileSync(path.join(__dirname, '../.gitattributes'), path.join(repo, '.gitattributes'));
+  for (const file of fs.readdirSync(options.dest)) {
+    fs.copyFileSync(path.join(options.dest, file), path.join(dest, file));
+  }
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: 'pipe' });
+  git('init', '-q');
+  git('config', 'core.autocrlf', 'true');
+  git('add', '.');
+  for (const file of fs.readdirSync(dest)) fs.unlinkSync(path.join(dest, file));
+  git('checkout-index', '--all', '--force');
+  const source = path.join(options.root, 'absent/runtime');
+  assert.deepEqual(syncRuntime({ source, dest }), []);
+  assert.deepEqual(syncRuntime({ source, dest, check: true }), []);
+  // Controlled reproduction: without the attributes, Windows checkout breaks hashes.
+  fs.writeFileSync(path.join(repo, '.gitattributes'), '');
+  for (const file of fs.readdirSync(dest)) fs.unlinkSync(path.join(dest, file));
+  git('checkout-index', '--force', '--', 'src/core/vendor/aichat-runtime/agent.cjs');
+  const checkedOut = fs.readFileSync(path.join(dest, 'agent.cjs'), 'utf8');
+  assert.ok(checkedOut.includes('\r\n'));
+  git('checkout-index', '--all', '--force');
+  assert.deepEqual(syncRuntime({ source, dest }), []);
+  fs.appendFileSync(path.join(dest, 'agent.cjs'), '// modified');
+  assert.throws(() => syncRuntime({ source, dest }), /modified/);
+});
 test('build and watch automatically refresh canonical source edits and inventory changes', async t => {
   const options = fixture(t);
   const { aichatRuntimePlugin } = await import('./aichat-runtime-build.mjs');
