@@ -33,7 +33,7 @@ export function apiDocs(port: number, requireAuth: boolean) {
     add('Service', 'GET', '/dashboard', 'Browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/dashboard/skills/keepwork-mcp-assistant/SKILL.md', 'Bundled MCP assistant instructions for the dashboard temporary AIChat. Contains no credentials or private runtime data.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/', 'Default browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
-    add('Admin', 'GET', '/admin/status', 'Daemon status, build identity (runtimeVersion/runtimeCommit/runtimeBuiltAt), hostKind/hostVersion, Node.js version, platform/architecture, executable and entry paths, start time and connected MCP sessions. Missing build metadata is omitted. Allowed Origin required when supplied.');
+    add('Admin', 'GET', '/admin/status', 'Daemon status, build identity (runtimeVersion/runtimeCommit/runtimeBuiltAt), hostKind/hostVersion, Node.js version, computer hostname, platform/architecture, executable and entry paths, start time and connected MCP sessions. Missing build metadata is omitted. Allowed Origin required when supplied.');
     add('Admin', 'GET', '/admin/history', 'Newest-first tool-call history.', 'Query: offset (default 0), limit (default 20, max 50).', '/admin/history?offset=0&limit=20');
     add('Admin', 'GET', '/admin/api-docs', 'Structured API catalog for the current daemon.');
     add('Admin', 'POST', '/admin/stop', 'Stops the daemon and disconnects clients. Restart externally.');

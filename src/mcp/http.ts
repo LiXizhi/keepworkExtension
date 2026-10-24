@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { registerMcpPresence } from './aichatPresence';
 import { attachAichatEvents } from './aichatEvents';
 import { Personas } from '../core/personas';
@@ -450,6 +451,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     ...identity,
                     nodeVersion: process.version,
                     platform: process.platform,
+                    hostname: hostname(),
                     arch: process.arch,
                     execPath: process.execPath,
                     entryPath: process.argv[1] ? path.resolve(process.argv[1]) : undefined,

@@ -59,7 +59,7 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
             assert.equal(health.runtimeBuiltAt, '2026-10-19T12:34:56.000Z');
             assert.equal(health.hostKind, hostKind);
             assert.equal(health.hostVersion, hostVersion);
-            for (const field of ['execPath', 'entryPath', 'nodeVersion', 'platform', 'arch']) assert.equal(field in health, false);
+            for (const field of ['hostname', 'execPath', 'entryPath', 'nodeVersion', 'platform', 'arch']) assert.equal(field in health, false);
             for (const route of ['/admin/dingtalk', '/dingtalk/status']) {
                 assert.equal((await fetch(base + route, { headers: { Authorization: `Bearer ${server.token}`, Origin: base } })).status, 404);
             }
@@ -94,6 +94,7 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
                     assert.equal(status.version, health.version);
                     assert.equal(status.nodeVersion, process.version);
                     assert.equal(status.platform, process.platform);
+                    assert.equal(status.hostname, os.hostname());
                     assert.equal(status.arch, process.arch);
                     assert.equal(status.execPath, process.execPath);
                     assert.equal(status.entryPath, path.resolve(process.argv[1]));

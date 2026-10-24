@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { registerBrowserTools } from './browserTools';
 import { registerComputerTools } from './computerTools';
 import { registerCreationTools } from './paracraftTools';
@@ -103,6 +104,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
                 `- name: ${SERVER_NAME} ${SERVER_VERSION}`,
                 `- port: ${runtime.port}`,
                 `- pid: ${process.pid}`,
+                `- hostname: ${hostname()}`,
                 `- workspaceRoot: ${runtime.root}`,
                 `- terminal: ${vscodeTerminalBridgeLive() ? 'vscode (Keepwork panel)' : 'spawn'}`,
                 `- startedAt: ${runtime.startedAt}`,
