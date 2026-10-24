@@ -148,6 +148,7 @@ test('overview displays build identity, source and environment with safe legacy 
     const Module = require('node:module'), { chromium } = require('playwright-core');
     function load(relative) {
         const file = path.resolve(__dirname, relative), mod = new Module(file, module);
+        mod.require = id => id.startsWith('.') ? load(path.resolve(path.dirname(file), id + '.ts')) : require(id);
         mod._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, file);
         return mod.exports;
     }
@@ -191,6 +192,13 @@ test('overview displays build identity, source and environment with safe legacy 
         assert.match(await page.locator('#channel-status').textContent(),/已过期/);
         assert.match(await page.locator('#channel-status').textContent(),/CLI 未提供/);
         assert.match(await page.locator('#channel-status').textContent(),/未绑定分身/);
+        await page.evaluate(() => renderChannels([{channel:'dingtalk',root:'/brains/demo',installed:true,checkedAt:Date.now(),accounts:[
+            {profile:'current:user',status:'active',expiresAt:'2099-01-01T00:00:00Z'},
+            {profile:'old:user',status:'expired',expiresAt:'2020-01-01T00:00:00Z'}
+        ],bindings:[{root:'/brains/demo',profile:'current:user',enabled:true,status:'reconnecting'}]}]));
+        assert.doesNotMatch(await page.locator('.channel-head').textContent(),/授权过期/);
+        assert.match(await page.locator('.channel-card details').textContent(),/已过期/);
+        await page.evaluate(() => refreshChannels());
         assert.match(await page.locator('#im-serving').textContent(),/当前第二大脑：\/brains\/demo/);
         assert.match(await page.locator('#im-serving').textContent(),/钉钉：CLI · codex · 模型 gpt-5\.4 · 正在回复/);
         assert.match(await page.locator('#im-serving').textContent(),/下次：无界面 AIChat · 模型 keepwork-pro/);

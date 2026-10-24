@@ -25,6 +25,18 @@ the CLI; missing timestamps say “CLI 未提供”, not “never expires”. On
 account/status/time fields reach the browser; raw responses and credential values
 are excluded. Errors in channel checks do not block the rest of Overview.
 
+The authorization badge checks accounts bound to the displayed brain when bindings
+exist; expired historical accounts remain visible in details without marking a
+valid bound account expired. DWS failures with non-JSON stdout retain uncertain
+delivery semantics, but proxy connection failures on stderr now produce a fixed,
+credential-free diagnostic. A daemon inherits its launcher's proxy environment:
+if a fresh CLI works while the daemon reports a proxy connection failure, correct
+the launcher's proxy settings and restart the development task/service (including
+its watcher). Restarting only the child under the same watcher retains that environment.
+Regression coverage: the dashboard browser fixture includes a valid bound account
+and an expired unrelated account; the DWS delivery fixture checks proxy diagnostics,
+credential redaction and no fallback send after an uncertain result.
+
 ## Startup recovery and multiple computers
 
 ### Bot loop protection

@@ -13,17 +13,24 @@ export function resolveDws(): string {
     for (const file of candidates) if (path.isAbsolute(file) && fs.existsSync(file) && fs.statSync(file).isFile()) return file;
     throw new Error('DWS CLI unavailable; install dingtalk-workspace-cli or set KEEPWORK_DWS_PATH to its native executable');
 }
-export class DwsError extends Error { constructor(public uncertain: boolean, public detail?: any) { super(uncertain ? 'DWS result unknown; not retried' : 'DWS rejected the operation'); } }
+export class DwsError extends Error { constructor(public uncertain: boolean, public detail?: any, reason = '') { super((uncertain ? 'DWS result unknown; not retried' : 'DWS rejected the operation') + (reason ? ` (${reason})` : '')); } }
 export function dws(args: string[], cwd: string): Promise<any> {
     return new Promise((resolve, reject) => {
         let child: ChildProcessWithoutNullStreams;
         try { child = spawn(resolveDws(), args, { cwd, shell: false, windowsHide: true, stdio: 'pipe' }); } catch(e) { reject(e); return; }
-        let output = '', settled = false;
+        let output = '', diagnostics = '', settled = false;
         const finish = (error?: Error, value?: any) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
         const timer = setTimeout(() => { child.stdin.end(); finish(new DwsError(true)); }, 45000);
         child.stdout.setEncoding('utf8'); child.stdout.on('data', s => { output += s; if (output.length > 2_000_000) { child.stdin.end(); finish(new DwsError(true)); } });
-        child.stderr.resume(); child.on('error', () => finish(new DwsError(false)));
-        child.on('close', code => { try { const result = JSON.parse(output); if (code || result.error) finish(new DwsError(false, result.error)); else finish(undefined, result); } catch { finish(new DwsError(true)); } });
+        child.stderr.setEncoding('utf8'); child.stderr.on('data', s => { diagnostics = (diagnostics + s).slice(-4000); });
+        child.on('error', () => finish(new DwsError(false)));
+        child.on('close', code => { try { const result = JSON.parse(output); if (code || result.error) finish(new DwsError(false, result.error)); else finish(undefined, result); } catch {
+            // Never surface raw stderr: URLs and diagnostics can contain credentials.
+            const reason = /proxy/i.test(diagnostics) && /connection|connect|dial/i.test(diagnostics)
+                ? 'proxy connection failed; check daemon proxy settings'
+                : `exit ${code}, invalid JSON, ${output.length} characters`;
+            finish(new DwsError(true, undefined, reason));
+        } });
     });
 }
 // Explicit interactive authorization only; output may contain credentials and is discarded.

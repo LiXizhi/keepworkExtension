@@ -172,10 +172,12 @@ function renderChannels(channels) {
     else if(failed)badge('连接异常','error');
     else if(waiting)badge('等待连接','warning');
     else badge(channel.installed?'未连接':'未安装','');
-    const expired=channel.accounts.some(a=>a.status==='expired'||(a.expiresAt&&new Date(a.expiresAt).getTime()<=Date.now()));
+    const boundProfiles=new Set(channel.bindings.filter(b=>b.root===channel.root).map(b=>b.profile));
+    const authAccounts=boundProfiles.size?channel.accounts.filter(a=>boundProfiles.has(a.profile)):channel.accounts;
+    const expired=authAccounts.some(a=>a.status==='expired'||(a.expiresAt&&new Date(a.expiresAt).getTime()<=Date.now()));
     if(expired)badge('授权过期','warning');
     else if(channel.error&&channel.installed)badge('授权待检查','warning');
-    else if(channel.accounts.length&&!channel.accounts.some(a=>['active','ready'].includes(a.status)))badge('未登录','');
+    else if(authAccounts.length&&!authAccounts.some(a=>['active','ready'].includes(a.status)))badge('未登录','');
     card.append(head);
     const brainLine=document.createElement('p');brainLine.className='channel-brain';brainLine.style.overflowWrap='anywhere';brainLine.textContent='第二大脑：'+(channel.root||'未绑定');brainLine.title=channel.root||'';card.append(brainLine);
     const accountLine=document.createElement('p');accountLine.className='channel-account';

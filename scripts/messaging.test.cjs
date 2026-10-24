@@ -131,10 +131,11 @@ test('card rejection falls back, uncertain creation does not, and send args neve
     const calls=[];let payload={error:{code:'unsupported'}},code=1;
     const {DingTalkDelivery,DwsError}=load('messagingDingtalk',{
         'node:fs':{...fs,existsSync:()=>true,statSync:()=>({isFile:()=>true})},
-        'node:child_process':{spawn:(exe,args,options)=>{calls.push({args,options});const c=new EventEmitter();c.stdout=new EventEmitter();c.stdout.setEncoding=()=>{};c.stderr={resume(){}};c.stdin={end(){}};process.nextTick(()=>{c.stdout.emit('data',typeof payload==='string'?payload:JSON.stringify(payload));c.emit('close',code);});return c;}},
+        'node:child_process':{spawn:(exe,args,options)=>{calls.push({args,options});const c=new EventEmitter();c.stdout=new EventEmitter();c.stdout.setEncoding=()=>{};c.stderr=new EventEmitter();c.stderr.setEncoding=()=>{};c.stdin={end(){}};process.nextTick(()=>{c.stdout.emit('data',typeof payload==='string'?payload:JSON.stringify(payload));if(code===5)c.stderr.emit('data','proxyconnect tcp: connection refused https://SECRET:PRIVATE@example.test');c.emit('close',code);});return c;}},
     });
     const delivery=new DingTalkDelivery(os.tmpdir(),'corp:user'),m=policy.incoming(message());assert.equal(await delivery.create(m),'');
     payload='garbled';code=0;await assert.rejects(delivery.create(m),e=>e instanceof DwsError&&e.uncertain);
+    payload='';code=5;await assert.rejects(delivery.create(m),e=>{assert.match(e.message,/proxy connection failed/);assert.doesNotMatch(e.message,/SECRET|PRIVATE|example/);return e instanceof DwsError&&e.uncertain;});code=0;
     payload={data:{bizId:'card'}};assert.equal(await delivery.create(m),'card');
     payload={ok:true};await delivery.send(m,'message-key','$(never execute) " 中文');
     const last=calls.at(-1);assert.equal(last.options.shell,false);assert.ok(last.args.includes('$(never execute) " 中文'));assert.ok(last.args.includes(m.sender));assert.ok(last.args.includes('message-key-0'));
