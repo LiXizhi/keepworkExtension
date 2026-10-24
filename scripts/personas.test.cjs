@@ -9,10 +9,11 @@ function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/persona
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
-    const {Personas,nextPersonaRun}=moduleFor({'./aichatPresence':{latestAichatBrainRoot:()=>home,latestAichatClient:owner=>owner==='owner'?client:null},'./messagingPolicy':{defaultMessageConfig:()=>({}),knowledgeContext:()=>''},'./terminal':{runTerminal:async opts=>{calls.push(opts);return {ok:true};}}});
+    const {Personas,nextPersonaRun}=moduleFor({'./aichatRuntime':{createMcpAgentRuntime:()=>{throw Error('test must inject runtime');}},'./aichatPresence':{latestAichatBrainRoot:()=>home,latestAichatClient:owner=>owner==='owner'?client:null},'./messagingPolicy':{defaultMessageConfig:()=>({}),knowledgeContext:()=>''},'./terminal':{runTerminal:async opts=>{calls.push(opts);return {ok:true};}}});
     const callbacks=new Map();const sessions={async create(owner,input){calls.push({owner,input});return {id:'native'};},subscribe(id,owner,fn){callbacks.set(id,fn);return()=>callbacks.delete(id);},async turn(id,owner,input){calls.push({owner,input});callbacks.get(id)?.({session:{status:'running',pending:[]}});},async interrupt(){callbacks.get('native')?.({session:{status:'interrupted'}});},respond(id,owner,input){calls.push({owner,input});}};
     const messaging={setAgentRootResolver:resolve=>{messaging.resolveRoot=resolve;},watch:()=>()=>{},setAgentPrompt:()=>{},agentBindings:()=>[],detachAgent:()=>{},assertAgentBinding:()=>{},inboxView:()=>({conversations:[]}),workers:{answer(input,signal,login,executeTool){if(!login)return Promise.reject(Error('需要登录 AIChat'));return new Promise((resolve,reject)=>{pending.push({input,resolve,reject,executeTool});signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});});}}};
-    const service=new Personas(home,sessions,messaging);t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
+    const factory=(login,executeTool)=>({close(){},answer(input,signal){return messaging.workers.answer(input,signal,login,(name,args)=>executeTool(name,args,signal));}});
+    const service=new Personas(home,sessions,messaging,factory);t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
     service.upsert('owner',{id:'first',name:'我的分身',root:home,executor:'auto'});
     return {service,home,pending,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,setClient:value=>{client=value;}};
 }
@@ -83,11 +84,11 @@ test('dashboard snapshot shows owned conversation and native execution metadata 
     f.service.submit('owner','first',{requestId:'job',text:'private question'});
     const snapshot=f.service.dashboard();
     assert.equal(snapshot.stats.total,1);assert.equal(snapshot.stats.active,1);assert.equal(snapshot.stats.messages,1);
-    assert.deepEqual(snapshot.sessions.map(s=>s.kind),['Conversation','CLI','Worker']);
+    assert.deepEqual(snapshot.sessions.map(s=>s.kind),['Conversation','CLI','Runtime']);
     assert.equal(snapshot.sessions[1].id,'native-session');
     assert.doesNotMatch(JSON.stringify(snapshot),/private question|private body|hidden|owner-login/);
     f.pending[0].resolve('private reply');await tick();
-    assert.equal(f.service.dashboard().stats.active,0);assert.equal(f.service.dashboard().sessions.some(s=>s.kind==='Worker'),false);
+    assert.equal(f.service.dashboard().stats.active,0);assert.equal(f.service.dashboard().sessions.some(s=>s.kind==='Runtime'),false);
 });
 
 test('persona auto-approval cannot be injected by upsert and remains owner, root and executor scoped',async t=>{

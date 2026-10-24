@@ -527,7 +527,12 @@ function openWindow(startHidden = false) {
     }
   });
 }
-if (!app.requestSingleInstanceLock()) app.quit();
+if (!app.requestSingleInstanceLock()) {
+  if (!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
+    console.error('Quit the existing Desktop app from its tray menu before starting the development task.');
+    app.exit(1);
+  } else app.quit();
+}
 else {
   app.on('second-instance', show);
   app.whenReady().then(async () => {
@@ -550,7 +555,13 @@ else {
     const target = `${process.platform === 'win32' ? 'windows' : 'macos'}-${process.arch}`;
     const stagedRuntime = path.resolve(__dirname, '../../mcp-runtime/staging', target);
     const stagedModelRuntime = path.resolve(__dirname, '../../local-model-runtime/runtime-staging', target);
-    runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion(), {}, { onUpdate: mcpUpdateChanged });
+    runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion(), {}, {
+      onUpdate: mcpUpdateChanged,
+      ...(!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE ? {
+        updates: false,
+        development: { node: process.env.AICHAT_DESKTOP_FRESH_MCP_NODE, entry: path.resolve(__dirname, '../../mcp-runtime/dist/cli.cjs') },
+      } : {}),
+    });
     modelRuntime = new RuntimeSupervisor(path.join(home, 'local-model-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'local-model-runtime') : process.env.KP_LOCAL_MODEL_RUNTIME_DIR || (fs.existsSync(path.join(stagedModelRuntime, 'runtime.json')) ? stagedModelRuntime : ''), app.getVersion(), {}, {
       product: 'keepwork-local-model-node-runtime', entry: 'app/dist/src/cli.js', port: 18089, healthPath: '/v1/health', updates: false,
       matcher: (body: any) => body.service === 'keepwork-local-model' && body.protocolVersion === '1.0.0',
@@ -597,7 +608,12 @@ else {
       // the server ready first so its one-shot initial discovery includes tools
       // such as run_terminal instead of caching an offline result for the chat.
       try { await runtime.start(); }
-      catch (e: unknown) { updateError = e instanceof Error ? e.message : String(e); }
+      catch (e: unknown) {
+        updateError = e instanceof Error ? e.message : String(e);
+        if (!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
+          console.error(updateError); app.exit(1); return;
+        }
+      }
       menu();
     }
     if (process.argv.includes('--background')) tray.setToolTip(closedTip);

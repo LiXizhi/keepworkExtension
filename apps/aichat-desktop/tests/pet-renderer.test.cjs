@@ -26,6 +26,18 @@ test('pet uses the default dragon before state, on missing artwork and after res
     for (const key of ['backgroundImage', 'backgroundSize', 'backgroundPosition']) assert.equal(element('art').style[key], '');
   };
   expectDefault();
+  publish({ version: 1, context: 'persona', target: 'persona', canSwitchTarget: true, title: '我的分身', folder: '/Users/me/brain/' });
+  assert.match(element('target-title').textContent, /分身 · 我的分身/);
+  assert.equal(element('target-detail').textContent, 'brain');
+  assert.equal(element('target').disabled, false);
+  publish({ version: 1, context: 'chat', target: 'chat', canSwitchTarget: true, title: 'Fix issue', skill: 'Reviewer', folder: '/Users/me/project' });
+  assert.match(element('target-title').textContent, /会话 · Fix issue/);
+  assert.equal(element('target-detail').textContent, '技能：Reviewer · 文件夹：project');
+  assert.ok(element('target').title.includes('/Users/me/project'));
+  publish({ version: 1, context: 'chat', target: 'chat', title: 'Windows', folder: 'C:\\Users\\me\\AIChat\\' });
+  assert.equal(element('target-detail').textContent, '技能：无 · 文件夹：AIChat');
+  assert.ok(element('target').title.includes('C:\\Users\\me\\AIChat\\'));
+
   assert.equal(element('status').textContent, '');
   publish({ version: 1, context: 'chat', pet: { imageData: 'data:image/webp;base64,YQ==', sheetUrl: 'https://cdn.keepwork.com/other.webp', bgSize: '400% 400%', bgPos: '66.667% 100%' } });
   assert.equal(element('art').style.backgroundImage, 'url("data:image/webp;base64,YQ==")');

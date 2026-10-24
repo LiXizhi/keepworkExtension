@@ -1,3 +1,4 @@
+import { aichatRuntimePlugin } from '../../../scripts/aichat-runtime-build.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,7 @@ const outdir = path.join(extensionRoot, 'dist');
 const watchMode = process.argv.includes('--watch');
 
 const common = {
-  plugins: [runtimeBuildInfoPlugin(extensionRoot)],
+  plugins: [aichatRuntimePlugin(), runtimeBuildInfoPlugin(extensionRoot)],
   bundle: true,
   platform: 'node',
   format: 'cjs',

@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "source": "AIChat/runtime",
+  "files": {
+    "agent.mjs": {
+      "source": "cbd3e26c85665da5aa0957dcc76cd07bfc6292086ac974291da7a4351f5dba60",
+      "output": "90e88f0f46e49385abf925082b11c8bddba157c40c53d7206efad40f1b029cd6"
+    },
+    "completion.mjs": {
+      "source": "4036e31ae39f724ce023298f58445b0206a4f9014f7bd29c89ad157cfecd09e3",
+      "output": "bfa731789a33a1f9a3c00f8f7a9045ec389a100460ecfa408ba6153ababe5a89"
+    },
+    "context.mjs": {
+      "source": "d053875cb9316780e76ad483c57e694b5bdc567391839f3102a10244fde57f6d",
+      "output": "581e59c683748c8a8f25c1536efeba50493980539a277a108a05047e24def547"
+    },
+    "history.mjs": {
+      "source": "6e41bbc01b4fa96a894eeb713f28cdaf82e4878144d6efa851a170fbe994db13",
+      "output": "27cde4351a948c723332f83f2fd480c2cc75566b16f950e86f90278bb08a605a"
+    },
+    "sdk_adapter.mjs": {
+      "source": "f3f68f3c4a2357512e097e3117059754fc544524d00e375b766332495fe354ed",
+      "output": "f7d11a475b756ed1d45e29d9e4814cd594a1800c79e5122475cc727e4e2af510"
+    },
+    "skills.mjs": {
+      "source": "81609a4343770eef88ac6cdaf5294ed6b9b7f9cdcea10873599a25efe58a3c8d",
+      "output": "28386ec30681641cc4024fff98140679a8716a85fc94e750227d63a25ae047f3"
+    }
+  },
+  "sourceRevision": {
+    "commit": "1ba606efdbaa76ccb8f4baf9aeef296c621af5af",
+    "dirty": true
+  }
+}

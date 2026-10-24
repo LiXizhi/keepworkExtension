@@ -1,3 +1,4 @@
+import { createMcpAgentRuntime } from './aichatRuntime';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -9,7 +10,7 @@ import { runTerminal } from './terminal';
 
 type Message = { id: string; role: string; text: string; time: number; state?: string };
 type Schedule = { id: string; title: string; prompt: string; time: string; timezone: string; enabled: boolean; next: number; last?: string; lastDate?: string; target?: { binding: string; conversation: string } };
-type Persona = { cliApprovalGrant?: {root:string;backend:string}; id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; worker?: boolean; session?: string; error?: string; pending?: any[] }; };
+type Persona = { cliApprovalGrant?: {root:string;backend:string}; id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; worker?: boolean; runtime?: any; session?: string; error?: string; pending?: any[] }; };
 const ID = /^[\w-]{1,160}$/;
 const active = (p: Persona) => !!p.job && ['queued','running','waiting'].includes(p.job.state);
 const ownerTools = [
@@ -36,11 +37,11 @@ export class Personas {
     private stopMessagingWatch: () => void;
     private deliveries = new Set<NodeJS.Timeout>();
     private watchers = new Set<{owner:string; update:()=>void; close:()=>void}>();
-    constructor(private home: string, private sessions: AgentSessions, private messaging: MessagingService) {
+    constructor(private home: string, private sessions: AgentSessions, private messaging: MessagingService, private runtimeFactory = createMcpAgentRuntime) {
         fs.mkdirSync(home,{recursive:true});
         for(const file of fs.readdirSync(home).filter(f=>/^[a-f0-9]{64}\.json$/.test(f))) {
             try { const p:Persona=JSON.parse(fs.readFileSync(path.join(home,file),'utf8'));
-                if(active(p)) { p.job!.state='unknown';p.job!.error='服务已重启，任务未重放';p.job!.pending=[]; }
+                if(active(p)) { p.job!.state='unknown';p.job!.error='服务已重启，任务未重放';p.job!.pending=[];for(const run of Object.values(p.job!.runtime?.runs||{}) as any[])if(['running','waiting'].includes(run.state))run.state='unknown'; }
                 for(const s of p.schedules) if(s.enabled)s.next=nextPersonaRun(s.time,s.timezone);
                 this.rows.set(this.key(p.owner,p.id),p);this.save(p);
             } catch { /* Invalid records are not executed. */ }
@@ -84,7 +85,7 @@ export class Personas {
         const sessions=[...this.rows.values()].flatMap(p=>{
             const personaKey=this.key(p.owner,p.id);
             const rows=this.sessions.list(personaKey,0,Number.MAX_SAFE_INTEGER).map(s=>({personaKey,persona:p.name,id:s.id,kind:'CLI',backend:s.backend,state:s.status}));
-            if(active(p)&&p.job?.worker)rows.push({personaKey,persona:p.name,id:p.job!.id,kind:'Worker',backend:'keepwork',state:p.job!.state});
+            if(active(p)&&p.job?.worker)rows.push({personaKey,persona:p.name,id:p.job!.id,kind:'Runtime',backend:'keepwork',state:p.job!.state});
             return [{personaKey,persona:p.name,id:p.id,kind:'Conversation',backend:'MCP',state:p.job?.state||'idle'},...rows];
         });
         return {personas,sessions,stats:{total:personas.length,active:personas.filter(p=>['queued','running','waiting'].includes(p.state)).length,
@@ -98,6 +99,7 @@ export class Personas {
         const root=String(input.root === undefined ? (old ? old.root : latestAichatBrainRoot()) : (input.root || ''));if(root&&(!path.isAbsolute(root)||!fs.statSync(root).isDirectory()))throw Error('请选择现有本机第二大脑目录');
         const executor=String(input.executor||'auto');if(!['auto','keepwork','copilot','codex','claude','workbuddy','cursor','trae','qwen','gemini','kimi','codebuddy','opencode'].includes(executor))throw Error('Invalid executor');
         const p:Persona={...(old||{owner,id:input.id,messages:[],requests:{},schedules:[],summary:'',readAt:0}),name,avatar:String(input.avatar||'🧠').slice(0,16),prompt:String(input.prompt||'').slice(0,16000),root:root?fs.realpathSync(root):'',executor,model:String(input.model||'').slice(0,256),pinned:input.pinned!==false,order:Number.isFinite(input.order)?input.order:Date.now()};
+        if(old&&old.root!==p.root)this.sessions.workspaceFiles?.revoke(this.key(owner,p.id));
         this.rows.set(this.key(owner,p.id),p);this.messaging.setAgentPrompt(owner,p.id,p.prompt);this.save(p);return this.view(p);
     }
     read(owner:string,id:string,before=Infinity){const p=this.get(owner,id);const rows=p.messages.filter(m=>m.time<before).slice(-50);return {...this.view(p),messages:rows,before:rows.length===50?rows[0].time:null};}
@@ -168,10 +170,17 @@ export class Personas {
             if(!submitted){
                 if(signal.aborted)throw Error('已取消');
                 let knowledge='';
-                // Fallback deliberately stays tool-free; CLI owns action/approval execution.
+                // Owner context remains local; the daemon owns tools and approvals.
                 if(p.root){try{knowledge=knowledgeContext(p.root,{...defaultMessageConfig(),knowledge:fs.readdirSync(p.root,{withFileTypes:true}).filter(d=>d.isDirectory()&&!d.isSymbolicLink()&&!d.name.startsWith('.')&&!/^(account|credentials|secrets)$/i.test(d.name)).map(d=>d.name)},text);}catch{/* no implicit public grant */}}
                 job.worker=true;
-                answer=await this.messaging.workers.answer({prompt,question:text,history,knowledge,brain:p.name,ownerTask:true,tools:ownerTools},signal,latestAichatClient(p.owner),(name,args)=>this.ownerTool(p,name,args,signal));
+                const runtime=this.runtimeFactory(latestAichatClient(p.owner),(name,args,toolSignal)=>this.ownerTool(p,name,args,toolSignal),{
+                    workspaceFiles:this.sessions.workspaceFiles,
+                    approve:(name,args,toolSignal)=>this.ownerApproval(p,{tool:name,...args},toolSignal),
+                    persist:snapshot=>{ job.runtime ||= {version:1,runs:{}};job.runtime.runs[snapshot.id]={id:snapshot.id,parentId:snapshot.parentId,member:snapshot.member,depth:snapshot.depth,children:snapshot.children,state:snapshot.state};this.save(p); },
+                });
+                if(p.root&&this.sessions.workspaceFiles)runtime.registerWorkspaces(runOwner,p.id,{username:'_persona',token:'',primaryId:p.id,spaces:[{id:p.id,type:'local',root:p.root,aliases:[p.id,'.brain']}]});
+                try { answer=await runtime.answer({id:job.id,prompt:prompt+'\n'+knowledge,question:text,history,root:p.root,owner:runOwner,workspaceId:p.root&&this.sessions.workspaceFiles?p.id:undefined,model:backend==='keepwork'?model:'keepwork-pro',tools:ownerTools},signal); }
+                finally { runtime.close(); }
             }
             if(signal.aborted)throw Error('已取消');if(!answer.trim())throw Error('执行器未返回答案');
             job.state='done';job.pending=[];
@@ -189,6 +198,16 @@ export class Personas {
         else{delete p.cliApprovalGrant;this.sessionGrants.set(this.key(owner,id),JSON.stringify(binding));}
         this.save(p);this.sessions.configureAutoApproval(p.job.session,this.key(owner,id),true);return this.view(p);
     }const approval=this.approvals.get(this.key(owner,id)+':'+input.id);if(approval){if(!['accept','decline','cancel'].includes(input.decision))throw Error('此操作仅支持单次授权');approval(input.decision==='accept');}else if(p.job.session)this.sessions.respond(p.job.session,this.key(owner,id),input);else throw Error('请求已失效');return this.view(p);}
+    private async ownerApproval(p:Persona,params:any,signal:AbortSignal){
+        if(signal.aborted)throw Error('已取消');
+        const id=randomUUID(),key=this.key(p.owner,p.id)+':'+id;
+        await new Promise<void>((resolve,reject)=>{
+            const abort=()=>done(false);
+            const done=(accept:boolean)=>{this.approvals.delete(key);signal.removeEventListener('abort',abort);p.job!.pending=[];if(p.job!.state==='waiting')p.job!.state='running';this.save(p);accept&&!signal.aborted?resolve():reject(Error('用户拒绝或已取消'));};
+            this.approvals.set(key,done);signal.addEventListener('abort',abort,{once:true});
+            p.job!.state='waiting';p.job!.pending=[{id,method:'owner/toolApproval',params:params}];this.save(p);
+        });
+    }
     private async ownerTool(p:Persona,name:string,args:any,signal:AbortSignal){
         if(signal.aborted)throw Error('已取消');
         if(name==='read_inbox')return this.messaging.inboxView(p.owner,p.id,String(args?.binding||''),String(args?.conversation||''));
@@ -201,13 +220,7 @@ export class Personas {
         if(name==='write_file'&&(!args||typeof args.content!=='string'||args.content.length>100000))throw Error('Invalid file content');
         if(name==='run_terminal'&&(!args||typeof args.command!=='string'||args.command.length>10000))throw Error('Invalid command');
         const target=name==='write_file'?file():root;
-        const id=randomUUID(),key=this.key(p.owner,p.id)+':'+id;
-        await new Promise<void>((resolve,reject)=>{
-            const abort=()=>done(false);
-            const done=(accept:boolean)=>{this.approvals.delete(key);signal.removeEventListener('abort',abort);p.job!.pending=[];if(p.job!.state==='waiting')p.job!.state='running';this.save(p);accept&&!signal.aborted?resolve():reject(Error('用户拒绝或已取消'));};
-            this.approvals.set(key,done);signal.addEventListener('abort',abort,{once:true});
-            p.job!.state='waiting';p.job!.pending=[{id,method:'owner/toolApproval',params:{tool:name,path:target,...(name==='run_terminal'?{command:args.command}:{content:args.content})}}];this.save(p);
-        });
+        await this.ownerApproval(p,{tool:name,path:target,...(name==='run_terminal'?{command:args.command}:{content:args.content})},signal);
         if(signal.aborted)throw Error('已取消');
         if(name==='write_file'){if(file()!==target)throw Error('File target changed');fs.writeFileSync(target,args.content,'utf8');return {written:true};}
         if(fs.realpathSync(p.root)!==root)throw Error('Workspace changed while waiting for approval');
@@ -227,6 +240,6 @@ export class Personas {
             if(s.target){const target={...s.target};const poll=setInterval(()=>{const result=p.requests[id];if(['queued','accepted','running'].includes(result))return;clearInterval(poll);this.deliveries.delete(poll);if(result==='done'){const answer=p.messages.find(m=>m.id===id+'-answer');if(answer)void this.messaging.manualReply(p.owner,p.id,target.binding,target.conversation,id,answer.text,false).catch(()=>{s.last='执行完成；发送失败或结果未知';this.save(p);});}},1000);this.deliveries.add(poll);poll.unref();}
         }
     }
-    async remove(owner:string,id:string){const p=this.get(owner,id);await this.cancel(owner,id);p.schedules=[];this.messaging.detachAgent(owner,id);this.rows.delete(this.key(owner,id));this.sessionGrants.delete(this.key(owner,id));fs.rmSync(path.join(this.home,this.key(owner,id)+'.json'),{force:true});}
+    async remove(owner:string,id:string){const p=this.get(owner,id);await this.cancel(owner,id);p.schedules=[];this.messaging.detachAgent(owner,id);this.sessions.workspaceFiles?.revoke(this.key(owner,id));this.rows.delete(this.key(owner,id));this.sessionGrants.delete(this.key(owner,id));fs.rmSync(path.join(this.home,this.key(owner,id)+'.json'),{force:true});}
     close(){if(this.closed)return;this.stopMessagingWatch();clearInterval(this.timer);for(const timer of this.deliveries)clearInterval(timer);this.deliveries.clear();for(const p of this.rows.values())if(active(p)){p.job!.state='unknown';p.job!.pending=[];this.save(p);}this.closed=true;for(const w of this.watchers)w.close();this.watchers.clear();for(const controller of this.aborts.values())controller.abort();}
 }

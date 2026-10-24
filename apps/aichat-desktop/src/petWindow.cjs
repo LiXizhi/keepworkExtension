@@ -1,7 +1,7 @@
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const CHANNEL = 'aichat-desktop:pet-v1';
-const ACTIONS = new Set(['input', 'send', 'stop', 'dictation', 'call', 'mute']);
+const ACTIONS = new Set(['toggle-target', 'input', 'send', 'stop', 'dictation', 'call', 'mute']);
 const EMPTY = Object.freeze({ version: 1, context: '', title: '打开 AIChat 开始聊天', draft: '', messages: [], ready: false });
 const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
 const PET_SIZES = [0.5, 1, 1.5, 2, 3, 4];
@@ -17,6 +17,8 @@ function projectState(value) {
   try { const url = new URL(pet.sheetUrl); if (url.protocol === 'https:' && url.hostname === 'cdn.keepwork.com' && !url.username && !url.password && !url.search) sheetUrl = url.href; } catch {}
   const percent = value => /^\d+(\.\d+)?% \d+(\.\d+)?%$/.test(value) ? value : '0% 0%';
   return { version: 1, context: text(value.context, 200), title: text(value.title, 160), draft: text(value.draft, 32000),
+    target: value.target === 'persona' ? 'persona' : 'chat', canSwitchTarget: value.canSwitchTarget === true,
+    skill: text(value.skill, 160), folder: text(value.folder, 500),
     ready: value.ready === true, busy: value.busy === true, richDraft: value.richDraft === true,
     attention: text(value.attention, 300), error: text(value.error, 300), dictating: value.dictating === true,
     canCall: value.canCall === true, voice: { active: value.voice?.active === true, muted: value.voice?.muted === true, state: text(value.voice?.state, 32) },

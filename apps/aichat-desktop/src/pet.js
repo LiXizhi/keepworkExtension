@@ -38,6 +38,11 @@
     setArtStyle('backgroundPosition', image ? pet.bgPos || '0% 0%' : '');
     document.body.style.setProperty('--pet-pixels', `${state.petPixels || 112}px`);
     $('pet').title = `${pet.name || '宠物'} · 点击聊天 · 右键设置 · 拖动移动`;
+    $('target-title').textContent = `${state.target === 'persona' ? '分身' : '会话'} · ${state.title || 'AIChat'} ⇄`;
+    const folderName = (state.folder || '').split(/[\\/]/).filter(Boolean).pop() || state.folder || '';
+    $('target-detail').textContent = state.target === 'persona' ? (folderName || '第二大脑') : `技能：${state.skill || '无'} · 文件夹：${folderName || '未绑定'}`;
+    $('target').title = `${$('target-title').textContent}\n${$('target-detail').textContent}${state.folder ? `\n${state.folder}` : ''}\n点击切换到${state.target === 'persona' ? '聊天会话' : '我的分身'}`;
+    $('target').disabled = !state.canSwitchTarget || state.dictating || !!state.voice?.active || !!edits || unsynced;
     $('badge').hidden = !(state.busy || state.voice?.active || state.attention || state.error);
     if (!edits && !unsynced) $('draft').value = state.draft || '';
     $('draft').disabled = !state.ready || state.richDraft || state.dictating;
@@ -149,6 +154,7 @@
     void action(name);
   };
   for (const name of ['dictation', 'call', 'mute']) $(name).onclick = () => { void action(name); };
+  $('target').onclick = async () => { await queue; if (!edits && !unsynced) await action('toggle-target'); };
   $('open').onclick = () => { void api.action('open'); };
   $('reply').onclick = () => { if (!window.getSelection()?.toString()) void api.action('open'); };
   $('reply').onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void api.action('open'); } };

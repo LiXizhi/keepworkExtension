@@ -24,7 +24,18 @@ The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arc
 `apps/local-model-runtime/runtime-staging/<platform>-<arch>` if present;
 `AICHAT_MCP_RUNTIME_DIR` and `KP_LOCAL_MODEL_RUNTIME_DIR` override them. No runtime is required for native files
 or user terminals. Use the tray menu's **退出** before starting a fresh debugging session.
-These tasks build only the desktop shell, never the AIChat website.
+The Start task (`npm start`) synchronizes the shared AIChat runtime, rebuilds the
+standalone MCP bundle and Desktop shell, then launches that exact MCP bundle using
+local Node. It stops an identified existing Keepwork MCP via its authenticated admin
+endpoint and verifies the new process PID before opening Desktop. A conflicting
+service or failed build/start aborts startup; no cached or downloaded MCP is selected.
+Development MCP updates are disabled and Desktop owns its process until Quit.
+Install dependencies in `apps/mcp-runtime` as well as the repository and Desktop.
+MCP builds without a sibling AIChat checkout use the manifest-verified committed
+runtime copy. The local AIChat page still requires its checkout when
+`AICHAT_DESKTOP_LOCAL_SOURCE=1`; that is separate from building MCP.
+Quit an already-running Desktop from its tray before starting this task again.
+F5/Build keep their existing shell-only behavior. Neither path builds the AIChat website.
 
 On macOS, the application menu is named **Keepwork**. Development builds prepare an
 ad-hoc-signed private Electron bundle under ignored `.dev-runtime/Keepwork.app`;

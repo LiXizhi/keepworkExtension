@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { startDevelopmentRuntime } = require('./development-runtime.cjs');
 const { atomicJson, inside } = require('./files.cjs');
 const semver = require('semver');
 const BASE = 'https://cdn.keepwork.com/keepwork/mcp-stable/';
@@ -118,6 +119,7 @@ class RuntimeSupervisor {
   }
   async startRuntime({ activatePending = true, takeover = true } = {}) {
     this.stopping = false;
+    if (this.options.development) return startDevelopmentRuntime(this);
     const candidates = [...new Set([activatePending && this.record.pending, this.record.current, this.record.previous].filter(Boolean)), null];
     const versions = new Map();
     for (const hash of candidates) {

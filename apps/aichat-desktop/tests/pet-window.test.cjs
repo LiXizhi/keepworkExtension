@@ -140,3 +140,32 @@ test('complete exit requires a loaded, current confirmation; cancel and owner ch
   await assert.rejects(h.invoke('exit-confirm', { id }), /expired/);
   h.pet.dispose();
 });
+
+test('pet target toggle crosses the real preload and native IPC allowlists', async () => {
+  const fs = require('node:fs'), vm = require('node:vm');
+  const h = fixture(); h.pet.show();
+  h.pet.update({ version: 1, context: 'persona', target: 'persona', canSwitchTarget: true });
+  let api;
+  const electron = {
+    contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'desktopPet'); api = value; } },
+    ipcRenderer: { invoke(channel, action, args) { assert.equal(channel, 'aichat-desktop:pet-v1'); return h.invoke(action, args); } },
+  };
+  const source = fs.readFileSync(require.resolve('../src/pet-preload.cjs'), 'utf8');
+  try {
+    vm.runInNewContext(source, { process: { isMainFrame: true }, require: () => electron });
+    const switched = api.action('toggle-target', { context: 'persona' });
+    const command = h.commands.at(-1);
+    if (command) {
+      assert.equal(command.action, 'toggle-target');
+      assert.equal(command.context, 'persona');
+      h.pet.result({ requestId: command.requestId, ok: true });
+      h.pet.update({ version: 1, context: 'chat', target: 'chat', canSwitchTarget: true });
+    }
+    assert.equal((await switched).target, 'chat');
+    await assert.rejects(api.action('toggle-target', { context: 'persona' }), /Stale/);
+    await assert.rejects(api.action('terminal'), /Invalid pet action/);
+    api = undefined;
+    vm.runInNewContext(source, { process: { isMainFrame: false }, require: () => electron });
+    assert.equal(api, undefined, 'subframes must not receive the pet bridge');
+  } finally { h.pet.dispose(); }
+});

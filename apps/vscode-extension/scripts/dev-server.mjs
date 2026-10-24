@@ -1,3 +1,4 @@
+import { aichatRuntimePlugin } from '../../../scripts/aichat-runtime-build.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -79,7 +80,7 @@ async function main() {
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: cliPath,
     external: ['node-pty', 'playwright-core'],
-    plugins: [runtimeBuildInfoPlugin(extensionRoot), creationSkillPlugin(path.dirname(cliPath)), {
+    plugins: [aichatRuntimePlugin(), runtimeBuildInfoPlugin(extensionRoot), creationSkillPlugin(path.dirname(cliPath)), {
       name: 'restart-keepwork-mcp',
       setup(build) {
         build.onEnd((result) => {

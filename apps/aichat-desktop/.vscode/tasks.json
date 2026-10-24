@@ -3,6 +3,7 @@
   "tasks": [
     {
       "label": "keepwork Desktop: Start",
+      "detail": "Sync AIChat runtime, rebuild MCP and Desktop, then restart MCP using the fresh local bundle.",
       "type": "shell",
       "command": "npm",
       "args": [

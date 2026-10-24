@@ -1,3 +1,4 @@
+import { aichatRuntimePlugin } from '../../../scripts/aichat-runtime-build.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +21,7 @@ await build({
   format: 'cjs',
   target: 'node22',
   external: ['node-pty', 'playwright-core'],
-  plugins: [runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir)],
+  plugins: [aichatRuntimePlugin(), runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir)],
   legalComments: 'none',
   logLevel: 'info',
 });

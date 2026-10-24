@@ -12,6 +12,7 @@ function load(name, mocks = {}) {
     m.require = id => {
         if (Object.hasOwn(mocks, id)) return mocks[id];
         if (id.startsWith('./')) {
+            if (id.endsWith('.cjs')) return require(path.resolve(path.dirname(file),id));
             const base = path.basename(id).replace(/\.ts$/, '');
             if (fs.existsSync(path.resolve(__dirname, '../src/core', base + '.ts'))) return load(base, mocks);
         }
