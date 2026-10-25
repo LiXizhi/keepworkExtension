@@ -28,8 +28,12 @@ export class MessagingCoordinator {
     status='connecting';
     private journalFile:string;
     constructor(readonly username:string,private token:string,readonly computerId:string,home:string,private changed:()=>void,
-        private gateway='https://us1.gameserver.keepwork.com',private fetchImpl=fetch,private WebSocketImpl:any=(globalThis as any).WebSocket) {
-        this.journalFile=path.join(home,coordinationKey(username)+'.journal.json');
+        private gateway=process.env.AICHAT_RELAY_GATEWAY || 'https://us1.gameserver.keepwork.com',private fetchImpl=fetch,private WebSocketImpl:any=(globalThis as any).WebSocket) {
+        const endpoint = new URL(this.gateway);
+        if (endpoint.username || endpoint.password || (endpoint.protocol !== 'https:' && !(endpoint.protocol === 'http:' && ['localhost','127.0.0.1'].includes(endpoint.hostname)))) throw Error('Invalid coordination gateway');
+        this.gateway = endpoint.href.replace(/\/$/, '');
+        const identity = this.gateway === 'https://us1.gameserver.keepwork.com' ? [username] : [this.gateway,username];
+        this.journalFile=path.join(home,coordinationKey(...identity)+'.journal.json');
         try{this.journal=JSON.parse(fs.readFileSync(this.journalFile,'utf8'));}catch(e:any){if(e.code!=='ENOENT')this.status='journal-unavailable';}
         this.timer=setInterval(()=>void this.tick(),10000);this.timer.unref();
     }

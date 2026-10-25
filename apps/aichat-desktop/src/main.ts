@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, Tray } from 'electron';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { autoUpdater } from 'electron-updater';
 import { TerminalSessionManager } from '../../../src/core/terminalSessions';
@@ -13,6 +14,7 @@ const { ENTRY, trustedPage, assertSender, externalUrl } = require('./security.cj
 const { MediaGrants, installPermissions } = require('./permissions.cjs');
 let devUrl = !app.isPackaged ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
 let developmentServer: { close: () => void } | undefined;
+let managedDeployment: any;
 let applicationMenu: Menu;
 const disableDevMcp = !app.isPackaged && process.env.AICHAT_DESKTOP_DISABLE_MCP === '1';
 if (devUrl && !/^http:\/\/(127\.0\.0\.1|localhost):\d+\//.test(devUrl)) throw new Error('Development URL must be loopback HTTP');
@@ -186,6 +188,7 @@ async function applyDesktopUpdate() {
   finally { updateActionBusy = false; notifyUpdateStatus(); }
 }
 async function checkUpdates() {
+  if (managedDeployment) return;
   if (disableDevMcp) return;
   if (updateActionBusy) return;
   if (checking) return checking;
@@ -492,7 +495,7 @@ function openWindow(startHidden = false) {
     backgroundColor: settings.theme === 'dark' ? '#0a0a0f' : '#ffffff',
     titleBarStyle: 'hidden', titleBarOverlay: { ...titlebarColors(settings.theme), height: 34 },
     autoHideMenuBar: true,
-    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), partition: 'persist:aichat', nodeIntegration: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), partition: managedDeployment ? `persist:aichat-${createHash('sha256').update(JSON.stringify([managedDeployment.config.profileHome, managedDeployment.config.profile, managedDeployment.config.entryURL, managedDeployment.config.identityRealm])).digest('hex').slice(0, 24)}` : 'persist:aichat', nodeIntegration: false,
       contextIsolation: true, sandbox: true, webSecurity: true, backgroundThrottling: false, webviewTag: false } });
   win = created;
   if (process.platform !== 'darwin') created.setMenu(null);
@@ -536,6 +539,13 @@ if (!app.requestSingleInstanceLock()) {
 else {
   app.on('second-instance', show);
   app.whenReady().then(async () => {
+    try {
+      managedDeployment = await require('./deployment.cjs').openDeployment(path.join(app.getPath('userData'), 'deployment.json'));
+      if (managedDeployment) {
+        devUrl = managedDeployment.url;
+        if (managedDeployment.config.relay?.gateway) process.env.AICHAT_RELAY_GATEWAY = managedDeployment.config.relay.gateway;
+      }
+    } catch (error) { dialog.showErrorBox(PRODUCT_NAME, `Invalid deployment: ${String(error)}`); app.exit(1); return; }
     if (!app.isPackaged && !devUrl && process.env.AICHAT_DESKTOP_LOCAL_SOURCE === '1') {
       try {
         const { startDevelopmentServer } = require('./dev-server.cjs');
@@ -557,6 +567,7 @@ else {
     const stagedModelRuntime = path.resolve(__dirname, '../../local-model-runtime/runtime-staging', target);
     runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion(), {}, {
       onUpdate: mcpUpdateChanged,
+      ...(managedDeployment ? { updates: false } : {}),
       ...(!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE ? {
         updates: false,
         development: { node: process.env.AICHAT_DESKTOP_FRESH_MCP_NODE, entry: path.resolve(__dirname, '../../mcp-runtime/dist/cli.cjs') },
@@ -628,6 +639,7 @@ else {
   app.on('activate', show);
   app.on('window-all-closed', () => { /* Tray and Keepwork MCP stay after the window is destroyed. */ });
   app.on('before-quit', event => {
+    if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }
     if (quitting) return;
     event.preventDefault(); quitting = true; floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
     if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }

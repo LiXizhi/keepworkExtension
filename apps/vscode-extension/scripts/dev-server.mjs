@@ -80,7 +80,7 @@ async function main() {
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: cliPath,
     external: ['node-pty', 'playwright-core'],
-    plugins: [aichatRuntimePlugin(), runtimeBuildInfoPlugin(extensionRoot), creationSkillPlugin(path.dirname(cliPath)), {
+    plugins: [aichatRuntimePlugin({ development: true }), runtimeBuildInfoPlugin(extensionRoot), creationSkillPlugin(path.dirname(cliPath)), {
       name: 'restart-keepwork-mcp',
       setup(build) {
         build.onEnd((result) => {

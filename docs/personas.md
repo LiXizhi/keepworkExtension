@@ -67,6 +67,13 @@ verify the packaged copy when AIChat is absent. Checks remain read-only and comp
 local source parity rather than fetching. Run `node --test scripts/aichat-runtime-freshness.test.cjs`
 for isolated Git-remote regressions.
 
+The VS Code `dev:server` watcher reads the sibling AIChat runtime ES modules
+directly, including uncommitted edits, without writing the packaged copy or its
+provenance. Imported source modules participate in watch rebuilds. When the
+AIChat checkout is absent, it verifies and uses the packaged copy. Release builds
+and explicit sync retain the freshness rules above. Test this separation with
+`node --test scripts/aichat-runtime-build.test.mjs`.
+
 ## Custom agents as persona forks
 
 Custom agents share the owner's global second-brain directory and existing channel accounts, but retain independent names, role/skill prompts, model preferences and owner conversations. No brain files, credentials or owner transcripts are copied. Portable `messaging` metadata is version 1: `{enabled, groups:[{channel,account,id,name}]}`; `account` is the stable CLI profile, never a credential or device-local binding ID. Group IDs survive renames. Enablement requires at least one group and a unique normalized agent name on the shared account. Creation without enablement does not start messaging.
