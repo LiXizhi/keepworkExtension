@@ -86,3 +86,18 @@ test('persona prompt and current second brain reach interactive, scheduled and f
     await submit('cleared-brain');assert.match(system(),/PROMPT_WITHOUT_BRAIN/);assert.doesNotMatch(system(),/BRAIN_TWO_RULE|brain-two/);
     assert.equal(requests.at(-1).localTools.some(t=>t.function.name==='workspace_file'),false);
 });
+
+test('role workspace writes run autonomously and model-declared scope exceptions request approval',async t=>{
+ let turn=0;
+ const f=fixture(t,async(_url,init)=>{
+  const body=JSON.parse(init.body);const tool=body.localTools.find(t=>t.function.name==='workspace_file');assert.equal(tool.function.parameters.properties.requireApproval.type,'boolean');
+  if(turn++===0)return response({tool_calls:[call('inside','workspace_file',{operation:'write',path:'inside.md',content:'in scope'})]});
+  if(turn===2)return response({tool_calls:[call('outside','workspace_file',{operation:'write',path:'outside.md',content:'exception',requireApproval:true,approvalReason:'Outside role'})]});
+  return response({result:'done'});
+ });
+ f.service.upsert(f.owner,{id:'persona',name:'Role writer',root:f.home,executor:'keepwork',prompt:'Write inside.md; ask outside it.'});
+ f.service.submit(f.owner,'persona',{requestId:'role-runtime',text:'Write files'});
+ await until(()=>f.service.read(f.owner,'persona').job.state==='waiting');assert.equal(fs.readFileSync(path.join(f.home,'inside.md'),'utf8'),'in scope');assert.equal(fs.existsSync(path.join(f.home,'outside.md')),false);
+ const ask=f.service.read(f.owner,'persona').job.pending[0];assert.equal(ask.params.requireApproval,true);f.service.respond(f.owner,'persona',{id:ask.id,decision:'accept'});
+ await until(()=>f.service.read(f.owner,'persona').job.state==='done');assert.equal(fs.readFileSync(path.join(f.home,'outside.md'),'utf8'),'exception');
+});

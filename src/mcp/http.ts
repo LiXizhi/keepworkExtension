@@ -436,6 +436,16 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 sendJson(res, 200, { supervisor: await clientSupervisor.configure(body.enabled) });
                 return;
             }
+            if (pathname === '/admin/messaging-computers' && ['GET','POST'].includes(req.method || '')) {
+                if (!assertAuth(req, url, res)) return;
+                if(req.method==='POST'){
+                    if(!originAllowed(String(req.headers.origin||''))){sendJson(res,403,{error:'Explicit allowed Origin required'});return;}
+                    const body=JSON.parse((await readBodyBuffer(req,8192)).toString('utf8'));
+                    if(!messaging.coordinationDashboard().some(row=>row.owner===body.owner)){sendJson(res,403,{error:'Unknown owner'});return;}
+                    await messaging.configureCoordination(body.owner,body);
+                }
+                sendJson(res,200,{accounts:messaging.coordinationDashboard()});return;
+            }
             if (pathname === '/admin/personas' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, { ...personas.dashboard(), recentMessages: messaging.dashboardMessages() });

@@ -50,11 +50,11 @@ export function automatedSender(event: any): boolean {
         .some(value => typeof value === 'string' && /^(app|bot|robot)$/i.test(value));
 }
 export function automatedText(text: string): boolean {
-    return /【AI\s*代答】|\[interactiveCard\]|暂不支持解析|类型消息暂不支持解析|收到非文本消息，请用文字再说一下/i.test(text);
+    return /【[^【】\r\n]{1,80}\s*·\s*AI】|【AI\s*代答】|\[interactiveCard\]|暂不支持解析|类型消息暂不支持解析|收到非文本消息，请用文字再说一下/i.test(text);
 }
 export function incoming(event: any): Incoming | null {
     const type = event?.type || event?.event_type;
-    const kind = type === 'user_im_message_receive_at' ? 'mention' : /^user_im_message_receive_o2o(?:_all)?$/.test(type) ? 'direct' : type === 'user_im_message_receive_group' ? 'group' : null;
+    const kind = type === 'user_im_message_receive_at' ? 'mention' : /^user_im_message_receive_o2o(?:_all)?$/.test(type) ? 'direct' : /^user_im_message_receive_group(?:_all)?$/.test(type) ? 'group' : null;
     if (!kind || typeof event.content !== 'string' || !event.content.trim()) return null;
     const raw = event.create_time || event.event_time || event.timestamp;
     let time = typeof raw === 'number' || /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw);

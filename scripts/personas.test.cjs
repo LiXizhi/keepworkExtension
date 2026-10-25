@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const Module=require('node:module');
 const ts=require('typescript');
-function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>Object.hasOwn(mocks,id)?mocks[id]:require(id);m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaMessaging','./agentRolePolicy'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
@@ -128,4 +128,80 @@ test('channel scope follows current persona brain, including restored clients an
  assert.equal(f.messaging.resolveRoot('unknown','first'),'');
  f.service.upsert('owner',{id:'first',name:'Persona',root:''});
  assert.equal(f.messaging.resolveRoot('owner','first'),'');
+});
+
+test('custom persona fork persists role and portable routing without copying owner history',async t=>{
+    const f=fixture(t),groups=[{channel:'dingtalk',account:'corp:user',id:'group',name:'Team'}];
+    f.service.submit('owner','first',{requestId:'owner-history',text:'Private owner conversation'});f.pending[0].resolve('Private answer');await tick();
+    const created=f.service.upsert('owner',{id:'fork',name:'Lily',prompt:'Research using $research',executor:'keepwork',messaging:{version:1,enabled:true,groups}});
+    assert.equal(created.root,fs.realpathSync(f.home));assert.equal(created.messagingVersion,1);assert.equal(created.prompt,'Research using $research');
+    assert.deepEqual(f.service.read('owner','fork').messages,[]);
+    assert.deepEqual(created.messaging,{version:1,enabled:true,groups});
+    assert.throws(()=>f.service.upsert('owner',{id:'duplicate',name:'ＬＩＬＹ',prompt:'other',messaging:{version:1,enabled:true,groups}}),/唯一/);
+    assert.throws(()=>f.service.upsert('owner',{id:'empty',name:'Empty',prompt:'role',messaging:{version:1,enabled:true,groups:[]}}),/主要群聊/);
+    const restored=new f.Personas(f.home,f.sessions,f.messaging);t.after(()=>restored.close());
+    assert.deepEqual(restored.read('owner','fork').messaging,created.messaging);
+    f.service.submit('owner','fork',{requestId:'fork-task',text:'Research'});
+    assert.match(f.pending[1].input.prompt,/Research using \$research/);assert.doesNotMatch(JSON.stringify(f.pending[1].input),/Private owner conversation|Private answer/);
+    assert.throws(()=>f.service.upsert('owner',{...created,root:''}),/等待/);
+    f.pending[1].resolve('Research result');await tick();
+    const cleared=f.service.upsert('owner',{...created,root:''});assert.equal(cleared.root,'');assert.deepEqual(cleared.messaging,created.messaging);
+});
+
+test('persona knows shared-memory and nickname rules; owner group assignment requires search, ownership and approval',async t=>{
+ const f=fixture(t,'codex');
+ f.service.upsert('owner',{id:'helper',name:'Helper',prompt:'Research role'});
+ f.messaging.agentBindings=()=>[{id:'binding',channel:'dingtalk',profile:'corp:user'}];
+ f.messaging.agentGroups=async(owner,id,binding,query)=>{assert.equal(owner,'owner');assert.equal(binding,'binding');return [{id:'group',name:'Team'}];};
+ const assigned=[];f.messaging.assignGroupNickname=async(...args)=>{assigned.push(args);return {nickname:'Owner & Helper'};};
+ f.service.submit('owner','first',{requestId:'assign-helper',text:'把 Helper 加入 Team 群'});await tick();
+ assert.equal(f.calls.length,0,'group management uses owner tool runtime, not CLI-only prompt');
+ const run=f.pending[0];assert.match(run.input.prompt,/分身的分身/);assert.match(run.input.prompt,/同一个第二大脑/);assert.match(run.input.prompt,/search_agent_groups/);
+ await assert.rejects(run.executeTool('assign_agent_group',{agentId:'helper',binding:'binding',group:'invented'}),/搜索/);
+ await run.executeTool('search_agent_groups',{binding:'binding',query:'Team'});
+ await assert.rejects(run.executeTool('assign_agent_group',{agentId:'foreign',binding:'binding',group:'group'}),/不存在/);
+ const action=run.executeTool('assign_agent_group',{agentId:'helper',binding:'binding',group:'group'});await tick();assert.equal(assigned.length,0);
+ const pending=f.service.read('owner','first').job.pending[0];f.service.respond('owner','first',{id:pending.id,decision:'accept'});
+ assert.deepEqual(await action,{nickname:'Owner & Helper'});assert.equal(assigned[0][1],'helper');run.resolve('Assigned');await tick();
+});
+
+test('group work approvals surface destination, preserve owner history and support cancellation',async t=>{
+ const f=fixture(t);let cancelled=false;
+ const controller=new AbortController(),request={owner:'owner',agentId:'first',root:fs.realpathSync(f.home),channel:'dingtalk',account:'corp:user',group:'group',message:'write report',tool:'write_file',args:{path:'report.md',content:'draft'},cancel:()=>{cancelled=true;}};
+ const pending=f.service.approveGroupWork(request,controller.signal);await tick();
+ const view=f.service.read('owner','first');assert.equal(view.messages.length,0);assert.equal(view.job.state,'waiting');assert.equal(view.job.pending[0].params.group,'group');assert.match(view.job.pending[0].params.notice,/角色范围外/);
+ f.service.respond('owner','first',{id:view.job.pending[0].id,decision:'accept'});await pending;assert.equal(f.service.read('owner','first').job.state,'done');assert.equal(cancelled,false);
+ const second=f.service.approveGroupWork(request,controller.signal);await tick();await f.service.cancel('owner','first');await assert.rejects(second,/拒绝|取消|Cancelled/);assert.equal(cancelled,true);
+});
+
+test('role agents autonomously write external repo paths; explicit scope exceptions still wait for approval',async t=>{
+ const f=fixture(t);const repo=fs.mkdtempSync(path.join(os.tmpdir(),'role-repo-'));t.after(()=>fs.rmSync(repo,{recursive:true,force:true}));
+ f.service.upsert('owner',{id:'writer',name:'Writer',prompt:'Maintain docs. May write '+repo+'/docs; ask outside that path.',root:f.home,executor:'keepwork'});
+ f.service.submit('owner','writer',{requestId:'role-write',text:'Update docs'});const run=f.pending[0];
+ assert.match(run.input.prompt,/默认具备写文件/);assert.match(run.input.prompt,/requireApproval:true/);
+ const target=path.join(repo,'docs/new.md');await run.executeTool('write_file',{path:target,content:'autonomous'});assert.equal(fs.readFileSync(target,'utf8'),'autonomous');assert.equal(f.service.read('owner','writer').job.pending?.length||0,0);
+ const outside=path.join(repo,'other.md'),pending=run.executeTool('write_file',{path:outside,content:'approved',requireApproval:true,approvalReason:'Outside docs role'});await tick();assert.equal(fs.existsSync(outside),false);
+ const approval=f.service.read('owner','writer').job.pending[0];assert.equal(approval.params.reason,'Outside docs role');f.service.respond('owner','writer',{id:approval.id,decision:'accept'});await pending;assert.equal(fs.readFileSync(outside,'utf8'),'approved');
+ await run.executeTool('run_terminal',{cwd:repo,command:'git diff -- docs'});assert.equal(f.calls.at(-1).root,fs.realpathSync(repo));
+ const denied=run.executeTool('write_file',{path:outside,content:'no',requireApproval:true});await tick();const ask=f.service.read('owner','writer').job.pending[0];f.service.respond('owner','writer',{id:ask.id,decision:'decline'});await assert.rejects(denied,/拒绝/);assert.equal(fs.readFileSync(outside,'utf8'),'approved');run.resolve('done');await tick();
+});
+test('native role agent uses craft while explicit questions still surface to owner',async t=>{
+ const f=fixture(t,'codex');f.service.upsert('owner',{id:'writer',name:'Writer',prompt:'Write docs; ask outside docs.',executor:'codex'});
+ f.service.submit('owner','writer',{requestId:'native-role',text:'Update docs'});await tick();
+ assert.equal(f.calls[0].input.mode,'craft');assert.equal(f.calls[1].input.mode,'craft');assert.match(f.calls[1].input.text,/requestUserInput/);
+ f.callbacks.get('native')({session:{status:'waiting',pending:[{id:'outside',method:'item/tool/requestUserInput',params:{questions:[{id:'scope',question:'May I change another repo?'}]}}]}});assert.equal(f.service.read('owner','writer').job.state,'waiting');
+ f.callbacks.get('native')({session:{status:'completed',items:[{type:'agentMessage',text:'waiting for scope approval'}]}});await tick();
+});
+
+test('new custom agent follows owner default brain; rebinding is deferred during group work',async t=>{
+ const f=fixture(t),brain=path.join(f.home,'owner-brain');fs.mkdirSync(brain);
+ f.service.upsert('owner',{id:'default-persona',name:'Owner',root:brain});f.service.upsert('owner',{id:'child',name:'Child',prompt:'Role'});
+ assert.equal(f.service.read('owner','child').root,fs.realpathSync(brain));
+ f.messaging.isAgentBusy=(owner,id)=>owner==='owner'&&id==='child';assert.equal(f.service.read('owner','child').groupWorkActive,true);
+ assert.throws(()=>f.service.upsert('owner',{id:'child',name:'Child',prompt:'Role',root:f.home}),/群任务/);
+ f.messaging.isAgentBusy=()=>false;f.service.upsert('owner',{id:'child',name:'Child',prompt:'Role',root:f.home});assert.equal(f.service.read('owner','child').root,fs.realpathSync(f.home));
+});
+
+test('nickname-discoverable custom agents reject separator and reply-marker names even with messaging disabled',t=>{
+ const f=fixture(t);for(const name of ['A & B','A＆B','A【B】','A\nB'])assert.throws(()=>f.service.upsert('owner',{id:'bad-name',name,prompt:'role',messaging:{version:1,enabled:false,groups:[]}}),/名称/);
 });

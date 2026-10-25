@@ -43,9 +43,9 @@ export function loginDws(root: string, profile?: string): Promise<void> {
         child.on('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error('DingTalk authorization was cancelled or failed')); });
     });
 }
-export function listenerArgs(config: MessageConfig): string[][] {
+export function listenerArgs(config: MessageConfig & { allGroups?: boolean }): string[][] {
     return [['user_im_message_receive_at', 'user_im_message_receive_o2o_all'],
-        ...(config.keywords.length ? config.groups.map(group => ['user_im_message_receive_group', '--group', group]) : [])]
+        ...(config.allGroups ? [['user_im_message_receive_group_all']] : config.keywords.length ? config.groups.map(group => ['user_im_message_receive_group', '--group', group]) : [])]
         .map(keys => ['event', 'consume', ...keys, '--flatten', '-f', 'ndjson']);
 }
 export async function listenDws(root: string, profile: string, config: MessageConfig, onEvent: (event: any) => void, onExit: () => void) {
@@ -65,7 +65,7 @@ export async function listenDws(root: string, profile: string, config: MessageCo
                 });
                 child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-4000); if (!ready && diagnostics.includes('[event] ready')) { ready = true; clearTimeout(timer); resolve(); } });
                 child.on('error', () => { clearTimeout(timer); reject(new Error('DWS listener could not start')); if (!stopping) onExit(); });
-                child.on('close', () => { clearTimeout(timer); if (!ready) reject(new Error(/invalid.?grant|token.*expired|unauthorized|\b401\b|auth login|未登录|请.*登录/i.test(diagnostics) ? 'DingTalk login required' : 'DWS listener exited before ready')); if (!stopping) onExit(); });
+                child.on('close', () => { clearTimeout(timer); if (!ready && /unknown.{0,30}(event|rule)|unsupported|not supported|invalid.{0,10}event/i.test(diagnostics)) { reject(new Error('DWS CLI update required for message subscriptions')); } else if (!ready) reject(new Error(/invalid.?grant|token.*expired|unauthorized|\b401\b|auth login|未登录|请.*登录/i.test(diagnostics) ? 'DingTalk login required' : 'DWS listener exited before ready')); if (!stopping) onExit(); });
             });
         }
         return stop;
@@ -112,21 +112,66 @@ function bizId(value: any): string {
     return '';
 }
 export class DingTalkDelivery {
-    constructor(private root: string, private profile: string) {}
+    constructor(private root: string, private profile: string, private beforeSend?:()=>Promise<void>) {}
     async create(message: Incoming): Promise<string> {
+        await this.beforeSend?.();
         try {
             const result = await dws(['chat', '+messages-send-card', ...(message.kind === 'direct' ? ['--receiver-open-dingtalk-id', message.sender] : ['--group', message.conversation]), '--profile', this.profile, '-f', 'json', '--yes'], this.root);
             const id = bizId(result); if (!id) throw new DwsError(true); return id;
         } catch(error) { if (error instanceof DwsError && !error.uncertain) return ''; throw error; }
     }
     async update(card: string, text: string, status: number) {
+        await this.beforeSend?.();
         return dws(['chat', '+messages-update-card', '--biz-id', card, '--content', text, '--flow-status', String(status), '--profile', this.profile, '-f', 'json', '--yes'], this.root);
     }
     async send(message: Incoming, id: string, text: string) {
-        const marker = '【AI 代答】';
+        const marker = text.match(/^【[^【】\r\n]{1,80}\s*·\s*AI】/)?.[0] || '【AI 代答】';
         const parts = text.startsWith(marker)
             ? splitReply(text.slice(marker.length), 6000 - Buffer.byteLength(marker)).map(part => marker + part)
             : splitReply(text);
-        for (const [index, part] of parts.entries()) await dws(['chat', '+messages-send', '--as', 'user', ...(message.kind === 'direct' ? ['--open-dingtalk-id', message.sender] : ['--group', message.conversation]), '--text', part, '--idempotency-key', `${id}-${index}`, '--profile', this.profile, '-f', 'json', '--yes'], this.root);
+        for (const [index, part] of parts.entries()) {await this.beforeSend?.();await dws(['chat', '+messages-send', '--as', 'user', ...(message.kind === 'direct' ? ['--open-dingtalk-id', message.sender] : ['--group', message.conversation]), '--text', part, '--idempotency-key', `${id}-${index}`, '--profile', this.profile, '-f', 'json', '--yes'], this.root);}
     }
+}
+
+async function nicknameIdentity(root:string, profile:string, call=dws) {
+    const status=await call(['event','status','--profile',profile,'-f','json'],root);
+    const identity=status.identity;
+    if(!identity?.open_dingtalk_id || `${identity.corp_id}:${identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
+    return identity;
+}
+export async function dingtalkNickname(root:string, profile:string, group:string, call=dws) {
+    await nicknameIdentity(root,profile,call);
+    const result=await call(['chat','group','user-settings','query','--groups',group,'--profile',profile,'-f','json'],root);
+    const found:any[]=[];
+    const visit=(value:any)=>{
+        if(!value||typeof value!=='object')return;
+        if((value.openConversationId||value.conversationId||value.cid)===group && Object.prototype.hasOwnProperty.call(value,'groupNick'))found.push(value);
+        else for(const child of Object.values(value))visit(child);
+    };
+    visit(result);
+    if(found.length!==1 || (found[0].groupNick!==null&&typeof found[0].groupNick!=='string'))throw Error('无法确认钉钉当前群昵称，未修改');
+    const nickname=found[0].groupNick||'';
+    if(nickname)return {nickname,name:''};
+    const me=await call(['contact','+me','--profile',profile,'-f','json'],root);
+    const data=me.data||me,user=data.user||data;
+    return {nickname,name:typeof user.name==='string'?user.name:''};
+}
+export async function setDingtalkNickname(root:string, profile:string, group:string, nickname:string, call=dws) {
+    await nicknameIdentity(root,profile,call);
+    return call(['chat','group','update-nick','--conversation-id',group,...(nickname?['--nick',nickname]:[]),'--profile',profile,'-f','json','--yes'],root);
+}
+
+export async function dingtalkGroupName(root:string,profile:string,group:string,call=dws) {
+    await nicknameIdentity(root,profile,call);
+    const result=await call(['chat','+conversation-info','--group',group,'--profile',profile,'-f','json'],root);
+    const names:string[]=[];
+    const visit=(value:any,depth=0)=>{
+        if(!value||typeof value!=='object'||depth>5)return;
+        const id=value.openConversationId||value.open_conversation_id||value.conversationId||value.conversation_id;
+        if(id&&id!==group)return;
+        const name=value.title||value.name||value.conversationName;
+        if(typeof name==='string'&&name.trim())names.push(name.trim().slice(0,256));
+        else for(const key of ['data','result','conversation','conversationInfo'])visit(value[key],depth+1);
+    };
+    visit(result);if(names.length!==1)throw Error('Group name unavailable');return names[0];
 }

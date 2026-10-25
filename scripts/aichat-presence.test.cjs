@@ -128,3 +128,12 @@ test('shared MCP heartbeats refresh their own presence without taking over the l
     touchAichatPresence('heartbeat-new');
     assert.equal(latestAichatClient().seenAt, 2000);
 });
+
+test('persona brain inheritance is owner scoped and explicit clearing does not select another owner brain',t=>{
+ const os=require('node:os'),crypto=require('node:crypto'),home=fs.mkdtempSync(path.join(os.tmpdir(),'owner-brain-'));t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
+ const a=path.join(home,'a'),b=path.join(home,'b');fs.mkdirSync(a);fs.mkdirSync(b);
+ const origin='https://keepwork.com',ownerA='a'.repeat(40),ownerB='b'.repeat(40),key=x=>crypto.createHash('sha256').update(origin+'\0'+x).digest('hex');
+ const register=(owner,root)=>rememberAichatClient({sessionId:'review-'+owner,owner,origin,url:origin+'/chat',token:'fixture',brainRoot:root});
+ register(ownerA,a);register(ownerB,b);assert.equal(mod.exports.latestAichatBrainRoot(key(ownerA)),fs.realpathSync(a));assert.equal(mod.exports.latestAichatBrainRoot('unknown-owner'),'');
+ register(ownerA,'');assert.equal(mod.exports.latestAichatBrainRoot(key(ownerA)),'');assert.equal(mod.exports.latestAichatBrainRoot(key(ownerB)),fs.realpathSync(b));
+});

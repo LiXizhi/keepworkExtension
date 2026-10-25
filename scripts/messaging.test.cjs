@@ -23,7 +23,7 @@ function load(name, mocks = {}) {
 const policy = load('messagingPolicy');
 const message = (id='1', conversation='dm', sender='sender') => ({type:'user_im_message_receive_o2o_all',message_id:id,conversation_id:conversation,sender_open_dingtalk_id:sender,content:'课程怎么学习',create_time:Date.now()+1000});
 function fixture(t, channel = 'dingtalk') {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-messaging-test-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-messaging-test-'))); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
     const root=path.join(dir,'brain');fs.mkdirSync(path.join(root,'public'),{recursive:true});fs.writeFileSync(path.join(root,'public','lesson.md'),'课程学习计划：先读教材，再练习。');
     const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let remoteRows=null, contextError=false, answerText='课程学习答案'; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0;
     class BeforeSubmission extends Error {}
@@ -31,9 +31,9 @@ function fixture(t, channel = 'dingtalk') {
         './messagingFeishu':{feishuContext:load('messagingFeishu').feishuContext,feishuConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},feishuIdentity:async()=>({id:'corp:user',self:'owner'}),pollFeishu:async(_r,_p,_f,event)=>{events.push(event);return()=>{};},FeishuDelivery:class{async create(){cards.push('created');return 'test-card';}async send(...args){sent.push(args);}}},
         './aichatPresence':{latestAichatClient:()=>null,latestAichatBrainRoot:()=>root},
         './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
-        './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve(answerText);};pending.push({input,end});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
+        './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal,_login,executeTool){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve(answerText);};pending.push({input,end,executeTool});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
     });
-    const createService=()=>{const instance=new serviceModule.MessagingService(path.join(dir,'state'),8089);t.after(()=>instance.close());return instance;};
+    const createService=()=>{const instance=new serviceModule.MessagingService(path.join(dir,'state'),8089);instance.nicknameReader=async()=>({nickname:'',name:'Owner'});t.after(()=>instance.close());return instance;};
     const service=createService();
     const binding=service.configure({channel,root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
     return {set remoteRows(v){remoteRows=v;},set contextError(v){contextError=v;},set answerText(v){answerText=v;},service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
@@ -602,12 +602,15 @@ test('every AI reply segment retains echo marker and stays within DWS byte limit
     const sent=[];
     const {DingTalkDelivery}=load('messagingDingtalk',{
         'node:fs':{...fs,existsSync:()=>true,statSync:()=>({isFile:()=>true})},
-        'node:child_process':{spawn:(_exe,args)=>{sent.push(args[args.indexOf('--text')+1]);const c=new EventEmitter();c.stdout=new EventEmitter();c.stdout.setEncoding=()=>{};c.stderr={resume(){}};c.stdin={end(){}};process.nextTick(()=>{c.stdout.emit('data','{}');c.emit('close',0);});return c;}},
+        'node:child_process':{spawn:(_exe,args)=>{sent.push(args[args.indexOf('--text')+1]);const c=new EventEmitter();c.stdout=new EventEmitter();c.stdout.setEncoding=()=>{};c.stderr=new EventEmitter();c.stderr.setEncoding=()=>{};c.stdin={end(){}};process.nextTick(()=>{c.stdout.emit('data','{}');c.emit('close',0);});return c;}},
     });
     const answer='课程🙂'.repeat(2000);
     await new DingTalkDelivery('.', 'corp:user').send(policy.incoming(message()),'reply','【AI 代答】'+answer);
     assert.ok(sent.length>1);assert.ok(sent.every(s=>s.startsWith('【AI 代答】')&&Buffer.byteLength(s)<=6000));
     assert.equal(sent.map(s=>s.slice('【AI 代答】'.length)).join(''),answer);
+    sent.length=0;await new DingTalkDelivery('.', 'corp:user').send(policy.incoming(message()),'custom-reply','【Lily · AI】'+answer);
+    assert.ok(sent.every(s=>s.startsWith('【Lily · AI】')&&Buffer.byteLength(s)<=6000));
+    assert.equal(sent.map(s=>s.slice('【Lily · AI】'.length)).join(''),answer);
 });
 
 
@@ -904,4 +907,377 @@ for(const chatMode of ['p2p','group'])test('Feishu explicit self mention in '+ch
  f.events[0](feishuIncoming({...row,message_id:'echo',content:f.sent[0][2]},chat,'owner'));
  await tick();assert.equal(f.pending.length,1);
  assert.equal(feishuIncoming({...row,mentions:[{id:'owner'}]},chat,'owner').mentionedSelf,true);
+});
+
+function forkAgents(f,channel='dingtalk') {
+    f.service.bindAgent('owner','default-persona',f.binding.id);
+    const make=(id,name)=>({owner:'owner',id,name,prompt:name+' handles courses; use $teaching',root:fs.realpathSync(f.root),executor:'keepwork',model:'',messaging:{version:1,enabled:true,groups:[{channel,account:'corp:user',id:'home',name:'Home'}]}});
+    const agents=[make('lily','Lily'),make('teacher','小明')];
+    f.service.setMessageAgents(()=>agents);
+    f.service.setAgentRootResolver(owner=>owner==='owner'?fs.realpathSync(f.root):'');
+    return agents;
+}
+for(const channel of ['dingtalk','feishu'])test('custom forks '+channel+': home relevance, named priority, isolated prompts and deduplicated replies',async t=>{
+    const f=fixture(t,channel),agents=forkAgents(f,channel);
+    fs.writeFileSync(path.join(f.root,'AGENTS.md'),'Shared brain instructions');
+    fs.mkdirSync(path.join(f.root,'.github/skills/teaching'),{recursive:true});fs.writeFileSync(path.join(f.root,'.github/skills/teaching/SKILL.md'),'Teaching skill guidance');
+    await f.service.start(f.binding.id);assert.equal(f.events.length,1);
+    const emit=(id,conversation,text)=>f.events[0](channel==='feishu'?{id,conversation,text,sender:'sender',kind:'group',time:Date.now()+1000}:{...message(id,conversation),type:'user_im_message_receive_group_all',content:text});
+    emit('outside','elsewhere','unrelated');await tick();assert.equal(f.pending.length,0);
+    emit('named','elsewhere','ＬＩＬＹ please help');await tick();assert.equal(f.pending.length,1);
+    const input=f.pending[0].input;
+    assert.match(input.prompt,/Lily handles/);assert.doesNotMatch(input.prompt,/小明 handles/);assert.match(input.prompt,/Shared brain instructions/);assert.match(input.prompt,/Teaching skill guidance/);
+    assert.equal(input.root,undefined);assert.equal(input.tools,undefined);assert.equal(input.restricted,true);
+    f.pending[0].end();await tick();assert.equal(f.sent.length,1);assert.match(f.sent[0][2],/^【Lily · AI】/);
+    emit('named','elsewhere','ＬＩＬＹ please help');await tick();assert.equal(f.pending.length,1);
+    emit('priority','home','小明请回答');await tick();assert.equal(f.pending.length,2);assert.match(f.pending[1].input.prompt,/小明 handles/);
+    f.answerText='(...)';f.pending[1].end();await tick();assert.equal(f.sent.length,1,'selective silence sends nothing');
+    emit('home','home','课程怎么学习');await tick();assert.equal(f.pending.length,3);
+    f.answerText='answer';f.pending[2].end();await tick();assert.equal(f.pending.length,4,'second home agent gets its own turn');f.pending[3].end();await tick();
+    assert.equal(f.sent.length,3);assert.notEqual(f.sent[1][1],f.sent[2][1]);
+    assert.equal(f.service.inboxView('owner','default-persona',f.binding.id,'home').messages.filter(m=>m.direction==='in'&&m.id==='home').length,1);
+    emit('echo','home','【Lily · AI】小明');await tick();assert.equal(f.pending.length,4);
+    assert.equal(agents.length,2);
+});
+for(const change of ['rename','disable','root','remove','prompt','groups'])test('custom fork withholds stale answer after '+change,async t=>{
+    const f=fixture(t),agents=forkAgents(f);await f.service.start(f.binding.id);
+    f.events[0]({...message('stale','home'),type:'user_im_message_receive_group_all',content:'Lily answer'});await tick();assert.equal(f.pending.length,1);
+    if(change==='rename')agents[0].name='New';if(change==='disable')agents[0].messaging.enabled=false;if(change==='root')agents[0].root='';if(change==='remove')agents.shift();if(change==='prompt')agents[0].prompt='New';if(change==='groups')agents[0].messaging.groups=[];
+    f.pending[0].end();await tick();assert.equal(f.sent.length,0);
+});
+test('custom routing names, group account boundaries, validation and portable config',()=>{
+    const p=load('personaMessaging');
+    assert.equal(p.agentNameMentioned('silly lilies','Lily'),false);assert.equal(p.agentNameMentioned('@LILY, help','Lily'),true);assert.equal(p.agentNameMentioned('请小明帮忙','小明'),true);
+    assert.equal(p.agentNameMentioned('Annette','Ann'),false);assert.equal(p.agentNameMentioned('x A+B!','A+B'),true);
+    const group={channel:'dingtalk',account:'corp:user',id:'home',name:'Home'};
+    const config=p.agentMessaging({version:1,enabled:true,groups:[{...group,binding:'local-secret'},group],token:'secret'});
+    assert.deepEqual(config,{version:1,enabled:true,groups:[group]});
+    assert.throws(()=>p.agentMessaging({version:1,enabled:true,groups:[]}));
+    const agent={id:'a',owner:'owner',name:'Lily',prompt:'role',messaging:config};
+    assert.throws(()=>p.assertAgentNames({...agent,id:'b',name:'ＬＩＬＹ'},[agent]));
+    assert.deepEqual(p.routeMessageAgents([agent],{kind:'group',conversation:'home',text:'hello'},'feishu','corp:user'),[]);
+});
+test('custom forks subscribe all DingTalk groups only when enabled; echoes include agent markers',()=>{
+    const d=load('messagingDingtalk');
+    assert.ok(d.listenerArgs({...policy.defaultMessageConfig(),allGroups:true}).flat().includes('user_im_message_receive_group_all'));
+    assert.equal(policy.incoming({...message('all','home'),type:'user_im_message_receive_group_all'}).kind,'group');
+    assert.equal(policy.automatedText('【Lily · AI】hello'),true);
+});
+test('custom forks cannot route another owner or account and survive removing a sibling',async t=>{
+    const f=fixture(t),agents=forkAgents(f);agents.push({...agents[0],owner:'other',id:'foreign',name:'Foreign'});
+    await f.service.start(f.binding.id);
+    f.events[0]({...message('foreign','away'),type:'user_im_message_receive_group_all',content:'Foreign'});await tick();assert.equal(f.pending.length,0);
+    agents[0].messaging.groups[0].account='other:account';
+    f.events[0]({...message('wrong-account','away'),type:'user_im_message_receive_group_all',content:'Lily'});await tick();assert.equal(f.pending.length,0);
+    f.service.detachAgent('owner','lily');assert.equal(f.service.view(f.binding.id).listening,true);
+});
+test('custom fork group search uses verified Feishu user account and bounded name search',async()=>{
+    const {feishuGroups}=load('messagingFeishu'),calls=[];
+    const call=async(args)=>{calls.push(args);return args[0]==='auth'?{appId:'app',identities:{user:{status:'ready',available:true,verified:true,openId:'user'}}}:{data:{chats:[{chat_id:'one',name:'Same'},{chat_id:'two',name:'Same'},{chat_id:'gone',chat_status:'dissolved'}]}};};
+    assert.deepEqual(await feishuGroups('/brain','app:user','Same',call),[{id:'one',name:'Same'},{id:'two',name:'Same'}]);
+    assert.ok(calls[1].includes('--disable-search-by-user'));assert.ok(calls[1].includes('user'));assert.ok(calls[1].includes('50'));
+    await assert.rejects(feishuGroups('/brain','app:wrong','Same',call),/identity/);
+});
+
+test('custom fork accepts owner naming it, shares transport on edits, and blocks takeover/unknown-send replay',async t=>{
+    const f=fixture(t),agents=forkAgents(f);await f.service.start(f.binding.id);
+    const event={...message('owner-named','home','owner'),type:'user_im_message_receive_group_all',content:'Lily help'};
+    f.events[0](event);await tick();assert.equal(f.pending.length,1);
+    f.pending[0].end();await tick();assert.equal(f.sent.length,1);
+    agents[0].prompt='New role';await f.service.routingChanged();assert.equal(f.events.length,1,'no listener restart for a role edit');
+    f.events[0]({...message('takeover','home'),type:'user_im_message_receive_group_all',content:'Lily help'});await tick();
+    f.service.inboxAction('owner','default-persona',f.binding.id,'home','pause');await tick();assert.equal(f.sent.length,1);
+    f.service.inboxAction('owner','default-persona',f.binding.id,'home','resume');
+    f.service.delivery=()=>({send:async()=>{throw Error('unknown send');}});
+    f.events[0]({...message('unknown','home'),type:'user_im_message_receive_group_all',content:'Lily help'});await tick();f.pending.at(-1).end();await tick();
+    assert.equal(f.service.dashboardMessages()[0].state,'unknown');
+    const count=f.pending.length;f.events[0]({...message('unknown','home'),type:'user_im_message_receive_group_all',content:'Lily help'});await tick();assert.equal(f.pending.length,count);
+    const restored=f.createService();restored.setMessageAgents(()=>agents);await restored.start(f.binding.id);
+    f.events.at(-1)({...message('unknown','home'),type:'user_im_message_receive_group_all',content:'Lily help'});await tick();assert.equal(f.pending.length,count);
+});
+test('custom fork explicit activation reuses configured accounts and one listener, preserving primary persona',async t=>{
+    const f=fixture(t),agents=forkAgents(f);await f.service.activateAgentMessaging('owner','lily');assert.equal(f.events.length,1);
+    await f.service.activateAgentMessaging('owner','teacher');assert.equal(f.events.length,1);
+    assert.equal(f.service.view(f.binding.id).agentId,'default-persona');
+    for(const a of agents)a.messaging.enabled=false;
+    await f.service.routingChanged();assert.equal(f.events.length,1,'custom personas still discover manual nickname assignments');
+    agents[0].messaging.enabled=true;await f.service.routingChanged();assert.equal(f.events.length,1);
+    f.service.detachAgent('owner','default-persona');assert.equal(f.service.view(f.binding.id).listening,true,'remaining persona retains shared transport');
+});
+test('custom fork explicit skill files stay confined and cannot enable native tool runners',async t=>{
+    const f=fixture(t),{agentBrainInstructions}=load('personaMessaging');
+    fs.mkdirSync(path.join(f.root,'.github/skills/research'),{recursive:true});fs.writeFileSync(path.join(f.root,'.github/skills/research/SKILL.md'),'Research skill');
+    assert.match(agentBrainInstructions(f.root,'Use $research'),/Research skill/);
+    assert.doesNotMatch(agentBrainInstructions(f.root,'Use $unknown'),/Research skill/);
+    const outside=path.join(path.dirname(f.root),'outside');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'SKILL.md'),'secret');fs.symlinkSync(outside,path.join(f.root,'.github/skills/escape'),'junction');
+    assert.throws(()=>agentBrainInstructions(f.root,'Use $escape'),/escapes/);
+    const executor=load('messagingExecutor');let called=false;executor.setMessagingAgentRunner(async()=>{called=true;return 'unsafe';});
+    await assert.rejects(executor.restrictedCliAnswer(f.root,{executor:'codex',model:''},{restricted:true,prompt:'role',question:'run tools',knowledge:'',history:[],brain:'brain'},new AbortController().signal),executor.BeforeSubmission);
+    assert.equal(called,false);
+});
+
+test('custom fork HTTP capabilities and group search require owned persona and project portable metadata',async t=>{
+    const f=fixture(t);
+    const {Personas}=load('personas',{'./aichatPresence':{latestAichatBrainRoot:()=>'',latestAichatClient:()=>null},'./terminal':{}});
+    const personas=new Personas(path.join(path.dirname(f.root),'http-personas'),{},f.service);t.after(()=>personas.close());
+    personas.upsert('owner',{id:'default-persona',name:'Owner',root:f.root});f.service.bindAgent('owner','default-persona',f.binding.id);
+    const {handlePersonaHttp}=load('../mcp/personaHttp',{'../core/agentSessions':{ownerKey:(_origin,owner)=>owner},'../core/messaging':{channelConflict:()=>null}});
+    const request=async(method,route,body,owner='owner')=>{
+        let status,value;
+        const req={method,headers:{origin:'http://localhost','x-agent-owner':owner,'content-type':'application/json'},async *[Symbol.asyncIterator](){yield JSON.stringify(body||{});}};
+        const res={setHeader(){},writeHead(code){status=code;},end(raw){value=JSON.parse(raw);}};
+        await handlePersonaHttp(req,res,new URL('http://localhost/agents/personas'+route),personas,f.service);return {status,value};
+    };
+    const options=await request('GET','/default-persona/messaging-options');assert.equal(options.status,200);assert.equal(options.value.version,1);
+    assert.deepEqual(Object.keys(options.value.channels[0]).sort(),['account','binding','channel','error','listening','nicknameErrors','status']);
+    assert.equal((await request('GET','/default-persona/messaging-options',null,'other')).status,400);
+    f.service.groups=async()=>[{id:'group',name:'Team'}];
+    assert.deepEqual((await request('POST','/default-persona/messaging-groups',{binding:f.binding.id,query:'Team'})).value.groups,[{id:'group',name:'Team'}]);
+    assert.equal((await request('POST','/default-persona/messaging-groups',{binding:'foreign'})).status,400);
+    const created=await request('POST','',{id:'fork',name:'Lily',root:f.root,prompt:'role',messaging:{version:1,enabled:true,groups:[{channel:'dingtalk',account:'corp:user',id:'group',name:'Team',binding:'not-portable'}]}});
+    assert.equal(created.status,200);assert.equal(created.value.messagingVersion,1);assert.equal(created.value.messaging.groups[0].binding,undefined);assert.equal(f.events.length,0,'saving alone never starts a listener');
+    const activated=await request('POST','',{...created.value,activateMessaging:true});assert.equal(activated.status,200);assert.equal(activated.value.messagingWarning,undefined);assert.equal(f.events.length,1);
+});
+
+test('group nicknames aggregate active assigned agents, remove stale assignments and isolate other accounts',async t=>{
+    const f=fixture(t),agents=forkAgents(f),calls=[];
+    f.service.nicknames={has:()=>true,sync:async(target,current)=>{if(current())calls.push(structuredClone(target));return '';}};
+    assert.equal(calls.length,0,'configuration and reception do not mutate nicknames');
+    await f.service.syncAgentNicknames('owner');assert.deepEqual(calls[0].names,['Lily','小明']);assert.equal(calls[0].group,'home');
+    const previous=structuredClone(agents[0]);agents[0].messaging.groups=[{channel:'dingtalk',account:'corp:user',id:'next',name:'Next'}];
+    calls.length=0;await f.service.syncAgentNicknames('owner',previous);
+    assert.deepEqual(calls.find(c=>c.group==='home').names,['小明']);assert.deepEqual(calls.find(c=>c.group==='next').names,['Lily']);
+    const last=structuredClone(agents[1]);agents[1].messaging.enabled=false;calls.length=0;await f.service.syncAgentNicknames('owner',last);
+    assert.deepEqual(calls.find(c=>c.group==='home').names,[],'last agent removal restores base');
+    calls.length=0;await f.service.syncAgentNicknames('other');assert.equal(calls.length,0);
+});
+test('nickname background errors are owner-scoped and never stop the message listener',async t=>{
+    const f=fixture(t);forkAgents(f);await f.service.start(f.binding.id);
+    let reject;f.service.nicknames={has:()=>true,sync:()=>new Promise((_,no)=>{reject=no;})};
+    assert.equal(f.service.queueAgentNicknames('owner'),true);assert.equal(f.service.nicknameStatus('owner').pending,true);
+    assert.deepEqual(f.service.nicknameStatus('other'),{pending:false,warnings:[]});
+    reject(Error('nickname permission denied'));await tick();
+    assert.equal(f.service.nicknameStatus('owner').pending,false);assert.match(f.service.nicknameStatus('owner').warnings[0],/permission/);
+    assert.equal(f.service.view(f.binding.id).listening,true);
+    f.service.nicknames={has:()=>false,sync:async()=>{throw Error('must not touch an unmanaged nickname');}};
+    assert.deepEqual(await f.service.syncAgentNicknames('owner',undefined,true),[]);
+});
+
+test('explicit nickname save touches only the edited agent groups while including assigned siblings',async t=>{
+    const f=fixture(t),agents=forkAgents(f),calls=[];
+    agents[1].messaging.groups.push({channel:'dingtalk',account:'corp:user',id:'unrelated',name:'Unrelated'});
+    f.service.nicknames={has:()=>true,sync:async(target,current)=>{if(current())calls.push(structuredClone(target));return '';}};
+    await f.service.syncAgentNicknames('owner',undefined,false,'lily');
+    assert.deepEqual(calls.map(c=>c.group),['home']);assert.deepEqual(calls[0].names,['Lily','小明']);
+    calls.length=0;await f.service.syncAgentNicknames('owner',undefined,false,'unassigned');assert.equal(calls.length,0);
+});
+
+for(const channel of ['dingtalk','feishu'])test(channel+' manual self nickname assigns a disabled persona and removal withholds an in-flight reply',async t=>{
+    const f=fixture(t,channel),agents=forkAgents(f,channel);
+    for(const a of agents)a.messaging={version:1,enabled:false,groups:[]};
+    let nickname='Owner & Lily & 小明';f.service.nicknameReader=async()=>({nickname,name:'Owner'});
+    await f.service.start(f.binding.id);
+    const event={...message('manual-nickname','manual-home'),type:'user_im_message_receive_group_all',content:'Lily help'};
+    f.events[0](channel==='feishu'?{id:event.messageId,conversation:'manual-home',sender:'other',text:'Lily help',time:Date.now(),kind:'group',mentioned:false}:event);
+    await tick();assert.equal(f.pending.length,1);assert.match(f.pending[0].input.prompt,/Lily/);
+    nickname='Owner & 小明';f.pending[0].end();await tick();assert.equal(f.sent.length,0,'removed nickname assignment invalidates generation');
+});
+test('nickname slots use normalized exact names and ambiguous names are not activated',async t=>{
+    const {nicknameAgentNames}=load('personaMessaging');
+    assert.deepEqual(nicknameAgentNames('Lily Owner ＆ ＬＩＬＹ & 小明'),['lily','小明']);
+    assert.deepEqual(nicknameAgentNames('Lily Owner'),[]);
+    const f=fixture(t),agents=forkAgents(f);agents.push({...structuredClone(agents[0]),id:'duplicate',name:'LILY'});
+    for(const a of agents)a.messaging={version:1,enabled:false,groups:[]};
+    f.service.nicknameReader=async()=>({nickname:'Owner & Lily',name:'Owner'});await f.service.start(f.binding.id);
+    f.events[0]({...message('ambiguous','home'),type:'user_im_message_receive_group_all',content:'ordinary text'});await tick();assert.equal(f.pending.length,0);
+});
+
+test('manual nickname assigned groups route ordinary messages once and fail closed when self nickname cannot be read',async t=>{
+ const f=fixture(t),agents=forkAgents(f);for(const a of agents)a.messaging={version:1,enabled:false,groups:[]};
+ let release;f.service.nicknameReader=()=>new Promise(resolve=>{release=()=>resolve({nickname:'Owner & Lily & 小明',name:'Owner'});});
+ await f.service.start(f.binding.id);
+ const event={...message('manual-all','new-group'),type:'user_im_message_receive_group_all',content:'ordinary group question'};
+ f.events[0](event);f.events[0](event);assert.equal(f.pending.length,0);release();await tick();
+ assert.equal(f.service.view(f.binding.id).recent.filter(r=>r.state==='queued'||r.state==='running').length,2);
+ assert.equal(f.pending.length,1,'one conversation remains serialized');
+ f.service.nicknameReader=async()=>{throw Error('permission denied');};f.pending[0].end();await tick();
+ assert.equal(f.sent.length,0);assert.match(f.service.view(f.binding.id).nicknameErrors.join(),/权限/);
+});
+
+for(const channel of ['dingtalk','feishu'])test(channel+' assigned agents use role autonomy, requested approvals and public-knowledge guards',async t=>{
+ const f=fixture(t,channel),agents=forkAgents(f,channel);await f.service.start(f.binding.id);
+ fs.writeFileSync(path.join(f.root,'public/work.md'),'public task context');fs.writeFileSync(path.join(f.root,'private.md'),'private');
+ const e={...message('work','home'),type:'user_im_message_receive_group_all',content:'Lily write a report'};
+ f.events[0](channel==='feishu'?{id:'work',conversation:'home',sender:'sender',kind:'group',text:e.content,time:Date.now()+1000}:e);await tick();
+ const run=f.pending[0];assert.equal(run.input.groupWork,true);assert.equal(run.input.tools.length,4);assert.equal(run.input.restricted,true);
+ assert.equal(await run.executeTool('read_file',{path:'public/work.md'}),'public task context');
+ await assert.rejects(run.executeTool('read_file',{path:'private.md'}),/approved public knowledge/);
+ await run.executeTool('write_file',{path:'autonomous.md',content:'autonomous report'});assert.equal(fs.readFileSync(path.join(f.root,'autonomous.md'),'utf8'),'autonomous report');
+ const repoFile=path.join(path.dirname(f.root),'role-repo','docs/draft.md');
+ await run.executeTool('write_file',{path:repoFile,content:'repo draft'});assert.equal(await run.executeTool('read_file',{path:repoFile}),'repo draft');
+ fs.symlinkSync(repoFile,path.join(f.root,'public/repo-link.md'));
+ await assert.rejects(run.executeTool('read_file',{path:'public/repo-link.md'}),/symlink/);
+ await assert.rejects(run.executeTool('write_file',{path:'report.md',content:'report',requireApproval:true}),/approval service/);assert.equal(fs.existsSync(path.join(f.root,'report.md')),false);
+ let release;f.service.setGroupWorkApproval(async request=>{assert.equal(request.group,'home');assert.equal(request.agentId,'lily');await new Promise(resolve=>release=resolve);});
+ const write=run.executeTool('write_file',{path:'report.md',content:'report',requireApproval:true,approvalReason:'Outside my role scope'});await tick();assert.equal(fs.existsSync(path.join(f.root,'report.md')),false);release();await write;assert.equal(fs.readFileSync(path.join(f.root,'report.md'),'utf8'),'report');
+ const stale=run.executeTool('write_file',{path:'report.md',content:'stale',requireApproval:true});await tick();agents[0].messaging.enabled=false;release();await assert.rejects(stale,/configuration changed/);assert.equal(fs.readFileSync(path.join(f.root,'report.md'),'utf8'),'report');run.end();await tick();
+});
+test('group knowledge tools reject symlinks and private descendants; assigned work never uses automatic native CLI approvals',async t=>{
+ const f=fixture(t),{readGroupKnowledge}=load('messagingAgentWork');
+ fs.mkdirSync(path.join(f.root,'public/secrets'));fs.writeFileSync(path.join(f.root,'public/secrets/a.md'),'secret');fs.writeFileSync(path.join(f.root,'private.md'),'private');fs.symlinkSync(path.join(f.root,'private.md'),path.join(f.root,'public/link.md'));
+ assert.throws(()=>readGroupKnowledge(f.root,policy.defaultMessageConfig(),'read_file',{path:'public/secrets/a.md'}),/Private/);
+ assert.throws(()=>readGroupKnowledge(f.root,{...policy.defaultMessageConfig(),knowledge:['public']},'read_file',{path:'public/link.md'}),/symlink/);
+ const executor=load('messagingExecutor');let called=false;executor.setMessagingAgentRunner(async()=>{called=true;return 'unsafe';});
+ await assert.rejects(executor.restrictedCliAnswer(f.root,{executor:'copilot',model:''},{groupWork:true,restricted:true,root:f.root},new AbortController().signal),executor.BeforeSubmission);assert.equal(called,false);
+});
+
+test('settings removal cannot resurrect an agent from its cached nickname assignment',async t=>{
+ const f=fixture(t),agents=forkAgents(f),calls=[];f.service.nicknameReader=async()=>({nickname:'Owner & Lily & 小明',name:'Owner'});
+ await f.service.refreshNickname(f.service.get(f.binding.id),'home');
+ const previous=structuredClone(agents[0]);agents[0].messaging.enabled=false;
+ f.service.nicknames={has:()=>true,sync:async target=>{calls.push(target);}};
+ await f.service.syncAgentNicknames('owner',previous,false,'lily');assert.deepEqual(calls[0].names,['小明']);
+ assert.equal(f.service.routedAgents(f.service.get(f.binding.id)).some(p=>p.id==='lily'),false);
+});
+for(const channel of ['dingtalk','feishu'])test(channel+' mentions discover nickname assignments and get role work tools; active work is visible',async t=>{
+ const f=fixture(t,channel),agents=forkAgents(f,channel);for(const a of agents)a.messaging={version:1,enabled:false,groups:[]};
+ f.service.nicknameReader=async()=>({nickname:'Owner & Lily',name:'Owner'});await f.service.start(f.binding.id);
+ const e={...message('mention-work','home'),type:'user_im_message_receive_at',content:'Lily help'};
+ f.events[0](channel==='feishu'?{id:'mention-work',conversation:'home',sender:'sender',kind:'mention',text:e.content,time:Date.now()+1000}:e);await tick();
+ assert.equal(f.pending[0].input.groupWork,true);assert.equal(f.service.isAgentBusy('owner','lily'),true);assert.equal(f.service.isAgentBusy('other','lily'),false);
+ f.pending[0].end();await tick();assert.equal(f.service.isAgentBusy('owner','lily'),false);
+});
+test('concurrent group and mention deliveries share dedup after asynchronous nickname lookup',async t=>{
+ const f=fixture(t);forkAgents(f);let release;f.service.nicknameReader=()=>new Promise(resolve=>{release=()=>resolve({nickname:'Owner',name:'Owner'});});
+ f.service.configure({root:f.root,profile:'corp:user',config:{...policy.defaultMessageConfig(),groups:['away'],keywords:['question']},prompt:policy.DEFAULT_PROMPT});await f.service.start(f.binding.id);
+ const event={...message('race-mention','away'),content:'question'};f.events[0]({...event,type:'user_im_message_receive_group_all'});f.events[0]({...event,type:'user_im_message_receive_at'});release();await tick();
+ assert.equal(f.pending.length,1);assert.equal(f.service.view(f.binding.id).queued,0);f.pending[0].end();await tick();assert.equal(f.sent.length,1);
+});
+
+test('custom agent badges and inboxes include only assigned groups with independent read cursors',async t=>{
+ const f=fixture(t),agents=forkAgents(f),box=f.service.box(f.binding.id),now=Date.now()-100;
+ const add=(id,conversation,kind='group')=>box.messages.push({id,conversation,kind,sender:'other',text:id,time:now,direction:'in'});
+ add('assigned','home');add('other-group','away');add('dm','person','direct');
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,1);
+ assert.equal(f.service.agentBindings('owner','lily')[0].unreadScope,'assigned-groups');
+ assert.deepEqual(f.service.inboxView('owner','lily',f.binding.id).conversations.map(c=>c.id),['home']);
+ assert.throws(()=>f.service.inboxView('owner','lily',f.binding.id,'away'),/未分配/);
+ f.service.inboxAction('owner','lily',f.binding.id,'home','read');
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,0);
+ assert.equal(f.service.agentBindings('owner','teacher')[0].unread,1,'reading one agent does not clear its sibling');
+ assert.equal(f.service.agentBindings('owner','default-persona')[0].unread,3,'default account inbox stays unchanged');
+ agents[0].messaging={version:1,enabled:false,groups:[]};
+ f.service.nicknameReader=async()=>({nickname:'Owner & Lily',name:'Owner'});await f.service.refreshNickname(f.service.get(f.binding.id),'away');
+ assert.deepEqual(f.service.inboxView('owner','lily',f.binding.id).conversations.map(c=>c.id),['away']);
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,1);
+ f.service.nicknameReader=async()=>({nickname:'Owner',name:'Owner'});await f.service.refreshNickname(f.service.get(f.binding.id),'away');
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,0);
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id).conversations.length,0);
+});
+
+test('assigned inbox exposes group names, refreshes nickname groups and retains IDs when metadata fails',async t=>{
+ const f=fixture(t),agents=forkAgents(f);f.service.box(f.binding.id).messages.push({id:'group-msg',conversation:'home',kind:'group',sender:'other',text:'task',time:Date.now()-1,direction:'in'});
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id).conversations[0].name,'Home');
+ let calls=0;f.service.groupNameReader=async()=>{calls++;return 'Renamed engineering';};
+ const view=await f.service.namedInboxView('owner','lily',f.binding.id);assert.equal(view.conversations[0].name,'Renamed engineering');assert.equal(view.conversations[0].id,'home');
+ assert.equal((await f.service.namedInboxView('owner','lily',f.binding.id,'home')).name,'Renamed engineering');assert.equal(calls,1);
+ agents[0].messaging={version:1,enabled:false,groups:[]};f.service.nicknameReader=async()=>({nickname:'Owner & Lily',name:'Owner'});await f.service.refreshNickname(f.service.get(f.binding.id),'manual');
+ f.service.box(f.binding.id).messages.push({id:'manual-msg',conversation:'manual',kind:'group',sender:'other',text:'task',time:Date.now()-1,direction:'in'});
+ f.service.groupNameReader=async()=>{throw Error('permission denied');};assert.equal((await f.service.namedInboxView('owner','lily',f.binding.id)).conversations[0].name,'manual');
+ f.service.groupNameReader=async()=> 'Design team';assert.equal((await f.service.namedInboxView('owner','lily',f.binding.id)).conversations[0].name,'Design team');
+ await assert.rejects(f.service.namedInboxView('owner','lily',f.binding.id,'home'),/未分配/);
+});
+test('group name adapters verify the account and make only metadata reads',async()=>{
+ const {dingtalkGroupName}=load('messagingDingtalk'),{feishuGroupName}=load('messagingFeishu');const ding=[],fei=[];
+ const d=async args=>{ding.push(args);return args[0]==='event'?{identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'self'}}:{data:{openConversationId:'g',title:'Ding team'}};};
+ assert.equal(await dingtalkGroupName('/brain','corp:user','g',d),'Ding team');assert.ok(ding[1].includes('+conversation-info'));assert.ok(ding[1].includes('g'));
+ await assert.rejects(dingtalkGroupName('/brain','corp:other','g',d),/identity/);
+ const f=async args=>{fei.push(args);return args[0]==='auth'?{appId:'app',identities:{user:{status:'ready',available:true,verified:true,openId:'user'}}}:{data:{chat_id:'g',name:'Feishu team'}};};
+ assert.equal(await feishuGroupName('/brain','app:user','g',f),'Feishu team');assert.deepEqual(fei[1].slice(0,3),['im','chats','get']);
+ await assert.rejects(feishuGroupName('/brain','app:other','g',f),/identity/);
+});
+
+
+test('assigned group list includes empty and read groups without changing unread counts',async t=>{
+ const f=fixture(t),agents=forkAgents(f);
+ let groups=f.service.inboxView('owner','lily',f.binding.id).conversations;
+ assert.deepEqual(groups.map(g=>({id:g.id,name:g.name,unread:g.unread})),[{id:'home',name:'Home',unread:0}]);
+ assert.deepEqual(f.service.inboxView('owner','lily',f.binding.id,'home').messages,[]);
+ f.service.inboxAction('owner','lily',f.binding.id,'home','read');
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id).conversations.length,1);
+ f.service.nicknameReader=async()=>({nickname:'Owner & Lily',name:'Owner'});await f.service.refreshNickname(f.service.get(f.binding.id),'manual-empty');
+ groups=f.service.inboxView('owner','lily',f.binding.id).conversations;
+ assert.deepEqual(groups.map(g=>g.id),['home','manual-empty']);assert.ok(groups.every(g=>g.unread===0));
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,0);
+ agents[0].messaging.groups=[];
+ assert.deepEqual(f.service.inboxView('owner','lily',f.binding.id).conversations.map(g=>g.id),['manual-empty']);
+ assert.throws(()=>f.service.inboxView('owner','lily',f.binding.id,'home'),/未分配/);
+});
+
+
+test('disabled auto replies keep saved group browsing and unread access without enabling routing',async t=>{
+ const f=fixture(t),agents=forkAgents(f);agents[0].messaging.enabled=false;
+ agents[0].messaging.groups.push({channel:'feishu',account:f.binding.profile,id:'other-channel',name:'Wrong channel'},{channel:'dingtalk',account:'another-account',id:'other-account',name:'Wrong account'});
+ const runtime=f.service.get(f.binding.id);
+ assert.equal(f.service.routedAgents(runtime).some(p=>p.id==='lily'),false);
+ assert.deepEqual(f.service.inboxView('owner','lily',f.binding.id).conversations.map(g=>g.id),['home']);
+ f.service.box(f.binding.id).messages.push({id:'disabled-group-msg',conversation:'home',kind:'group',sender:'other',text:'task',time:Date.now()-1,direction:'in'});
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id,'home').messages.length,1);
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,1);
+ f.service.inboxAction('owner','lily',f.binding.id,'home','read');
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,0);
+ assert.equal(f.service.routedAgents(runtime).some(p=>p.id==='lily'),false);
+ agents[0].messaging.groups=[];
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id).conversations.length,0);
+ assert.throws(()=>f.service.inboxView('owner','lily',f.binding.id,'home'),/未分配/);
+});
+
+for(const channel of ['dingtalk','feishu'])test('manual first message to assigned empty '+channel+' group preserves scope and dedup',async t=>{
+ const f=fixture(t,channel),agents=forkAgents(f,channel);agents[0].messaging.enabled=false;
+ assert.deepEqual(f.service.agentBindings('owner','lily')[0].groups,[{id:'home',name:'Home'}]);
+ const reply=await f.service.manualReply('owner','lily',f.binding.id,'home','first-manual','Hello');
+ assert.equal(reply.state,'sent');assert.equal(f.sent.length,1);assert.equal(f.sent[0][0].conversation,'home');assert.equal(f.sent[0][0].kind,'group');
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id,'home').messages[0].text,'Hello');
+ await f.service.manualReply('owner','lily',f.binding.id,'home','first-manual','Hello');assert.equal(f.sent.length,1);
+ await assert.rejects(f.service.manualReply('owner','lily',f.binding.id,'elsewhere','bad','No'),/未分配/);
+ agents[0].messaging.groups=[];
+ await assert.rejects(f.service.manualReply('owner','lily',f.binding.id,'home','removed','No'),/未分配/);assert.equal(f.sent.length,1);
+});
+
+test('two computers deduplicate the same default-persona message with portable gateway receipts',async t=>{
+    const a=fixture(t),b=fixture(t);
+    await a.service.start(a.binding.id);await b.service.start(b.binding.id);
+    // Baseline: independent local gateways both generate and send the same event.
+    a.events[0](message('multi-local'));b.events[0](message('multi-local'));await tick();
+    assert.equal(a.pending.length+b.pending.length,2);a.pending[0].end();b.pending[0].end();await tick();assert.equal(a.sent.length+b.sent.length,2);
+    const claimed=new Set();let sends=0;
+    const coordinator={canRun:()=>true,snapshot:()=>({online:false}),claim:async(_resource,key)=>{if(claimed.has(key))return false;claimed.add(key);return true;},sending:async()=>{sends++;},complete:async()=>{},close(){}};
+    for(const [f,owner] of [[a,'owner-on-a'],[b,'different-owner-on-b']]){
+        const r=f.service.runs.get(f.binding.id);r.binding.agentOwner=owner;r.binding.agentId='default-persona';
+        f.service.coordinationEnabled[owner]=true;f.service.ownerCoordinators.set(owner,coordinator);
+    }
+    a.events[0](message('multi-coordinated'));b.events[0](message('multi-coordinated'));await tick();await tick();
+    assert.equal(a.pending.length+b.pending.length,3);
+    (a.pending[1]||b.pending[1]).end();await tick();assert.equal(sends,1);assert.equal(a.sent.length+b.sent.length,3);
+});
+
+test('standby does not admit messages and lost ownership withholds generated reply',async t=>{
+    const f=fixture(t);await f.service.start(f.binding.id);const r=f.service.runs.get(f.binding.id);r.binding.agentOwner='owner';r.binding.agentId='default-persona';let owns=false;
+    f.service.coordinationEnabled.owner=true;f.service.ownerCoordinators.set('owner',{canRun:()=>owns,snapshot:()=>({online:false}),claim:async()=>true,sending:async()=>{},complete:async()=>{},close(){}});
+    f.events[0](message('standby'));await tick();assert.equal(f.pending.length,0);
+    owns=true;f.events[0](message('owned'));await tick();assert.equal(f.pending.length,1);owns=false;f.pending[0].end();await tick();assert.equal(f.sent.length,0);
+});
+
+test('coordinated gateway restores checkpoint and drains real accepted work before release',async t=>{
+    const f=fixture(t,'feishu');const r=f.service.runs.get(f.binding.id);r.binding.agentOwner='owner';r.binding.agentId='default-persona';r.binding.enabled=true;
+    let owns=true,draining=false;const calls=[],time=Date.now();
+    const checkpoint={paused:['paused-group'],autoReplyTimes:{'paused-group':[time]},cursor:{since:time,window:{start:time-1000,end:time,token:'page-two'}}};
+    const c={register(){},canRun:(_r,admit)=>owns&&(!admit||!draining),snapshot:()=>({online:true,mode:draining?'draining':'active',lease:{draining},checkpoint}),claim:async()=>true,sending:async()=>{},complete:async()=>{},
+        request:async(_r,op,data)=>{calls.push({op,data});if(op==='release')owns=false;return {lease:{draining}};},close(){}};
+    f.service.coordinationEnabled.owner=true;f.service.ownerCoordinators.set('owner',c);f.service.resolveCoordinator=async()=>c;
+    await f.service.syncCoordination();assert.equal(r.status,'listening');assert.deepEqual(f.service.box(r.binding.id).paused,['paused-group']);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.service.home,r.binding.id+'.cursor.json'),'utf8')),checkpoint.cursor);
+    f.events[0]({id:'drain',conversation:'other',sender:'someone',kind:'direct',text:'question',time:Date.now()});await tick();assert.equal(f.pending.length,1);
+    draining=true;await f.service.syncCoordination();assert.equal(calls.some(c=>c.op==='release'),false);
+    f.pending[0].end();await tick();await f.service.syncCoordination();assert.equal(f.sent.length,1);assert.equal(calls.at(-1).op,'release');assert.equal(r.status,'standby');
 });

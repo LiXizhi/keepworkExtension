@@ -247,3 +247,56 @@ Regression cases in `scripts/messaging.test.cjs`: `status is shared...` (both ch
 钉钉沿用已有本人 @本人事件入口；CLI 上游是否投递仍待真实账号验证。飞书仍约十分钟轮询，不保证即时响应，自己会话的检索可见性及客户端是否提供真实 @操作也需实测。未增加别名配置或任意 @XXX 文本触发。
 
 验证：新增飞书单聊/群聊本人 @本人用例均通过，覆盖真实 mention ID、普通本人消息、@其他人、去重和 AI 回声。`npm run check:shared`、`git diff --check` 通过。消息与分身套件 92 项中 91 项通过，既有真实无头浏览器握手用例超过 30 秒超时；不报告整套通过。未发送真实消息，未重启或部署运行中的 MCP。
+
+## Named persona routing
+
+```mermaid
+flowchart LR
+    CLI[Shared DingTalk / Feishu account] --> Inbox[One transport inbox and deduplication]
+    Persona[Owner brain + independent agent role and group assignments] --> Router[Named persona router]
+    Inbox --> Router
+    Router --> Named[Explicitly named agents]
+    Router --> Home[Otherwise: agents assigned to this group]
+    Named --> Reply[Agent-scoped context and selective reply]
+    Home --> Reply
+    Reply --> Delivery[Shared conversation rate limit / takeover / delivery]
+    Delivery --> CLI
+```
+
+Assigned-group messages enter each assigned agent's relevance evaluation; irrelevant messages produce `(...)` and no send. In other groups only a name match activates an agent. Explicit names take priority over unnamed home agents; multiple named agents may each respond. Latin names use NFKC, case-insensitive word matching; Chinese names need no spaces. An owner-authored group message naming an agent is eligible even without an account @mention. Automated messages remain excluded, including `【Name · AI】` replies. Direct messages and unclaimed legacy triggers retain their prior behavior; claimed messages do not additionally invoke the default persona.
+
+DingTalk adds `user_im_message_receive_group_all` to the shared event listener while any custom agent is enabled. Feishu retains its existing account-wide message polling and approximately ten-minute cadence. Permission/CLI failures are surfaced through channel status; neither transport can receive inaccessible chats. Configured group names are display labels; channel/account/group ID determine routing.
+
+Incoming messages are stored once. Each replying agent gets its own queued configuration snapshot, receipt/delivery key, prompt and history key. Queue/rate budgets and manual takeover remain per shared conversation. Before sending, recheck current persona, brain, role, assignments, instruction files, reply rules and conversation snapshot. Changes, deletion, cancellation or takeover withhold stale answers. Unknown sends are never automatically replayed. Removing a custom agent preserves a shared connection used by remaining personas. Duplicate copies of the same stable agent identity in registered clients are routed once, preferring the original transport owner.
+
+Custom-agent skill guidance cannot expand external-message permissions: unassigned-group named replies use supplied public knowledge and a tool-free adapter/worker. Assigned-group work uses declared tools and role-prompt write permissions; scope exceptions request owner approval. Existing legacy messaging execution behavior is unchanged. The computer, daemon and CLI authorization must remain available for background processing.
+
+### Group nicknames
+
+Explicit saves in the capable AIChat agent dialog queue a background nickname reconciliation, independently of message reception. For each assigned group the shared account advertises all enabled assigned agents, e.g. `username & A & B`. Use the original group nickname as the base, or the verified account display name when unset. Names are deduplicated and sorted; moving, renaming, disabling or deleting agents removes obsolete names. The last removal restores the exact original nickname, including an unset nickname. Other groups where agents respond only when named are not renamed.
+
+`messagingNicknames.ts` serializes updates and stores only original/base/applied/pending nickname strings under hashed channel/account/group keys in local `group-nicknames.json`. Before writing, read and recheck the current nickname. Manual edits are preserved with a visible conflict. Persist intent before CLI mutation; an uncertain write is reconciled by reading on the next explicit save, never blindly replayed. Corrupt recovery metadata blocks writes. Requests above a conservative 300-byte bound are rejected rather than truncating names; server-side stricter limits surface separately. No nickname writes run on profile hydration, message arrival or daemon startup.
+
+DingTalk uses verified `event status`, `chat group user-settings query --groups`, and self-only `chat group update-nick --conversation-id` (omit `--nick` to clear). Feishu uses verified user identity and `im chat.nickname get/update/delete --as user`; writing may require `im:chat.nickname:write`. A missing current-nickname field, mismatched identity, unsupported CLI or permission failure leaves the nickname untouched. Empty bases use a self-profile read; no other members are queried. No raw diagnostics/credentials are exposed.
+
+HTTP saves accept transient `syncGroupNicknames:true` and return `nicknamePending:true`. Persona snapshots expose owner-scoped `nicknameSync:{pending,warnings}` via existing change notifications; nickname failures never pause replies. `messaging-options` advertises `nicknameVersion:1`; old services keep normal agent settings usable and show the upgrade hint. Deletion only restores groups already managed by this daemon. Tests: `scripts/messaging-nicknames.test.cjs` plus the messaging/persona suites.
+
+### Manual nickname assignments
+
+On already-enabled shared transports, having custom personas subscribes to group messages even when their settings-based group lists are empty. Reception reads the verified account's own nickname. Exact NFKC/case-normalized names in ampersand-delimited slots after the human name add dynamic group assignments; duplicate persona names fail closed. The service never uses another member's nickname or untrusted event text as assignment authority. Discovery is serialized per account/group, capped in memory, refreshed on incoming group messages and before sending, and rebuilt after restart. Read failures remove discovered permissions and surface a channel warning; explicit settings assignments remain intact. Incoming reservations prevent concurrent duplicates while nickname lookup is pending. No channel is started merely by creating a persona.
+
+Owner conversation tools can search accessible groups and edit a target persona's nickname slot after the existing explicit tool approval. They preserve other slots and manual base names, verify account identity and current nickname before writing, and journal uncertain writes. These manual assignments are not copied into portable profile group lists. The dynamic router gives them the same role/skill restrictions, selective silence, takeover and deduplication as settings assignments. Removing a slot removes its dynamic assignment; an independently configured group remains assigned until removed in settings. `nicknameRoutingVersion:1` advertises discovery and conversational assignment support.
+
+Assigned-group work tools are checked at each invocation, not only before the final reply. Shared-brain public reads follow the selected-directory/text-file policy; role-directed repository tools support absolute file paths and command `cwd`. Custom agents default to write capability, with writable/read-only scope defined by the saved role prompt. `agentRolePolicy.ts` instructs the model to execute in-scope work autonomously and set `requireApproval:true` for unclear/out-of-scope actions. This is prompt-based authorization, not a filesystem ACL: the host does not infer arbitrary natural-language path permissions. Scope-exception approvals identify the group and action. Cancellation and configuration/takeover changes still prevent stale tool operations. Existing receipt/tool-call deduplication prevents replay; restart does not resume side effects. Group execution never receives the owner transcript, assignment-management tools or an unrestricted native CLI runner. Role write permission does not authorize disclosure or implicit commits/pushes/deployment.
+
+Nickname reconciliation keeps configured suffixes separate from discovery results: it never computes a managed nickname from its own previously emitted suffix. Manual slots remain in the baseline and are not appended twice after Unicode normalization. Conversational changes retain the settings baseline through uncertain writes. Both plain-group and group-mention events discover self-nickname assignments and allow assigned-group work; the asynchronous read is followed by a second deduplication check. Busy queued/running channel work is exposed to persona rebinding. Role instructions are never silently shortened by the browser worker; oversized instruction payloads fail explicitly.
+
+## Multi-computer coordination
+
+Opt in from Dashboard → Personas → Messaging computers. The verified Keepwork account shares one ordered computer list; each channel identity elects its highest-ranked eligible daemon. Stable installation IDs live in the MCP home, local participation flags in `messaging-v1/coordination-settings.json`, and offline receipt journals in `messaging-v1/coordination/`. Tokens remain in presence memory. Browser closure does not stop coordination.
+
+The server must advertise `account.coordination.v1` with persistent storage configured. Preferred return drains accepted work before releasing the 30-second lease (renewed every ten seconds). Shared receipt keys exclude browser owner and local binding IDs. The gateway checkpoints Feishu pagination, takeover state and rate history; message bodies and model context remain local. Seven-day receipts prevent replay of accepted/unknown work; this can sacrifice an interrupted reply rather than repeat it.
+
+Availability-first is deliberate: a gateway confirmed in this daemon run can continue offline, while an online standby may take over after expiry. Duplicates are possible during that partition. Cold starts and standbys never self-promote offline. Reconnect merges offline receipts before restoring eligibility. Manual takeover changes must use the active computer; disconnected state is not synchronously replicated. Existing local-mode services must be stopped/upgraded before enabling coordination; unconnected old services cannot be discovered remotely.
+
+Owner-scoped GET/POST `/agents/personas/messaging-computers` shares persona SSE invalidations. The loopback dashboard uses authenticated `/admin/messaging-computers` (POST additionally checks Origin). Rankings use expected revisions. Ordinary persona chats, schedules, manual sends and remote execution delegation are unchanged. No production server or local daemon is restarted by source verification.

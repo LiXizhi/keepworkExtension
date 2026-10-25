@@ -56,7 +56,7 @@ export function feishuIncoming(row: any, chat: any, self: string): Incoming | nu
         kind:chat.chat_mode==='p2p'?'direct':mentionedSelf?'mention':'group'};
 }
 // One sweep at a time; bounded pages fail visibly instead of advancing past unread data.
-export async function pollFeishu(root:string, profile:string, file:string, onMessage:(message:Incoming)=>void, onError:(error:Error)=>void, onPoll:(time:number)=>void, call=lark, interval=600000, signal?:AbortSignal) {
+export async function pollFeishu(root:string, profile:string, file:string, onMessage:(message:Incoming)=>void|Promise<void>, onError:(error:Error)=>void, onPoll:(time:number)=>void, call=lark, interval=600000, signal?:AbortSignal) {
     const controller=new AbortController(); let timer:NodeJS.Timeout|undefined;
     const abort=()=>{controller.abort();clearTimeout(timer);};
     if(signal?.aborted)throw Error('Cancelled');
@@ -83,7 +83,7 @@ export async function pollFeishu(root:string, profile:string, file:string, onMes
         for(const row of data.messages){
             if(!row.chat_id||!['p2p','group'].includes(row.chat_type))continue;
             const message=feishuIncoming(row,{chat_id:row.chat_id,chat_mode:row.chat_type},identity.self);
-            if(message&&message.time>=window.start&&message.time<=window.end)onMessage(message);
+            if(message&&message.time>=window.start&&message.time<=window.end)await onMessage(message);
         }
         // Continue dense windows next tick; never burst through all their pages.
         if(data.has_more)window.token=data.page_token;else delete checkpoint.window;
@@ -119,11 +119,49 @@ export async function feishuConversation(root: string, profile: string, target: 
 export { conversationContext as feishuContext } from './messagingPolicy';
 
 export class FeishuDelivery {
-    constructor(private root:string,private profile:string){}
+    constructor(private root:string,private profile:string,private beforeSend?:()=>Promise<void>){}
     async create(_message:Incoming){return '';}
     async update(_card:string,_text:string,_status:number){}
     async send(message:Incoming,id:string,text:string){
         await feishuIdentity(this.root,this.profile);
-        for(const [index,part] of splitReply(text).entries())await lark(['im','+messages-reply','--as','user','--profile',this.profile.split(':')[0],'--message-id',message.id,'--text',part,'--idempotency-key',createHash('sha256').update(id+':'+index).digest('hex').slice(0,48),'--format','json'],this.root);
+        const marker=text.match(/^【[^【】\r\n]{1,80}\s*·\s*AI】/)?.[0] || '';
+        const parts=marker?splitReply(text.slice(marker.length),6000-Buffer.byteLength(marker)).map(part=>marker+part):splitReply(text);
+        for(const [index,part] of parts.entries()){await this.beforeSend?.();await lark(['im','+messages-reply','--as','user','--profile',this.profile.split(':')[0],'--message-id',message.id,'--text',part,'--idempotency-key',createHash('sha256').update(id+':'+index).digest('hex').slice(0,48),'--format','json'],this.root);}
     }
+}
+
+/** One bounded page of joined/visible groups, using the verified personal identity. */
+export async function feishuGroups(root:string, profile:string, query:string, call=lark) {
+    if(query.length>64)throw Error('飞书群名搜索最多 64 个字符');
+    await feishuIdentity(root,profile,call);
+    const result=await call(['im',...(query?['+chat-search','--query',query,'--disable-search-by-user','--search-types','private,external,public_joined','--chat-modes','group']:['+chat-list','--types','group']),
+        '--page-size','50','--as','user','--profile',profile.split(':')[0],'--format','json'],root);
+    const data=result.data||result;
+    if(!Array.isArray(data.chats))throw Error('Unexpected Feishu group response');
+    return data.chats.filter((g:any)=>typeof g.chat_id==='string'&&g.chat_status!=='dissolved'&&g.chat_mode!=='p2p')
+        .slice(0,50).map((g:any)=>({id:g.chat_id,name:String(g.name||g.chat_id)}));
+}
+
+export async function feishuNickname(root:string, profile:string, group:string, call=lark) {
+    await feishuIdentity(root,profile,call);
+    const flags=['--as','user','--profile',profile.split(':')[0],'--format','json'];
+    const result=await call(['im','chat.nickname','get','--chat-id',group,...flags],root);
+    const data=result.data||result;
+    if(typeof data.nickname!=='string')throw Error('无法确认飞书当前群昵称，未修改');
+    if(data.nickname)return {nickname:data.nickname,name:''};
+    const me=await call(['contact','+get-user',...flags],root),profileData=me.data||me,user=profileData.user||profileData;
+    return {nickname:data.nickname,name:typeof user.name==='string'?user.name:''};
+}
+export async function setFeishuNickname(root:string, profile:string, group:string, nickname:string, call=lark) {
+    await feishuIdentity(root,profile,call);
+    return call(['im','chat.nickname',nickname?'update':'delete','--chat-id',group,...(nickname?['--data',JSON.stringify({nickname})]:[]),
+        '--as','user','--profile',profile.split(':')[0],'--format','json'],root);
+}
+
+export async function feishuGroupName(root:string,profile:string,group:string,call=lark) {
+    await feishuIdentity(root,profile,call);
+    const result=await call(['im','chats','get','--chat-id',group,'--as','user','--profile',profile.split(':')[0],'--format','json'],root);
+    const data=result.data||result;
+    if((data.chat_id&&data.chat_id!==group)||typeof data.name!=='string'||!data.name.trim())throw Error('Group name unavailable');
+    return data.name.trim().slice(0,256);
 }

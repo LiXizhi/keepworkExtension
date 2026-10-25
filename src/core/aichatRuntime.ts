@@ -1,3 +1,4 @@
+import { roleApprovalProperties, roleNeedsApproval } from './agentRolePolicy';
 import { AichatClient } from './aichatPresence';
 import { AichatWorkspaceFiles, WORKSPACE_FILE_TOOL } from './aichatWorkspaceFiles';
 // Generated from the canonical AIChat ES modules; bundled statically into each daemon.
@@ -9,6 +10,7 @@ export interface RuntimeInput {
     members?: Record<string, any>; owner?: string; workspaceId?: string;
 }
 export type RuntimeOptions = {
+    roleScopedWrites?: boolean;
     fetch?: typeof fetch;
     approve?: (name:string,args:any,signal:AbortSignal)=>Promise<void>;
     workspaceFiles?: AichatWorkspaceFiles;
@@ -53,7 +55,7 @@ export function createMcpAgentRuntime(login:AichatClient|null, executeTool:(name
         },
         execute:async(name:string,args:any,spec:any)=>{
             if(name==='workspace_file'&&options.workspaceFiles&&spec.owner&&spec.workspaceId){
-                if(!['read','list','search'].includes(args.operation)){
+                if(!['read','list','search'].includes(args.operation)&&(!options.roleScopedWrites||roleNeedsApproval(args))){
                     if(!options.approve)throw Error('Owner approval unavailable');
                     await options.approve(name,args,spec.signal);
                 }
@@ -88,7 +90,7 @@ export function createMcpAgentRuntime(login:AichatClient|null, executeTool:(name
         if (!login?.token) throw Error('需要登录 AIChat');
         const result=await runtime.turn({id:input.id,prompt:input.prompt,text:input.question,history:input.history,
             workspace:input.root || '',owner:input.owner,workspaceId:input.workspaceId,model:input.model || 'keepwork-pro',
-            tools:[...input.tools,...(options.workspaceFiles&&input.workspaceId?[{type:'function',function:{name:WORKSPACE_FILE_TOOL.name,description:WORKSPACE_FILE_TOOL.description,parameters:WORKSPACE_FILE_TOOL.inputSchema}}]:[])],skills:input.skills || [],members:input.members || {},signal,conversationId:input.id});
+            tools:[...input.tools,...(options.workspaceFiles&&input.workspaceId?[{type:'function',function:{name:WORKSPACE_FILE_TOOL.name,description:WORKSPACE_FILE_TOOL.description,parameters:options.roleScopedWrites?{...WORKSPACE_FILE_TOOL.inputSchema,properties:{...WORKSPACE_FILE_TOOL.inputSchema.properties,...roleApprovalProperties}}:WORKSPACE_FILE_TOOL.inputSchema}}]:[])],skills:input.skills || [],members:input.members || {},signal,conversationId:input.id});
         return result.answer as string;
     } };
 }

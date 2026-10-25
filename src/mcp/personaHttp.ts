@@ -10,20 +10,33 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
         const owner=ownerKey(String(req.headers.origin||''),String(req.headers['x-agent-owner']||''));
         let input:any={};if(req.method==='POST'){if(!String(req.headers['content-type']).startsWith('application/json'))throw Error('JSON required');let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>131072)throw Error('Request too large');}input=JSON.parse(raw||'{}');}
         const parts=url.pathname.split('/').filter(Boolean),id=parts[2],action=parts[3];
+        if(id==='messaging-computers'){if(!['GET','POST'].includes(req.method||'')){send(405,{error:'Method not allowed'});return;}send(200,req.method==='GET'?messaging.coordinationView(owner):await messaging.configureCoordination(owner,input));return;}
         if(id==='events'&&req.method==='GET'){
             res.writeHead(200,{'Content-Type':'text/event-stream','X-Accel-Buffering':'no'});
             const update=()=>{if(!res.destroyed&&!res.writableEnded&&!res.write('event: changed\ndata: {}\n\n'))res.end();};
             const stop=personas.watch(owner,update,()=>res.end());const timer=setInterval(()=>{if(!res.write(': alive\n\n'))res.end();},25000);timer.unref();
             res.on('close',()=>{clearInterval(timer);stop();});update();return;
         }
-        if(!id&&req.method==='GET'){send(200,{agents:personas.list(owner)});return;}
-        if(!id&&req.method==='POST'){send(200,personas.upsert(owner,input));return;}
+        if(!id&&req.method==='GET'){send(200,{messagingVersion:1,coordinationVersion:1,agents:personas.list(owner)});return;}
+        if(!id&&req.method==='POST'){
+            let previous;try{previous=personas.read(owner,input.id);}catch{/* new agent */}
+            personas.upsert(owner,input);
+            let messagingWarning='';
+            try { await messaging.routingChanged(); if(input.activateMessaging===true)await messaging.activateAgentMessaging(owner,input.id); }
+            catch(error){messagingWarning=(error as Error).message;}
+            const nicknamePending=input.syncGroupNicknames===true?messaging.queueAgentNicknames(owner,previous,false,input.id):false;
+            send(200,{...personas.read(owner,input.id),...(messagingWarning?{messagingWarning}:{}),...(nicknamePending?{nicknamePending}:{})});return;
+        }
         if(!action&&req.method==='GET'){send(200,personas.read(owner,id,Number(url.searchParams.get('before')||Infinity)));return;}
         // Resolve ownership even for channel routes.
         personas.read(owner,id);
-        if(action==='inbox'&&req.method==='GET'){send(200,messaging.inboxView(owner,id,url.searchParams.get('binding')||'',url.searchParams.get('conversation')||'',Number(url.searchParams.get('before')||Infinity)));return;}
+        if(action==='messaging-options'&&req.method==='GET'){
+            send(200,{version:1,nicknameVersion:1,nicknameRoutingVersion:1,roleWriteVersion:1,channels:messaging.agentBindings(owner,id).map(b=>({binding:b.id,channel:b.channel,account:b.profile,status:b.status,error:b.error,nicknameErrors:b.nicknameErrors,listening:b.listening}))});return;
+        }
+        if(action==='inbox'&&req.method==='GET'){send(200,await messaging.namedInboxView(owner,id,url.searchParams.get('binding')||'',url.searchParams.get('conversation')||'',Number(url.searchParams.get('before')||Infinity)));return;}
         if(req.method!=='POST'){send(405,{error:'Method not allowed'});return;}
         switch(action){
+            case 'messaging-groups':send(200,{groups:await messaging.agentGroups(owner,id,String(input.binding||''),String(input.query||''))});return;
             case 'messages':send(200,personas.submit(owner,id,input));return;
             case 'clear':send(200,personas.clear(owner,id));return;
             case 'read':send(200,personas.markRead(owner,id));return;
@@ -31,7 +44,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
             case 'approval-revoke':send(200,personas.revokeApproval(owner,id));return;
             case 'respond':send(200,personas.respond(owner,id,input));return;
             case 'schedules':send(200,personas.schedule(owner,id,input));return;
-            case 'remove':await personas.remove(owner,id);send(200,{ok:true});return;
+            case 'remove':{const previous=personas.read(owner,id);await personas.remove(owner,id);await messaging.routingChanged().catch(()=>{});messaging.queueAgentNicknames(owner,previous,true,id);send(200,{ok:true,nicknamePending:true});return;}
             case 'channel-connect':{const agent=personas.read(owner,id);try{if(input.channel && !['dingtalk','feishu'].includes(input.channel))throw Error('Unknown channel');if(input.switchFromRoot !== undefined) await messaging.switchChannel(input.channel || 'dingtalk',String(input.root||agent.root||''),String(input.switchFromRoot));send(200,await (input.channel==='feishu'?messaging.connectFeishuAgent(owner,id,String(input.root||agent.root||''),agent.prompt):messaging.connectAgent(owner,id,String(input.root||agent.root||''),agent.prompt)));}catch(error){if(!messagingNeedsLogin(error))throw error;send(200,{status:'needs-login',listening:false,needsLogin:true});}return;}
             case 'channel-login':{const agent=personas.read(owner,id);if(input.switchFromRoot !== undefined) await messaging.switchChannel('dingtalk',String(input.root||agent.root||''),String(input.switchFromRoot));send(200,await messaging.loginAgent(owner,id,String(input.root||agent.root||''),agent.prompt));return;}
             case 'bind':{const result=messaging.bindAgent(owner,id,input.binding);messaging.setAgentPrompt(owner,id,personas.read(owner,id).prompt);send(200,result);return;}

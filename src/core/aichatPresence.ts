@@ -30,6 +30,7 @@ const owners = new Map<string,StoredClient>();
 const connectionOrder = new Map<string, number>();
 let nextConnection = 0;
 let brain = { order: 0, root: '' };
+const ownerBrains = new Map<string,{order:number;root:string}>();
 
 function validBrainPath(value: unknown): string {
     if (typeof value !== 'string' || !path.isAbsolute(value)) return '';
@@ -38,8 +39,8 @@ function validBrainPath(value: unknown): string {
 }
 
 /** Shared local default, independent of login ownership and periodic refresh order. */
-export function latestAichatBrainRoot(): string {
-    return validBrainPath(brain.root);
+export function latestAichatBrainRoot(owner?:string): string {
+    return validBrainPath(owner===undefined?brain.root:ownerBrains.get(owner)?.root);
 }
 
 export function sanitizeClientUrl(value: string): string {
@@ -74,7 +75,10 @@ export function rememberAichatClient(input: { sessionId: string; url: string; to
     const order = connectionOrder.get(input.sessionId)!;
     const root = validBrainPath(input.brainRoot);
     if (root && order >= brain.order) brain = { order, root };
-    if (/^[a-zA-Z0-9-]{32,128}$/.test(input.owner || '') && input.origin) owners.set(createHash('sha256').update(input.origin+'\0'+input.owner).digest('hex'),current);
+    if (/^[a-zA-Z0-9-]{32,128}$/.test(input.owner || '') && input.origin) {
+        const owner=createHash('sha256').update(input.origin+'\0'+input.owner).digest('hex');owners.set(owner,current);
+        if((root||input.brainRoot==='')&&order>=(ownerBrains.get(owner)?.order||0))ownerBrains.set(owner,{order,root});
+    }
 }
 
 /** Shared MCP heartbeat refreshes only its own remembered clients, never latest-page ordering. */
