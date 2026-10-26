@@ -1,14 +1,18 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-async function startDevelopmentServer(sourceDirectory, firstPort = 3001) {
+async function startDevelopmentServer(sourceDirectory, firstPort = 3001, options = {}) {
   const source = fs.realpathSync(sourceDirectory);
   if (!fs.existsSync(path.join(source, 'AIChat.html'))) throw new Error('AICHAT_SOURCE_DIR must contain AIChat.html');
   const repository = path.resolve(source, '../../../..');
   const root = fs.existsSync(path.join(repository, 'official/apps/tools/AIChat/AIChat.html')) ? repository : source;
   const mime = { '.html':'text/html', '.js':'text/javascript', '.mjs':'text/javascript', '.css':'text/css', '.json':'application/json', '.svg':'image/svg+xml', '.png':'image/png', '.jpg':'image/jpeg', '.webp':'image/webp', '.wasm':'application/wasm' };
-  const server = http.createServer((req, res) => {
+  const manager = options.managementHome ? await (await import(require('node:url').pathToFileURL(path.join(source,'scripts/source_package_manager.mjs')).href)).sourcePackageManager(source,options.managementHome) : null;
+  const server = http.createServer(async (req, res) => {
     try {
+      const origin = `http://127.0.0.1:${server.address().port}`;
+      if(manager && req.headers.host !== new URL(origin).host) {res.writeHead(403).end();return;}
+      if(manager && await manager.handle(req,res,origin)) return;
       if (!['GET','HEAD'].includes(req.method)) { res.writeHead(405).end(); return; }
       const relative = decodeURIComponent(new URL(req.url, 'http://localhost').pathname).replace(/^\/+/, '');
       if (relative.split(/[\\/]/).some(p => p.startsWith('.'))) throw Error('Hidden path');
@@ -16,7 +20,9 @@ async function startDevelopmentServer(sourceDirectory, firstPort = 3001) {
       const rel = path.relative(root, target);
       if (rel.startsWith('..') || path.isAbsolute(rel) || !fs.statSync(target).isFile()) throw Error('Outside source');
       res.writeHead(200, { 'Content-Type':mime[path.extname(target)] || 'application/octet-stream', 'Cache-Control':'no-store' });
-      if(req.method === 'HEAD') res.end(); else fs.createReadStream(target).on('error',()=>res.destroy()).pipe(res);
+      if(req.method === 'HEAD') res.end();
+      else if(manager && target === path.join(source,'AIChat.html')) res.end(manager.inject(fs.readFileSync(target,'utf8')));
+      else fs.createReadStream(target).on('error',()=>res.destroy()).pipe(res);
     } catch { res.writeHead(404).end('Not found'); }
   });
   for(let port = firstPort; port < firstPort + 100; port++) {

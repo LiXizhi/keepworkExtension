@@ -4,8 +4,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { configValue, confined, defaultMessageConfig, DEFAULT_PROMPT, digestMessage, incoming, Incoming, knowledgeContext, knowledgeDirectory, MessageConfig, readRules, RULE_DIR, trigger, conversationContext, automatedText } from './messagingPolicy';
-import { FeishuDelivery, feishuIdentity, pollFeishu, feishuConversation, feishuGroups, feishuNickname, setFeishuNickname, feishuGroupName } from './messagingFeishu';
-import { DingTalkDelivery, dws, listenDws, loginDws, dingtalkConversation, dingtalkNickname, setDingtalkNickname, dingtalkGroupName } from './messagingDingtalk';
+import { FeishuDelivery, feishuIdentity, pollFeishu, feishuConversation, feishuGroups, feishuNickname, setFeishuNickname, feishuGroupName, feishuSenderName } from './messagingFeishu';
+import { DingTalkDelivery, dws, listenDws, loginDws, dingtalkConversation, dingtalkNickname, setDingtalkNickname, dingtalkGroupName, dingtalkSenderName } from './messagingDingtalk';
 import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
 import { MessagingNicknames, NicknameTarget, nicknameKey } from './messagingNicknames';
 import { MessageAgent, routeMessageAgents, agentNameMentioned, agentBrainInstructions, nicknameAgentNames, normalizedAgentName } from './personaMessaging';
@@ -156,7 +156,7 @@ export class MessagingService {
                 else {
                     const cached=this.coordinationChecked.get(r.binding.id);
                     if(cached&&Date.now()-cached.time<60000)reason=cached.reason;
-                    else {try{this.rules(r.binding.id);if(this.startGuard&&!await this.startGuard(r.binding))throw Error('Local client unavailable');
+                    else {try{this.rules(r.binding.id);if(this.startGuard&&(await this.startGuard(r.binding))!==true)throw Error('Local client unavailable');
                         if(r.binding.channel==='feishu')await feishuIdentity(r.binding.root,r.binding.profile);
                         else{const status=await dws(['event','status','--profile',r.binding.profile,'-f','json'],r.binding.root);if(`${status.identity?.corp_id}:${status.identity?.user_id}`!==r.binding.profile)throw Error('CLI identity mismatch');}
                     }catch(e){reason=(e as Error).message;}this.coordinationChecked.set(r.binding.id,{time:Date.now(),reason});}
@@ -221,15 +221,15 @@ export class MessagingService {
         } finally { this.switching.delete(channel); }
     }
 
-    private startGuard?: (binding: Binding) => Promise<boolean>;
-    setStartGuard(guard: (binding: Binding) => Promise<boolean>) { this.startGuard = guard; }
+    private startGuard?: (binding: Binding) => Promise<boolean | 'needs-authorization' | 'authorization-error'>;
+    setStartGuard(guard: (binding: Binding) => Promise<boolean | 'needs-authorization' | 'authorization-error'>) { this.startGuard = guard; }
     private suspended = new Set<string>();
     private canRun(r: Runtime) { return r.binding.enabled && !this.suspended.has(r.binding.id); }
-    suspend(id: string) {
+    suspend(id: string, status: 'waiting-client' | 'needs-authorization' | 'authorization-error' = 'waiting-client') {
         const r = this.get(id);
         this.suspended.add(id);
         this.halt(r);
-        r.status = 'waiting-client'; this.persist(r);
+        r.status = status; this.persist(r);
     }
     // Separate from persisted receipts/inbox: bounded diagnostics for this process only.
     private recentMessages: RecentMessage[] = [];
@@ -244,7 +244,7 @@ export class MessagingService {
         return this.recentMessages.slice().reverse().map(({receipt,...row})=>({...row,id:receipt.id,time:receipt.time,state:receipt.state,reason:receipt.reason||'',executor:receipt.executor||'',model:receipt.model||'',server:receipt.server||''}));
     }
     private logins = new Map<string, Promise<any>>();
-    private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; sends?: Record<string,string>; autoReplyTimes?: Record<string,number[]> }> = {};
+    private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; readFutureIds?: Record<string,string[]>; sends?: Record<string,string>; autoReplyTimes?: Record<string,number[]> }> = {};
     private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
     private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
     private nicknames: MessagingNicknames;
@@ -399,6 +399,10 @@ export class MessagingService {
     private readKey(owner:string,agentId:string,conversation:string) {
         return agentId==='default-persona'||!this.messageAgents?conversation:JSON.stringify(['agent',owner,agentId,conversation]);
     }
+    private inboxUnread(owner:string,agentId:string,id:string,m:Incoming & {direction:string}) {
+        const box=this.box(id),key=this.readKey(owner,agentId,m.conversation);
+        return m.direction==='in'&&m.time>(box.read[key]||0)&&!box.readFutureIds?.[key]?.includes(m.id);
+    }
     private scopedInbox(owner:string,agentId:string,id:string) {
         const scope=this.inboxScope(owner,agentId,id);
         return this.box(id).messages.filter(m=>scope===null||(m.kind!=='direct'&&scope.has(m.conversation)));
@@ -406,7 +410,7 @@ export class MessagingService {
     agentBindings(owner:string,agentId:string){return this.list().filter(b=>this.hasAgent(b,owner,agentId)).sort((a,b)=>(a.listening?0:a.enabled?1:2)-(b.listening?0:b.enabled?1:2)).map(b=>({...b,
         unreadScope:agentId!=='default-persona'&&this.messageAgents?'assigned-groups':'all',
         groups:[...(this.inboxScope(owner,agentId,b.id)||[])].map(id=>({id,name:this.inboxName(owner,agentId,b.id,id)})),
-        unread:this.scopedInbox(owner,agentId,b.id).filter(m=>m.direction==='in'&&m.time>(this.box(b.id).read[this.readKey(owner,agentId,m.conversation)]||0)).length}));}
+        unread:this.scopedInbox(owner,agentId,b.id).filter(m=>this.inboxUnread(owner,agentId,b.id,m)).length}));}
     assertAgentBinding(owner:string,agentId:string,id:string){const b=this.get(id).binding;if(!this.hasAgent(b,owner,agentId))throw Error('渠道不属于此分身');}
     bindAgent(owner:string,agentId:string,id:string,shareRoot=false){
         const r=this.get(id);
@@ -441,6 +445,29 @@ export class MessagingService {
         return this.view(binding.id);
     }
     private groupNames = new Map<string,{name:string;time:number}>();
+    private senderNames = new Map<string,{name:string;time:number}>();
+    private senderNameReads = new Map<string,Promise<void>>();
+    private senderNameReader=(r:Runtime,m:Incoming)=>r.binding.channel==='feishu'?feishuSenderName(r.binding.root,r.binding.profile,m):dingtalkSenderName(r.binding.root,r.binding.profile,m);
+    private senderNameKey(id:string,m:Incoming) { const b=this.get(id).binding;return JSON.stringify([id,b.channel,b.profile,b.root,m.conversation,m.sender]); }
+    private async warmSenderNames(id:string,messages:Incoming[]) {
+        const targets=[...new Map(messages.filter(m=>m.sender).map(m=>[this.senderNameKey(id,m),m])).entries()];
+        let cursor=0;
+        await Promise.all(Array.from({length:Math.min(4,targets.length)},async()=>{
+            while(cursor<targets.length&&!this.closed){
+                const [key,m]=targets[cursor++],cached=this.senderNames.get(key);
+                // Resolved names stay valid for this MCP process; only failed lookups retry.
+                if(cached&&(cached.name||Date.now()-cached.time<30000))continue;
+                let task=this.senderNameReads.get(key);
+                if(!task){task=Promise.resolve().then(async()=>{
+                    let name='';try{name=await this.senderNameReader(this.get(id),m);}catch{/* Contact permissions/offline service must not hide history. */}
+                    this.senderNames.delete(key);this.senderNames.set(key,{name,time:Date.now()});
+                    if(this.senderNames.size>1000)this.senderNames.delete(this.senderNames.keys().next().value!);
+                    this.senderNameReads.delete(key);
+                });this.senderNameReads.set(key,task);}
+                await task;
+            }
+        }));
+    }
     private groupNameReads = new Map<string,Promise<void>>();
     private groupNameReader=(r:Runtime,group:string)=>r.binding.channel==='feishu'?feishuGroupName(r.binding.root,r.binding.profile,group):dingtalkGroupName(r.binding.root,r.binding.profile,group);
     private inboxName(owner:string,agentId:string,id:string,conversation:string) {
@@ -463,15 +490,20 @@ export class MessagingService {
             }
         }));
         let timer:NodeJS.Timeout|undefined;
-        try{await Promise.race([warm,new Promise(resolve=>{timer=setTimeout(resolve,1500);})]);}finally{clearTimeout(timer);}
+        const senders=this.warmSenderNames(id,conversation?(view.messages||[]).filter(m=>m.direction==='in'):(view.conversations||[]).flatMap(c=>c.last?.direction==='in'?[c.last]:[]));
+        try{await Promise.race([Promise.all([warm,senders]),new Promise(resolve=>{timer=setTimeout(resolve,5000);})]);}finally{clearTimeout(timer);}
         return this.inboxView(owner,agentId,id,conversation,before);
     }
     inboxView(owner:string,agentId:string,id:string,conversation='',before=Infinity){
-        this.assertAgentBinding(owner,agentId,id);const box=this.box(id),messages=this.scopedInbox(owner,agentId,id);
+        this.assertAgentBinding(owner,agentId,id);const box=this.box(id),messages=this.scopedInbox(owner,agentId,id).map(m=>({...m,senderName:this.senderNames.get(this.senderNameKey(id,m))?.name||''}));
         if(conversation){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');const rows=messages.filter(m=>m.conversation===conversation&&m.time<before).slice(-50);return {name:this.inboxName(owner,agentId,id,conversation),messages:rows,before:rows.length===50?rows[0].time:null,paused:box.paused.includes(conversation)};}
-        const scope=this.inboxScope(owner,agentId,id);const ids=[...new Set([...(scope||[]),...messages.map(m=>m.conversation)])];return {conversations:ids.map(key=>({id:key,name:this.inboxName(owner,agentId,id,key),last:messages.filter(m=>m.conversation===key).at(-1),unread:messages.filter(m=>m.conversation===key&&m.direction==='in'&&m.time>(box.read[this.readKey(owner,agentId,key)]||0)).length,paused:box.paused.includes(key)}))};
+        const scope=this.inboxScope(owner,agentId,id);const ids=[...new Set([...(scope||[]),...messages.map(m=>m.conversation)])];return {conversations:ids.map(key=>({id:key,name:this.inboxName(owner,agentId,id,key),last:messages.filter(m=>m.conversation===key).at(-1),unread:messages.filter(m=>m.conversation===key&&this.inboxUnread(owner,agentId,id,m)).length,paused:box.paused.includes(key)}))};
     }
-    inboxAction(owner:string,agentId:string,id:string,conversation:string,action:string){this.assertAgentBinding(owner,agentId,id);const box=this.box(id),r=this.get(id);if(['pause','resume'].includes(action)&&!this.gatewayAllowed(r))throw Error('Use the active messaging computer to change takeover state');if(action==='read'){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');box.read[this.readKey(owner,agentId,conversation)]=Date.now();}
+    inboxAction(owner:string,agentId:string,id:string,conversation:string,action:string){this.assertAgentBinding(owner,agentId,id);const box=this.box(id),r=this.get(id);if(['pause','resume'].includes(action)&&!this.gatewayAllowed(r))throw Error('Use the active messaging computer to change takeover state');if(action==='read'){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');const key=this.readKey(owner,agentId,conversation),now=Date.now();
+            box.read[key]=Math.max(box.read[key]||0,now);
+            // Upstream clocks may be ahead. Acknowledge those stored IDs without
+            // advancing the time cursor and hiding later arrivals with normal timestamps.
+            (box.readFutureIds||={})[key]=box.messages.filter(m=>m.conversation===conversation&&m.direction==='in'&&m.time>box.read[key]).map(m=>m.id);}
         else if(action==='clear')box.messages=box.messages.filter(m=>conversation&&m.conversation!==conversation);
         else if(action==='pause'){if(!box.paused.includes(conversation))box.paused.push(conversation);r.active.get(conversation)?.abort();for(const job of r.queues.get(conversation)||[])job.receipt.state='cancelled';r.queues.delete(conversation);}
         else if(action==='resume'){box.paused=box.paused.filter(x=>x!==conversation);}else throw Error('Unknown inbox action');this.saveInbox();this.persist(r);return {ok:true};}
@@ -680,8 +712,9 @@ export class MessagingService {
     }
     private async startRun(r: Runtime) {
         if (this.closed) throw new Error('Service closed');
-        if (this.startGuard && !await this.startGuard(r.binding)) {
-            if (r.binding.enabled && !this.closed) this.suspend(r.binding.id);
+        const gate = this.startGuard ? await this.startGuard(r.binding) : true;
+        if (gate !== true) {
+            if (r.binding.enabled && !this.closed) this.suspend(r.binding.id, gate || 'waiting-client');
             return;
         }
         if (!r.binding.enabled || this.closed) return;

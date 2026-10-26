@@ -44,12 +44,12 @@ export class ClientSupervisor {
     private pending?: Promise<void>;
     private closed = false;
     private enabled: boolean;
-    private checks = new Map<string, { profile: string; channel: string; authorized: boolean; checkedAt: number }>();
+    private checks = new Map<string, { profile: string; channel: string; authorized: boolean; failure?: 'needs-authorization' | 'authorization-error'; checkedAt: number }>();
     private clients = { dingtalk: false, feishu: false, error: '', checkedAt: 0 };
     constructor(private messaging: Pick<MessagingService, 'list' | 'start' | 'suspend' | 'setStartGuard'>,
         private deps = { desktopClients, cliAuthorized, readConfigFile, writeConfigFile }) {
         this.enabled = deps.readConfigFile().autoFollowImClients !== false;
-        messaging.setStartGuard(binding => this.allowed(binding));
+        messaging.setStartGuard(binding => this.allowed(binding, true));
     }
     snapshot() { return { enabled: this.enabled, intervalMs: CLIENT_POLL_MS, clients: this.clients, accounts: [...this.checks.values()] }; }
     async configure(enabled: boolean) {
@@ -59,7 +59,7 @@ export class ClientSupervisor {
         await this.poll();
         return this.snapshot();
     }
-    private async allowed(binding: Binding) {
+    private async allowed(binding: Binding, fresh = false): Promise<boolean | 'needs-authorization' | 'authorization-error'> {
         if (this.closed) return false;
         if (!this.enabled) return true;
         if (Date.now() - this.clients.checkedAt > 10000) {
@@ -68,13 +68,14 @@ export class ClientSupervisor {
         const channel = (binding.channel || 'dingtalk') as Channel;
         if (this.clients.error || !this.clients[channel]) return false;
         let check = this.checks.get(binding.id);
-        if (!check || Date.now() - check.checkedAt > 10000) {
-            let authorized = false;
-            try { authorized = await this.deps.cliAuthorized(binding); } catch { /* fail closed */ }
-            check = { channel, profile: binding.profile, authorized, checkedAt: Date.now() };
+        if (fresh || !check || Date.now() - check.checkedAt > 10000) {
+            let authorized = false, failure: 'needs-authorization' | 'authorization-error' = 'needs-authorization';
+            try { authorized = await this.deps.cliAuthorized(binding); }
+            catch(error) { failure = /login required|permission denied|identity does not match/i.test((error as Error).message) ? 'needs-authorization' : 'authorization-error'; }
+            check = { channel, profile: binding.profile, authorized, failure: authorized ? undefined : failure, checkedAt: Date.now() };
             this.checks.set(binding.id, check);
         }
-        return !this.closed && (!this.enabled || check.authorized);
+        return this.closed ? false : !this.enabled || check.authorized ? true : check.failure || 'needs-authorization';
     }
     poll(): Promise<void> {
         if (this.closed) return Promise.resolve();
@@ -89,7 +90,7 @@ export class ClientSupervisor {
                 // Re-read user intent after asynchronous checks; never undo manual Stop.
                 const current = this.messaging.list().find(row => row.id === binding.id);
                 if (this.closed || !current?.enabled) continue;
-                if (!allowed) this.messaging.suspend(binding.id);
+                if (allowed !== true) this.messaging.suspend(binding.id, allowed || 'waiting-client');
                 else if (current.status !== 'listening' && current.status !== 'connecting') {
                     try { await this.messaging.start(binding.id); } catch { /* listener exposes its own error */ }
                 }

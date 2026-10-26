@@ -549,7 +549,7 @@ else {
     if (!app.isPackaged && !devUrl && process.env.AICHAT_DESKTOP_LOCAL_SOURCE === '1') {
       try {
         const { startDevelopmentServer } = require('./dev-server.cjs');
-        const server = await startDevelopmentServer(process.env.AICHAT_SOURCE_DIR || path.resolve(__dirname, '../../../../apps/official/apps/tools/AIChat'));
+        const server = await startDevelopmentServer(process.env.AICHAT_SOURCE_DIR || path.resolve(__dirname, '../../../../apps/official/apps/tools/AIChat'), 3001, {managementHome:path.join(app.getPath('userData'),'source-packages')});
         developmentServer = server; devUrl = server.url;
         console.log(`AIChat source: ${devUrl}`);
       } catch (error) {

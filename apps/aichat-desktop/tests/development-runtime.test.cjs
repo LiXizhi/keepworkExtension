@@ -52,9 +52,11 @@ test('rejected stop aborts; readiness from a different PID never attaches or fal
 });
 test('both builds run in order and build failures prevent subsequent startup work', () => {
   const calls = [];
-  buildDevelopment((node, args) => calls.push(args[0]));
-  assert.match(calls[0], /mcp-runtime[/\\]scripts[/\\]build.mjs$/);
-  assert.match(calls[1], /aichat-desktop[/\\]scripts[/\\]build.mjs$/);
+  buildDevelopment((node, args) => calls.push(args));
+  assert.match(calls[0][0], /mcp-runtime[/\\]scripts[/\\]build.mjs$/);
+  assert.deepEqual(calls[0].slice(1), ['--development']);
+  assert.match(calls[1][0], /aichat-desktop[/\\]scripts[/\\]build.mjs$/);
+  assert.deepEqual(calls[1].slice(1), []);
   let count = 0;
   assert.throws(() => buildDevelopment(() => { count++; throw Error('build failed'); }), /build failed/);
   assert.equal(count, 1);

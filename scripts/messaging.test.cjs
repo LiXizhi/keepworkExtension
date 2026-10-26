@@ -1281,3 +1281,105 @@ test('coordinated gateway restores checkpoint and drains real accepted work befo
     draining=true;await f.service.syncCoordination();assert.equal(calls.some(c=>c.op==='release'),false);
     f.pending[0].end();await tick();await f.service.syncCoordination();assert.equal(f.sent.length,1);assert.equal(calls.at(-1).op,'release');assert.equal(r.status,'standby');
 });
+
+test('sender names resolve old inbox messages, coalesce reads, isolate groups and survive lookup failures',async t=>{
+ const f=fixture(t);forkAgents(f);f.service.groupNameReader=async()=> 'Home';
+ const rows=f.service.box(f.binding.id).messages;
+ rows.push({id:'old',conversation:'home',kind:'group',sender:'opaque-id',text:'task',time:Date.now()-1,direction:'in'});
+ let calls=0;f.service.senderNameReader=async()=>{calls++;await tick();return '张小明';};
+ const views=await Promise.all([f.service.namedInboxView('owner','lily',f.binding.id,'home'),f.service.namedInboxView('owner','lily',f.binding.id,'home')]);
+ assert.equal(calls,1);assert.equal(views[0].messages[0].senderName,'张小明');assert.equal(views[1].messages[0].sender,'opaque-id');
+ assert.equal(rows[0].senderName,undefined,'lookup does not rewrite persisted messages');
+ f.service.senderNames.get(f.service.senderNameKey(f.binding.id,rows[0])).time=0;
+ await f.service.namedInboxView('owner','lily',f.binding.id,'home');assert.equal(calls,1);
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id,'home').messages[0].senderName,'张小明','resolved names do not expire during the MCP process');
+ await assert.rejects(f.service.namedInboxView('stranger','lily',f.binding.id,'home'));assert.equal(calls,1);
+ rows.push({...rows[0],id:'unknown',sender:'unknown'});
+ f.service.senderNameReader=async()=>{calls++;throw Error('offline');};
+ const offline=await f.service.namedInboxView('owner','lily',f.binding.id,'home');assert.equal(offline.messages[1].senderName,'');assert.equal(offline.messages[1].text,'task');
+ await f.service.namedInboxView('owner','lily',f.binding.id,'home');assert.equal(calls,2,'failed reads have a short negative cache');
+ f.service.senderNames.get(f.service.senderNameKey(f.binding.id,rows[1])).time=0;
+ f.service.senderNameReader=()=>{throw Error('synchronous failure');};
+ await f.service.namedInboxView('owner','lily',f.binding.id,'home');assert.equal(f.service.senderNameReads.size,0);
+ f.service.senderNames.get(f.service.senderNameKey(f.binding.id,rows[1])).time=0;
+ f.service.senderNameReader=async()=> 'Recovered name';
+ assert.equal((await f.service.namedInboxView('owner','lily',f.binding.id,'home')).messages[1].senderName,'Recovered name');
+ const key=f.service.senderNameKey(f.binding.id,rows[0]);assert.notEqual(key,f.service.senderNameKey(f.binding.id,{...rows[0],conversation:'other'}));
+ f.service.get(f.binding.id).binding.profile='corp:another';assert.notEqual(key,f.service.senderNameKey(f.binding.id,rows[0]));
+});
+
+test('sender name adapters use verified identities and exact returned sender IDs',async()=>{
+ const {dingtalkSenderName}=load('messagingDingtalk'),{feishuSenderName}=load('messagingFeishu');
+ const m={sender:'sender-id',conversation:'group',kind:'group'};const ding=[],fei=[];
+ const d=async args=>{ding.push(args);return args[0]==='event'?{identity:{corp_id:'corp',user_id:'user'}}:{result:{members:[{openDingtalkId:'other',nick:'Wrong'},{openDingtalkId:'sender-id',nick:'张小明'}]}};};
+ assert.equal(await dingtalkSenderName('/brain','corp:user',m,d),'张小明');assert.deepEqual(ding[1].slice(0,6),['chat','+chat-members-get','--id','group','--users','sender-id']);
+ await assert.rejects(dingtalkSenderName('/brain','corp:other',m,d),/identity/);
+ const f=async args=>{fei.push(args);return args[0]==='auth'?{appId:'app',identities:{user:{status:'ready',available:true,verified:true,openId:'user'}}}:{data:{users:[{open_id:'other',localized_name:'Wrong'},{open_id:'sender-id',localized_name:'李小华'}]}};};
+ assert.equal(await feishuSenderName('/brain','app:user',m,f),'李小华');assert.deepEqual(fei[1].slice(0,4),['contact','+search-user','--user-ids','sender-id']);
+ await assert.rejects(feishuSenderName('/brain','app:other',m,f),/identity/);
+ assert.equal(await feishuSenderName('/brain','app:user',m,async args=>args[0]==='auth'?f(args):{data:{users:[{open_id:'sender-id',localized_name:'sender-id'}]}}),'');
+});
+
+test('DingTalk direct sender names resolve each participant via their own single-chat metadata',async()=>{
+ const {dingtalkSenderName}=load('messagingDingtalk');const calls=[];
+ const call=async args=>{calls.push(args);return args[0]==='event'?{identity:{corp_id:'corp',user_id:'user'}}:{result:{conversationInfo:{singleChat:true,title:args[3]==='sender-one'?'张小明':'李小华'}}};};
+ for(const [sender,name] of [['sender-one','张小明'],['sender-two','李小华']]){
+  assert.equal(await dingtalkSenderName('/brain','corp:user',{kind:'direct',conversation:'shared-history',sender},call),name);
+  assert.deepEqual(calls.at(-1).slice(0,4),['chat','+conversation-info','--open-dingtalk-id',sender]);
+ }
+ await assert.rejects(dingtalkSenderName('/brain','corp:other',{kind:'direct',sender:'sender-one'},call),/identity/);
+ for(const conversationInfo of [{singleChat:false,title:'A group'}, {singleChat:true,title:'sender-one'}, {singleChat:true}]){
+  assert.equal(await dingtalkSenderName('/brain','corp:user',{kind:'direct',sender:'sender-one'},async args=>args[0]==='event'?call(args):{result:{conversationInfo}}),'');
+ }
+});
+
+for(const channel of ['dingtalk','feishu'])test('group read clears stored future timestamps for '+channel+' and preserves agent isolation',async t=>{
+ const f=fixture(t,channel),agents=forkAgents(f,channel),box=f.service.box(f.binding.id);
+ const future=Date.now()+86400000;
+ box.messages.push({id:'future-group',conversation:'home',kind:'group',sender:'other',text:'task',time:future,direction:'in'});
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,1);
+ f.service.inboxAction('owner','lily',f.binding.id,'home','read');
+ assert.equal(f.service.inboxView('owner','lily',f.binding.id).conversations.find(c=>c.id==='home').unread,0);
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,0);
+ assert.equal(f.service.agentBindings('owner','teacher')[0].unread,1);
+ assert.equal(f.service.agentBindings('owner','default-persona')[0].unread,1);
+ f.service.inboxAction('owner','default-persona',f.binding.id,'home','read');
+ assert.equal(f.service.agentBindings('owner','default-persona')[0].unread,0);
+ f.service.inboxAction('owner','lily',f.binding.id,'home','read');
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,0,'repeated read never moves the cursor backwards');
+ const restored=f.createService();restored.setMessageAgents(()=>agents);restored.setAgentRootResolver(owner=>owner==='owner'?fs.realpathSync(f.root):'');
+ assert.equal(restored.inboxView('owner','lily',f.binding.id).conversations.find(c=>c.id==='home').unread,0,'read marker survives restart');
+ box.messages.push({id:'next-group',conversation:'home',kind:'group',sender:'other',text:'new task',time:Date.now()+1,direction:'in'});
+ assert.equal(f.service.agentBindings('owner','lily')[0].unread,1);
+});
+
+test('DingTalk identity accepts matching profiles without optional open ID and rejects mismatches before reads',async()=>{
+ const {dingtalkConversation,dingtalkGroupName,dingtalkNickname}=load('messagingDingtalk');
+ let identity={corp_id:'corp',user_id:'user'},reads=0;
+ const call=async args=>{
+  if(args[0]==='event')return {identity};
+  reads++;
+  if(args.includes('+chat-messages'))return {contractVersion:'im.message-list.v1',complete:true,messages:[{messageId:'own',senderId:'user',createTime:1700000000000,text:'own'}]};
+  if(args.includes('+conversation-info'))return {data:{openConversationId:'group',title:'Team'}};
+  if(args.includes('query'))return {data:{openConversationId:'group',groupNick:'My nickname'}};
+  throw Error('Unexpected request');
+ };
+ const operations=[()=>dingtalkConversation('.','corp:user',{id:'incoming',conversation:'group',sender:'peer',kind:'group'},undefined,call),()=>dingtalkGroupName('.','corp:user','group',call),()=>dingtalkNickname('.','corp:user','group',call)];
+ assert.equal((await operations[0]())[0].sender,'user','missing optional open ID preserves the existing sender ID');
+ assert.equal(await operations[1](),'Team');assert.deepEqual(await operations[2](),{nickname:'My nickname',name:''});
+ for(const bad of [{corp_id:'other',user_id:'user'},{corp_id:'corp',user_id:'other'},{corp_id:'corp'},{}]){
+  identity=bad;const before=reads;
+  for(const op of operations)await assert.rejects(op,/identity does not match/);
+  assert.equal(reads,before,'wrong or missing identity cannot read channel data');
+ }
+});
+
+test('manual channel start preserves authorization gate status without starting a listener',async t=>{
+ const f=fixture(t,'feishu');
+ for(const reason of ['needs-authorization','authorization-error',false]){
+  f.service.setStartGuard(async()=>reason);await f.service.start(f.binding.id);
+  assert.equal(f.service.view(f.binding.id).status,reason||'waiting-client');
+  assert.equal(f.service.view(f.binding.id).listening,false);
+  assert.equal(f.events.length,0);
+ }
+});

@@ -17,15 +17,15 @@ function fixture(){
  rows.push({...rows[0],id:'manual-stop',enabled:false});
  let running=true,authorized=true,guard,checks=0,stored={},gate;
  const calls=[];
- const service={list:()=>rows.map(r=>({...r})),setStartGuard:g=>guard=g,suspend:id=>{calls.push('suspend:'+id);rows.find(r=>r.id===id).status='waiting-client';},start:async id=>{const r=rows.find(r=>r.id===id);if(await guard(r)){calls.push('start:'+id);r.status='listening';}}};
- const supervisor=new ClientSupervisor(service,{readConfigFile:()=>stored,writeConfigFile:v=>stored={...stored,...v},desktopClients:async()=>({dingtalk:running,feishu:running,error:''}),cliAuthorized:async()=>{checks++;if(gate)await gate;return authorized;}});
+ const service={list:()=>rows.map(r=>({...r})),setStartGuard:g=>guard=g,suspend:(id,status='waiting-client')=>{calls.push('suspend:'+id);rows.find(r=>r.id===id).status=status;},start:async id=>{const r=rows.find(r=>r.id===id);if((await guard(r))===true){calls.push('start:'+id);r.status='listening';}}};
+ const supervisor=new ClientSupervisor(service,{readConfigFile:()=>stored,writeConfigFile:v=>stored={...stored,...v},desktopClients:async()=>({dingtalk:running,feishu:running,error:''}),cliAuthorized:async()=>{checks++;if(gate)await gate;if(authorized instanceof Error)throw authorized;return authorized;}});
  return {supervisor,rows,calls,get checks(){return checks;},get stored(){return stored;},set running(v){running=v;},set authorized(v){authorized=v;},set gate(v){gate=v;}};
 }
 test('default on; both channels suspend/resume, never enable manually stopped binding; config persists',async()=>{
  const f=fixture();assert.equal(f.supervisor.snapshot().enabled,true);assert.equal(CLIENT_POLL_MS,300000);
  await f.supervisor.poll();assert.deepEqual(f.calls,['start:dingtalk','start:feishu']);
- f.running=false;await f.supervisor.poll();assert.equal(f.checks,2,'no auth checks without client');assert.equal(f.rows[0].enabled,true);assert.equal(f.rows[0].status,'waiting-client');
- f.running=true;f.authorized=false;await f.supervisor.poll();assert.equal(f.rows[1].status,'waiting-client');
+ const beforeAbsent=f.checks;f.running=false;await f.supervisor.poll();assert.equal(f.checks,beforeAbsent,'no auth checks without client');assert.equal(f.rows[0].enabled,true);assert.equal(f.rows[0].status,'waiting-client');
+ f.running=true;f.authorized=false;await f.supervisor.poll();assert.equal(f.rows[1].status,'needs-authorization');
  f.authorized=true;await f.supervisor.poll();assert.equal(f.rows[1].status,'listening');
  f.running=false;await f.supervisor.poll();await f.supervisor.configure(false);assert.deepEqual(f.stored,{autoFollowImClients:false});assert.equal(f.rows[0].status,'listening');
  await f.supervisor.configure(true);assert.equal(f.rows[0].status,'waiting-client');assert.equal(f.calls.some(x=>x.endsWith('manual-stop')),false);
@@ -36,4 +36,13 @@ test('manual Stop and shutdown during an auth check cannot restart bindings; ove
  const first=f.supervisor.poll();assert.equal(first,f.supervisor.poll());await new Promise(r=>setImmediate(r));
  f.rows[0].enabled=false;f.rows[1].enabled=false;release();await first;assert.deepEqual(f.calls,[]);
  f.rows[0].enabled=true;f.gate=new Promise(r=>release=r);const pending=f.supervisor.poll();await new Promise(r=>setImmediate(r));f.supervisor.close();release();await pending;assert.deepEqual(f.calls,[]);
+});
+
+test('Feishu authorization failures remain distinct from absent clients and recover after authorization',async()=>{
+ const f=fixture();
+ f.authorized=Error('Feishu login required');await f.supervisor.poll();assert.equal(f.rows[1].status,'needs-authorization');
+ f.authorized=Error('Feishu CLI timed out');await f.supervisor.poll();assert.equal(f.rows[1].status,'authorization-error');
+ f.running=false;await f.supervisor.poll();assert.equal(f.rows[1].status,'waiting-client');
+ f.running=true;f.authorized=true;await f.supervisor.poll();assert.equal(f.rows[1].status,'listening');
+ f.supervisor.close();
 });

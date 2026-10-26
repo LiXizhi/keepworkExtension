@@ -76,8 +76,9 @@ export async function dingtalkConversation(root: string, profile: string, target
     const check = () => { if(signal?.aborted)throw Error('Cancelled'); };
     check();
     const status = await call(['event','status','--profile',profile,'--format','json'],root);
+    // event status may omit open_dingtalk_id; corp/user IDs establish the profile.
     const identity = status.identity;
-    if(!identity?.open_dingtalk_id || `${identity.corp_id}:${identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
+    if(!identity?.corp_id || !identity.user_id || `${identity.corp_id}:${identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
     const read = async (selector: string[]) => {
         check();
         const result = await call(['chat',...selector,'--limit','50','--order','desc','--no-reactions','--profile',profile,'--format','json'],root);
@@ -98,7 +99,7 @@ export async function dingtalkConversation(root: string, profile: string, target
         if(conversation && row.conversationId && row.conversationId!==conversation)throw Error('钉钉会话上下文不匹配');
         const text=typeof row.text==='string'?row.text:'[非文本消息]';
         messages.set(row.messageId,{id:row.messageId,conversation:target.conversation,
-            sender:row.senderId===identity.user_id?identity.open_dingtalk_id:row.senderId,
+            sender:row.senderId===identity.user_id?(identity.open_dingtalk_id||row.senderId):row.senderId,
             time:time<1e12?time*1000:time,text,kind:target.kind,thread:row.threadId || undefined,
             automated:automatedSender(row)||automatedText(text)});
     }
@@ -136,7 +137,7 @@ export class DingTalkDelivery {
 async function nicknameIdentity(root:string, profile:string, call=dws) {
     const status=await call(['event','status','--profile',profile,'-f','json'],root);
     const identity=status.identity;
-    if(!identity?.open_dingtalk_id || `${identity.corp_id}:${identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
+    if(!identity?.corp_id || !identity.user_id || `${identity.corp_id}:${identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
     return identity;
 }
 export async function dingtalkNickname(root:string, profile:string, group:string, call=dws) {
@@ -174,4 +175,24 @@ export async function dingtalkGroupName(root:string,profile:string,group:string,
         else for(const key of ['data','result','conversation','conversationInfo'])visit(value[key],depth+1);
     };
     visit(result);if(names.length!==1)throw Error('Group name unavailable');return names[0];
+}
+
+/** Resolve message open IDs using personal conversation or group-member metadata. */
+export async function dingtalkSenderName(root:string,profile:string,message:Incoming,call=dws) {
+    const status=await call(['event','status','--profile',profile,'-f','json'],root);
+    const identity=status.identity;
+    if(!identity?.corp_id||!identity.user_id||`${identity.corp_id}:${identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
+    if(message.kind==='direct'){
+        const result=await call(['chat','+conversation-info','--open-dingtalk-id',message.sender,'--profile',profile,'-f','json'],root);
+        const data=result.result||result.data||result,conversation=data.conversationInfo;
+        // Only the single-chat title for this exact sender can supply their display name.
+        const name=conversation?.singleChat===true?conversation.title:'';
+        return typeof name==='string'&&name.trim()!==message.sender?name.trim().slice(0,256):'';
+    }
+    const result=await call(['chat','+chat-members-get','--id',message.conversation,'--users',message.sender,'--profile',profile,'-f','json'],root);
+    const data=result.result||result.data||result;
+    const rows=Array.isArray(data)?data:data.members||data.list||[];
+    const member=rows.find((row:any)=>row.openDingtalkId===message.sender);
+    const name=member?.memberEmpName||member?.nick||member?.memberNick||member?.groupNick||member?.memberGroupNick;
+    return typeof name==='string'&&name.trim()!==message.sender?name.trim().slice(0,256):'';
 }

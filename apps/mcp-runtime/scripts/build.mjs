@@ -21,7 +21,7 @@ await build({
   format: 'cjs',
   target: 'node22',
   external: ['node-pty', 'playwright-core'],
-  plugins: [aichatRuntimePlugin(), runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir)],
+  plugins: [aichatRuntimePlugin({ development: process.argv.includes('--development') }), runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir)],
   legalComments: 'none',
   logLevel: 'info',
 });

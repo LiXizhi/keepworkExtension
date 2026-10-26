@@ -165,3 +165,11 @@ export async function feishuGroupName(root:string,profile:string,group:string,ca
     if((data.chat_id&&data.chat_id!==group)||typeof data.name!=='string'||!data.name.trim())throw Error('Group name unavailable');
     return data.name.trim().slice(0,256);
 }
+
+export async function feishuSenderName(root:string,profile:string,message:Incoming,call=lark) {
+    await feishuIdentity(root,profile,call);
+    const result=await call(['contact','+search-user','--user-ids',message.sender,'--as','user','--profile',profile.split(':')[0],'--format','json'],root);
+    const user=(result.data||result).users?.find((row:any)=>row.open_id===message.sender);
+    const name=user?.localized_name;
+    return typeof name==='string'&&name.trim()!==message.sender?name.trim().slice(0,256):'';
+}

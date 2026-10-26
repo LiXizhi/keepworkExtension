@@ -24,12 +24,14 @@ The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arc
 `apps/local-model-runtime/runtime-staging/<platform>-<arch>` if present;
 `AICHAT_MCP_RUNTIME_DIR` and `KP_LOCAL_MODEL_RUNTIME_DIR` override them. No runtime is required for native files
 or user terminals. Use the tray menu's **退出** before starting a fresh debugging session.
-The Start task (`npm start`) synchronizes the shared AIChat runtime, rebuilds the
+The Start task (`npm start`) reads the shared AIChat runtime directly from local source, rebuilds the
 standalone MCP bundle and Desktop shell, then launches that exact MCP bundle using
 local Node. It stops an identified existing Keepwork MCP via its authenticated admin
 endpoint and verifies the new process PID before opening Desktop. A conflicting
 service or failed build/start aborts startup; no cached or downloaded MCP is selected.
 Development MCP updates are disabled and Desktop owns its process until Quit.
+Uncommitted AIChat runtime edits are supported during startup; the committed packaged
+copy and its provenance stay unchanged. Release builds retain the freshness checks.
 Install dependencies in `apps/mcp-runtime` as well as the repository and Desktop.
 MCP builds without a sibling AIChat checkout use the manifest-verified committed
 runtime copy. The local AIChat page still requires its checkout when
