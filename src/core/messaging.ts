@@ -1,5 +1,6 @@
+import { Circles } from './circles';
 import { MessagingCoordinator, computerIdentity, coordinationKey } from './messagingCoordination';
-import { anyAichatClient, latestAichatClient } from './aichatPresence';
+import { anyAichatClient, latestAichatClient, latestAichatBrainRoot } from './aichatPresence';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -266,11 +267,12 @@ export class MessagingService {
             const target:NicknameTarget={root,channel:group.channel,account:group.account,group:group.id,names:[]};
             targets.set(nicknameKey(target),target);
         };
-        for(const p of this.messageAgents?.()||[])if(p.owner===owner&&(!agentId||p.id===agentId)&&p.messaging?.enabled)for(const g of p.messaging.groups)add(p.root,g);
+        for(const p of this.messageAgents?.()||[])if(p.owner===owner&&(!agentId||p.id===agentId)&&p.messaging)for(const g of p.messaging.groups)add(p.root,g);
+        for(const p of this.messageAgents?.()||[])if(p.owner===owner)for(const g of this.circles.assignments(p))add(p.root,g);
         for(const g of previous?.messaging?.groups||[])add(previous!.root,g);
         const desired=(target:NicknameTarget)=>{
             const binding=[...this.runs.values()].find(r=>r.binding.root===target.root&&r.binding.profile===target.account&&(r.binding.channel||'dingtalk')===target.channel);
-            return binding ? this.availableAgents(binding).filter(p=>p.messaging?.enabled&&p.messaging.groups.some(g=>g.channel===target.channel&&g.account===target.account&&g.id===target.group)).map(p=>p.name).sort() : [];
+            return binding ? this.availableAgents(binding).filter(p=>[...(p.messaging?.groups||[]),...this.circles.assignments(p)].some(g=>g.channel===target.channel&&g.account===target.account&&g.id===target.group)).map(p=>p.name).sort() : [];
         };
         const warnings:string[]=[];
         for(const target of targets.values()) {
@@ -297,8 +299,21 @@ export class MessagingService {
     }
     private groupWorkApproval?: GroupWorkApproval;
     setGroupWorkApproval(approve:GroupWorkApproval) { this.groupWorkApproval=approve; }
+    readonly circles: Circles;
     private messageAgents?: () => MessageAgent[];
-    setMessageAgents(resolve: () => MessageAgent[]) { this.messageAgents = resolve; }
+    async circleRequest(owner:string,input:any) {
+        const agents=(this.messageAgents?.()||[]).filter(p=>p.owner===owner);
+        const previous=agents.flatMap(p=>this.circles.assignments(p));
+        const result=await this.circles.request(owner,String(input.action||'read'),input);
+        if(['apply','deploy','unbind'].includes(input.action)){
+            try{await this.routingChanged();}catch(e){result.warnings=[(e as Error).message];}
+            const root=agents.find(p=>p.id==='default-persona')?.root||'';
+            const warnings=await this.syncAgentNicknames(owner,{root,messaging:{version:1,enabled:true,groups:previous}});
+            if(warnings.length)result.warnings=[...(result.warnings||[]),...warnings];
+        }
+        return result;
+    }
+    setMessageAgents(resolve: () => MessageAgent[]) { this.messageAgents = resolve; for(const p of resolve())this.circles.register(p.owner); }
     private nicknameAssignments = new Map<string, Map<string,string[]>>();
     private nicknameReadErrors = new Map<string,string>();
     private nicknameReads = new Map<string,Promise<void>>();
@@ -326,15 +341,17 @@ export class MessagingService {
         this.nicknameReads.set(key,task);
         try { await task; } finally { this.nicknameReads.delete(key); }
     }
-    private routedAgents(r: Runtime) {
+    private routedAgents(r: Runtime, conversation = '') {
         const available=this.availableAgents(r);
         return available.map(p=>{
             const groups=p.messaging?.enabled ? p.messaging.groups.filter(g=>g.channel===(r.binding.channel||'dingtalk')&&g.account===r.binding.profile) : [];
+            for(const g of this.circles.assignments(p))if(g.channel===(r.binding.channel||'dingtalk')&&g.account===r.binding.profile&&!groups.some(x=>x.id===g.id))groups.push(g);
             // Ambiguous names never acquire permission from a nickname.
             if(available.filter(other=>normalizedAgentName(other.name)===normalizedAgentName(p.name)).length===1)
                 for(const [id,names] of this.nicknameAssignments.get(r.binding.id)||[])
-                    if(names.includes(normalizedAgentName(p.name))&&!groups.some(g=>g.id===id))groups.push({channel:r.binding.channel||'dingtalk',account:r.binding.profile,id,name:id});
-            return {...p,messaging:{version:1 as const,enabled:groups.length>0,groups}};
+                    if(names.includes(normalizedAgentName(p.name))&&!groups.some(g=>g.id===id)
+                        && !p.messaging?.groups.some(g=>g.id===id&&g.channel===(r.binding.channel||'dingtalk')&&g.account===r.binding.profile))groups.push({channel:r.binding.channel||'dingtalk',account:r.binding.profile,id,name:id});
+            return {...p,...(conversation?{prompt:p.prompt+this.circles.context(p,{channel:r.binding.channel||'dingtalk',account:r.binding.profile,id:conversation})}:{}),messaging:{version:1 as const,enabled:groups.length>0,groups}};
         }).filter(p=>p.messaging.enabled);
     }
     private subscriptionConfig(r: Runtime, config: MessageConfig) { return {...config, allGroups:this.availableAgents(r).length > 0}; }
@@ -518,6 +535,13 @@ export class MessagingService {
     private watchers = new Map<() => void, () => void>();
     readonly workers: MessagingWorkers;
     constructor(private home: string, port: number) {
+        this.circles=new Circles(path.join(home,'circles'),{
+            root:owner=>typeof latestAichatBrainRoot==='function'&&latestAichatClient(owner)?latestAichatBrainRoot(owner):(this.messageAgents?.().find(p=>p.owner===owner&&p.id==='default-persona')?.root||''),
+            agents:owner=>(this.messageAgents?.()||[]).filter(p=>p.owner===owner),
+            bindings:owner=>this.list().filter(b=>b.agentOwner===owner||b.peers?.some(p=>p.owner===owner)).map(b=>({...b,channel:b.channel||'dingtalk'})),
+            allowed:(owner,id)=>{const r=this.runs.get(id);return !!r&&r.binding.enabled&&this.gatewayAllowed(r);},
+            pause:(owner,id,group)=>{const r=this.get(id);const peer=r.binding.agentOwner===owner?r.binding.agentId:r.binding.peers?.find(p=>p.owner===owner)?.agentId;if(!peer)throw Error('Channel owner unavailable');this.inboxAction(owner,peer,id,group,'pause');}
+        });
         this.nicknames=new MessagingNicknames(path.join(home,'group-nicknames.json'),{
             read:target=>target.channel==='feishu'?feishuNickname(target.root,target.account,target.group):dingtalkNickname(target.root,target.account,target.group),
             write:(target,nickname)=>target.channel==='feishu'?setFeishuNickname(target.root,target.account,target.group,nickname):setDingtalkNickname(target.root,target.account,target.group,nickname),
@@ -811,6 +835,7 @@ export class MessagingService {
         const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
         const receipt: Receipt = { id, time: Date.now(), state: 'ignored' }; r.receipts.push(receipt); r.receipts = r.receipts.slice(-200);
         const recent=this.rememberMessage(r,message,receipt);
+        if(message.kind!=='direct')for(const owner of new Set([r.binding.agentOwner,...(r.binding.peers||[]).map(p=>p.owner)].filter((x):x is string=>!!x)))this.circles.observe(owner,{channel:r.binding.channel||'dingtalk',account:r.binding.profile,id:message.conversation},{id:message.id,sender:message.sender,name:'',text:message.text,time:message.time,kind:'text'});
         if(message.kind!=='direct' && this.availableAgents(r).length && !message.automated && !automatedText(message.text)) {
             const reservation=id+':'+message.kind;
             r.seen.push(reservation);
@@ -823,7 +848,7 @@ export class MessagingService {
             const {config} = this.rules(r.binding.id);
             if (this.subscriptionKey(r,config) !== r.subscriptions) throw new Error('监听群或称呼开关已变化，请重新启用服务');
             receipt.reason = trigger(message, config, r.since, r.self, true);
-            const candidates = this.routedAgents(r);
+            const candidates = this.routedAgents(r,message.conversation);
             const selfNamed=message.sender===r.self && !message.automated && !automatedText(message.text) && candidates.some(p=>agentNameMentioned(message.text,p.name));
             const agents = ['old','echo'].includes(receipt.reason) || (receipt.reason==='self'&&!selfNamed) ? [] : routeMessageAgents(candidates,message,r.binding.channel||'dingtalk',r.binding.profile);
             if (agents.length) receipt.reason='reply';
@@ -903,7 +928,7 @@ export class MessagingService {
             delete receipt.reason;
             receipt.state = 'running'; this.persist(r);
             const {config,prompt} = this.rules(r.binding.id);
-            const currentAgent=()=>agent ? this.routedAgents(r).find(p=>p.owner===agent.owner&&p.id===agent.id) : undefined;
+            const currentAgent=()=>agent ? this.routedAgents(r,message.conversation).find(p=>p.owner===agent.owner&&p.id===agent.id) : undefined;
             const agentVersion=JSON.stringify(agent);
             if(agent && JSON.stringify(currentAgent())!==agentVersion)throw Error('Agent configuration changed; answer withheld');
             const instructions=agent ? agentBrainInstructions(agent.root,agent.prompt) : '';
@@ -1008,6 +1033,6 @@ export class MessagingService {
             r.error = receipt.reason || 'Task failed';
         } finally { if(workKey){const count=(this.agentWorkCounts.get(workKey)||1)-1;if(count)this.agentWorkCounts.set(workKey,count);else this.agentWorkCounts.delete(workKey);}this.persist(r); }
     }
-    close() { this.closed = true; clearInterval(this.coordinationTimer);for(const c of this.coordinators.values())c.close(); clearTimeout(this.replyTimer); for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.pollAbort?.abort(); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }
+    close() { this.circles.close(); this.closed = true; clearInterval(this.coordinationTimer);for(const c of this.coordinators.values())c.close(); clearTimeout(this.replyTimer); for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.pollAbort?.abort(); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }
 }
 export { defaultMessageConfig, DEFAULT_PROMPT };

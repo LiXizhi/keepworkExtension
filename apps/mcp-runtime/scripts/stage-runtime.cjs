@@ -191,6 +191,7 @@ async function stageRuntime(nodeVersion, target) {
   fs.copyFileSync(path.join(runtimeRoot, 'package-lock.json'), path.join(stageApp, 'package-lock.json'));
   npmCi(stageApp, target);
   fs.copyFileSync(path.join(runtimeRoot, 'dist/cli.cjs'), path.join(stageApp, 'cli.cjs'));
+  require('../../../scripts/pet-companion-stage.cjs').stagePetCompanion(path.join(stageApp, 'pet-companion'), { platform: target.platform, arch: target.arch });
 
   const runtimePackage = {
     name: packageJson.name,

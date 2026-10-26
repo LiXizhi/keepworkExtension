@@ -1,3 +1,4 @@
+import { petCompanionPlugin } from '../../../scripts/pet-companion-build.mjs';
 import { aichatRuntimePlugin } from '../../../scripts/aichat-runtime-build.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -21,7 +22,7 @@ await build({
   format: 'cjs',
   target: 'node22',
   external: ['node-pty', 'playwright-core'],
-  plugins: [aichatRuntimePlugin({ development: process.argv.includes('--development') }), runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir)],
+  plugins: [aichatRuntimePlugin({ development: process.argv.includes('--development') }), runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir), petCompanionPlugin(outdir, { includeRuntime: false })],
   legalComments: 'none',
   logLevel: 'info',
 });

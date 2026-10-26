@@ -7,6 +7,8 @@ const { verifyFreshness } = require('./aichat-runtime-freshness.cjs');
 const defaultSource = path.resolve(__dirname, '../../apps/official/apps/tools/AIChat/runtime');
 const defaultDest = path.resolve(__dirname, '../src/core/vendor/aichat-runtime');
 const hash = s => crypto.createHash('sha256').update(s).digest('hex');
+// Git checkout line endings must not change runtime identity across platforms.
+const readSource = file => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 function runtimeFiles(source) {
     if (!fs.existsSync(source)) throw Error(`AIChat runtime source missing: ${source}. Restore the sibling AIChat checkout or pass its runtime directory explicitly.`);
     const files = fs.readdirSync(source).filter(f => f.endsWith('.mjs')).sort();
@@ -38,7 +40,7 @@ function syncRuntime({ source = defaultSource, dest = defaultDest, check = false
     const manifest = { version: 1, source: 'AIChat/runtime', files: {} };
     const outputs = new Map();
     for (const file of files) {
-        const input = fs.readFileSync(path.join(source, file), 'utf8');
+        const input = readSource(path.join(source, file));
         const output = ts.transpileModule(input.replace(/(from\s+['"][^'"]+)\.mjs(['"])/g, '$1.cjs$2'), {
             fileName: file.replace(/\.mjs$/, '.js'),
             compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, allowJs: true }
@@ -55,7 +57,7 @@ function syncRuntime({ source = defaultSource, dest = defaultDest, check = false
         const revision = freshness({ source, previous, changed });
         if (revision) manifest.sourceRevision = revision;
         if (JSON.stringify(runtimeFiles(source)) !== JSON.stringify(files) || files.some(file =>
-            hash(fs.readFileSync(path.join(source, file))) !== manifest.files[file].source)) {
+            hash(readSource(path.join(source, file))) !== manifest.files[file].source)) {
             throw Error('AIChat runtime changed during sync; packaged runtime left unchanged. Retry.');
         }
     }

@@ -18,3 +18,5 @@ release-manifest.json
 .idea
 .test-runtime/
 temp/
+
+apps/pet-companion/runtime-staging/

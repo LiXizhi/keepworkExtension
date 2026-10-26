@@ -9,6 +9,8 @@ const { defaultBrainFolder } = require('./brainFolder.cjs');
 const { checkGit, installGit } = require('./gitSetup.cjs');
 const { createUpdateWindow } = require('./updateWindow.cjs');
 const { createPetWindow } = require('./petWindow.cjs');
+const { connectPermissionPet } = require('../../../src/pet/permissionClient.cjs');
+let disconnectPermissionPet: (() => void) | undefined;
 const { RuntimeSupervisor } = require('./runtime.cjs');
 const { ENTRY, trustedPage, assertSender, externalUrl } = require('./security.cjs');
 const { MediaGrants, installPermissions } = require('./permissions.cjs');
@@ -349,7 +351,7 @@ function menu() {
     { label: '显示桌面宠物', type: 'checkbox', checked: settings.petVisible, click: (item: any) => {
       settings.petVisible = item.checked; atomicJson(settingsFile, settings);
       if (!item.checked) floatingPet?.hide(true);
-      else if (liveWindow() && !liveWindow()!.isVisible()) floatingPet?.show();
+      else if (liveWindow()) floatingPet?.show();
       else if (!liveWindow() && !opening) opening = openWindow(true).finally(() => { opening = null; });
       menu();
     } },
@@ -604,6 +606,7 @@ else {
         current.webContents.send('aichat-desktop:pet-command', command);
       },
     });
+    disconnectPermissionPet = connectPermissionPet(floatingPet);
     setupBridge();
     const icon = appIcon.resize({ width: process.platform === 'darwin' ? 22 : 16 });
     tray = new Tray(icon); tray.setToolTip(PRODUCT_NAME); tray.on('click', show); menu();
@@ -642,6 +645,7 @@ else {
     if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }
     if (quitting) return;
     event.preventDefault(); quitting = true; floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
+    disconnectPermissionPet?.();
     if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }
     void (async () => {
       try { await runtime?.restarting; await runtime?.starting; } catch { /* Finish shutdown after failed startup. */ }

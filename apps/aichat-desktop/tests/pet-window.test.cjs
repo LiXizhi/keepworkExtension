@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { createPetWindow, projectState, clampBounds } = require('../src/petWindow.cjs');
+const { createPetWindow, projectState, clampBounds } = require('../../../src/pet/petWindow.cjs');
 
 test('pet projection accepts bounded raster bytes without allowing active image payloads', () => {
   const project = imageData => projectState({ version: 1, context: 'chat', pet: { imageData, bgSize: '400% 400%', bgPos: '66.667% 100%' } }).pet;
@@ -36,6 +36,7 @@ function fixture() {
 test('pet window remains single-instance, transparent/topmost and restores after hiding without requesting microphone restart', async () => {
   const h = fixture(); h.pet.show(); h.pet.show(); assert.equal(h.windows.length, 1);
   const w = h.windows[0]; assert.equal(w.options.transparent, true); assert.equal(w.options.alwaysOnTop, true);
+  assert.equal(w.options.minimizable, false); assert.equal(w.options.maximizable, false);
   assert.equal(w.options.webPreferences.sandbox, true); assert.equal(w.options.webPreferences.nodeIntegration, false);
   assert.equal(w.bounds.x, 0); assert.equal(w.bounds.y, 0);
   await h.invoke('expand', { expanded: true }); assert.equal(w.bounds.width, 1200); assert.ok(w.bounds.x + w.bounds.width <= 1200);
@@ -150,7 +151,7 @@ test('pet target toggle crosses the real preload and native IPC allowlists', asy
     contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'desktopPet'); api = value; } },
     ipcRenderer: { invoke(channel, action, args) { assert.equal(channel, 'aichat-desktop:pet-v1'); return h.invoke(action, args); } },
   };
-  const source = fs.readFileSync(require.resolve('../src/pet-preload.cjs'), 'utf8');
+  const source = fs.readFileSync(require.resolve('../../../src/pet/pet-preload.cjs'), 'utf8');
   try {
     vm.runInNewContext(source, { process: { isMainFrame: true }, require: () => electron });
     const switched = api.action('toggle-target', { context: 'persona' });
@@ -168,4 +169,19 @@ test('pet target toggle crosses the real preload and native IPC allowlists', asy
     vm.runInNewContext(source, { process: { isMainFrame: false }, require: () => electron });
     assert.equal(api, undefined, 'subframes must not receive the pet bridge');
   } finally { h.pet.dispose(); }
+});
+
+
+test('screenshot bubble is independent of chat; validates identity and hides before granting', async () => {
+ const h=fixture(); h.pet.show();
+ const pending=h.pet.requestPermission({id:'capture-1',client:'PPT teacher'});
+ const w=h.windows[0]; assert.equal(w.state.permission.client,'PPT teacher'); assert.ok(w.state.petTop>=250);
+ await assert.rejects(h.invoke('permission-choice',{id:'stale',choice:'always'}),/expired/);
+ await assert.rejects(h.invoke('permission-choice',{id:'capture-1',choice:'once'},{sender:{}}),/Untrusted/);
+ await h.invoke('permission-choice',{id:'capture-1',choice:'once'});
+ assert.equal(await pending,'once'); assert.equal(w.shown,false); assert.equal(w.state.permission,null);
+ h.pet.restorePermission(); assert.equal(w.shown,true); h.pet.dispose();
+});
+test('hiding or disposing permission pet cancels pending approval', async () => {
+ for(const operation of ['hide','dispose']) { const h=fixture(); const pending=h.pet.requestPermission({id:'capture',client:'teacher'}); h.pet[operation](); await assert.rejects(pending,/hidden|closed/); if(operation!=='dispose')h.pet.dispose(); }
 });

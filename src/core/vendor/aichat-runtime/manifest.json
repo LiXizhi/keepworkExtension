@@ -7,8 +7,8 @@
       "output": "90e88f0f46e49385abf925082b11c8bddba157c40c53d7206efad40f1b029cd6"
     },
     "completion.mjs": {
-      "source": "4036e31ae39f724ce023298f58445b0206a4f9014f7bd29c89ad157cfecd09e3",
-      "output": "bfa731789a33a1f9a3c00f8f7a9045ec389a100460ecfa408ba6153ababe5a89"
+      "source": "3ad0eafa5329e89487778c57cfc4a8ee1ce31cb1fb0b0b03aed770fd098a0cf9",
+      "output": "75abb5cc9e6051f3a940f51b9c2132fdaa95bed0bc8992cfd063864168d73ad8"
     },
     "context.mjs": {
       "source": "d053875cb9316780e76ad483c57e694b5bdc567391839f3102a10244fde57f6d",
@@ -18,9 +18,49 @@
       "source": "6e41bbc01b4fa96a894eeb713f28cdaf82e4878144d6efa851a170fbe994db13",
       "output": "27cde4351a948c723332f83f2fd480c2cc75566b16f950e86f90278bb08a605a"
     },
+    "i18n.mjs": {
+      "source": "558af238924c2d9518fd92ba19bf0ad4c1d191e0a3df6d4bb6dc0076cad35519",
+      "output": "2649e6d01359f1cc917b48b035687e33b0127f8a3565b8d811956449043297cd"
+    },
+    "model_service_adapter.mjs": {
+      "source": "552311ba1dab8f5f3a2a7409fc9f0d5c9ea73a9d5891d65510c57a4a19bf173b",
+      "output": "5293c44bd03241e3e15b99405aaf2b408709580d6dee81659d4607714b41c0a5"
+    },
+    "package_registry.mjs": {
+      "source": "15bfb6eff54eae0200ba55c4102f6b5e45e8afd0c2e52d1364a2227ff91aabd6",
+      "output": "56351f381518b25c17534be3c99859a805816064b1340b765f908f62cbbb9595"
+    },
+    "package_schema.mjs": {
+      "source": "ef27f0d8504d494c2084ad9d46d6427105c2034c4a35125f8c41816a9c57c291",
+      "output": "47d48464cb7524985a6a4aee3ea8671401657bd66153729b4a36c234017efa98"
+    },
+    "package_validation.mjs": {
+      "source": "7625ca2bb5943d57dba5d2779b2be87a23920900b3822bd79a561bb9a8d23e91",
+      "output": "3558191ff63df8fb12b732a77fa6e54ff13011e656fa8d74624973710a0563f8"
+    },
+    "packages.mjs": {
+      "source": "094cb119ed99b3d39524bed8cd8af82e18af13ddcfbcc3dff915d1a9de0d51c0",
+      "output": "afb760dd08f6d168d9935b3dc397610bb0a9b2ebfbf40efdb9fe1a0d10cc3b70"
+    },
+    "platform_turn.mjs": {
+      "source": "2a586363cee548f0cd32647d31ef1f71ab2e148258917a4cfc59a984fdefd5f4",
+      "output": "ce8175383e8fd4a0b3f72f55e1249842d1e9ab7bc87dd1046133b7a2354e20d8"
+    },
+    "plugin_host.mjs": {
+      "source": "14b4366f49179de8f281c2df7618fb8b381850abbacd056edab7950107cf5429",
+      "output": "7ac52503da32f6699c93153a27309dea4246a20f1a653fc0834ace9471e1448f"
+    },
+    "profile_resolver.mjs": {
+      "source": "3456cbf1dba43ceaf6aa542cdbabacdc38cae6a9f4422392988e009467736e4e",
+      "output": "eb5ec17715a2875561b4f4ecc365f9409d21bea580b2902baae133939ebf548f"
+    },
     "sdk_adapter.mjs": {
       "source": "f3f68f3c4a2357512e097e3117059754fc544524d00e375b766332495fe354ed",
       "output": "f7d11a475b756ed1d45e29d9e4814cd594a1800c79e5122475cc727e4e2af510"
+    },
+    "service_contracts.mjs": {
+      "source": "b6c0a58fddc6218baac68227b8d8d709a8db85abd8056b8289b78396b88a477b",
+      "output": "f7ed3263b498a5bd443b5899e6ba17c533810e7977b057b110b973ed31c2b359"
     },
     "skills.mjs": {
       "source": "81609a4343770eef88ac6cdaf5294ed6b9b7f9cdcea10873599a25efe58a3c8d",
@@ -28,7 +68,7 @@
     }
   },
   "sourceRevision": {
-    "commit": "5553503c0a04cc2a680af548d7bcd15f7ca8dc39",
+    "commit": "ccb6ab90523b96704cf869fdf1378fb924cd9bb1",
     "dirty": false
   }
 }

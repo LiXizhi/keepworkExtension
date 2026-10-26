@@ -1,3 +1,5 @@
+import { petPermissionBridge, screenshotPermission } from '../core/petPermissionBridge';
+import { computerController } from '../core/computer';
 import { hostname } from 'node:os';
 import { registerMcpPresence } from './aichatPresence';
 import { attachAichatEvents } from './aichatEvents';
@@ -452,6 +454,27 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                 return;
             }
 
+            if (pathname === '/admin/screenshot-permission') {
+                if (!assertAuth(req, url, res)) return;
+                const origin = String(req.headers.origin || '');
+                if ((origin && !originAllowed(origin)) || (req.method === 'POST' && (!origin || !originAllowed(origin)))) { sendJson(res,403,{error:'Explicit allowed Origin required'}); return; }
+                const abort = new AbortController();
+                res.once('close', () => { if (!res.writableFinished) abort.abort(); });
+                try {
+                    if (req.method === 'POST') {
+                        const body = JSON.parse((await readBody(req)) || '{}');
+                        if (typeof body.alwaysAllowScreenshots !== 'boolean' || Object.keys(body).length !== 1) throw Error('Expected alwaysAllowScreenshots boolean');
+                        if (!body.alwaysAllowScreenshots) screenshotPermission.disable();
+                        else {
+                            if (computerController.isBusy) throw Error('Desktop is busy');
+                            try { await screenshotPermission.authorize('settings', 'Keepwork screenshot settings', abort.signal, true); } finally { petPermissionBridge.restorePet(); }
+                        }
+                    } else if (req.method !== 'GET') { sendJson(res,405,{error:'Method not allowed'}); return; }
+                    sendJson(res,200,screenshotPermission.status());
+                } catch (error) { if (!res.destroyed) sendJson(res,400,{error:error instanceof Error ? error.message : 'Screenshot setting failed'}); }
+                return;
+            }
+
             if (pathname === '/admin/status' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
                 sendJson(res, 200, {
@@ -516,7 +539,9 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     parsedBody = raw ? JSON.parse(raw) : undefined;
                 }
 
-                await requestContext.run({ sessionId, origin, userAgent }, async () => {
+                const requestAbort = new AbortController();
+                res.once('close', () => { if (!res.writableFinished) requestAbort.abort(new Error('MCP client disconnected')); });
+                await requestContext.run({ sessionId, origin, userAgent, signal: requestAbort.signal }, async () => {
                     if (sessionId && transports.has(sessionId)) {
                         touchSession(sessionId);
                         const transport = transports.get(sessionId)!;
@@ -549,6 +574,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                             onsessionclosed: async (sid) => {
                                 transports.delete(sid);
                                 removeSession(sid);
+                                screenshotPermission.cancelOwner(sid);
                                 void managedBrowsers.closeOwner(sid);
                             },
                         });
@@ -557,6 +583,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                             if (sid) {
                                 transports.delete(sid);
                                 removeSession(sid);
+                                screenshotPermission.cancelOwner(sid);
                                 void managedBrowsers.closeOwner(sid);
                             }
                         };
@@ -603,7 +630,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
     });
 
     const pruneTimer = setInterval(() => {
-        pruneIdleSessions(activeMcpStreams);
+        pruneIdleSessions(new Set([...activeMcpStreams, ...(screenshotPermission.waitingOwner ? [screenshotPermission.waitingOwner] : [])]));
         terminalSessions.prune();
         void managedBrowsers.prune();
     }, 60_000);
@@ -624,11 +651,13 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         startedAt: runtime.startedAt,
         name: SERVER_NAME,
     });
+    await petPermissionBridge.start().catch(() => { /* A capture reports companion startup failure. */ });
     startParacraftWatch();
     startCalendarWatch();
     clientSupervisor.start();
 
     const close = async () => {
+        screenshotPermission.close(); petPermissionBridge.close();
         clientSupervisor.close();
         clearInterval(pruneTimer);
         stopParacraftWatch();

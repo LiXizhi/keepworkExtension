@@ -67,7 +67,7 @@ function createBuilderConfig(localConfig = {}, helperRoot = path.resolve(__dirna
       from: path.resolve(helperRoot, runtimeDir),
       to: 'local-model-runtime',
     }] : [],
-    asarUnpack: [
+    asarUnpack: ['dist/pet-companion/**',
       'node_modules/playwright-core/**/*',
       'node_modules/node-pty/build/Release/**/*',
       'node_modules/node-pty/prebuilds/win32-x64/**/*',

@@ -78,7 +78,7 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
             announced.set(call.id || `index:${call.index ?? announced.size}`, call);
         const calls = [...announced.values()].map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
         const content = responseText(response);
-        emit({ type: 'message', content, iteration });
+        await emit({ type: 'message', content, iteration, message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) } });
         if (!calls.length)
             return response;
         messages.push({ role: 'assistant', content, tool_calls: calls });
@@ -116,8 +116,10 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
             emit({ type: 'tool', status: 'done', id: call.id, name });
             results.push({ role: 'tool', tool_call_id: call.id, content: typeof result === 'string' ? result : JSON.stringify(result ?? null) });
         }
-        for (const result of results)
+        for (const result of results) {
             messages.push(result);
+            await emit({ type: 'tool-result', message: result, iteration });
+        }
         if (options._session?._restartSignal)
             return content;
     }

@@ -23,7 +23,7 @@ ${dashboardCliStyles}
 <p id="notice" role="status" aria-live="polite"></p>
 <section class="view" id="view-overview">
 <nav class="toolbar" aria-label="Service controls"><button id="refresh">Refresh</button><button id="copy">Copy MCP URL</button><a href="https://keepwork.com/chat" target="_blank" rel="noopener noreferrer">Open AIChat</a><button id="stop" disabled>Stop service</button></nav>
-<h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl><h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
+<label><input id="screenshot-permission" type="checkbox"> 始终允许桌面截图 / Always allow screenshots</label><p id="screenshot-permission-status" role="status"></p><h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl><h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
 <section class="view" id="view-instance-messaging" hidden><div id="im-serving" class="im-serving"><p class="im-brain">当前第二大脑：正在读取…</p></div><h2>通讯渠道</h2><div class="channel-controls"><label><input id="follow-im-clients" type="checkbox" disabled> 随客户端自动监督</label><span class="muted">每 5 分钟检查</span></div><details class="channel-help"><summary>监督设置说明</summary><p class="muted">本机默认开启：客户端进程运行且 CLI 授权有效时，恢复已启用的分身；这不代表桌面客户端已登录。关闭后，分身可独立运行。授权时间由 CLI 提供，每分钟更新。</p><p id="supervisor-status" class="muted"></p></details><div id="channel-status" class="channel-grid" aria-live="polite">正在读取渠道状态…</div></section>
 <section class="view" id="view-clients" hidden><div id="clients" class="scroll"></div></section>
 <section class="view" id="view-history" hidden><div id="history" class="scroll"></div>
@@ -245,6 +245,15 @@ byId('follow-im-clients').onchange=async()=>{
   finally{supervisorSaving=false;await refreshChannels();}
 };
 async function refreshChannels(){try{const data=await request('/admin/channels');renderChannels(data.channels||[]);renderSupervisor(data.supervisor);}catch{byId('im-serving').textContent='当前第二大脑：读取失败';byId('channel-status').textContent='渠道状态读取失败，请检查服务或登录授权。';}}
+let screenshotSettingBusy = false;
+byId('screenshot-permission').onchange = async event => {
+  const checkbox = event.target, enabled = checkbox.checked;
+  screenshotSettingBusy = true; checkbox.disabled = true;
+  byId('screenshot-permission-status').textContent = enabled ? '请在桌面宠物上选择 / Choose in the desktop pet bubble' : '';
+  try { const value = await request('/admin/screenshot-permission', 'POST', {alwaysAllowScreenshots:enabled}); checkbox.checked = value.alwaysAllowScreenshots; }
+  catch (error) { checkbox.checked = !enabled; byId('screenshot-permission-status').textContent = error.message; }
+  finally { screenshotSettingBusy = false; checkbox.disabled = false; }
+};
 async function refresh() {
   if (busy || stopped) return;
   busy = true; byId('refresh').disabled = true;
@@ -252,6 +261,10 @@ async function refresh() {
   try {
     const status = await request('/admin/status');
     metadata(serverMetadata(status));
+    if (!screenshotSettingBusy) {
+      try { const permission = await request('/admin/screenshot-permission'); byId('screenshot-permission').checked = permission.alwaysAllowScreenshots; byId('screenshot-permission').disabled = false; }
+      catch { byId('screenshot-permission').disabled = true; }
+    }
     if(requestedView==='instance-messaging')void refreshChannels();
     const clientRows = status.clients.map(client => [client.sessionId.slice(0,8),client.origin,client.connectedAt,client.lastSeenAt,client.callCount]);
     for (const target of ['clients','overview-clients']) table(target,['Session','Origin','Connected','Last seen','Calls'],clientRows,'No connected AIChat sessions.');

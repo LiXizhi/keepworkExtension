@@ -1,3 +1,4 @@
+import { petCompanionPlugin } from '../../../scripts/pet-companion-build.mjs';
 import { aichatRuntimePlugin } from '../../../scripts/aichat-runtime-build.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -33,7 +34,7 @@ const builds = [
     ...common,
     entryPoints: [path.join(extensionRoot, 'src/cli.ts')],
     outfile: path.join(outdir, 'cli.js'),
-    plugins: [...common.plugins, creationSkillPlugin(outdir)],
+    plugins: [...common.plugins, creationSkillPlugin(outdir), petCompanionPlugin(outdir)],
     external: ['node-pty', 'playwright-core'],
   },
 ];

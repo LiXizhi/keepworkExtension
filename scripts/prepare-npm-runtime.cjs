@@ -10,6 +10,7 @@ delete pkg.scripts; delete pkg.devDependencies; delete pkg.private;
 pkg.repository = { type: 'git', url: 'git+https://github.com/LiXizhi/keepworkExtension.git', directory: 'apps/mcp-runtime' };
 fs.mkdirSync(dest, { recursive: true });
 fs.cpSync(path.join(source, 'dist'), path.join(dest, 'dist'), { recursive: true });
+require('./pet-companion-stage.cjs').stagePetCompanion(path.join(dest,'dist/pet-companion'), { universal:true });
 fs.copyFileSync(path.join(source, 'README.md'), path.join(dest, 'README.md'));
 fs.writeFileSync(path.join(dest, 'package.json'), JSON.stringify(pkg, null, 2));
 console.log(dest);

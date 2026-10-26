@@ -1,3 +1,5 @@
+import { screenshotPermission, petPermissionBridge } from './petPermissionBridge';
+import { captureDesktop } from './desktopCapture';
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
@@ -121,16 +123,20 @@ try {
 
 export class ComputerController {
     private busy = false;
-    constructor(private platform = process.platform, private execute = platform === 'darwin' ? executeMac : executeWindows) {}
+    constructor(private platform = process.platform, private execute = platform === 'darwin' ? executeMac : executeWindows, private screenshot?: (owner: string, client: string, signal?: AbortSignal) => Promise<string>) {}
+    get isBusy() { return this.busy; }
 
-    async run(input: unknown, owner = 'local') {
+    async run(input: unknown, owner = 'local', signal?: AbortSignal, client = 'Keepwork MCP client') {
         const args = computerSchema.parse(input);
-        if (args.action === 'status') return { content: [{ type: 'text' as const, text: JSON.stringify({ supported: this.platform === 'win32' || this.platform === 'darwin', platform: this.platform, experimental: this.platform === 'darwin', scope: 'primary-screen', permission: this.platform === 'darwin' ? 'native session consent; expires after 24 hours with no idle timeout; hold Escape or move pointer to top-left to block the next action; requires macOS Screen Recording, Accessibility and Automation permissions' : 'revocable native session consent; expires after 2 idle minutes', limitations: this.platform === 'darwin' ? ['no scroll or right-click', 'no reclaim panel; local stop checked between actions', 'typing depends on application and keyboard support', 'screenshots normalized to screen points'] : [], unattended: false }) }] };
+        if (args.action === 'status') return { content: [{ type: 'text' as const, text: JSON.stringify({ screenshotPermission: screenshotPermission.status(), supported: this.platform === 'win32' || this.platform === 'darwin', platform: this.platform, experimental: this.platform === 'darwin', scope: 'primary-screen', permission: this.platform === 'darwin' ? 'native session consent; expires after 24 hours with no idle timeout; hold Escape or move pointer to top-left to block the next action; requires macOS Screen Recording, Accessibility and Automation permissions' : 'revocable native session consent; expires after 2 idle minutes', limitations: this.platform === 'darwin' ? ['no scroll or right-click', 'no reclaim panel; local stop checked between actions', 'typing depends on application and keyboard support', 'screenshots normalized to screen points'] : [], unattended: false }) }] };
         if (this.platform !== 'win32' && this.platform !== 'darwin') throw new Error('Desktop control supports Windows and experimental macOS only');
-        if (this.busy) throw new Error('Desktop is busy; no actions are queued');
+        if (this.busy || screenshotPermission.status().pending) throw new Error('Desktop is busy; no actions are queued');
         this.busy = true;
         try {
-            const output = await this.execute(args, owner);
+            signal?.throwIfAborted();
+            const output = args.action === 'screenshot' && this.screenshot
+                ? await this.screenshot(owner, client, signal) : await this.execute(args, owner);
+            signal?.throwIfAborted();
             if (output) {
                 const shot = JSON.parse(output);
                 return { content: [
@@ -186,4 +192,10 @@ function executeWindows(args: ComputerArgs, owner: string): Promise<string> {
     });
 }
 
-export const computerController = new ComputerController();
+export const computerController = new ComputerController(process.platform, undefined, async (owner, client, signal) => {
+    try {
+        await screenshotPermission.authorize(owner, client, signal);
+        signal?.throwIfAborted();
+        return await captureDesktop(signal);
+    } finally { petPermissionBridge.restorePet(); }
+});

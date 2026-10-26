@@ -106,8 +106,18 @@
       if (openingExit) $('exit-cancel').focus();
     }
     if (closingExit) $('pet').focus();
+    const permission = state.permission;
+    $('permission-bubble').hidden = !permission;
+    if (permission) {
+      $('bubble').hidden = true; $('panel').hidden = true; $('exit-bubble').hidden = true;
+      $('permission-client').textContent = `请求方：${permission.client}`;
+    }
     positionLayers();
   }
+  for (const button of document.querySelectorAll('[data-permission]')) button.onclick = async () => {
+    const id = state.permission?.id; if (!id) return;
+    await api.action('permission-choice', { id, choice: button.dataset.permission });
+  };
   function action(name, args = {}) {
     const context = state.context;
     const task = queue.then(async () => {
@@ -121,7 +131,7 @@
     return queue;
   }
   async function expand(value) {
-    if (state.exitPrompt) return;
+    if (state.exitPrompt || state.permission) return;
     const opening = value && !expanded;
     expanded = value;
     if (opening && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
@@ -165,7 +175,7 @@
     void api.action('exit-confirm', { id: state.exitPrompt.id }).catch(error => { $('exit-status').textContent = error.message; });
   };
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape') { if (state.exitPrompt) void api.action('exit-cancel'); else void expand(false); }
+    if (event.key === 'Escape') { if (state.permission) { void api.action('permission-choice', { id: state.permission.id, choice: 'cancel' }); return; } if (state.exitPrompt) void api.action('exit-cancel'); else void expand(false); }
     if (event.key === 'Tab' && state.exitPrompt) {
       event.preventDefault();
       (document.activeElement === $('exit-cancel') && !$('exit-confirm').disabled ? $('exit-confirm') : $('exit-cancel')).focus();
@@ -190,7 +200,7 @@
   $('pet').addEventListener('click', event => { if (event.detail === 0) void expand(!expanded); });
   $('pet').addEventListener('contextmenu', event => { event.preventDefault(); void api.action('menu'); });
   document.addEventListener('mousemove', event => {
-    const next = !!pointer || !!event.target.closest('#pet, #panel, #bubble, #exit-bubble');
+    const next = !!pointer || !!event.target.closest('#pet, #panel, #bubble, #exit-bubble, #permission-bubble');
     if (next !== interactive) { interactive = next; void api.action('hit-test', { interactive }); }
   });
   api.subscribe(render); void api.action('state').then(render);

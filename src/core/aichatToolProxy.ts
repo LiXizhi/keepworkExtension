@@ -26,9 +26,22 @@ export const AICHAT_TOOL_PROXY_SOURCE = String.raw`
                 else if (['tools/list', 'tools/call'].includes(message.method)) {
                     const progressToken = message.params?._meta?.progressToken;
                     if (message.method === 'tools/call' && progressToken !== undefined) write({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken, progress: 0, message: 'Running the bound Keepwork tool; any webpage confirmation must be completed in the original AIChat page.' } });
-                    const response = await fetch(endpoint, { method: 'POST', headers: { Authorization: 'Bearer ' + capability, 'Content-Type': 'application/json' }, body: JSON.stringify({ method: message.method, params: message.params }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(125000)]) });
-                    if (!response.ok) throw new Error('AIChat bridge disconnected; reconnect the original conversation');
-                    result = await response.json();
+                    const payload = JSON.stringify({ method: message.method, params: message.params });
+                    const screenshot = message.method === 'tools/call' && message.params?.arguments?.name === 'computer_use' && message.params?.arguments?.arguments?.action === 'screenshot';
+                    if (screenshot) {
+                        // No fetch header deadline while waiting for the desktop pet.
+                        result = await new Promise((resolve,reject) => {
+                            const req = require('node:http').request(endpoint,{method:'POST',signal:controller.signal,headers:{Authorization:'Bearer '+capability,'Content-Type':'application/json'}},res=>{
+                                let text='',size=0;res.setEncoding('utf8');res.on('error',reject);
+                                res.on('data',chunk=>{size+=Buffer.byteLength(chunk);if(size>8_000_000){req.destroy(Error('Oversized screenshot result'));return;}text+=chunk;});
+                                res.on('end',()=>{try{if(res.statusCode!==200)throw Error('AIChat bridge disconnected');resolve(JSON.parse(text));}catch(error){reject(error);}});
+                            });req.on('error',reject);req.end(payload);
+                        });
+                    } else {
+                        const response = await fetch(endpoint, { method: 'POST', headers: { Authorization: 'Bearer ' + capability, 'Content-Type': 'application/json' }, body: payload, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(125000)]) });
+                        if (!response.ok) throw new Error('AIChat bridge disconnected; reconnect the original conversation');
+                        result = await response.json();
+                    }
                 } else { write({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Unsupported method' } }); return; }
                 write({ jsonrpc: '2.0', id: message.id, result });
             } catch { write({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'AIChat bridge unavailable; operation was not retried' } }); } finally { active.delete(message.id); }

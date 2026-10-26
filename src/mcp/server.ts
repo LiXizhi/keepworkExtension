@@ -75,7 +75,7 @@ export function createMcpServer(runtime: ServerRuntime): McpServer {
     });
 
     registerBrowserTools(server);
-    registerComputerTools(server);
+    registerComputerTools(server, runtime);
     registerCreationTools(server, runtime);
     registerCreationGuide(server);
     if (runtime.includeSetupGuides) registerAgentGuide(server);

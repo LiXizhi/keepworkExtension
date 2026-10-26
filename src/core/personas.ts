@@ -24,6 +24,7 @@ const ownerTools = [
     ['run_terminal','Run a command after explicit owner approval',{command:{type:'string'}}],
     ['search_agent_groups','Find groups on an existing account; omit binding to list accounts. Only use for owner requests.',{binding:{type:'string'},query:{type:'string'}}],
     ['assign_agent_group','Assign a custom persona by editing your own group nickname, only after group search. Requires explicit owner approval.',{agentId:{type:'string'},binding:{type:'string'},group:{type:'string'},remove:{type:'boolean'}}],
+    ['circles','Pass expectedScope from read to later requests. Read/design circles and manage their linked groups. Read or preview first; apply/deploy/publish/send/resolve/unbind require owner approval. Refresh imports X- groups without modifying external groups. pullPreview previews current group metadata and roles for local apply. publishPreview/publish require the platform group owner or administrator. Agents use their verified human owner CLI identity, never a virtual member. Never claim success without a receipt.',{action:{type:'string'},expectedScope:{type:'string'},receiptId:{type:'string'},organization:{type:'object'},expectedRevision:{type:'integer'},circleId:{type:'string'},ticket:{type:'string'},channel:{type:'string'},account:{type:'string'},query:{type:'string'},contacts:{type:'boolean'},groupId:{type:'string'},type:{type:'string'},requestId:{type:'string'},text:{type:'string'},replyId:{type:'string'},cursor:{type:'string'},confirm:{type:'boolean'},resolutions:{type:'object'}}],
     ['read_inbox','Read this Agent’s linked DingTalk inbox',{binding:{type:'string'},conversation:{type:'string'}}],
 ].map(([name,description,properties])=>({type:'function',function:{name,description,parameters:{type:'object',properties}}}));
 const roleTools = ownerTools.map(tool=>['read_file','list_dir','write_file','run_terminal'].includes(String(tool.function.name))?{type:'function',function:{...tool.function,
@@ -248,6 +249,12 @@ export class Personas {
     private groupSearches = new Map<string,Set<string>>();
     private async ownerTool(p:Persona,name:string,args:any,signal:AbortSignal){
         if(signal.aborted)throw Error('已取消');
+        if(name==='circles'){
+            const action=String(args?.action||'read');
+            if(!['read','preview','search','deployPreview','publishPreview','pullPreview','membersPreview','history'].includes(action))await this.ownerApproval(p,{tool:'circles',...args},signal);
+            if(signal.aborted)throw Error('已取消');
+            return this.messaging.circleRequest(p.owner,{...args,action});
+        }
         if(name==='search_agent_groups') {
             if(!args?.binding)return this.messaging.agentBindings(p.owner,p.id).map(b=>({binding:b.id,channel:b.channel,account:b.profile}));
             const binding=String(args.binding),groups=await this.messaging.agentGroups(p.owner,p.id,binding,String(args.query||''));

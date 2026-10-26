@@ -79,6 +79,8 @@ jobs:
         run: |
           npm ci
           npm ci --prefix apps/mcp-runtime
+          npm ci --prefix apps/pet-companion
+          npm run prepare:runtime --prefix apps/pet-companion
       - name: Typecheck shared source and test release scripts
         run: |
           npx --no-install tsc -p ./ --noEmit

@@ -43,6 +43,11 @@ jobs:
         with: { node-version: '22.23.2', architecture: '${{ matrix.arch }}' }
       - run: npm ci
       - run: npm ci --prefix apps/mcp-runtime
+      - run: npm ci --prefix apps/pet-companion
+      - run: npm run prepare:runtime --prefix apps/pet-companion
+        if: runner.os != 'Linux'
+      - run: npm run prepare:all --prefix apps/pet-companion
+        if: runner.os == 'Linux'
       - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
       - run: npm run package --prefix apps/mcp-runtime -- --commit "$GITHUB_SHA" --prefix 'keepwork/mcp-stable/${{ needs.gate.outputs.version }}/'
       - uses: actions/upload-artifact@v4
@@ -60,6 +65,11 @@ jobs:
         with: { node-version: 24 }
       - run: npm ci
       - run: npm ci --prefix apps/mcp-runtime
+      - run: npm ci --prefix apps/pet-companion
+      - run: npm run prepare:runtime --prefix apps/pet-companion
+        if: runner.os != 'Linux'
+      - run: npm run prepare:all --prefix apps/pet-companion
+        if: runner.os == 'Linux'
       - run: npm ci --prefix apps/vscode-extension
       - run: npm run build --prefix apps/mcp-runtime
       - run: node scripts/prepare-npm-runtime.cjs

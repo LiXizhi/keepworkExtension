@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 async function main() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-pet-smoke-'));
-  const source = path.resolve(__dirname, '../src');
+  const source = path.resolve(__dirname, '../../../src/pet');
   const entry = path.join(directory, 'main.cjs');
   fs.writeFileSync(entry, `
     const { app, BrowserWindow, ipcMain, screen, Menu } = require('electron');
@@ -54,6 +54,8 @@ async function main() {
     page.on('pageerror', error => errors.push(error.message));
     await page.locator('#pet').waitFor();
     assert.equal(await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isAlwaysOnTop()), true);
+    assert.equal(await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isMinimizable()), false);
+    assert.equal(await application.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), true);
     const bounds = await application.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0]; global.resizeCount = 0;
       window.on('resize', () => { global.resizeCount++; }); return window.getBounds();

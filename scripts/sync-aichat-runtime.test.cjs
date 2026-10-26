@@ -36,6 +36,16 @@ test('checks reject stale source without repairing it; sync handles added/delete
   assert.throws(() => syncRuntime(options), /source missing/);
   assert.throws(() => syncRuntime({ ...options, check: true }), /source missing/);
 });
+test('canonical CRLF and LF checkouts share source hashes and compiled output', t => {
+  const options = fixture(t);
+  syncRuntime(options);
+  const before = fs.readFileSync(path.join(options.dest, 'manifest.json'), 'utf8');
+  fs.writeFileSync(path.join(options.source, 'agent.mjs'), 'export const value = 1;\r\n');
+  syncRuntime({ ...options, check: true });
+  syncRuntime({ ...options, freshness: ({ changed }) => { assert.equal(changed, false); } });
+  assert.equal(fs.readFileSync(path.join(options.dest, 'manifest.json'), 'utf8'), before);
+});
+
 test('default source resolves independently of current working directory', () => {
   execFileSync(process.execPath, [path.join(__dirname, 'sync-aichat-runtime.cjs'), '--check'], { cwd: os.tmpdir() });
 });

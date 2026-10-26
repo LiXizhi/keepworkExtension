@@ -96,7 +96,7 @@ export class AichatToolBridge {
         if (!this.policy(owner, id, name, backend ? 'backend' : definition ? 'web' : 'native', args)) return errorResult('Tool is unavailable in the current agent mode');
         if (!definition) {
             const native = this.nativeFor(owner, id);
-            try { const tools = await native?.list(); if (tools?.some(t => t.name === name)) return await native!.call(name, args); } catch { return errorResult('Keepwork native MCP tool unavailable'); }
+            try { const tools = await native?.list(); if (tools?.some(t => t.name === name)) return await native!.call(name, args, signal); } catch { return errorResult('Keepwork native MCP tool unavailable'); }
             return errorResult('Tool not registered for this conversation');
         }
         try { validateToolArguments(definition.inputSchema, args); } catch (e) { return errorResult((e as Error).message); }

@@ -10,6 +10,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
         const owner=ownerKey(String(req.headers.origin||''),String(req.headers['x-agent-owner']||''));
         let input:any={};if(req.method==='POST'){if(!String(req.headers['content-type']).startsWith('application/json'))throw Error('JSON required');let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>131072)throw Error('Request too large');}input=JSON.parse(raw||'{}');}
         const parts=url.pathname.split('/').filter(Boolean),id=parts[2],action=parts[3];
+        if(id==='circles'){if(req.method!=='POST'){send(405,{error:'POST required'});return;}send(200,await messaging.circleRequest(owner,input));return;}
         if(id==='messaging-computers'){if(!['GET','POST'].includes(req.method||'')){send(405,{error:'Method not allowed'});return;}send(200,req.method==='GET'?messaging.coordinationView(owner):await messaging.configureCoordination(owner,input));return;}
         if(id==='events'&&req.method==='GET'){
             res.writeHead(200,{'Content-Type':'text/event-stream','X-Accel-Buffering':'no'});

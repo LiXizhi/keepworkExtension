@@ -5,6 +5,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { transformSync } = require('esbuild');
+
+test('tray can show a hidden pet even while the main window is visible', () => {
+  const source = fs.readFileSync(require.resolve('../src/main.ts'), 'utf8');
+  const start = source.indexOf("settings.petVisible = item.checked; atomicJson(settingsFile, settings);");
+  const end = source.indexOf('menu();', start) + 'menu();'.length;
+  assert.ok(start >= 0 && end > start);
+  for (const mainVisible of [true, false]) {
+    let shown = false, saved, refreshed = 0;
+    const context = vm.createContext({
+      item: { checked: false }, settings: { petVisible: true }, settingsFile: 'fixture',
+      atomicJson: (_file, settings) => { saved = settings.petVisible; },
+      floatingPet: { show: () => { shown = true; }, hide: () => { shown = false; } },
+      liveWindow: () => ({ isVisible: () => mainVisible }),
+      menu: () => { refreshed++; },
+    });
+    const callback = source.slice(start, end);
+    vm.runInContext(callback, context);
+    assert.equal(shown, false); assert.equal(saved, false);
+    context.item.checked = true;
+    vm.runInContext(callback, context);
+    assert.equal(shown, true, `pet must reappear with mainVisible=${mainVisible}`);
+    assert.equal(saved, true); assert.equal(refreshed, 2);
+  }
+});
 test('closing AIChat keeps its renderer and terminals; reopening restores the same window and mode', async () => {
   const windows = [], calls = [];
   class Window extends EventEmitter {

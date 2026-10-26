@@ -52,7 +52,7 @@ for (const rule of ['* text=auto eol=lf', '*.onnx binary', '*.wav binary', '*.np
   assert.ok(modelAttributes.includes(rule), `local-model Git attributes must include ${rule}`);
 }
 
-assert.deepEqual(fs.readdirSync(sharedRoot).sort(), ['core', 'mcp'], 'root src may contain only shared core and mcp');
+assert.deepEqual(fs.readdirSync(sharedRoot).sort(), ['core', 'mcp', 'pet'], 'root src contains shared core, MCP, and native pet UI');
 for (const oldPath of ['.vscodeignore', 'src/extension.ts', 'src/cli.ts', 'src/vscode']) {
   assert.equal(fs.existsSync(path.join(repoRoot, oldPath)), false, `${oldPath} belongs to an application`);
 }

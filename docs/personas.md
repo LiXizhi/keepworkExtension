@@ -1,5 +1,7 @@
 # Long-lived AIChat Agents
 
+Circles supports independent organizations. The legacy `.aichat/circles/organization.json` remains `default`; additional organizations use `organization.<stable-id>.json` in the same directory. The service uses request-local organization selection, independent revisions, preview tickets and owner/brain/organization state. Incoming messages project only into their bound organization; assignments aggregate all organizations while role context remains group-specific. Background refresh enumerates all organizations; unassigned X- groups import only into the default organization. Cross-organization duplicate group bindings are rejected. The frontend and daemon must both be updated for organization creation.
+
 `src/core/personas.ts` owns local identity bindings, one durable transcript per Agent, bounded context, idempotent tasks and a daemon-owned daily scheduler. `src/mcp/personaHttp.ts` is mounted under the existing authenticated, Origin-checked `/agents` namespace. Native CLI sessions use a separate hashed internal owner so they never appear in ordinary AIChat session listings.
 
 All endpoints require `X-Agent-Owner`. Owner keys use the same Origin-bound capability scheme as existing CLI sessions. AIChat profile metadata is portable; local roots, messages, requests, approvals, native session references, schedules and channel bodies remain on this machine. Credentials remain in memory and are selected by owner; a missing owner's login must not fall back to the last different account.

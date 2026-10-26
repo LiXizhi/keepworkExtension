@@ -1,0 +1,13 @@
+{
+  "name": "keepwork-permission-pet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shared desktop pet and standalone screenshot-permission companion",
+  "devDependencies": {
+    "electron": "44.1.1"
+  },
+  "scripts": {
+    "prepare:runtime": "node node_modules/electron/install.js",
+    "prepare:all": "node scripts/prepare-all.cjs"
+  }
+}

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 export interface RequestCtx {
+    signal?: AbortSignal;
     sessionId: string;
     origin: string;
     userAgent: string;

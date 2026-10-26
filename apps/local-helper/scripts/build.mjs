@@ -1,3 +1,4 @@
+import { petCompanionPlugin } from '../../../scripts/pet-companion-build.mjs';
 import { aichatRuntimePlugin } from '../../../scripts/aichat-runtime-build.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -51,7 +52,7 @@ await build({
   ...common,
   entryPoints: [path.join(helperRoot, 'src/worker.ts')],
   outfile: path.join(outdir, 'worker.js'),
-  plugins: [aichatRuntimePlugin(), runtimeBuildInfoPlugin(helperRoot), creationSkillPlugin(outdir)],
+  plugins: [aichatRuntimePlugin(), runtimeBuildInfoPlugin(helperRoot), creationSkillPlugin(outdir), petCompanionPlugin(outdir)],
   external: ['node-pty', 'playwright-core'],
 });
 

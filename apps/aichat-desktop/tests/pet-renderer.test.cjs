@@ -5,8 +5,10 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 test('pet uses the default dragon before state, on missing artwork and after reset', async () => {
-  const read = name => fs.readFileSync(path.join(__dirname, '../src', name), 'utf8');
+  const read = name => fs.readFileSync(path.join(__dirname, '../../../src/pet', name), 'utf8');
   const css = read('pet.css');
+  // The transparent sprite must not acquire a halo or a second mascot behind it.
+  assert.doesNotMatch(css, /radial-gradient|#pet::before/);
   assert.match(css, /#art\{background-image:url\("https:\/\/cdn\.keepwork\.com\/maisi\/magichaqi\/pet\/dragon_green_20260528090748\.webp"\);background-size:400% 400%;background-position:0% 0%\}/);
   assert.match(read('pet.html'), /<span id="art"><\/span>/);
   const elements = new Map();
@@ -18,7 +20,7 @@ test('pet uses the default dragon before state, on missing artwork and after res
   let publish;
   vm.runInNewContext(read('pet.js'), {
     window: { desktopPet: { subscribe(fn) { publish = fn; }, action: async () => ({ version: 1, context: '' }) } },
-    document: { body: { style: { setProperty() {} } }, getElementById: element, addEventListener() {} },
+    document: { querySelectorAll: () => [], body: { style: { setProperty() {} } }, getElementById: element, addEventListener() {} },
   });
   await Promise.resolve();
   const expectDefault = () => {

@@ -70,6 +70,8 @@ jobs:
           npm ci
           npm ci --prefix apps/vscode-extension
           npm ci --prefix apps/local-helper
+          npm ci --prefix apps/pet-companion
+          npm run prepare:runtime --prefix apps/pet-companion
           npm ci --prefix apps/local-model-runtime
 
       - name: Compile and test all package boundaries

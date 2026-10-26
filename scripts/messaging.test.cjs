@@ -917,6 +917,15 @@ function forkAgents(f,channel='dingtalk') {
     f.service.setAgentRootResolver(owner=>owner==='owner'?fs.realpathSync(f.root):'');
     return agents;
 }
+test('circles: independent assignment source injects only the current group role and invalidates changed work',async t=>{
+    const f=fixture(t),agents=forkAgents(f);agents.push({owner:'owner',id:'default-persona',name:'Owner',prompt:'',root:f.root,executor:'keepwork',model:''});
+    const file=path.join(f.root,'.aichat/circles/organization.json');fs.mkdirSync(path.dirname(file),{recursive:true});
+    const org={version:1,revision:1,name:'Org',members:[{id:'member',kind:'persona',personaId:'lily',name:'Lily'}],circles:[{id:'c',parentId:null,name:'Docs',goal:'Circle-only objective',publicDescription:'',archived:false,members:[],roles:[{id:'r',name:'Editor',responsibility:'Circle-only responsibility',skills:[],holders:['member']}],binding:{channel:'dingtalk',account:'corp:user',id:'circle-group'}}]};
+    fs.writeFileSync(file,JSON.stringify(org));await f.service.start(f.binding.id);
+    f.events[0]({...message('circle-message','circle-group'),type:'user_im_message_receive_group_all',content:'Please help'});await tick();assert.equal(f.pending.length,1);assert.match(f.pending[0].input.prompt,/Circle-only responsibility/);assert.ok(!f.pending[0].input.tools?.some(t=>(t.function?.name||t.name)==='circles'));
+    org.circles[0].archived=true;org.revision++;fs.writeFileSync(file,JSON.stringify(org));f.pending[0].end();await tick();assert.equal(f.sent.length,0,'archiving withholds an in-flight circle reply');
+    assert.equal(agents[0].messaging.groups[0].id,'home','manual settings remain independent');assert.doesNotMatch(agents[0].prompt,/Circle-only/);
+});
 for(const channel of ['dingtalk','feishu'])test('custom forks '+channel+': home relevance, named priority, isolated prompts and deduplicated replies',async t=>{
     const f=fixture(t,channel),agents=forkAgents(f,channel);
     fs.writeFileSync(path.join(f.root,'AGENTS.md'),'Shared brain instructions');
@@ -1047,7 +1056,7 @@ test('group nicknames aggregate active assigned agents, remove stale assignments
     const previous=structuredClone(agents[0]);agents[0].messaging.groups=[{channel:'dingtalk',account:'corp:user',id:'next',name:'Next'}];
     calls.length=0;await f.service.syncAgentNicknames('owner',previous);
     assert.deepEqual(calls.find(c=>c.group==='home').names,['小明']);assert.deepEqual(calls.find(c=>c.group==='next').names,['Lily']);
-    const last=structuredClone(agents[1]);agents[1].messaging.enabled=false;calls.length=0;await f.service.syncAgentNicknames('owner',last);
+    const last=structuredClone(agents[1]);agents[1].messaging.groups=[];calls.length=0;await f.service.syncAgentNicknames('owner',last);
     assert.deepEqual(calls.find(c=>c.group==='home').names,[],'last agent removal restores base');
     calls.length=0;await f.service.syncAgentNicknames('other');assert.equal(calls.length,0);
 });
@@ -1136,7 +1145,8 @@ test('settings removal cannot resurrect an agent from its cached nickname assign
  await f.service.refreshNickname(f.service.get(f.binding.id),'home');
  const previous=structuredClone(agents[0]);agents[0].messaging.enabled=false;
  f.service.nicknames={has:()=>true,sync:async target=>{calls.push(target);}};
- await f.service.syncAgentNicknames('owner',previous,false,'lily');assert.deepEqual(calls[0].names,['小明']);
+ await f.service.syncAgentNicknames('owner',previous,false,'lily');assert.deepEqual(calls[0].names,['Lily','小明']);
+ await f.service.refreshNickname(f.service.get(f.binding.id),'home');
  assert.equal(f.service.routedAgents(f.service.get(f.binding.id)).some(p=>p.id==='lily'),false);
 });
 for(const channel of ['dingtalk','feishu'])test(channel+' mentions discover nickname assignments and get role work tools; active work is visible',async t=>{
@@ -1382,4 +1392,22 @@ test('manual channel start preserves authorization gate status without starting 
   assert.equal(f.service.view(f.binding.id).listening,false);
   assert.equal(f.events.length,0);
  }
+});
+
+for(const channel of ['dingtalk','feishu'])test(channel+' assigned disabled agents sync nicknames without enabling automatic replies',async t=>{
+ const f=fixture(t,channel),agents=forkAgents(f,channel),calls=[];
+ agents[0].messaging.enabled=false;
+ f.service.nicknames={has:()=>true,sync:async target=>{calls.push(structuredClone(target));return '';}};
+ await f.service.syncAgentNicknames('owner',undefined,false,'lily');
+ assert.deepEqual(calls[0].names,['Lily','小明']);
+ f.service.nicknameReader=async()=>({nickname:'Owner & Lily & 小明',name:'Owner'});
+ const runtime=f.service.get(f.binding.id);
+ await f.service.refreshNickname(runtime,'home');
+ assert.equal(f.service.routedAgents(runtime).some(p=>p.id==='lily'),false);
+ agents[0].messaging.enabled=true;
+ assert.equal(f.service.routedAgents(runtime).some(p=>p.id==='lily'),true);
+ agents[0].messaging.enabled=false;
+ const previous=structuredClone(agents[0]);agents[0].messaging.groups=[];calls.length=0;
+ await f.service.syncAgentNicknames('owner',previous,false,'lily');
+ assert.deepEqual(calls[0].names,['小明']);
 });

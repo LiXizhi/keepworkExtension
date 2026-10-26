@@ -1,10 +1,46 @@
 # Computer Use
 
+## Screenshot-only permission
+
+`computer_use({"action":"screenshot"})` uses the independent `captureDesktop` function.
+It captures the primary display without requesting or renewing mouse/keyboard control.
+`status` includes `screenshotPermission` (`alwaysAllowScreenshots`, `pending`).
+
+A dedicated bubble above the native desktop pet offers **Allow once**, **Always allow
+screenshots**, and **Cancel**. The approval has no deadline. Request cancellation,
+MCP session termination, pet closure/crash and daemon shutdown cancel it; late choices
+cannot capture or grant permission. The pet surface hides before capture and restores
+its previous visibility afterward. No screenshot is logged or persisted in chat history.
+Windows returns physical pixels; macOS normalizes to screen points. Both return JPEG
+MCP image blocks with dimensions, capture time and `inputSent:false`.
+
+Remembered approval lives in `~/.keepwork-mcp/config.json` as `alwaysAllowScreenshots`
+and applies to this OS user across MCP clients and restarts. AIChat's Keepwork MCP
+settings and the daemon dashboard Overview control the same setting. Turning it off
+restores prompts; turning it on requires a pet choice. It never authorizes input.
+`GET /admin/screenshot-permission` reads the setting; `POST` accepts only
+`{"alwaysAllowScreenshots": boolean}`. POST requires an explicit allowed Origin and
+normal configured authentication. No tool argument can grant approval.
+
+The daemon owns an authenticated loopback pet bridge. Its per-user discovery file
+contains a random credential available only to native main processes, never the
+renderer. A running desktop pet connects; otherwise the daemon launches its bundled
+pet companion without a chat window. Shared UI is in `src/pet`; application shells
+must not import one another. Startup is bounded (20 seconds), but approval is not.
+Capture starts its own 30-second limit after approval and is capped at 3 MB. Concurrent
+desktop operations fail as busy. HTTP and stdio callers share the singleton daemon;
+stdio and the AIChat native CLI adapter forward screenshots using native HTTP without an approval/header deadline. Third-party MCP clients may impose their
+own deadlines; their cancellation is respected and never automatically retried.
+
+Run `node --test scripts/screenshot-permission.test.cjs scripts/screenshot-http.test.cjs`
+and `node scripts/pet-permission-native.cjs`. Native acceptance uses an isolated bridge
+and does not persist real approval. See `apps/pet-companion/README.md` for packaging.
+
 ## Experimental macOS
 
-Uses built-in `osascript`, `screencapture` and `sips`; no additional runtime binary. Supports status, screenshot, left click, type and named navigation keys. Scroll and right-click fail explicitly. Clicks use Quartz mouse events, including on the Dock and custom canvases; typing has application and Unicode limitations.
+Uses built-in `osascript`, `screencapture` and `sips`; no additional capture binary; the permission pet uses its bundled Electron runtime. Supports status, screenshot, left click, type and named navigation keys. Scroll and right-click fail explicitly. Clicks use Quartz mouse events, including on the Dock and custom canvases; typing has application and Unicode limitations.
 
-The first action requires native Allow Session approval with Cancel as default and a 20-second approval timeout. Consent stays in memory for the requesting MCP connection, expires after 24 hours with no idle timeout, and is discarded on execution failure or when another connection requests control. Consecutive actions do not display another dialog or restore focus. Hold Escape or move the pointer into the primary display’s top-left 3×3-point corner to block the next action and discard consent. Stop checks occur between actions and after approval; they cannot undo input already delivered. There is no Take Back Control panel. The original foreground process is restored only after approval. Inputs return a new screenshot. Screenshots are unmasked, sent to the model, and briefly stored in a private temporary directory removed after capture; a process crash may leave a temporary file. Close private windows first.
+The first **input** action requires native Allow Session approval with Cancel as default and a 20-second approval timeout. Consent stays in memory for the requesting MCP connection, expires after 24 hours with no idle timeout, and is discarded on execution failure or when another connection requests control. Consecutive actions do not display another dialog or restore focus. Hold Escape or move the pointer into the primary display’s top-left 3×3-point corner to block the next action and discard consent. Stop checks occur between actions and after approval; they cannot undo input already delivered. There is no Take Back Control panel. The original foreground process is restored only after approval. Inputs return a new screenshot. Screenshots are unmasked, sent to the model, and briefly stored in a private temporary directory removed after capture; a process crash may leave a temporary file. Close private windows first.
 
 macOS may require Screen Recording, Accessibility and Automation permissions for the launching app (VS Code, Terminal or another host). Failures must not be automatically retried because input might already have been delivered. Only the primary display is supported. Screenshots are normalized to screen-point dimensions to align Retina click coordinates with the returned image.
 
@@ -34,6 +70,17 @@ Input targets the foreground application after the dialog closes. Do not switch 
 
 ## Limits and validation
 
-Windows interactive user sessions only. No UAC/secure desktop, elevation bypass, secondary-monitor targeting, arbitrary scripts, key chords, drag-and-drop, held keys, or unattended approval. Use the existing DOM-based browser tools for web work whenever possible.
+Windows interactive user sessions only. No UAC/secure desktop, elevation bypass, secondary-monitor targeting, arbitrary scripts, key chords, drag-and-drop, held keys, or automatic input approval. Screenshot-only remembered approval is supported as described above. Use the existing DOM-based browser tools for web work whenever possible.
 
 Run `node --test scripts/computer.test.cjs` and `npm run check:shared`. Automated tests mock input, parse the helper and compile the native overlay without controlling the desktop. Real screenshot exclusion, DPI alignment, foreground restoration, Unicode typing, reclaim during typing and renewed consent require a user-supervised smoke test in a disposable application before production use. Multi-monitor capture and UI Automation element targeting remain follow-up work.
+
+
+### Validation record (2026-10-25)
+
+Focused permission/HTTP/controller/pet tests, Windows native pet-only launch and bubble
+choices, existing pet UI smoke, and independent Windows JPEG capture passed. macOS
+capture normalization/cleanup is covered by mocked commands; native macOS acceptance
+was not available. Shared and desktop TypeScript, layout, syntax and diff checks passed.
+`npm run check:shared` reaches the vendored-runtime parity check and fails on an existing
+`completion.mjs` source hash mismatch; both canonical runtime and vendor directories
+were untouched. Packaging fixtures pass; no installers or releases were built/published.

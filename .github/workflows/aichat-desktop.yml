@@ -62,6 +62,11 @@ jobs:
           node -e 'const e=process.env; if(e.RELEASE_BUILD==="true" && (e.PUBLISH==="true" || !/^[a-zA-Z0-9-]+$/.test(e.PUBLISHER_ID) || e.EXPECTED_SHA!==e.GITHUB_SHA || e.GITHUB_REF!=="refs/heads/main")) throw Error("Invalid local publisher request")'
       - run: npm ci
       - run: npm ci --prefix apps/mcp-runtime
+      - run: npm ci --prefix apps/pet-companion
+      - run: npm run prepare:runtime --prefix apps/pet-companion
+        if: runner.os != 'Linux'
+      - run: npm run prepare:all --prefix apps/pet-companion
+        if: runner.os == 'Linux'
       - run: npm ci --prefix apps/local-model-runtime
       - run: npm ci --prefix apps/aichat-desktop
       - run: npm run check:shared
