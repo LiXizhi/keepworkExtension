@@ -20,6 +20,6 @@ function copyRuntime(destination,platform,arch,runtimeDir,nested) {
   const executable = platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron.exe';
   if (!source || !fs.existsSync(path.join(source, executable))) throw Error(`Missing ${platform}-${arch} pet Electron runtime. Run npm ci --prefix apps/pet-companion on the target host, or set ${key} to its extracted Electron 44.1.1 distribution.`);
   if (fs.readFileSync(path.join(source,'version'),'utf8').trim().replace(/^v/,'') !== '44.1.1') throw Error('Pet companion requires Electron 44.1.1');
-  fs.cpSync(source, path.join(destination,'electron',...(nested ? [`${platform}-${arch}`] : [])), { recursive: true });
+  fs.cpSync(source, path.join(destination,'electron',...(nested ? [`${platform}-${arch}`] : [])), { recursive: true, verbatimSymlinks: true });
 }
 module.exports = { stagePetCompanion };

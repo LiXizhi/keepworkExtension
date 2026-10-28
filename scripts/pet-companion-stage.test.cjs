@@ -16,3 +16,20 @@ test('universal stage includes each supported executable in a separate target di
  const output=path.join(root,'out');stagePetCompanion(output,{universal:true});
  for(const [platform,arch]of [['win32','x64'],['darwin','x64'],['darwin','arm64']])assert.ok(fs.existsSync(path.join(output,'electron',platform+'-'+arch,platform==='darwin'?'Electron.app/Contents/MacOS/Electron':'electron.exe')));
 });
+
+test('mac framework links remain relative and relocatable after staging', {skip:process.platform==='win32'}, t=>{
+ const root=fixture(t),input=path.join(root,'input'),output=path.join(root,'output');runtime(input,'darwin');
+ const framework=path.join(input,'Electron.app/Contents/Frameworks/Electron Framework.framework');
+ fs.mkdirSync(path.join(framework,'Versions/A/Resources'),{recursive:true});
+ fs.writeFileSync(path.join(framework,'Versions/A/Electron Framework'),'framework binary');
+ fs.symlinkSync('A',path.join(framework,'Versions/Current'));
+ fs.symlinkSync('Versions/Current/Electron Framework',path.join(framework,'Electron Framework'));
+ fs.symlinkSync('Versions/Current/Resources',path.join(framework,'Resources'));
+ stagePetCompanion(output,{platform:'darwin',arch:'arm64',runtimeDir:input});
+ fs.rmSync(input,{recursive:true});
+ const copied=path.join(output,'electron/Electron.app/Contents/Frameworks/Electron Framework.framework');
+ assert.equal(fs.readlinkSync(path.join(copied,'Electron Framework')),'Versions/Current/Electron Framework');
+ assert.equal(fs.readlinkSync(path.join(copied,'Versions/Current')),'A');
+ assert.equal(fs.readFileSync(path.join(copied,'Electron Framework'),'utf8'),'framework binary');
+ assert.ok(fs.statSync(path.join(copied,'Resources')).isDirectory());
+});
