@@ -291,3 +291,35 @@ clipboard checks, including repeated prompts after approval and concurrent dialo
 Evidence: `.test-runtime/proofs/clipboard-consent/before.log` (repository root).
 These tests simulate Electron sessions/dialogs; no packaged Windows acceptance,
 app build or release was performed.
+
+### Publish existing GitHub artifacts from a local machine
+
+Use `scripts/publish-desktop-artifacts.cjs` to upload the exact CI installers from
+China without rebuilding. Stop the original run's publish job before taking over.
+Download all three `desktop-*` artifacts from the **same release-quality Actions
+run**; place their outer ZIP files (or extracted `desktop-<target>` folders) in
+one directory. Do not extract or repack the inner installer ZIPs.
+
+```bash
+node scripts/publish-desktop-artifacts.cjs \
+  --artifacts /absolute/path/to/artifacts \
+  --run-id 40689935542 \
+  --version 0.1.6 \
+  --commit 02b98f8a0813939665f4585f725578cf1008f899 \
+  --config /absolute/path/to/qiniu.yaml \
+  --dry-run
+```
+
+Remove `--dry-run` to publish all platforms; optionally select one with
+`--target win32-x64`, `darwin-arm64`, or `darwin-x64`. Install the desktop app's
+Node dependencies first (`npm ci --prefix apps/aichat-desktop`). Credentials come
+from the existing Qiniu YAML (`qiniu.accessKey`, `qiniu.secretKey`) or
+`KP_QINIU_ACCESS_KEY` / `KP_QINIU_SECRET_KEY`; they are never printed or recorded.
+The script validates target, full commit, version, provenance SHA-256 and updater
+SHA-512 for every selected platform before uploading anything. It copies approved
+files into a temporary staging directory, uses the same publisher as Actions,
+refuses a live version downgrade or conflicting same-version ZIP, and writes
+`publish-receipt.json` beside the artifacts after each verified platform.
+The receipt records the caller-selected run ID, commit and exact CDN file hashes;
+confirm the download's run and artifact digest on GitHub before invoking it.
+A rerun may re-upload identical bytes, but never builds or modifies the signed ZIP.
