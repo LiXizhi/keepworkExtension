@@ -331,3 +331,7 @@ The dashboard **Personas / 分身** tab (`/dashboard#personas`) shows persona to
 CLI setup guides (`agent-cli-verify` and its installation/provider references) are configuration-only. Normal MCP sessions do not register or advertise them. The developer dashboard explicitly includes them for inspection and labels them accordingly; Second Brain setup loads its selected provider configuration on demand.
 
 AIChat automatic client names read `hostname` (Node.js `os.hostname()`) from authenticated `GET /admin/status`; `mcp_status` also includes it. The public `/health` response does not expose the hostname. Existing Origin and optional pairing-token checks still apply.
+
+### Alibaba temporary file uploads
+
+The shared loopback daemon advertises `/health.modelStudioUploadApi: "temporary-upload-v1"`. AIChat video-to-PPT uses `/model-studio/temporary-files/request` for Alibaba temporary upload policy and streamed OSS multipart uploads; no additional `3018` server is needed. Requests retain the daemon's explicit trusted Origin and optional pairing-token checks. `Authorization` is reserved for MCP authentication; the transient Alibaba key uses `X-DashScope-Api-Key` and is forwarded only to the two official upload-policy endpoints. It is never stored, logged, sent to OSS or included in a URL. Inference stays browser-to-Alibaba. Uploads reject redirects, arbitrary targets and bodies above 960MB. See the dashboard API catalog. Validation: `node --test scripts/model-studio-upload.test.cjs`.

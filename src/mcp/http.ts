@@ -1,3 +1,4 @@
+import { MODEL_STUDIO_UPLOAD_API, handleModelStudioUpload } from '../core/modelStudioUpload';
 import { petPermissionBridge, screenshotPermission } from '../core/petPermissionBridge';
 import { computerController } from '../core/computer';
 import { hostname } from 'node:os';
@@ -83,8 +84,8 @@ function applyCors(req: http.IncomingMessage, res: http.ServerResponse): void {
         res.setHeader('Access-Control-Allow-Origin', '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID, X-Agent-Owner');
-    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID, X-Agent-Owner, X-DashScope-Api-Key');
+    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, MCP-Protocol-Version, Retry-After');
     if (String(req.headers['access-control-request-private-network'] || '').toLowerCase() === 'true') {
         res.setHeader('Access-Control-Allow-Private-Network', 'true');
     }
@@ -194,12 +195,19 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
 
 
         if (req.method === 'OPTIONS') {
+            if (pathname.startsWith('/model-studio/') && (!req.headers.origin || !originAllowed(String(req.headers.origin)))) { sendJson(res, 403, { error: 'Explicit allowed Origin required' }); return; }
             res.writeHead(204);
             res.end();
             return;
         }
 
         try {
+            if (pathname.startsWith('/model-studio/')) {
+                const origin = String(req.headers.origin || '');
+                if (!origin || !originAllowed(origin)) { sendJson(res, 403, { error: 'Explicit allowed Origin required' }); return; }
+                if (!assertAuth(req, url, res)) return;
+                await handleModelStudioUpload(req, res, url); return;
+            }
             if (pathname.startsWith('/messaging/')) {
                 const worker = pathname === '/messaging/worker' || pathname.startsWith('/messaging/worker/');
                 const origin = String(req.headers.origin || '');
@@ -235,6 +243,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     webservers: listWebserverRoots(),
                     fsApi: FS_API,
                     folderBrowserApi: FOLDER_BROWSER_API,
+                    modelStudioUploadApi: MODEL_STUDIO_UPLOAD_API,
                     browserApi: 'browser-v1',
                     fsDirApi: 'mkdir-v1',
                     terminalApi: 'pty-session-v1',

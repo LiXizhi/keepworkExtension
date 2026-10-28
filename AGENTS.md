@@ -46,6 +46,7 @@ The repository root is a private shared-runtime package. Product manifests, entr
 | `apps/vscode-extension/src/vscode/terminalBridge.ts` | Extension host: reuse Keepwork integrated terminal + `/run` loopback |
 | `apps/vscode-extension/src/vscode/notifyBridge.ts` | Extension host: calendar OS/VS Code notifications + open AIChat |
 | `src/core/grep.ts` | `rg` if present, else Node walk |
+| `src/core/modelStudioUpload.ts` | Allowlisted temporary Model Studio upload policy + streamed OSS multipart relay; shared Origin/auth in http.ts; no key persistence |
 | `src/core/web.ts` | Public http(s) fetch, SSRF checks, search-engine HTML parsers, compact JSON |
 | `src/core/headless.ts` | System Edge/Chrome `--dump-dom` for `fetch_url` |
 | `src/core/html_text.ts` | Structured HTML → text (headings/lists; never markup) |
@@ -287,3 +288,5 @@ must not be reported as passing. See `docs/agent-harnesses.md`.
 ## Agent CLI development maintenance
 
 For agent CLI installation recipes, discovery, protocol/model compatibility or periodic product upkeep, read [.github/skills/agent-cli-maintenance/SKILL.md](.github/skills/agent-cli-maintenance/SKILL.md), then the selected `.github/skills/agent-cli-maintenance/references/providers/<backend>.md`. This is a single development Skill with per-platform references. Runtime installation guidance is plain Markdown under `skills/agent-cli-verify/references/providers/`; do not register development maintenance Skills as user-facing product skills.
+
+- Model Studio temporary uploads → `src/core/modelStudioUpload.ts`, gated in `src/mcp/http.ts`, documented in `apiDocs.ts`. Preserve separation of daemon Bearer auth and `X-DashScope-Api-Key`, never forward keys to OSS, keep HTTPS target allowlist/body caps/redirect rejection/stream cancellation. Run `node --test scripts/model-studio-upload.test.cjs`. This is an HTTP upload capability, not a model-invoked MCP tool or general proxy.
