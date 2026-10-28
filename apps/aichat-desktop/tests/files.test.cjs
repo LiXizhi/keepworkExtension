@@ -96,9 +96,10 @@ test('missing wiki directories return empty native listings without IPC exceptio
 test('native directory listing still reports permission failures', t => {
   const { root, files } = fixture(t); const { id: rootId } = files.grant(root);
   fs.mkdirSync(path.join(root, '_wiki'));
+  const denied = files.resolve(rootId, '_wiki', { followLinks: true });
   const original = fs.readdirSync;
   t.mock.method(fs, 'readdirSync', function (target, ...args) {
-    if (target === path.join(root, '_wiki')) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    if (target === denied) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
     return original.call(this, target, ...args);
   });
   assert.throws(() => files.execute('list', { rootId, rel: '_wiki' }), { code: 'EACCES' });

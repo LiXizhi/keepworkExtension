@@ -101,6 +101,8 @@ jobs:
           overwrite: true
 
   publish:
+    # Build-only commits can verify CI without changing the live CDN feed.
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip publish]')
     needs: [prepare, build]
     runs-on: ubuntu-latest
     timeout-minutes: 40
