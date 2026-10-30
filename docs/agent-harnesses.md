@@ -510,3 +510,46 @@ Qwen 通过 `/auth` 管理账号，不提供未经核实的独立登出命令。
 本次源码验证：共享 TypeScript / 仓库布局检查通过；相关 MCP 回归 125 项通过（macOS 临时目录使用 `/private/tmp`，避免系统 `/var` 别名导致既有路径断言差异）；最终 Dashboard / 操作目录 6 项通过。AIChat 相关浏览器 5 项通过，Node 24 项通过、Windows 专用 1 项跳过。未发布或重启在用服务，未执行真实账号登出。
 
 CLI 账号页使用紧凑卡片与顶部状态计数，已确认在线优先。绿色“在线”仅表示原生检测已登录、可用且无模型／连接错误，不代表有后台任务运行；待确认／未登录为琥珀色，异常为红色，未安装为灰色，检测中为蓝色。颜色始终配文字，未知状态不会显示为在线；详情默认折叠。
+
+
+## Native Codex history in AIChat
+
+`GET /agents/native-codex?cursor=` exposes paged metadata from `thread/list`
+(across model providers; CLI, VS Code, exec and app-server sources; unarchived).
+`GET /agents/native-codex/{threadId}` attaches the selected history to an owned
+session and reads `thread/read` without resume. The returned session ID uses the
+existing turns/interrupt/respond endpoints; the first explicit send resumes the
+original thread in Ask mode. No terminal input injection is performed. The daemon
+uses its configured Codex home, not every OS account or custom installation.
+Known sessions belonging to another owner are excluded/rejected. Catalog access
+uses the existing Origin, owner and optional pairing-token checks. AIChat cloud
+access additionally uses its same-account relay. Native active status is best
+effort across processes; this does not provide terminal steering or cross-process
+locking. Existing request IDs still prevent duplicate daemon turn submissions.
+
+## Other native CLI histories
+
+Generic endpoints: `GET /agents/native-sessions/{backend}?cursor=` and
+`GET /agents/native-sessions/{backend}/{threadId}`. Codex aliases remain supported.
+
+| Backend | Discovery and continuation |
+| --- | --- |
+| WorkBuddy / CodeBuddy | Read `$CODEBUDDY_CONFIG_DIR/projects` (default `~/.codebuddy/projects`) JSONL; existing ACP load/prompt with original ID/cwd. Shared namespace prevents duplicate owner attachments. |
+| Claude Code | Read `$CLAUDE_CONFIG_DIR/projects` (default `~/.claude/projects`) JSONL; native `--resume` through the stream-json adapter. |
+| Copilot / Cursor / Trae / Qwen / Kimi / OpenCode | Installed ACP v1 must advertise `sessionCapabilities.list` and `loadSession`; list metadata, replay via load, prompt same ID. Unsupported versions fail explicitly. |
+| Antigravity (gemini key) | Native discovery not implemented: installed CLI exposes conversation resume but no verified metadata catalog including cwd. Existing AIChat sessions remain supported. |
+
+Disk projection is bounded to 1,000 recent valid records per provider and the last
+2 MB of text history, excluding nested subagent files and configuration/credentials.
+Original transcripts are never written by discovery. Opening ACP history loads the
+session to replay it but sends no prompt; Codex/Buddy/Claude reads do not resume.
+Existing receipts, ownership, approvals and working-directory checks remain
+authoritative. This does not steer an unrelated running terminal.
+
+Protocol references checked 2026-10-29: [ACP session list](https://agentclientprotocol.com/protocol/v1/session-list),
+[ACP load](https://agentclientprotocol.com/protocol/v1/session-setup),
+[CodeBuddy ACP](https://www.codebuddy.cn/docs/cli/acp), and
+[Claude persistence](https://code.claude.com/docs/en/agent-sdk/sessions).
+Installed WorkBuddy lacks session/list; project transcript format was verified
+against the installed CLI and read-only local history. Other ACP engines and Claude
+are fixture-tested here, not claimed as live installed acceptance.

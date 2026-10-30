@@ -25,18 +25,18 @@ const message = (id='1', conversation='dm', sender='sender') => ({type:'user_im_
 function fixture(t, channel = 'dingtalk') {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-messaging-test-'))); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
     const root=path.join(dir,'brain');fs.mkdirSync(path.join(root,'public'),{recursive:true});fs.writeFileSync(path.join(root,'public','lesson.md'),'课程学习计划：先读教材，再练习。');
-    const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let remoteRows=null, contextError=false, answerText='课程学习答案'; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0;
+    const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let historyResponse={success:true,result:{conversationMessagesList:[],hasMore:false}}; let remoteRows=null, contextError=false, answerText='课程学习答案'; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0;
     class BeforeSubmission extends Error {}
     const serviceModule=load('messaging',{
         './messagingFeishu':{feishuContext:load('messagingFeishu').feishuContext,feishuConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},feishuIdentity:async()=>({id:'corp:user',self:'owner'}),pollFeishu:async(_r,_p,_f,event)=>{events.push(event);return()=>{};},FeishuDelivery:class{async create(){cards.push('created');return 'test-card';}async send(...args){sent.push(args);}}},
         './aichatPresence':{latestAichatClient:()=>null,latestAichatBrainRoot:()=>root},
-        './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
+        './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{if(args[0]==='chat'&&args[1]==='message'&&args[2]==='list-all')return historyResponse;statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
         './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal,_login,executeTool){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve(answerText);};pending.push({input,end,executeTool});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
     });
     const createService=()=>{const instance=new serviceModule.MessagingService(path.join(dir,'state'),8089);instance.nicknameReader=async()=>({nickname:'',name:'Owner'});t.after(()=>instance.close());return instance;};
     const service=createService();
     const binding=service.configure({channel,root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
-    return {set remoteRows(v){remoteRows=v;},set contextError(v){contextError=v;},set answerText(v){answerText=v;},service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
+    return {set historyResponse(v){historyResponse=v;},set remoteRows(v){remoteRows=v;},set contextError(v){contextError=v;},set answerText(v){answerText=v;},service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
@@ -1410,4 +1410,46 @@ for(const channel of ['dingtalk','feishu'])test(channel+' assigned disabled agen
  const previous=structuredClone(agents[0]);agents[0].messaging.groups=[];calls.length=0;
  await f.service.syncAgentNicknames('owner',previous,false,'lily');
  assert.deepEqual(calls[0].names,['小明']);
+});
+
+// Regression: an event subscription can stay green while private deliveries are missing.
+function recoveredHistory(rows){return {success:true,result:{conversationMessagesList:[{singleChat:true,messages:rows.map(m=>({openMessageId:m.id,openConversationId:'dm',senderOpenDingTalkId:m.sender||'sender',sender:'display name',createTime:m.time,content:m.text||'missed private message'}))}],hasMore:false}};}
+test('DingTalk backfill merges private backlog into one reply and deduplicates late events/restart',async t=>{
+ const f=fixture(t),time=Date.now()-60000;
+ fs.writeFileSync(path.join(path.dirname(f.root),'state',f.binding.id+'.history-cursor.json'),JSON.stringify({since:time-1000}));
+ f.historyResponse=recoveredHistory([{id:'earlier',time:time-1000},{id:'missed',time}]);
+ await f.service.start(f.binding.id);await tick();
+ const disk=path.join(path.dirname(f.root),'state','inbox.json');
+ let rows=JSON.parse(fs.readFileSync(disk))[f.binding.id].messages;
+ assert.equal(rows.length,2);assert.equal(rows[1].state,'recovery-claimed');assert.equal(f.pending.length,1);
+ assert.equal(f.service.view(f.binding.id).historySync.status,'current');
+ f.events[0]({...message('missed'),create_time:time});await tick();assert.equal(f.pending.length,1);
+ f.pending[0].end();await tick();assert.equal(f.sent.length,1);
+ f.service.stop(f.binding.id);await f.service.start(f.binding.id);await tick();
+ rows=JSON.parse(fs.readFileSync(disk))[f.binding.id].messages;assert.equal(rows.length,3);
+ assert.equal(f.pending.length,1);assert.equal(f.sent.length,1);
+});
+test('DingTalk recovered private messages with a later human reply do not generate',async t=>{
+ const f=fixture(t),time=Date.now()-60000;
+ fs.writeFileSync(path.join(path.dirname(f.root),'state',f.binding.id+'.history-cursor.json'),JSON.stringify({since:time-1000}));
+ f.historyResponse=recoveredHistory([{id:'missed',time},{id:'human',sender:'owner',time:time+1000}]);
+ await f.service.start(f.binding.id);await tick();assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
+});
+test('DingTalk checks remote human replies before generating a recovered answer',async t=>{
+ const f=fixture(t),time=Date.now()-60000;
+ fs.writeFileSync(path.join(path.dirname(f.root),'state',f.binding.id+'.history-cursor.json'),JSON.stringify({since:time-1000}));
+ f.historyResponse=recoveredHistory([{id:'missed',time}]);
+ f.remoteRows=[{id:'missed',sender:'sender',conversation:'dm',time,text:'question',kind:'direct'},{id:'human',sender:'owner',conversation:'dm',time:time+1000,text:'answered',kind:'direct'}];
+ await f.service.start(f.binding.id);await tick();assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
+ assert.match(f.service.view(f.binding.id).recent[0].reason,/本人已回复/);
+});
+test('DingTalk cancels a recovered answer if the human replies during generation',async t=>{
+ const f=fixture(t),time=Date.now()-60000;
+ fs.writeFileSync(path.join(path.dirname(f.root),'state',f.binding.id+'.history-cursor.json'),JSON.stringify({since:time-1000}));
+ const target={id:'missed',sender:'sender',conversation:'dm',time,text:'question',kind:'direct'};
+ f.historyResponse=recoveredHistory([{id:'missed',time}]);f.remoteRows=[target];
+ await f.service.start(f.binding.id);await tick();assert.equal(f.pending.length,1);
+ f.remoteRows=[target,{...target,id:'human',sender:'owner',time:time+1000,text:'answered'}];
+ f.pending[0].end();await tick();assert.equal(f.sent.length,0);
+ assert.match(f.service.view(f.binding.id).recent[0].reason,/聊天已更新/);
 });

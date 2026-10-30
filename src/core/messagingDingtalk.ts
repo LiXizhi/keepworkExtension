@@ -72,7 +72,7 @@ export async function listenDws(root: string, profile: string, config: MessageCo
     } catch(e) { stop(); throw e; }
 }
 // On-demand context reads complement the event listener; they never enqueue replies.
-export async function dingtalkConversation(root: string, profile: string, target: Incoming, signal?: AbortSignal, call = dws): Promise<Incoming[]> {
+export async function dingtalkConversation(root: string, profile: string, target: Incoming, signal?: AbortSignal, call = dws, self = ''): Promise<Incoming[]> {
     const check = () => { if(signal?.aborted)throw Error('Cancelled'); };
     check();
     const status = await call(['event','status','--profile',profile,'--format','json'],root);
@@ -99,7 +99,7 @@ export async function dingtalkConversation(root: string, profile: string, target
         if(conversation && row.conversationId && row.conversationId!==conversation)throw Error('钉钉会话上下文不匹配');
         const text=typeof row.text==='string'?row.text:'[非文本消息]';
         messages.set(row.messageId,{id:row.messageId,conversation:target.conversation,
-            sender:row.senderId===identity.user_id?(identity.open_dingtalk_id||row.senderId):row.senderId,
+            sender:row.senderId===identity.user_id?(identity.open_dingtalk_id||self||row.senderId):row.senderId,
             time:time<1e12?time*1000:time,text,kind:target.kind,thread:row.threadId || undefined,
             automated:automatedSender(row)||automatedText(text)});
     }

@@ -1,6 +1,6 @@
 import * as http from 'node:http';
 import { agentAccountCatalog } from '../core/agentAccountActions';
-import { AgentSessions, ownerKey } from '../core/agentSessions';
+import { AGENT_BACKENDS, AgentSessions, ownerKey } from '../core/agentSessions';
 
 export async function handleAgentHttp(req: http.IncomingMessage, res: http.ServerResponse, url: URL, manager: AgentSessions) {
     res.setHeader('Cache-Control', 'no-store');
@@ -40,6 +40,18 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
             }) } : await manager.backends()); return;
         }
         if (parts.join('/') === 'agents/login' && req.method === 'POST') { send(200, await manager.login(input.backend || 'codex')); return; }
+        if (parts[1] === 'native-sessions') {
+            const backend = parts[2] as typeof AGENT_BACKENDS[number];
+            if (!AGENT_BACKENDS.includes(backend)) throw new Error('Unsupported agent backend');
+            if (parts.length === 3 && req.method === 'GET') { send(200, await manager.nativeCatalog(owner, url.searchParams.get('cursor') || undefined, backend)); return; }
+            if (parts.length === 4 && req.method === 'GET') { send(200, await manager.nativeSession(owner, parts[3], backend)); return; }
+            throw new Error('Unknown native session operation');
+        }
+        if (parts[1] === 'native-codex') {
+            if (parts.length === 2 && req.method === 'GET') { send(200, await manager.nativeCatalog(owner, url.searchParams.get('cursor') || undefined)); return; }
+            if (parts.length === 3 && req.method === 'GET') { send(200, await manager.nativeSession(owner, parts[2])); return; }
+            throw new Error('Unknown native Codex operation');
+        }
         if (parts[1] !== 'sessions') { send(404, { error: 'Unknown agent endpoint' }); return; }
         const id = parts[2], action = parts[3];
         if (!id && req.method === 'GET') {

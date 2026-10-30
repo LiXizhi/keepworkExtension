@@ -378,3 +378,29 @@ test('explicit automatic approval covers later native requests but not questions
     assert.equal(fake.responses.length,3);
     assert.equal((await manager.read(session.id,owner)).pending.length,4);
 });
+
+test('native Codex catalog and history do not resume; send resumes the original thread once', async t => {
+    const {root,manager,owner,fake} = setup(t);
+    const original = fake.call.bind(fake);
+    let active = false;
+    fake.call = async (method, params) => {
+        if (method === 'thread/list') { fake.calls.push({method,params}); return {data:[{id:'native-one',cwd:root,name:'Terminal task',updatedAt:123}],nextCursor:'page-two'}; }
+        if (method === 'thread/read') { fake.calls.push({method,params}); return {thread:{id:params.threadId,cwd:root,status:{type:active?'active':'idle'},turns:[{items:[{id:'u1',type:'userMessage',content:[{type:'text',text:'original CLI prompt'}]}]}]}}; }
+        return original(method,params);
+    };
+    const catalog = await manager.nativeCatalog(owner);
+    assert.equal(catalog.sessions[0].updatedAt,123000); assert.equal(catalog.nextCursor,'page-two');
+    const [a,b] = await Promise.all([manager.nativeSession(owner,'native-one'),manager.nativeSession(owner,'native-one')]);
+    assert.equal(a.id,b.id); assert.equal(a.items[0].content[0].text,'original CLI prompt');
+    assert.equal(fake.calls.filter(c=>c.method==='thread/resume').length,0);
+    await assert.rejects(manager.nativeSession('other-owner','native-one'),/unavailable/);
+    assert.equal((await manager.nativeCatalog('other-owner')).sessions.length,0);
+    active=true; await manager.nativeSession(owner,'native-one');
+    await assert.rejects(manager.turn(a.id,owner,{requestId:'busy',text:'continue'}),/already running/);
+    active=false; await manager.nativeSession(owner,'native-one');
+    await manager.turn(a.id,owner,{requestId:'native-send',text:'continue'});
+    await manager.turn(a.id,owner,{requestId:'native-send',text:'continue'});
+    assert.equal(fake.calls.filter(c=>c.method==='turn/start').length,1);
+    assert.equal(fake.calls.find(c=>c.method==='thread/resume').params.threadId,'native-one');
+    assert.equal(fake.calls.find(c=>c.method==='turn/start').params.threadId,'native-one');
+});

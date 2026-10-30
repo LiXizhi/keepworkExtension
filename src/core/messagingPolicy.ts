@@ -44,7 +44,7 @@ export function readRules(root: string, directory = RULE_DIR) {
     for (const dir of config.knowledge) knowledgeDirectory(root,dir);
     return { config, prompt };
 }
-export interface Incoming { id: string; conversation: string; sender: string; text: string; time: number; kind: 'direct' | 'mention' | 'group'; automated?: boolean; thread?: string; mentionedSelf?: boolean }
+export interface Incoming { recovered?: boolean; id: string; conversation: string; sender: string; text: string; time: number; kind: 'direct' | 'mention' | 'group'; automated?: boolean; thread?: string; mentionedSelf?: boolean }
 export function automatedSender(event: any): boolean {
     return [event?.sender_type, event?.senderType, event?.sender?.sender_type, event?.sender?.type]
         .some(value => typeof value === 'string' && /^(app|bot|robot)$/i.test(value));

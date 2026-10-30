@@ -1,3 +1,4 @@
+import { DingTalkHistorySync, dingtalkHistorySelf } from './messagingDingtalkSync';
 import { Circles } from './circles';
 import { MessagingCoordinator, computerIdentity, coordinationKey } from './messagingCoordination';
 import { anyAichatClient, latestAichatClient, latestAichatBrainRoot } from './aichatPresence';
@@ -17,7 +18,7 @@ import { runTerminal } from './terminal';
 interface Binding { channel?: 'dingtalk' | 'feishu'; id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; peers?: {owner:string;agentId:string}[]; rulesDir?: string; agentPrompt?: string }
 interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; model?: string; server?: 'cli' | 'client' | 'headless'; card?: string; workKey?: string }
 interface RecentMessage { binding: string; channel: string; persona: string; profile: string; conversation: string; sender: string; direction: string; kind: string; relevant: boolean; text: string; reply: string; receipt: Receipt }
-interface Runtime { admitting?: number; inbound?: Promise<void>; pollAbort?: AbortController; lastPollAt?: number; binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt; agent?: MessageAgent }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
+interface Runtime { historyStop?: () => void; historySync?: { status: string; since?: number; error?: string }; admitting?: number; inbound?: Promise<void>; pollAbort?: AbortController; lastPollAt?: number; binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt; agent?: MessageAgent }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
 export const messagingBrainTools = [
     ['read_file', 'Read a text file in the second brain', { path: { type: 'string' } }],
     ['list_dir', 'List files in the second brain', { path: { type: 'string' } }],
@@ -584,7 +585,7 @@ export class MessagingService {
     list() { return [...this.runs.values()].map(r => this.view(r.binding.id)); }
     view(id: string) {
         const r = this.get(id);
-        return { ...r.binding, nicknameErrors:[...(this.nicknameReadErrors.has(r.binding.id)?[this.nicknameReadErrors.get(r.binding.id)!]:[]),...[...this.nicknameErrors.entries()].filter(([key])=>(this.messageAgents?.()||[]).some(p=>p.root===r.binding.root&&p.messaging?.groups.some(g=>g.channel===(r.binding.channel||'dingtalk')&&g.account===r.binding.profile&&nicknameKey({channel:g.channel,account:g.account,group:g.id,root:p.root,names:[]})===key))).map(([,error])=>error)], transitioning: !!r.starting, channel:r.binding.channel||'dingtalk', transport:r.binding.channel==='feishu'?'polling':'events', pollIntervalMs:r.binding.channel==='feishu'?600000:undefined, lastPollAt:r.lastPollAt||null, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', serving: this.servingView(r), autoReply: r.binding.enabled };
+        return { ...r.binding, nicknameErrors:[...(this.nicknameReadErrors.has(r.binding.id)?[this.nicknameReadErrors.get(r.binding.id)!]:[]),...[...this.nicknameErrors.entries()].filter(([key])=>(this.messageAgents?.()||[]).some(p=>p.root===r.binding.root&&p.messaging?.groups.some(g=>g.channel===(r.binding.channel||'dingtalk')&&g.account===r.binding.profile&&nicknameKey({channel:g.channel,account:g.account,group:g.id,root:p.root,names:[]})===key))).map(([,error])=>error)], transitioning: !!r.starting, channel:r.binding.channel||'dingtalk', historySync:r.historySync, transport:r.binding.channel==='feishu'?'polling':'events', pollIntervalMs:r.binding.channel==='feishu'?600000:undefined, lastPollAt:r.lastPollAt||null, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', serving: this.servingView(r), autoReply: r.binding.enabled };
     }
     rules(id: string) { const b=this.get(id).binding;return readRules(b.root,b.rulesDir); }
     private replyPlan(r: Runtime) {
@@ -779,7 +780,7 @@ export class MessagingService {
             r.since = Date.now(); r.subscriptions = this.subscriptionKey(r,config);
             r.stop = await listenDws(r.binding.root, r.binding.profile, this.subscriptionConfig(r,config), e => this.receive(r,e), () => this.disconnected(r));
             if (!this.canRun(r) || this.closed) { r.stop(); r.stop = undefined; this.releaseIdentity(r); r.status = 'stopped'; return; }
-            r.status = 'listening'; r.retries = 0; this.persist(r);
+            r.status = 'listening'; r.retries = 0; this.startHistorySync(r); this.persist(r);
         } catch(error) {
             this.releaseIdentity(r);
             if (this.closed || !this.canRun(r)) { r.status = 'stopped'; r.error = ''; return; }
@@ -787,6 +788,65 @@ export class MessagingService {
             if (rulesLoaded && !messagingNeedsRepair(error)) this.scheduleReconnect(r);
             else { clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.status = 'error'; this.persist(r); }
             throw error;
+        }
+    }
+    private startHistorySync(r: Runtime) {
+        r.historyStop?.();
+        let stopped=false, timer:NodeJS.Timeout|undefined, sync:DingTalkHistorySync|undefined;
+        const active=()=>!stopped&&!this.closed&&this.canRun(r)&&this.gatewayAllowed(r,true);
+        r.historyStop=()=>{stopped=true;clearTimeout(timer);r.historySync={...r.historySync,status:'stopped'};};
+        const run=async()=>{
+            let more=false;
+            try {
+                if(!active())return;
+                r.historySync={...r.historySync,status:'syncing',error:''};this.persist(r);
+                if(!sync){
+                    if(!r.self)r.self=await dingtalkHistorySelf(r.binding.root,r.binding.profile);
+                    if(!active())return;
+                    // Existing versions have no coverage cursor. Include a day of overlap
+                    // before the latest local incoming message to recover silent event gaps.
+                    const last=this.box(r.binding.id).messages.filter(m=>m.direction==='in').reduce((n,m)=>Math.max(n,Math.min(m.time,Date.now())),0)||Date.now();
+                    sync=new DingTalkHistorySync(path.join(this.home,r.binding.id+'.history-cursor.json'),last-86400000,r.binding.profile,r.binding.root,r.self,async rows=>{
+                        if(!active())throw Error('History sync stopped');
+                        const box=this.box(r.binding.id), keys=new Set(box.messages.map(m=>JSON.stringify([m.conversation,m.id])));
+                        for(const row of rows){
+                            const key=JSON.stringify([row.conversation,row.id]);if(keys.has(key))continue;
+                            keys.add(key);box.messages.push({...row,state:'recovered'});
+                        }
+                        box.messages.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));
+                        // Import a full window before considering private unanswered conversations.
+                        this.saveInbox();
+                    });
+                }
+                more=await sync.step(Date.now(),active);
+                if(active()){
+                    r.historySync={status:more?'syncing':'current',since:sync.state.since};
+                    if(!more)await this.replyRecoveredDirect(r);
+                }
+            }catch{
+                if(active())r.historySync={status:'error',since:sync?.state.since,error:'历史补收失败，将从原位置重试；实时监听继续'};
+            }finally{
+                if(!stopped){this.persist(r);timer=setTimeout(()=>void run(),more?1000:5*60000);timer.unref();}
+            }
+        };
+        void run();
+    }
+    private async replyRecoveredDirect(r:Runtime) {
+        const box=this.box(r.binding.id);
+        const latest=new Map<string,typeof box.messages[number]>();
+        for(const message of box.messages)if(message.kind==='direct'){
+            const previous=latest.get(message.conversation);
+            if(!previous||message.time>=previous.time)latest.set(message.conversation,message);
+        }
+        for(const message of latest.values()){
+            if(this.closed||!this.canRun(r)||!this.gatewayAllowed(r,true))return;
+            if(!r.self||message.direction!=='in'||message.sender===r.self||message.automated||message.state!=='recovered'||box.paused.includes(message.conversation))continue;
+            if(r.active.has(message.conversation)||r.queues.get(message.conversation)?.length)continue;
+            if([...this.runs.values()].reduce((n,x)=>n+[...x.queues.values()].reduce((a,q)=>a+q.length,0),0)>=100)break;
+            // Persist an admission marker before queueing. Unknown work is never replayed.
+            message.state='recovery-claimed';this.saveInbox();
+            await this.receive(r,{type:'user_im_message_receive_o2o_all',message_id:message.id,conversation_id:message.conversation,
+                sender_open_dingtalk_id:message.sender,content:message.text,create_time:message.time},true);
         }
     }
     private releaseIdentity(r: Runtime) { if (r.ownsIdentity) this.identities.delete(r.identity); r.ownsIdentity = false; }
@@ -805,7 +865,7 @@ export class MessagingService {
         this.persist(r);
     }
     private disconnected(r: Runtime) {
-        r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
+        r.historyStop?.(); r.historyStop = undefined; r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
         if (this.closed || !this.canRun(r)) return;
         r.error = 'Listener disconnected';
         // Reconnect subscriptions only. Never replay model work or message sends.
@@ -818,20 +878,22 @@ export class MessagingService {
     }
     private halt(r: Runtime) {
         clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.retries = 0;
-        r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
+        r.historyStop?.(); r.historyStop = undefined; r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
         for (const q of r.queues.values()) for (const job of q) job.receipt.state = 'cancelled';
         r.queues.clear(); for (const controller of r.active.values()) controller.abort();
         r.status = 'stopped'; r.error = '';
     }
-    private receive(r:Runtime,event:any):Promise<void>{
-        if(!this.coordinated(r))return this.receiveOne(r,event);
+    private receive(r:Runtime,event:any,recovered=false):Promise<void>{
+        if(!this.coordinated(r))return this.receiveOne(r,event,recovered);
         r.admitting=(r.admitting||0)+1;
-        const next=(r.inbound||Promise.resolve()).then(()=>this.receiveOne(r,event)).finally(()=>{r.admitting!--;});
+        const next=(r.inbound||Promise.resolve()).then(()=>this.receiveOne(r,event,recovered)).finally(()=>{r.admitting!--;});
         r.inbound=next.catch(()=>{});return next;
     }
-    private async receiveOne(r: Runtime, event: any) {
+    private async receiveOne(r: Runtime, event: any, recovered=false) {
         if (!this.canRun(r) || this.closed || !this.gatewayAllowed(r,true)) return;
         const message: Incoming | null = r.binding.channel==='feishu' ? event : incoming(event); if (!message) return;
+        if (!recovered && this.box(r.binding.id).messages.some(m=>['recovered','recovery-claimed'].includes(m.state||'')&&m.id===message.id&&m.conversation===message.conversation)) return;
+        if(recovered)message.recovered=true;
         const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
         const receipt: Receipt = { id, time: Date.now(), state: 'ignored' }; r.receipts.push(receipt); r.receipts = r.receipts.slice(-200);
         const recent=this.rememberMessage(r,message,receipt);
@@ -847,7 +909,7 @@ export class MessagingService {
         try {
             const {config} = this.rules(r.binding.id);
             if (this.subscriptionKey(r,config) !== r.subscriptions) throw new Error('监听群或称呼开关已变化，请重新启用服务');
-            receipt.reason = trigger(message, config, r.since, r.self, true);
+            receipt.reason = trigger(message, config, recovered?0:r.since, r.self, true);
             const candidates = this.routedAgents(r,message.conversation);
             const selfNamed=message.sender===r.self && !message.automated && !automatedText(message.text) && candidates.some(p=>agentNameMentioned(message.text,p.name));
             const agents = ['old','echo'].includes(receipt.reason) || (receipt.reason==='self'&&!selfNamed) ? [] : routeMessageAgents(candidates,message,r.binding.channel||'dingtalk',r.binding.profile);
@@ -937,13 +999,13 @@ export class MessagingService {
             // Policy changes invalidate conversation memory, including formerly public material.
             const scope = createHash('sha256').update(JSON.stringify(config)+prompt+agentPrompt+(agent?agent.owner+'\0'+agent.id:'')).digest('hex');
             const historyKey = scope + '\0' + message.conversation + '\0' + message.sender;
-            const readConversation = r.binding.channel==='feishu' ? feishuConversation : dingtalkConversation;
+            const readConversation = r.binding.channel==='feishu' ? feishuConversation : (root:string,profile:string,target:Incoming,abort?:AbortSignal)=>dingtalkConversation(root,profile,target,abort,dws,r.self);
             const snapshot = await readConversation(r.binding.root,r.binding.profile,message,signal);
             const fingerprint = (rows: Incoming[]) => JSON.stringify(rows);
             const humanReplied = () => this.box(r.binding.id).messages.some(m=>m.conversation===message.conversation && m.sender===r.self && !m.automated && m.time>=message.time && m.id!==message.id);
             const silence = (reason: string) => { receipt.state='ignored';receipt.reason=reason; };
             if(snapshot && !snapshot.some(m=>m.id===message.id)) { silence('原消息不可见或已撤回，保持沉默');return; }
-            if(snapshot && humanReplied()) { silence('本人已回复，保持沉默');return; }
+            if(snapshot && (humanReplied() || (message.recovered && snapshot.some(m=>m.id!==message.id&&m.time>=message.time&&(m.sender===r.self||m.automated))))) { silence('本人已回复，保持沉默');return; }
             const question = snapshot?.find(m=>m.id===message.id)?.text || message.text;
             const groupWork=!!agent&&message.kind!=='direct'&&!!agent.messaging?.groups.some(g=>g.id===message.conversation&&g.account===r.binding.profile&&g.channel===(r.binding.channel||'dingtalk'));
             const input: AnswerInput = { brain: path.basename(r.binding.root), ...(agent ? {restricted:true,...(groupWork?{groupWork:true,root:r.binding.root,tools:messagingRoleTools}: {})} : {root:r.binding.root,tools:messagingBrainTools}), prompt: agentPrompt+'\n'+prompt, question, knowledge: knowledgeContext(r.binding.root,config,question), history: snapshot ? conversationContext(snapshot,r.self) : r.history.get(historyKey) || [] };
@@ -1033,6 +1095,6 @@ export class MessagingService {
             r.error = receipt.reason || 'Task failed';
         } finally { if(workKey){const count=(this.agentWorkCounts.get(workKey)||1)-1;if(count)this.agentWorkCounts.set(workKey,count);else this.agentWorkCounts.delete(workKey);}this.persist(r); }
     }
-    close() { this.circles.close(); this.closed = true; clearInterval(this.coordinationTimer);for(const c of this.coordinators.values())c.close(); clearTimeout(this.replyTimer); for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.pollAbort?.abort(); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }
+    close() { this.circles.close(); this.closed = true; clearInterval(this.coordinationTimer);for(const c of this.coordinators.values())c.close(); clearTimeout(this.replyTimer); for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.historyStop?.(); r.historyStop = undefined; r.pollAbort?.abort(); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }
 }
 export { defaultMessageConfig, DEFAULT_PROMPT };

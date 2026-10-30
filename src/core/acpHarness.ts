@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { NativeCliHistory } from './nativeCliHistory';
 import { HarnessAdapter } from './codexHarness';
 import { resolveAgentCli, CliLaunch, stopCli } from './agentCliProcess';
 import { AcpBackend, AGENT_CLI } from './agentCliBackends';
@@ -31,6 +32,9 @@ export function cacheValue(value: any, budget = { remaining: 2_000_000 }, depth 
 
 /** ACP stays private to the daemon. Browser snapshots use the existing normalized contract. */
 export class AcpHarness extends EventEmitter implements HarnessAdapter {
+    private nativeHistory: NativeCliHistory | null;
+    private nativeCatalog = new Map<string, any>();
+    private replaying = new Set<string>();
     private scoped = new Map<string, AcpHarness>();
     private scopedRequests = new Map<string, { child: AcpHarness; id: string | number }>();
     private child?: ChildProcessWithoutNullStreams;
@@ -53,7 +57,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         private executable?: string,
         private args = AGENT_CLI[backend].args,
         private prepareEnvironment?: () => Promise<NodeJS.ProcessEnv>,
-        private launchMcp?: any[], private launchCwd?: string, private persistHistory = true) { super(); }
+        private launchMcp?: any[], private launchCwd?: string, private persistHistory = true) { super(); this.nativeHistory = this.isBuddy() ? new NativeCliHistory(this.backend as 'workbuddy' | 'codebuddy') : null; }
 
     private start(): Promise<any> {
         if (this.ready) return this.ready;
@@ -137,17 +141,19 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             const candidates = [...this.active].filter(([id, run]) => id === m.params?.sessionId || run.items.some(i => i.id === m.params?.toolCallId));
             const sessionId = candidates.length === 1 ? candidates[0][0] : this.active.size === 1 ? [...this.active.keys()][0] : undefined;
             if (!sessionId) { this.write({ id: m.id, error: { code: -32602, message: 'Cannot identify active Cursor session' } }); return; }
+            if (this.replaying.has(sessionId)) { this.write({id:m.id,error:{code:-32601,message:'Actions are unavailable during history replay'}}); return; }
             this.permissions.set(m.id, { ...m.params, sessionId, cursorMethod: m.method });
             if (m.method === 'cursor/ask_question') this.emit('request', { id: m.id, method: 'item/tool/requestUserInput', params: { threadId: sessionId, questions: (m.params.questions || []).map((q: any) => ({ id: q.id, question: q.prompt, options: (q.options || []).map((o: any) => ({ label: o.label, description: o.id })) })) } });
             else this.emit('request', { id: m.id, method: 'item/commandExecution/requestApproval', params: { threadId: sessionId, requiresUserDecision: true, command: String(m.params.plan || m.params.overview || 'Approve Cursor plan').slice(0, 10000) } });
             return;
         }
+        if (m.id !== undefined && this.replaying.has(m.params?.sessionId)) { this.write({id:m.id,error:{code:-32601,message:'Actions are unavailable during history replay'}}); return; }
         if (m.method === 'session/request_permission' && this.active.has(m.params?.sessionId)) {
             this.permissions.set(m.id, m.params);
             this.emit('request', { id: m.id, method: 'item/commandExecution/requestApproval', params: { threadId: m.params.sessionId, readOnly: ['read', 'search'].includes(m.params.toolCall?.kind), command: m.params.toolCall?.title || 'CLI tool', toolCall: cacheValue(m.params.toolCall || {}), options: m.params.options } });
         } else this.write({ id: m.id, error: { code: -32601, message: 'Client method unsupported' } });
     }
-    private notify(method: string, threadId: string, params: any) { this.emit('notification', { method, params: { threadId, ...params } }); }
+    private notify(method: string, threadId: string, params: any) { if (this.replaying.has(threadId)) return; this.emit('notification', { method, params: { threadId, ...params } }); }
     private update(p: any) {
         const run = this.active.get(p?.sessionId), update = p?.update;
         const thread = this.threads.get(p?.sessionId);
@@ -157,6 +163,13 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         }
         if (thread?.modes && update?.sessionUpdate === 'current_mode_update') thread.modes.currentModeId = update.currentModeId;
         if (!run || !update) return;
+        if (this.replaying.has(p.sessionId) && update.sessionUpdate === 'user_message_chunk' && update.content?.type === 'text') {
+            run.textItem = undefined; run.thoughtItem = undefined;
+            const previous = run.items.at(-1);
+            if (previous?.type === 'userMessage') previous.content[0].text += update.content.text;
+            else run.items.push({id:randomUUID(),type:'userMessage',content:[{type:'text',text:update.content.text}]});
+            return;
+        }
         if (['agent_message_chunk', 'agent_thought_chunk'].includes(update.sessionUpdate) && update.content?.type === 'text') {
             const key = update.sessionUpdate === 'agent_thought_chunk' ? 'thoughtItem' : 'textItem';
             if (!run[key]) {
@@ -201,6 +214,40 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
     }
     private isBuddy() { return this.backend === 'workbuddy' || this.backend === 'codebuddy'; }
     async call(method: string, p: any = {}): Promise<any> {
+        if (method === 'thread/list') {
+            if (this.nativeHistory) return this.nativeHistory.list(p.cursor);
+            await this.start();
+            if (!this.capabilities.sessionCapabilities?.list || !this.capabilities.loadSession) throw new Error('Native session discovery unsupported by this CLI');
+            const result = await this.rpc('session/list', p.cursor ? {cursor:p.cursor} : {});
+            const data = (result.sessions || []).filter((r:any)=>/^[\w-]{1,160}$/.test(r.sessionId) && typeof r.cwd === 'string' && path.isAbsolute(r.cwd)).map((r:any)=>({id:r.sessionId,cwd:r.cwd,name:r.title || this.backend,updatedAt:Date.parse(r.updatedAt)/1000 || 0}));
+            for (const row of data) this.nativeCatalog.set(row.id,row);
+            while (this.nativeCatalog.size > 1000) this.nativeCatalog.delete(this.nativeCatalog.keys().next().value!);
+            return {data,nextCursor:result.nextCursor || null};
+        }
+        if (method === 'thread/native/read') {
+            const child = this.scoped.get(p.threadId);
+            if (child) return child.call('thread/read',p);
+            const existing = this.threads.get(p.threadId);
+            if (existing?.loaded) return {thread:existing};
+            if (this.nativeHistory) {
+                const history = await this.nativeHistory.read(p.threadId);
+                const thread: Thread = {...history,loaded:false};
+                this.threads.set(thread.id,thread); this.save(thread); return {thread};
+            }
+            // Only IDs discovered through the provider catalog can supply a cwd.
+            const metadata = this.nativeCatalog.get(p.threadId) || (()=>{try{return this.thread(p.threadId);}catch{return null;}})();
+            if (!metadata) throw new Error('Refresh the native session catalog before opening this session');
+            await this.start();
+            if (!this.capabilities.loadSession) throw new Error('Native history loading unsupported by this CLI');
+            const thread: Thread = {...metadata,turns:[],loaded:false};
+            const run = {id:randomUUID(),items:[] as any[]};
+            this.threads.set(thread.id,thread); this.active.set(thread.id,run); this.replaying.add(thread.id);
+            try {
+                await this.resume(thread);
+                thread.turns=[{items:cacheValue(run.items)}]; this.save(thread); return {thread};
+            } catch (error) { this.threads.delete(thread.id); throw error; }
+            finally { this.replaying.delete(thread.id); this.active.delete(thread.id); }
+        }
         // Copilot versions that ignore ACP mcpServers need one process-level configuration per session.
         // Buddy captures its environment at process startup; session/new.cwd alone does not
         // change that context. Keep each owned session in its root, separate from discovery.

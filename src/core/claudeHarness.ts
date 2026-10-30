@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { NativeCliHistory } from './nativeCliHistory';
 import { HarnessAdapter } from './codexHarness';
 import { cacheValue } from './acpHarness';
 import { CliLaunch, resolveAgentCli, stopCli } from './agentCliProcess';
@@ -39,6 +40,7 @@ function normalizeClaudeModel(m: any) {
 
 /** Claude's native bidirectional stream-json control protocol, without shell or SDK dependency. */
 export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
+    private nativeHistory = new NativeCliHistory('claude');
     private threads = new Map<string, Thread>();
     private connections = new Map<string, Connection>();
     private modelCache: any[] = [];
@@ -219,6 +221,13 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         thread.effort = effort;
     }
     async call(method: string, p: any = {}): Promise<any> {
+        if (method === 'thread/list') return this.nativeHistory.list(p.cursor);
+        if (method === 'thread/native/read') {
+            if (this.connections.has(p.threadId)) return {thread:this.thread(p.threadId)};
+            const history = await this.nativeHistory.read(p.threadId);
+            const thread: Thread = {...history,roots:[history.cwd],native:true};
+            this.threads.set(thread.id,thread); this.save(thread); return {thread};
+        }
         if (method === 'account/read') {
             const command = resolveAgentCli('claude', [...this.prefix, '--version'], this.executable); this.launch = command;
             await promisify(execFile)(command.executable, command.args, { timeout: 10000, maxBuffer: 65536, windowsHide: true });

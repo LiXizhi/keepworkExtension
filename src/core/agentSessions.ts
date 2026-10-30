@@ -19,7 +19,7 @@ type Backend = typeof AGENT_BACKENDS[number];
 
 type Item = { id: string; type: string; [key: string]: any };
 type Session = {
-    backend: Backend; id: string; owner: string; conversationId: string; threadId: string; title: string;
+    native?: boolean; externalBusy?: boolean; backend: Backend; id: string; owner: string; conversationId: string; threadId: string; title: string;
     roots: string[]; rootNames?: string[]; worktrees: string[]; sandboxPolicy?: any; model?: string; effort?: string; archived: boolean; removed: boolean; aichatContext?: boolean;
     status: string; mode?: AgentMode; nativePlan?: boolean; turnId?: string; error?: string; retrying?: boolean; cursor: number; items: Item[]; pending: any[];
     submissions: Record<string, { state: string; turnId?: string }>;
@@ -62,6 +62,7 @@ export function canonicalRoot(input: string) {
     const real = fs.realpathSync(input);
     return process.platform === 'win32' ? real.toLowerCase() : real;
 }
+const nativeBackendKey = (backend: string) => ['workbuddy','codebuddy'].includes(backend) ? 'buddy' : backend;
 function overlap(a: string, b: string) { return a === b || a.startsWith(b.endsWith(path.sep) ? b : b + path.sep) || b.startsWith(a.endsWith(path.sep) ? a : a + path.sep); }
 function inside(root: string, file: string) { return file === root || file.startsWith(root.endsWith(path.sep) ? root : root + path.sep); }
 function verifyRoots(roots: string[]) {
@@ -101,6 +102,7 @@ export class AgentSessions {
     private listeners = new Map<string, Set<(event: any) => void>>();
     private loaded = new Set<string>();
     private loading = new Map<string, Promise<void>>();
+    private attaching = new Map<string, Promise<any>>();
     private creating = new Map<string, Promise<any>>();
     private flushTimers = new Map<string, NodeJS.Timeout>();
     private closing = false;
@@ -238,6 +240,46 @@ export class AgentSessions {
         return { url: result.authUrl };
     }
     list(owner: string, offset = 0, limit = 100) { return [...this.sessions.values()].filter(s => s.owner === owner && !s.removed).slice(offset, offset + limit).map(s => this.view(s, false)); }
+    async nativeCatalog(owner: string, cursor?: string, backend: Backend = 'codex') {
+        const result = await this.adapterFor(backend).call('thread/list', {limit: 100, sortKey: 'updated_at', archived: false, modelProviders: [], sourceKinds: ['cli', 'vscode', 'exec', 'appServer'], ...(cursor ? {cursor} : {})});
+        const sessions = (result.data || []).filter((thread: any) => typeof thread.id === 'string'
+            && ![...this.sessions.values()].some(s => nativeBackendKey(s.backend) === nativeBackendKey(backend) && s.threadId === thread.id && s.owner !== owner)).map((thread: any) => ({
+                backend, threadId: thread.id, title: String(thread.name || thread.preview || AGENT_CLI[backend].name).slice(0, 160),
+                workspace: path.basename(String(thread.cwd || '')), updatedAt: Number(thread.updatedAt) * 1000 || 0,
+                busy: thread.status?.type === 'active',
+            }));
+        return {sessions, nextCursor: result.nextCursor || null};
+    }
+    async nativeSession(owner: string, threadId: string, backend: Backend = 'codex'): Promise<any> {
+        const key = nativeBackendKey(backend) + ':' + threadId;
+        const pending = this.attaching.get(key);
+        if (pending) { await pending; return this.attachNativeSession(owner, threadId, backend); }
+        const task = this.attachNativeSession(owner, threadId, backend); this.attaching.set(key, task);
+        try { return await task; } finally { if (this.attaching.get(key) === task) this.attaching.delete(key); }
+    }
+    private async attachNativeSession(owner: string, threadId: string, backend: Backend): Promise<any> {
+        if (!/^[a-zA-Z0-9_-]{1,160}$/.test(threadId)) throw new Error('Invalid native thread ID');
+        const existing = [...this.sessions.values()].find(s => nativeBackendKey(s.backend) === nativeBackendKey(backend) && s.threadId === threadId);
+        if (existing) {
+            if (existing.owner !== owner || existing.removed || !existing.native) throw new Error('Native session unavailable');
+            return this.read(existing.id, owner);
+        }
+        const result = await this.adapterFor(backend).call(backend === 'codex' ? 'thread/read' : 'thread/native/read', {threadId, includeTurns: true});
+        const thread = result.thread;
+        if (thread?.id !== threadId) throw new Error('Native thread unavailable');
+        // Recheck after I/O so concurrent opens cannot attach the same thread twice.
+        if ([...this.sessions.values()].some(s => nativeBackendKey(s.backend) === nativeBackendKey(backend) && s.threadId === threadId)) return this.attachNativeSession(owner, threadId, backend);
+        if (this.sessions.size >= 1000) throw new Error('Agent session limit reached');
+        const s: Session = {native: true, backend, id: randomUUID(), owner, conversationId: 'native-' + backend + '-' + threadId,
+            threadId, title: String(thread.name || thread.preview || AGENT_CLI[backend].name).slice(0,160), roots: [canonicalRoot(thread.cwd)], worktrees: [],
+            archived: false, removed: false, mode: 'ask', status: 'idle', cursor: 0, items: [], pending: [], submissions: {}, events: [], updatedAt: Number(thread.updatedAt) * 1000 || Date.now()};
+        this.sessions.set(s.id, s);
+        this.refreshNative(s, thread); this.save(); return this.view(s);
+    }
+    private refreshNative(s: Session, thread: any) {
+        s.items = (thread.turns || []).flatMap((turn: any) => turn.items || []).slice(-2000).map((item: any) => bounded(visibleItem(item)));
+        s.externalBusy = thread.status?.type === 'active';
+    }
     async create(owner: string, input: any) {
         if (typeof input.conversationId !== 'string' || !/^[\w-]{1,160}$/.test(input.conversationId)) throw new Error('Conversation ID required');
         const backend = input.backend || 'codex'; this.adapterFor(backend);
@@ -307,7 +349,13 @@ export class AgentSessions {
         try { await task; } finally { this.loading.delete(s.id); }
     }
     async read(id: string, owner: string) {
-        const s = this.get(id, owner); await this.load(s);
+        const s = this.get(id, owner);
+        if (s.native && !ACTIVE.has(s.status)) {
+            const result = await this.forSession(s).call(s.backend === 'codex' ? 'thread/read' : 'thread/native/read', {threadId: s.threadId, includeTurns: true});
+            this.refreshNative(s, result.thread || {});
+            return this.view(s);
+        }
+        await this.load(s);
         if (s.status === 'uncertain') {
             const result = await this.forSession(s).call('thread/read', { threadId: s.threadId, includeTurns: true });
             const turns = result.thread?.turns || [], last = turns[turns.length - 1];
@@ -328,7 +376,7 @@ export class AgentSessions {
         if (!/^[\w-]{1,160}$/.test(input.requestId || '')) throw new Error('requestId required');
         if (s.submissions[input.requestId]) return { submission: s.submissions[input.requestId], session: this.view(s) };
         if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 200000) throw new Error('Text required (maximum 200000 characters)');
-        if (s.archived || ACTIVE.has(s.status)) throw new Error('Session is archived or already running');
+        if (s.archived || s.externalBusy || ACTIVE.has(s.status)) throw new Error('Session is archived or already running');
         const mode = agentMode(input.mode ?? s.mode);
         verifyRoots(s.roots);
         const context = s.aichatContext ? this.toolBridge.context(owner, s.conversationId) : null;
