@@ -96,7 +96,7 @@ export function apiDocs(port: number, requireAuth: boolean) {
     add('Agents', 'POST', '/agents/personas/:id/messaging-groups', 'Search up to 50 groups by name on an owned existing channel. Returns stable IDs and display names only.', 'binding, query');
     add('Agents', 'GET', '/agents/personas/events', 'Owner-scoped SSE change notifications; fetch snapshots after reconnect.');
     add('Agents', 'GET', '/agents/personas/:id', 'Single lasting conversation, 50 messages per page.', 'Optional before timestamp');
-    add('Agents', 'POST', '/agents/personas/:id/messages', 'Idempotent owner task; no replay after uncertain submission.', 'requestId, text');
+    add('Agents', 'POST', '/agents/personas/:id/messages', 'Idempotent owner task; no replay after uncertain submission. Isolated context omits past chat for this turn without deleting it or changing grants. Persona snapshots advertise taskContextVersion:1; unsupported modes return 422 with code UNSUPPORTED_FEATURE before acceptance.', 'requestId, text, optional contextMode: conversation (default) or isolated');
     add('Agents', 'POST', '/agents/personas/:id/schedules', 'Daily daemon schedule in an IANA timezone; disabled unless enabled explicitly.', 'id, title, prompt, time HH:mm, timezone, enabled; optional explicit target {binding,conversation}; remove:true deletes');
     add('Agents', 'POST', '/agents/personas/:id/clear', 'Clear owner conversation and context summary; preserves configuration, schedules, channels and request deduplication. Rejects active tasks.');
     add('Agents', 'POST', '/agents/personas/:id/cancel', 'Cancel this Agent task and pending approvals.');

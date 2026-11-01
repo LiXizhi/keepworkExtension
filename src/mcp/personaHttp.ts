@@ -11,7 +11,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
         let input:any={};if(req.method==='POST'){if(!String(req.headers['content-type']).startsWith('application/json'))throw Error('JSON required');let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>131072)throw Error('Request too large');}input=JSON.parse(raw||'{}');}
         const parts=url.pathname.split('/').filter(Boolean),id=parts[2],action=parts[3];
         if(id==='circles'){if(req.method!=='POST'){send(405,{error:'POST required'});return;}send(200,await messaging.circleRequest(owner,input));return;}
-        if(id==='messaging-computers'){if(!['GET','POST'].includes(req.method||'')){send(405,{error:'Method not allowed'});return;}send(200,req.method==='GET'?messaging.coordinationView(owner):await messaging.configureCoordination(owner,input));return;}
+        if(id==='messaging-computers'){if(!['GET','POST'].includes(req.method||'')){send(405,{error:'Method not allowed',code:'UNSUPPORTED_FEATURE'});return;}send(200,req.method==='GET'?messaging.coordinationView(owner):await messaging.configureCoordination(owner,input));return;}
         if(id==='events'&&req.method==='GET'){
             res.writeHead(200,{'Content-Type':'text/event-stream','X-Accel-Buffering':'no'});
             const update=()=>{if(!res.destroyed&&!res.writableEnded&&!res.write('event: changed\ndata: {}\n\n'))res.end();};
@@ -35,7 +35,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
             send(200,{version:1,nicknameVersion:1,nicknameRoutingVersion:1,roleWriteVersion:1,channels:messaging.agentBindings(owner,id).map(b=>({binding:b.id,channel:b.channel,account:b.profile,status:b.status,error:b.error,nicknameErrors:b.nicknameErrors,listening:b.listening}))});return;
         }
         if(action==='inbox'&&req.method==='GET'){send(200,await messaging.namedInboxView(owner,id,url.searchParams.get('binding')||'',url.searchParams.get('conversation')||'',Number(url.searchParams.get('before')||Infinity)));return;}
-        if(req.method!=='POST'){send(405,{error:'Method not allowed'});return;}
+        if(req.method!=='POST'){send(405,{error:'Method not allowed',code:'UNSUPPORTED_FEATURE'});return;}
         switch(action){
             case 'messaging-groups':send(200,{groups:await messaging.agentGroups(owner,id,String(input.binding||''),String(input.query||''))});return;
             case 'messages':send(200,personas.submit(owner,id,input));return;
@@ -53,7 +53,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
             case 'reply':send(200,await messaging.manualReply(owner,id,input.binding,input.conversation,input.requestId,input.text));return;
             case 'channel-start':messaging.assertAgentBinding(owner,id,input.binding);await messaging.start(input.binding);send(200,{ok:true});return;
             case 'channel-stop':messaging.assertAgentBinding(owner,id,input.binding);messaging.stop(input.binding);send(200,{ok:true});return;
-            default:send(404,{error:'Unknown Agent operation'});
+            default:send(404,{error:'Unknown Agent operation',code:'UNSUPPORTED_FEATURE'});
         }
-    }catch(error){const conflict=channelConflict(error);send(conflict?409:400,conflict||{error:(error as Error).message});}
+    }catch(error){const conflict=channelConflict(error);const unsupported=(error as any)?.code==='UNSUPPORTED_FEATURE';send(conflict?409:unsupported?422:400,conflict||{error:(error as Error).message,...(unsupported?{code:'UNSUPPORTED_FEATURE'}:{})});}
 }

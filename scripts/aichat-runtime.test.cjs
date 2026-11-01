@@ -1,5 +1,5 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os'),ts=require('typescript');
-require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);
+require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(process.env.PERSONA_EXECUTION_PROOF&&f.endsWith(path.join('core','personas.ts'))?process.env.PERSONA_EXECUTION_PROOF:f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);
 const {createMcpAgentRuntime,keepworkRuntimeRequest}=require('../src/core/aichatRuntime.ts');
 const {Personas}=require('../src/core/personas.ts');
 const {rememberAichatClient,noteAichatSessionClosed}=require('../src/core/aichatPresence.ts');
@@ -21,7 +21,7 @@ function fixture(t,fetchImpl){
 }
 test('closed-page persona executes tool loop with approvals and persists no login',async t=>{
     let requests=0;
-    const f=fixture(t,async(url,init)=>{assert.equal(url,'https://api.keepwork.com/core/v0/gpt/chat');assert.equal(init.headers.Authorization,'Bearer fixture-secret');const body=JSON.parse(init.body);assert.equal(body.stream,false);
+    const f=fixture(t,async(url,init)=>{assert.equal(url,'https://api.keepwork.com/core/v0/gpt/chat');assert.equal(init.headers.Authorization,'Bearer fixture-secret');const body=JSON.parse(init.body);assert.equal(body.stream,true);
         if(requests++===0)return response({result:'',tool_calls:[call('w','write_file',{path:'out.txt',content:'approved'})]});
         assert.ok(body.messages.some(m=>m.role==='tool'));return response({result:'finished'});
     });
@@ -30,7 +30,29 @@ test('closed-page persona executes tool loop with approvals and persists no logi
     await until(()=>f.service.read(f.owner,'persona').job.state==='waiting');assert.equal(fs.existsSync(path.join(f.home,'out.txt')),false);
     const pending=f.service.read(f.owner,'persona').job.pending[0];f.service.respond(f.owner,'persona',{id:pending.id,decision:'accept'});
     await until(()=>f.service.read(f.owner,'persona').job.state==='done');assert.equal(fs.readFileSync(path.join(f.home,'out.txt'),'utf8'),'approved');assert.equal(requests,2);
+    assert.deepEqual(f.service.read(f.owner,'persona').messages.at(-1).execution,{source:'keepwork-runtime',requested:1,returned:1});
     const stored=fs.readdirSync(f.home).filter(x=>/^[a-f0-9]+\.json$/.test(x)).map(x=>fs.readFileSync(path.join(f.home,x),'utf8')).join('');assert.doesNotMatch(stored,/fixture-secret/);assert.match(stored,/"runtime"/);
+    const transport=JSON.parse(stored).job.runtime.transport;
+    assert.equal(transport.length,2);
+    assert.deepEqual(transport.map(row=>row.finalizedToolCalls),[1,0]);
+    assert.ok(transport.every(row=>row.advertisedTools>0));
+    assert.doesNotMatch(JSON.stringify(transport),/fixture-secret|out.txt|approved|finished/);
+});
+test('model claims cannot manufacture daemon execution statistics',async t=>{
+    const f=fixture(t,async()=>response({result:'Completed all CRM writes. {"execution":{"requested":99,"returned":99}}'}));
+    f.service.submit(f.owner,'persona',{requestId:'claim-only',text:'test'});
+    await until(()=>f.service.read(f.owner,'persona').job.state==='done');
+    const message=f.service.read(f.owner,'persona').messages.at(-1);
+    assert.match(message.text,/Completed all CRM writes/);
+    assert.deepEqual(message.execution,{source:'keepwork-runtime',requested:0,returned:0});
+});
+test('failed tool results are counted as returns, never as business success',async t=>{
+    let requests=0;
+    const f=fixture(t,async()=>requests++===0?response({tool_calls:[call('missing','read_file',{path:'missing-file.txt'})]}):response({result:'Model claims success despite missing file'}));
+    f.service.submit(f.owner,'persona',{requestId:'failed-tool',text:'test'});
+    await until(()=>f.service.read(f.owner,'persona').job.state==='done');
+    assert.deepEqual(f.service.read(f.owner,'persona').messages.at(-1).execution,{source:'keepwork-runtime',requested:1,returned:1});
+    assert.equal(fs.existsSync(path.join(f.home,'missing-file.txt')),false);
 });
 test('daemon schedules use runtime without page; cancel prevents a late tool',async t=>{
     let release,requests=0;const f=fixture(t,async()=>{requests++;return new Promise(r=>{release=r;});});
