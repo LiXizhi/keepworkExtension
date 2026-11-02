@@ -120,10 +120,12 @@ gets the desktop bridge; Dashboard and embedded pages do not gain native privile
   `folder-grants.json`, `media-grants.json`, settings, and MCP runtime installation records. Never upload grants.
   The original `AIChat Desktop` installed profile directory (development: `aichat-desktop`),
   application ID and update feed stay stable across the product rename.
-- Microphone and camera consent is remembered separately for the trusted top-level page,
+- Microphone, camera and clipboard-write consent is remembered separately for the trusted top-level page,
   including across reloads, window recreation and app restarts. Local source and published
   pages have separate grants. Concurrent identical requests share one prompt. Denial is
-  not saved, so a later explicit attempt can ask again. OS privacy permissions still apply.
+  not saved, so a later explicit attempt can ask again. Clipboard consent restores page focus
+  before resuming a write; it does not grant clipboard read, other pages or subframes.
+  OS privacy permissions still apply.
   To reset these app-level grants, quit the app and remove `media-grants.json` from its
   user-data directory; this does not reset the system microphone/camera permissions.
 - **Open Folder** grants a canonical directory and connects it to AIChat. Reopening a saved
@@ -282,3 +284,10 @@ invalidate the prompt. `pet-window.test.cjs` and `pet-smoke.cjs` cover native
 confirmation, cancellation, stale IDs and displayed names. App quit is stubbed in
 the smoke; live services were not stopped. 11 native tests and TypeScript checks
 passed, along with the AIChat host's 7 unit and Edge integration tests.
+
+2026-11-02 clipboard consent regression: desktop source suite 86/86 and permission
+checks 11/11 passed. An isolated HEAD permissions.cjs snapshot fails the three new
+clipboard checks, including repeated prompts after approval and concurrent dialogs.
+Evidence: `.test-runtime/proofs/clipboard-consent/before.log` (repository root).
+These tests simulate Electron sessions/dialogs; no packaged Windows acceptance,
+app build or release was performed.

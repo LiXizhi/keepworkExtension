@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { MediaGrants, installPermissions } = require('../src/permissions.cjs');
+const { MediaGrants, installPermissions } = require(process.env.AICHAT_PERMISSION_SOURCE || '../src/permissions.cjs');
 
 function profile(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-permissions-'));
@@ -12,12 +12,12 @@ function profile(t) {
   return path.join(dir, 'media-grants.json');
 }
 function host(file, prompt = async () => ({ response: 1 })) {
-  const state = { url: 'https://keepwork.com/chat', developmentUrl: '', destroyed: false, prompts: [] };
+  const state = { url: 'https://keepwork.com/chat', developmentUrl: '', destroyed: false, prompts: [], focusEvents: [] };
   const contents = Object.assign(new EventEmitter(), {
-    isDestroyed: () => state.destroyed, getURL: () => state.url,
+    isDestroyed: () => state.destroyed, getURL: () => state.url, focus: () => state.focusEvents.push('contents'),
     session: { setPermissionCheckHandler(fn) { state.check = fn; }, setPermissionRequestHandler(fn) { state.request = fn; } },
   });
-  const window = { webContents: contents, isDestroyed: () => state.destroyed };
+  const window = { webContents: contents, isDestroyed: () => state.destroyed, focus: () => state.focusEvents.push('window') };
   installPermissions(window, new MediaGrants(file), () => state.developmentUrl, {
     showMessageBox: async (_window, options) => { state.prompts.push(options); return prompt(); },
   });
@@ -137,11 +137,66 @@ test('dialog failures, corrupt files and write failures fail closed and allow re
   assert.equal(blocked.allowed(), false);
 });
 
-test('unsupported permissions remain denied and clipboard/notifications keep their policy', async t => {
+test('unsupported permissions remain denied and notifications keep their policy', async t => {
   const h = host(profile(t));
   assert.equal(await h.ask([], {}, h.contents, 'geolocation'), false);
-  assert.equal(h.allowed('audio', {}, h.contents, 'clipboard-sanitized-write'), true);
+  assert.equal(h.allowed('audio', {}, h.contents, 'clipboard-sanitized-write'), false);
   assert.equal(h.allowed('audio', {}, h.contents, 'notifications'), false);
   assert.equal(await h.ask([], {}, h.contents, 'notifications'), true);
   assert.match(h.prompts[0].message, /通知/);
+});
+
+test('clipboard write approval persists independently across copies, reload and restart', async t => {
+  const file = profile(t), h = host(file);
+  const allowed = () => h.allowed('audio', {}, h.contents, 'clipboard-sanitized-write');
+  const copy = () => h.ask([], {}, h.contents, 'clipboard-sanitized-write');
+  await h.ask(); // Microphone must not grant clipboard access.
+  assert.equal(allowed(), false);
+  assert.equal(await copy(), true);
+  assert.match(h.prompts[1].message, /剪贴板写入/);
+  assert.equal(allowed(), true);
+  assert.deepEqual(h.focusEvents, ['window', 'contents'], 'restore focus before the approved request resumes');
+  h.contents.emit('did-start-navigation', {}, h.url, false, true);
+  h.url += '?chat=another#fork=fixture';
+  assert.equal(await copy(), true);
+  assert.equal(h.prompts.length, 2);
+  const restarted = host(file);
+  assert.equal(restarted.allowed('audio', {}, restarted.contents, 'clipboard-sanitized-write'), true);
+  assert.equal(await restarted.ask([], {}, restarted.contents, 'clipboard-sanitized-write'), true);
+  assert.equal(restarted.prompts.length, 0);
+  assert.equal(restarted.allowed('video'), false);
+  assert.equal(restarted.allowed('audio', {}, restarted.contents, 'clipboard-read'), false);
+});
+
+test('clipboard denial is not persisted; the next attempt prompts again', async t => {
+  const file = profile(t);
+  let attempts = 0;
+  const h = host(file, async () => ({ response: ++attempts === 1 ? 0 : 1 }));
+  assert.equal(await h.ask([], {}, h.contents, 'clipboard-sanitized-write'), false);
+  assert.equal(fs.existsSync(file), false);
+  assert.deepEqual(h.focusEvents, []);
+  assert.equal(await h.ask([], {}, h.contents, 'clipboard-sanitized-write'), true);
+  assert.equal(h.prompts.length, 2);
+  assert.equal(await h.ask([], {}, h.contents, 'clipboard-sanitized-write'), true);
+  assert.equal(h.prompts.length, 2);
+});
+
+test('clipboard consent shares concurrent prompts and cannot cross pages, frames or navigation', async t => {
+  let resolve;
+  const file = profile(t), h = host(file, () => new Promise(done => { resolve = done; }));
+  const copies = [1,2,3].map(() => h.ask([], {}, h.contents, 'clipboard-sanitized-write'));
+  assert.equal(h.prompts.length, 1);
+  resolve({ response: 1 });
+  assert.deepEqual(await Promise.all(copies), [true,true,true]);
+  for (const details of [{isMainFrame:false}, {requestingUrl:'https://keepwork.com/preview'}, {securityOrigin:'https://evil.test'}]) {
+    assert.equal(h.allowed('audio', details, h.contents, 'clipboard-sanitized-write'), false);
+    assert.equal(await h.ask([], details, h.contents, 'clipboard-sanitized-write'), false);
+  }
+  h.url = h.developmentUrl = 'http://127.0.0.1:3001/AIChat.html';
+  assert.equal(h.allowed('audio', {}, h.contents, 'clipboard-sanitized-write'), false);
+  const pending = h.ask([], {}, h.contents, 'clipboard-sanitized-write');
+  h.contents.emit('did-start-navigation', {}, h.url, false, true);
+  resolve({ response: 1 });
+  assert.equal(await pending, false);
+  assert.equal(h.allowed('audio', {}, h.contents, 'clipboard-sanitized-write'), false);
 });

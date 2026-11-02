@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { autoUpdater } from 'electron-updater';
 import { TerminalSessionManager } from '../../../src/core/terminalSessions';
+const { rememberDesktopClient } = require('../../../src/core/desktopClientIdentity.cjs');
 const { NativeFiles, atomicJson } = require('./files.cjs');
 const { defaultBrainFolder } = require('./brainFolder.cjs');
 const { checkGit, installGit } = require('./gitSetup.cjs');
@@ -205,7 +206,7 @@ async function checkUpdates() {
   return checking;
 }
 function updatePayload() {
-  return { state: updateState, progress: updateProgress, error: updateError || '', mcp: runtime?.updateSnapshot() };
+  return { state: updateState, version: app.getVersion(), latestVersion: shellLatest?.version || '', progress: updateProgress, error: updateError || '', mcp: runtime?.updateSnapshot() };
 }
 function notifyUpdateStatus() {
   updatesWindow?.send();
@@ -332,7 +333,7 @@ function desktopMenus() {
 function menuPayload(id: string) {
   const menus = desktopMenus() as Record<string, any[]>;
   if (!menus[id]) throw new Error('Invalid menu');
-  return { id, label: id[0].toUpperCase() + id.slice(1), items: menus[id] };
+  return { id, label: ({ file: '文件', edit: '编辑', view: '视图', help: '帮助' } as Record<string, string>)[id], items: menus[id] };
 }
 function templateFrom(items: any[]) {
   return items.map(item => {
@@ -393,11 +394,11 @@ function menu() {
   tray?.setContextMenu(Menu.buildFromTemplate(items));
   const bar = desktopMenus();
   applicationMenu = Menu.buildFromTemplate([
-    ...(process.platform === 'darwin' ? [{ label: MAC_APP_NAME, submenu: [{ label: `关于 ${PRODUCT_NAME}`, enabled: false }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { label: '退出', accelerator: 'Cmd+Q', click: () => app.quit() }] }] : []),
-    { label: 'File', submenu: templateFrom(bar.file) },
-    { label: 'Edit', submenu: templateFrom(bar.edit) },
-    { label: 'View', submenu: templateFrom(bar.view) },
-    { label: 'Help', submenu: templateFrom(bar.help) },
+    ...(process.platform === 'darwin' ? [{ label: MAC_APP_NAME, submenu: [{ label: `关于 ${PRODUCT_NAME}`, enabled: false }, { type: 'separator' }, { role: 'hide', label: '隐藏 KeepWork' }, { role: 'hideOthers', label: '隐藏其他应用' }, { role: 'unhide', label: '显示全部' }, { type: 'separator' }, { label: '退出', accelerator: 'Cmd+Q', click: () => app.quit() }] }] : []),
+    { label: '文件', submenu: templateFrom(bar.file) },
+    { label: '编辑', submenu: templateFrom(bar.edit) },
+    { label: '视图', submenu: templateFrom(bar.view) },
+    { label: '帮助', submenu: templateFrom(bar.help) },
   ]);
   Menu.setApplicationMenu(applicationMenu);
   const current = liveWindow();
@@ -453,7 +454,7 @@ function setupBridge() {
       return defaultBrainFolder(files, app.getPath('documents'), args.prepare);
     }
     if (method === 'revokeFolder') { clearTerminals(); return files.revoke(args.rootId); }
-    if (method === 'status') return { version: app.getVersion(), mcp: runtime.state, shell: updateState, progress: updateProgress, error: updateError };
+    if (method === 'status') return { ...updatePayload(), mcp: runtime.state, shell: updateState };
     if (method === 'checkUpdates') { await checkUpdates(); return { mcp: runtime.state, shell: updateState, progress: updateProgress, error: updateError }; }
     if (method === 'installUpdate') {
       if (updateState !== 'pending restart') return updatePayload();
@@ -541,6 +542,10 @@ if (!app.requestSingleInstanceLock()) {
 else {
   app.on('second-instance', show);
   app.whenReady().then(async () => {
+    if (app.isPackaged) {
+      try { rememberDesktopClient({ version: app.getVersion(), platform: process.platform === 'darwin' ? 'macos' : 'windows', arch: process.arch, executable: process.execPath }); }
+      catch (error) { console.warn('Unable to record desktop version:', String(error)); }
+    }
     try {
       managedDeployment = await require('./deployment.cjs').openDeployment(path.join(app.getPath('userData'), 'deployment.json'));
       if (managedDeployment) {

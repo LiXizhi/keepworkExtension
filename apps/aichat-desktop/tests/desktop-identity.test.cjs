@@ -1,0 +1,22 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { rememberDesktopClient, readDesktopClient } = require('../../../src/core/desktopClientIdentity.cjs');
+test('packaged desktop identity survives daemon ownership changes and omits executable paths', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-identity-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'desktop-client.json'), executable = path.join(dir, 'KeepWork');
+  fs.writeFileSync(executable, 'fixture');
+  assert.equal(readDesktopClient(file), undefined);
+  rememberDesktopClient({version:'0.1.6', platform:'macos', arch:'arm64', executable}, file);
+  assert.deepEqual(readDesktopClient(file), {product:'aichat-desktop', version:'0.1.6', platform:'macos', arch:'arm64'});
+  rememberDesktopClient({version:'0.1.7', platform:'macos', arch:'arm64', executable}, file);
+  assert.equal(readDesktopClient(file).version, '0.1.7');
+  assert.throws(() => rememberDesktopClient({version:'wrong',platform:'macos',arch:'arm64',executable}, file));
+  fs.unlinkSync(executable);
+  assert.equal(readDesktopClient(file), undefined);
+  fs.writeFileSync(file, '{invalid');
+  assert.equal(readDesktopClient(file), undefined);
+});

@@ -52,7 +52,15 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
             assert.equal((await fetch(base + '/agents/accounts', { headers: { ...dashboardHeaders, Referer: 'https://evil.example/dashboard' } })).status, 403);
             assert.equal((await fetch(base + '/agents/accounts', { headers: { ...dashboardHeaders, Origin: 'https://evil.example' } })).status, 403);
             if (requireAuth) assert.equal((await fetch(base + '/agents/accounts', { headers: { ...dashboardHeaders, Authorization: '' } })).status, 401);
+            const { rememberDesktopClient } = require('../src/core/desktopClientIdentity.cjs');
+            assert.equal((await (await fetch(base + '/health')).json()).desktopClient, undefined);
+            const desktopExe = path.join(home, 'KeepWork');
+            fs.writeFileSync(desktopExe, 'fixture');
+            rememberDesktopClient({ version: '0.1.6', platform: 'macos', arch: 'arm64', executable: desktopExe });
             const health = await (await fetch(base + '/health')).json();
+            assert.deepEqual(health.desktopClient, { product: 'aichat-desktop', version: '0.1.6', platform: 'macos', arch: 'arm64' });
+            fs.unlinkSync(desktopExe);
+            assert.equal((await (await fetch(base + '/health')).json()).desktopClient, undefined);
             assert.equal('dingtalkApi' in health, false);
             assert.equal(health.runtimeVersion, process.env.KEEPWORK_MCP_RUNTIME_VERSION || '9.8.7');
             assert.equal(health.runtimeCommit, process.env.KEEPWORK_MCP_RUNTIME_COMMIT || 'a'.repeat(40));

@@ -34,10 +34,10 @@ function host(platform = 'win32') {
   return { context, calls, window, electron, handlers, saved, app: electron.app, menu: () => { vm.runInContext('menu()', context); return template; } };
 }
 
-test('desktop menus are File Edit View Help and expose a serializable page payload', async () => {
+test('desktop menus are Chinese and expose a serializable page payload', async () => {
   const h = host();
-  const bar = h.menu().filter(item => ['File', 'Edit', 'View', 'Help'].includes(item.label));
-  assert.equal(JSON.stringify(bar.map(item => item.label)), JSON.stringify(['File', 'Edit', 'View', 'Help']));
+  const bar = h.menu().filter(item => ['文件', '编辑', '视图', '帮助'].includes(item.label));
+  assert.equal(JSON.stringify(bar.map(item => item.label)), JSON.stringify(['文件', '编辑', '视图', '帮助']));
   assert.equal(JSON.stringify(bar[0].submenu.map(item => item.label).filter(Boolean)), JSON.stringify(['新对话', '打开文件夹…', '重新加载', '检查更新…', '登录后自动启动', '退出']));
   const help = bar[3].submenu;
   help.find(item => item.label === '打开 Dashboard').click();
@@ -47,7 +47,7 @@ test('desktop menus are File Edit View Help and expose a serializable page paylo
   help.find(item => item.label === '使用线上服务器').click();
   assert.equal(h.calls.at(-1), 'https://keepwork.com/chat');
   const payload = vm.runInContext('menuPayload("view")', h.context);
-  assert.equal(payload.label, 'View');
+  assert.equal(payload.label, '视图');
   assert.equal(JSON.stringify(payload.items.filter(item => item.id).map(item => item.id)), JSON.stringify(['experience-simple', 'experience-professional', 'theme-light', 'theme-dark', 'toggle-sidebar', 'toggle-files', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'open-settings']));
   for (const item of payload.items) assert.equal(typeof item.click, 'undefined');
   assert.throws(() => vm.runInContext('menuPayload("nope")', h.context), /Invalid menu/);
@@ -73,9 +73,9 @@ test('macOS native menus dispatch page commands and preserve native editing role
   const config = require('../electron-builder.config.cjs');
   assert.equal(config.mac.extendInfo.CFBundleName, undefined);
   assert.equal(config.mac.extendInfo.CFBundleDisplayName, 'Keepwork');
-  bar.find(item => item.label === 'File').submenu.find(item => item.label === '新对话').click();
+  bar.find(item => item.label === '文件').submenu.find(item => item.label === '新对话').click();
   assert.deepEqual(h.calls, [['aichat-desktop:page-command', 'new-chat']]);
-  assert.ok(bar.find(item => item.label === 'Edit').submenu.some(item => item.role === 'copy'));
+  assert.ok(bar.find(item => item.label === '编辑').submenu.some(item => item.role === 'copy'));
 });
 
 for (const platform of ['darwin', 'win32', 'linux']) {
@@ -132,7 +132,7 @@ async function titlebar(platform) {
 for (const platform of ['darwin', 'win32']) test(`${platform} titlebar has only platform-appropriate menus and working controls`, async () => {
   const h = await titlebar(platform);
   const menus = h.nodes.filter(node => node.attributes['aria-haspopup'] === 'menu');
-  assert.deepEqual(menus.map(node => node.textContent), platform === 'darwin' ? [] : ['File', 'Edit', 'View', 'Help']);
+  assert.deepEqual(menus.map(node => node.textContent), platform === 'darwin' ? [] : ['文件', '编辑', '视图', '帮助']);
   assert.ok(h.nodes.find(node => node.tag === 'html').children.some(node => node.id === 'keepwork-desktop-titlebar'));
   h.nodes.find(node => node.className === 'refresh').handlers.click();
   assert.ok(h.calls.includes('reloadPage'));
@@ -150,7 +150,7 @@ test('Help and File update entries open the same update window on both platforms
   for (const platform of ['win32', 'darwin']) {
     const h = host(platform);
     vm.runInContext('updatesWindow = { open: () => globalThis.updateOpens = (globalThis.updateOpens || 0) + 1 };', h.context);
-    for (const label of ['File', 'Help']) {
+    for (const label of ['文件', '帮助']) {
       h.menu().find(item => item.label === label).submenu.find(item => item.label === '检查更新…').click();
     }
     assert.equal(vm.runInContext('updateOpens', h.context), 2);
@@ -210,4 +210,13 @@ test('one MCP notification per staged identity opens update window', () => {
   `, h.context);
   assert.equal(vm.runInContext('notifications.length', h.context), 1);
   assert.equal(vm.runInContext('opened', h.context), 1);
+});
+
+test('desktop update payload identifies application versions independently of MCP', () => {
+  const h = host();
+  vm.runInContext('shellLatest = {version:"0.1.6"}; updateState = "current";', h.context);
+  const payload = vm.runInContext('updatePayload()', h.context);
+  assert.equal(payload.version, '0.1.0');
+  assert.equal(payload.latestVersion, '0.1.6');
+  assert.equal(payload.state, 'current');
 });

@@ -29,7 +29,7 @@ export function apiDocs(port: number, requireAuth: boolean) {
         endpoints.push({ group, method, path: route, description, auth, parameters,
             example: `fetch(${JSON.stringify(base + samplePath)}, ${JSON.stringify(options, null, 2)})\n  .then(response => response.text())\n  .then(console.log);` });
     };
-    add('Service', 'GET', '/health', 'Service identity, runtime capabilities, workspace and Web Paracraft instances. runtimeVersion/runtimeCommit/runtimeBuiltAt identify the MCP build independently of protocol version and application hostVersion; runtimeBuiltAt is the bundle build time in UTC ISO 8601.', undefined, undefined, undefined, 'No token required');
+    add('Service', 'GET', '/health', 'Service identity, runtime capabilities, workspace and Web Paracraft instances. Optional desktopClient reports the installed aichat-desktop product/version/platform/arch independently of MCP; absent when unknown or its recorded executable is missing. runtimeVersion/runtimeCommit/runtimeBuiltAt identify the MCP build independently of protocol version and application hostVersion; runtimeBuiltAt is the bundle build time in UTC ISO 8601.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/dashboard', 'Browser dashboard HTML.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/dashboard/skills/keepwork-mcp-assistant/SKILL.md', 'Bundled MCP assistant instructions for the dashboard temporary AIChat. Contains no credentials or private runtime data.', undefined, undefined, undefined, 'No token required');
     add('Service', 'GET', '/', 'Default browser dashboard HTML.', undefined, undefined, undefined, 'No token required');

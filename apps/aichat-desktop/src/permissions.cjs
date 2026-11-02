@@ -15,7 +15,7 @@ function sameOrigin(url, origin) {
 }
 
 // Electron's persistent session does not persist decisions made by our handler.
-// Keep microphone and camera grants separate; an audio grant must not grant video.
+// Keep media and clipboard grants separate; an audio grant must not grant video or clipboard.
 class MediaGrants {
   constructor(file) {
     this.file = file;
@@ -52,7 +52,7 @@ function installPermissions(window, grants, getDevelopmentUrl, dialog) {
 
   contents.session.setPermissionCheckHandler((sender, permission, origin, details) => {
     if (!trusted(sender, details) || !sameOrigin(contents.getURL(), origin)) return false;
-    if (permission === 'clipboard-sanitized-write') return true;
+    if (permission === 'clipboard-sanitized-write') return grants.has(pageKey(details.requestingUrl), permission);
     // embeddingOrigin is absent for top-level requests. Validate requestingUrl
     // instead of passing an origin (without /chat) to the exact-page validator.
     return permission === 'media' && ['audio', 'video'].includes(details.mediaType)
@@ -64,22 +64,22 @@ function installPermissions(window, grants, getDevelopmentUrl, dialog) {
     const key = pageKey(details.requestingUrl);
     const generation = navigation;
     const stillTrusted = () => navigation === generation && trusted(sender, details);
-    if (permission !== 'media') {
-      if (!['notifications', 'clipboard-sanitized-write'].includes(permission)) return false;
-      const label = permission === 'notifications' ? '通知' : '剪贴板写入';
-      const answer = await dialog.showMessageBox(window, { message: `允许 AIChat 使用${label}？`, buttons: ['不允许', '允许'], defaultId: 0, cancelId: 0 });
+    if (permission === 'notifications') {
+      const answer = await dialog.showMessageBox(window, { message: '允许 AIChat 使用通知？', buttons: ['不允许', '允许'], defaultId: 0, cancelId: 0 });
       return stillTrusted() && answer.response === 1;
     }
-    const types = details.mediaTypes;
-    if (!Array.isArray(types) || !types.length || types.some(type => !['audio', 'video'].includes(type))) return false;
+    const clipboard = permission === 'clipboard-sanitized-write';
+    if (permission !== 'media' && !clipboard) return false;
+    const types = clipboard ? [permission] : details.mediaTypes;
+    if (!Array.isArray(types) || !types.length || types.some(type => !['audio', 'video', ...(clipboard ? [permission] : [])].includes(type))) return false;
     const missing = [...new Set(types)].filter(type => !grants.has(key, type)).sort();
     if (!missing.length) return true;
     const pendingKey = JSON.stringify([generation, key, missing]);
     if (!pending.has(pendingKey)) {
       const decision = (async () => {
-        const label = missing.map(type => type === 'audio' ? '麦克风' : '摄像头').join('和');
+        const label = clipboard ? '剪贴板写入' : missing.map(type => type === 'audio' ? '麦克风' : '摄像头').join('和');
         const answer = await dialog.showMessageBox(window, {
-          message: `允许 AIChat 使用${label}？`, detail: '允许后会记住此页面的授权，下次使用不再重复询问。系统隐私权限仍由系统管理。',
+          message: `允许 AIChat 使用${label}？`, detail: clipboard ? '允许后会记住此页面的剪贴板写入授权，下次复制不再重复询问。不允许则下次复制时再次询问。' : '允许后会记住此页面的授权，下次使用不再重复询问。系统隐私权限仍由系统管理。',
           buttons: ['不允许', '允许'], defaultId: 0, cancelId: 0,
         });
         if (!stillTrusted() || answer.response !== 1) return false;
@@ -88,7 +88,13 @@ function installPermissions(window, grants, getDevelopmentUrl, dialog) {
       })();
       pending.set(pendingKey, decision);
     }
-    try { return await pending.get(pendingKey) && stillTrusted(); }
+    try {
+      const allowed = await pending.get(pendingKey) && stillTrusted();
+      // Native consent temporarily blurs the renderer. Restore focus before
+      // Chromium resumes the approved writeText request.
+      if (allowed && clipboard) { window.focus(); contents.focus(); }
+      return allowed;
+    }
     finally { pending.delete(pendingKey); }
   }
 

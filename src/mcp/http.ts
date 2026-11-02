@@ -1,3 +1,4 @@
+const { readDesktopClient } = require('../core/desktopClientIdentity.cjs');
 import { MODEL_STUDIO_UPLOAD_API, handleModelStudioUpload } from '../core/modelStudioUpload';
 import { petPermissionBridge, screenshotPermission } from '../core/petPermissionBridge';
 import { computerController } from '../core/computer';
@@ -233,6 +234,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     name: SERVER_NAME,
                     version: SERVER_VERSION,
                     ...identity,
+                    desktopClient: readDesktopClient(),
                     port,
                     pid: process.pid,
                     clients: sessionCount(),
@@ -491,6 +493,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     name: SERVER_NAME,
                     version: SERVER_VERSION,
                     ...identity,
+                    desktopClient: readDesktopClient(),
                     nodeVersion: process.version,
                     platform: process.platform,
                     hostname: hostname(),

@@ -24,7 +24,7 @@ if (process.isMainFrame) {
       const icon = document.createElement('img'); icon.src = config.icon; icon.alt = ''; header.append(icon);
       const menuButtons = [];
       // macOS owns these menus in the system menu bar.
-      const inlineMenus = config.platform === 'darwin' ? [] : [['file', 'File'], ['edit', 'Edit'], ['view', 'View'], ['help', 'Help']];
+      const inlineMenus = config.platform === 'darwin' ? [] : [['file', '文件'], ['edit', '编辑'], ['view', '视图'], ['help', '帮助']];
       inlineMenus.forEach(([id, label]) => {
         const button = document.createElement('button'); button.textContent = label; button.setAttribute('aria-haspopup', 'menu'); button.setAttribute('aria-expanded', 'false');
         button.addEventListener('click', async () => {
