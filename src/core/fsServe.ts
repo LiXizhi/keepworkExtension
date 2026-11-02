@@ -9,12 +9,14 @@ import {
 
 export const FS_API = 'workspace';
 const MAX_FILE_BYTES = 1024 * 1024 * 1024;
+const MAX_PPT_BYTES = 500 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES = 100 * 1024 * 1024;
 const DEFAULT_LIST_MAX = 1000;
 const MAX_LIST_MAX = 5000;
 
 export function localFileSizeLimit(filename: string): number {
-    return /\.(?:pptx?|pdf)$/i.test(filename) ? MAX_DOCUMENT_BYTES : MAX_FILE_BYTES;
+    if (/\.pptx?$/i.test(filename)) return MAX_PPT_BYTES;
+    return /\.pdf$/i.test(filename) ? MAX_DOCUMENT_BYTES : MAX_FILE_BYTES;
 }
 
 function assertFileSize(filename: string, size: number): void {
