@@ -4,6 +4,7 @@ import { CliLaunch, resolveAgentCli } from './agentCliProcess';
 // Reviewed native flows, matching AIChat's accountInstructions. Slash inputs
 // require the native interactive CLI; they are never sent to a system shell.
 const flows: Record<AgentCliBackend, { login: string[]; logout?: string[]; input?: string }> = {
+    deepseek: { login: ['web'] },
     codex: { login: ['login'], logout: ['logout'] },
     claude: { login: ['auth', 'login'], logout: ['auth', 'logout'] },
     cursor: { login: ['login'], logout: ['logout'] },
@@ -28,7 +29,7 @@ export function agentAccountCatalog(resolve = resolveAgentCli, platform = proces
         try {
             const launch = resolve(backend, flow.login);
             const actions: Record<string, { label: string; command: string; input?: string }> = {
-                login: { label: backend === 'qwen' ? '登录 / 更换账号' : '登录', command: accountShellCommand(launch, platform), ...(backend === 'qwen' ? { input: flow.input } : {}) },
+                login: { label: backend === 'deepseek' ? '配置模型提供商' : backend === 'qwen' ? '登录 / 更换账号' : '登录', command: accountShellCommand(launch, platform), ...(backend === 'qwen' ? { input: flow.input } : {}) },
             };
             if (flow.logout) actions.logout = { label: '登出', command: accountShellCommand(resolve(backend, flow.logout), platform), ...(flow.input ? { input: flow.input } : {}) };
             return [backend, { name: spec.name, available: true, cli: { path: launch.path, source: launch.source }, actions }];

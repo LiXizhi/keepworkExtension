@@ -553,3 +553,21 @@ Protocol references checked 2026-10-29: [ACP session list](https://agentclientpr
 Installed WorkBuddy lacks session/list; project transcript format was verified
 against the installed CLI and read-only local history. Other ACP engines and Claude
 are fixture-tested here, not claimed as live installed acceptance.
+
+
+### Native Codex workspace discovery
+
+Native session snapshots optionally include `nativeWorkspace: {version: 1, roots,
+complete, error?}`. Discovery reads the bounded first JSONL metadata record at the
+Codex-owned `thread.path`, confined by realpath to `CODEX_HOME/sessions` or
+`CODEX_HOME/archived_sessions`, and requires an exact `session_meta.payload.id` match.
+Only `runtime_workspace_roots` is used; credentials, instructions and message text
+are not interpreted. The cwd remains first. Missing paths/legacy metadata return
+`complete: false` with the primary root; invalid explicit roots return a feature-specific
+error. Directory existence is checked by the normal client folder binding flow,
+so missing extras are not silently discarded. Legacy `roots`, routes, send payloads
+and source-session permissions stay unchanged. Opening/refreshing never resumes a
+thread. AIChat uses this additive metadata to create a Craft chat with a workspace
+group; older clients continue consuming the existing snapshot fields.
+
+Validation: `node --test scripts/codex-workspace.test.cjs scripts/agent-sessions.test.cjs`.

@@ -1,0 +1,20 @@
+const test=require('node:test'), assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),ts=require('typescript');
+require.extensions['.ts']=(mod,file)=>mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,file);
+const {codexWorkspace}=require('../src/core/codexWorkspace.ts');
+test('owned session metadata exposes ordered roots without resuming or parsing messages',async t=>{
+ const home=fs.mkdtempSync(path.join(os.tmpdir(),'codex-roots-'));t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
+ fs.mkdirSync(path.join(home,'sessions'));const file=path.join(home,'sessions','thread.jsonl'),primary=path.join(home,'repo'),extra=path.join(home,'extra');
+ const write=payload=>fs.writeFileSync(file,JSON.stringify({type:'session_meta',payload})+'\n'+JSON.stringify({type:'response_item',payload:{text:'ignore /unrelated'}}));
+ const thread={id:'owned',path:file};
+ write({id:'owned',runtime_workspace_roots:[extra,primary,extra]});
+ assert.deepEqual(await codexWorkspace(thread,primary,home),{version:1,roots:[primary,extra],complete:true});
+ write({id:'owned'});assert.equal((await codexWorkspace(thread,primary,home)).complete,false);
+ write({id:'wrong',runtime_workspace_roots:[extra]});assert.deepEqual((await codexWorkspace(thread,primary,home)).roots,[primary]);
+ write({id:'owned',runtime_workspace_roots:['relative']});assert.match((await codexWorkspace(thread,primary,home)).error,/invalid/);
+ write({id:'owned',runtime_workspace_roots:[]});assert.equal((await codexWorkspace(thread,primary,home)).complete,true);
+ assert.equal((await codexWorkspace({id:'owned'},primary,home)).complete,false);
+ const outside=path.join(home,'outside');fs.writeFileSync(outside,JSON.stringify({type:'session_meta',payload:{id:'owned',runtime_workspace_roots:[extra]}}));
+ assert.equal((await codexWorkspace({id:'owned',path:outside},primary,home)).complete,false);
+ fs.unlinkSync(file);fs.symlinkSync(outside,file);
+ assert.equal((await codexWorkspace(thread,primary,home)).complete,false);
+});

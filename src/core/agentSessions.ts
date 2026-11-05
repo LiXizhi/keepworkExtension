@@ -1,3 +1,4 @@
+import {codexWorkspace, NativeWorkspace} from './codexWorkspace';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -20,7 +21,7 @@ type Backend = typeof AGENT_BACKENDS[number];
 type Item = { id: string; type: string; [key: string]: any };
 type Session = {
     native?: boolean; externalBusy?: boolean; backend: Backend; id: string; owner: string; conversationId: string; threadId: string; title: string;
-    roots: string[]; rootNames?: string[]; worktrees: string[]; sandboxPolicy?: any; model?: string; effort?: string; archived: boolean; removed: boolean; aichatContext?: boolean;
+    roots: string[]; nativeWorkspace?: NativeWorkspace; rootNames?: string[]; worktrees: string[]; sandboxPolicy?: any; model?: string; effort?: string; archived: boolean; removed: boolean; aichatContext?: boolean;
     status: string; mode?: AgentMode; nativePlan?: boolean; turnId?: string; error?: string; retrying?: boolean; cursor: number; items: Item[]; pending: any[];
     submissions: Record<string, { state: string; turnId?: string }>;
     events: any[]; updatedAt: number;
@@ -274,6 +275,7 @@ export class AgentSessions {
             threadId, title: String(thread.name || thread.preview || AGENT_CLI[backend].name).slice(0,160), roots: [canonicalRoot(thread.cwd)], worktrees: [],
             archived: false, removed: false, mode: 'ask', status: 'idle', cursor: 0, items: [], pending: [], submissions: {}, events: [], updatedAt: Number(thread.updatedAt) * 1000 || Date.now()};
         this.sessions.set(s.id, s);
+        if (backend === 'codex') s.nativeWorkspace = await codexWorkspace(thread, s.roots[0]);
         this.refreshNative(s, thread); this.save(); return this.view(s);
     }
     private refreshNative(s: Session, thread: any) {
@@ -352,6 +354,7 @@ export class AgentSessions {
         const s = this.get(id, owner);
         if (s.native && !ACTIVE.has(s.status)) {
             const result = await this.forSession(s).call(s.backend === 'codex' ? 'thread/read' : 'thread/native/read', {threadId: s.threadId, includeTurns: true});
+            if (s.backend === 'codex') s.nativeWorkspace = await codexWorkspace(result.thread, s.roots[0]);
             this.refreshNative(s, result.thread || {});
             return this.view(s);
         }

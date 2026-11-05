@@ -333,6 +333,37 @@
       "notes": [
         "Windows 官方推荐 WSL，原生 npm 也是官方方法。Keepwork 守护进程默认在本机系统运行，不把 WSL 内的 CLI 路径当作 Windows EXE。"
       ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek Harness",
+      "protocol": "acp",
+      "commands": [
+        "dsh"
+      ],
+      "args": [
+        "--profile",
+        "acp"
+      ],
+      "login": "dsh web",
+      "npm": "@deepseek-ai/dsh",
+      "source": "https://github.com/deepseek-ai/deepseek-harness",
+      "reviewedAt": "2026-11-05",
+      "windows": {
+        "kind": "npm",
+        "command": "npm install -g @deepseek-ai/dsh",
+        "evidence": "official npm package; not live-tested"
+      },
+      "macos": {
+        "kind": "npm",
+        "command": "npm install -g @deepseek-ai/dsh",
+        "evidence": "official npm package; not live-tested"
+      },
+      "notes": [
+        "使用官方 dsh --profile acp；模型和能力来自 ACP 握手，不预设模型。",
+        "dsh web 打开本机配置界面，由用户完成模型提供商配置；这不是 dsh login，勿虚构登录或退出命令。配置后重新检测 ACP。",
+        "需要满足官方 npm 包的 Node.js engines 要求。未进行 Windows/macOS 真实生成验收。"
+      ]
     }
   ]
 }

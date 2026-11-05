@@ -404,3 +404,26 @@ test('native Codex catalog and history do not resume; send resumes the original 
     assert.equal(fake.calls.find(c=>c.method==='thread/resume').params.threadId,'native-one');
     assert.equal(fake.calls.find(c=>c.method==='turn/start').params.threadId,'native-one');
 });
+
+test('native workspace metadata is additive, refreshable and does not alter legacy continuation roots', async t => {
+    const {dir,root,manager,owner,fake}=setup(t), previous=process.env.CODEX_HOME;
+    process.env.CODEX_HOME=dir;t.after(()=>{if(previous===undefined) delete process.env.CODEX_HOME;else process.env.CODEX_HOME=previous;});
+    fs.mkdirSync(path.join(dir,'sessions'));const extra=path.join(dir,'extra');fs.mkdirSync(extra);
+    const rollout=path.join(dir,'sessions','native.jsonl');
+    fs.writeFileSync(rollout,JSON.stringify({type:'session_meta',payload:{id:'native-roots',runtime_workspace_roots:[root,extra]}})+'\n');
+    const original=fake.call.bind(fake);let modern=true;
+    fake.call=async(method,params)=>{
+        if(method==='thread/read'){fake.calls.push({method,params});return {thread:{id:params.threadId,cwd:root,...(modern?{path:rollout}:{}),turns:[]}};}
+        return original(method,params);
+    };
+    let snapshot=await manager.nativeSession(owner,'native-roots');
+    assert.deepEqual(snapshot.roots,[fs.realpathSync(root)]);
+    assert.deepEqual(snapshot.nativeWorkspace.roots,[fs.realpathSync(root),fs.realpathSync(extra)]);
+    assert.equal(snapshot.nativeWorkspace.complete,true);
+    assert.equal(fake.calls.some(c=>c.method==='thread/resume'),false);
+    modern=false;snapshot=await manager.read(snapshot.id,owner);
+    assert.equal(snapshot.nativeWorkspace.complete,false);
+    assert.deepEqual(snapshot.nativeWorkspace.roots,snapshot.roots);
+    await manager.turn(snapshot.id,owner,{requestId:'legacy-shape',text:'continue'});
+    assert.equal(fake.calls.find(c=>c.method==='turn/start').params.cwd,fs.realpathSync(root));
+});
