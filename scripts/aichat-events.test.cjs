@@ -29,7 +29,7 @@ test('two MCP sessions carry isolated persona changes on their existing GET; rec
         const id = req.headers['mcp-session-id'];
         if (req.method === 'GET') {
             const transport = transports.get(id);
-            attachAichatEvents(res, transport, personas, req.headers['x-agent-owner']);
+            attachAichatEvents(res, transport, personas, req.headers['x-agent-owner'], { fsApi: 'workspace' });
             await transport.handleRequest(req, res); return;
         }
         let raw = ''; for await (const chunk of req) raw += chunk;
@@ -57,7 +57,9 @@ test('two MCP sessions carry isolated persona changes on their existing GET; rec
         const response = await fetch(url, { headers: { Accept: 'text/event-stream', 'Mcp-Session-Id': sid, 'X-Agent-Owner': owner }, signal: controller.signal });
         assert.equal(response.status, 200);
         const reader = response.body.getReader();
-        assert.match(new TextDecoder().decode((await reader.read()).value), /personas_changed/);
+        const initialEvent = new TextDecoder().decode((await reader.read()).value);
+        assert.match(initialEvent, /personas_changed/);
+        assert.match(initialEvent, /"health":\{"fsApi":"workspace"\}/);
         return { controller, reader, sid };
     }
     const one = await open('owner-one'), two = await open('owner-two');

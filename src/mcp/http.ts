@@ -177,6 +177,23 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         return false;
     };
 
+    const healthCapabilities = {
+        requireAuth: authRequired,
+        workspaceRoot: runtime.root,
+        fsApi: FS_API,
+        folderBrowserApi: FOLDER_BROWSER_API,
+        modelStudioUploadApi: MODEL_STUDIO_UPLOAD_API,
+        browserApi: 'browser-v1',
+        fsDirApi: 'mkdir-v1',
+        terminalApi: 'pty-session-v1',
+        agentSessionApi: 'v1',
+        agentContextApi: 'v1',
+        agentModeApi: 'v1',
+        agentInventoryApi: 'v1',
+        aichatPresenceApi: 'post-sse-v1',
+        messagingApi: 'messaging-v1',
+        personasApi: 'personas-v1',
+    };
     const server = http.createServer(async (req, res) => {
         applyCors(req, res);
         const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
@@ -239,24 +256,10 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                     pid: process.pid,
                     clients: sessionCount(),
                     paracraftClients: liveClientCount(),
-                    requireAuth: authRequired,
-                    workspaceRoot: runtime.root,
+                    ...healthCapabilities,
                     webserverBase: webserverBaseUrl(),
                     webservers: listWebserverRoots(),
-                    fsApi: FS_API,
-                    folderBrowserApi: FOLDER_BROWSER_API,
-                    modelStudioUploadApi: MODEL_STUDIO_UPLOAD_API,
-                    browserApi: 'browser-v1',
-                    fsDirApi: 'mkdir-v1',
-                    terminalApi: 'pty-session-v1',
-                    agentSessionApi: 'v1',
-                    agentContextApi: 'v1',
-                    agentModeApi: 'v1',
-                    agentInventoryApi: 'v1',
                     aichatClient: aichatClientRemembered(),
-                    aichatPresenceApi: 'post-sse-v1',
-                    messagingApi: 'messaging-v1',
-                    personasApi: 'personas-v1',
                 });
                 return;
             }
@@ -568,16 +571,18 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
                             if (activeMcpStreams.has(sessionId)) { sendJson(res, 409, { error: 'MCP stream already open' }); return; }
                             activeMcpStreams.add(sessionId);
                             res.once('close', () => activeMcpStreams.delete(sessionId));
-                            attachAichatEvents(res, transport, personas, owner);
+                            attachAichatEvents(res, transport, personas, owner, healthCapabilities);
                         }
                         await transport.handleRequest(req, res, parsedBody);
                         return;
                     }
 
                     if (!sessionId && req.method === 'POST' && isInitializeRequest(parsedBody)) {
+                        const preference = parsedBody.params.capabilities.experimental?.['keepwork/streamedResponses'];
+                        const streamReplies = preference && typeof preference === 'object' && 'version' in preference && preference.version === 1;
                         const transport = new StreamableHTTPServerTransport({
                             sessionIdGenerator: () => randomUUID(),
-                            enableJsonResponse: true,
+                            enableJsonResponse: !streamReplies,
                             onsessioninitialized: async (sid) => {
                                 transports.set(sid, transport);
                                 upsertSession(sid, origin, userAgent);

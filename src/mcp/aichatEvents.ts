@@ -5,7 +5,7 @@ import type { Personas } from '../core/personas';
 
 /** Attach owner-scoped invalidations to the existing MCP GET, never a second SSE. */
 export function attachAichatEvents(res: http.ServerResponse, transport: StreamableHTTPServerTransport,
-    personas: Pick<Personas, 'watch'>, owner: string) {
+    personas: Pick<Personas, 'watch'>, owner: string, health?: Record<string, unknown>) {
     let closed = false, pending = false, dirty = !!owner;
     const send = async () => {
         if (closed || pending) return;
@@ -15,7 +15,7 @@ export function attachAichatEvents(res: http.ServerResponse, transport: Streamab
         dirty = false;
         try {
             await transport.send({ jsonrpc: '2.0', method: changed
-                ? 'notifications/keepwork/personas_changed' : 'notifications/keepwork/alive', params: {} });
+                ? 'notifications/keepwork/personas_changed' : 'notifications/keepwork/alive', params: { health } });
             sent = true;
             if (transport.sessionId) touchAichatPresence(transport.sessionId);
         } catch { dirty ||= changed; /* GET may still be opening; retry on heartbeat. */ }
