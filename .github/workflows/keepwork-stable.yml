@@ -1,6 +1,11 @@
 name: Coordinated Keepwork stable release
 on:
   workflow_dispatch:
+    inputs:
+      marketplace_version:
+        description: Already published Marketplace version (local Entra release, MCP CDN only)
+        type: string
+        default: ''
   push:
     tags: ['keepwork-v*']
 permissions:
@@ -23,9 +28,17 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 24 }
       - id: identity
+        env:
+          MARKETPLACE_VERSION: ${{ inputs.marketplace_version }}
         run: |
           version=$(node scripts/stable-release.cjs --mode validate)
           if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "keepwork-v$version" ]]; then exit 1; fi
+          if [[ -n "$MARKETPLACE_VERSION" ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main && "$MARKETPLACE_VERSION" == "$version" ]]
+            url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/Xizhi/vsextensions/keepwork/$version/vspackage"
+            curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors "$url" -o "$RUNNER_TEMP/published.vsix"
+            unzip -p "$RUNNER_TEMP/published.vsix" extension/package.json | jq -e --arg v "$version" '.name == "keepwork" and .publisher == "Xizhi" and .version == $v'
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
   runtime:
     needs: gate
@@ -106,6 +119,7 @@ jobs:
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
       - name: Publish npm with trusted publishing (retry matching releases)
+        if: inputs.marketplace_version == ''
         env:
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
         run: |
@@ -118,11 +132,13 @@ jobs:
             npm publish "release-stable/keepwork-mcp-runtime-$RELEASE_VERSION.tgz" --access public --provenance --tag next
           fi
       - uses: azure/login@v2
+        if: inputs.marketplace_version == ''
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
       - name: Publish matching VSIX without rebuilding or bumping versions
+        if: inputs.marketplace_version == ''
         working-directory: apps/vscode-extension
         run: npx --no-install vsce publish --azure-credential --skip-duplicate --packagePath ../../release-stable/keepwork.vsix
       - name: Promote stable CDN metadata after both package publications succeed
@@ -131,6 +147,7 @@ jobs:
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
       - name: Promote npm latest
+        if: inputs.marketplace_version == ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_DIST_TAG_TOKEN }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}

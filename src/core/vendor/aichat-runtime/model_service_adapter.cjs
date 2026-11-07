@@ -7,11 +7,15 @@ async function completeWithServices(services, options) {
     const model = services.get('model');
     if (!model)
         throw Error('No model provider is configured. Open Settings → Packages & profiles.');
-    const registered = new Map([...services].filter(([name]) => name.startsWith('tool:')).map(([name, tool]) => [name.slice(5), tool]));
+    const reserved = new Set(options.callerOwnedTools || []);
+    const registered = options.onlyRequestedTools ? new Map()
+        : new Map([...services].filter(([name]) => name.startsWith('tool:') && !reserved.has(name.slice(5))).map(([name, tool]) => [name.slice(5), tool]));
     const tools = new Map((options.tools || []).map(tool => [tool.function.name, tool]));
     for (const [name, tool] of registered)
         tools.set(name, { type: 'function', function: { name, ...tool.schema } });
-    const messages = [...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []), ...(options.messages || [])];
+    // Observer-owned messages carry a safe-boundary steering hook on push.
+    const messages = options.onlyRequestedTools && !options.systemPrompt ? (options.messages || [])
+        : [...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []), ...(options.messages || [])];
     const response = await (0, completion_cjs_1.runCompletion)({ ...options, messages, tools: [...tools.values()] }, {
         request: async (request) => {
             const reply = await model.complete({ messages: request.messages, tools: request.tools, signal: options.abortController?.signal,
