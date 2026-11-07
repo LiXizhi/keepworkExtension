@@ -28,6 +28,8 @@ The channel operations delegate to `MessagingService`, maintaining compatibility
 
 ## Execution and scheduling
 
+Persona views advertise `peerMessagingVersion: 1`. The owner runtime lists same-owner peers by stable ID, name, the opening sentence of the role (up to 180 characters), and skill names and can call `send_persona_message` for a reply. Explicit `/协作` requests use this runtime before any native CLI submission. The recipient uses its saved role and at most twelve recent messages exchanged by this pair in a text-only Keepwork request. Isolated turns omit pair history. Peer exchanges appear in both transcripts. Each new exchange stores an optional `peerRoute` with the sender ID and the sender and recipient names at delivery. Older clients can still display the message text. The recipient stores the delivery ID before inference, rejects busy deliveries and never replays unknown outcomes. No channel binding or new HTTP route is required.
+
 Owner CLI tasks reuse `AgentSessions` in `ask` mode. Only pre-submission initialization failures can fall back. Completed native sessions are removed from the runtime index where the provider supports it; native CLI history follows provider policy. Cancellation propagates to the owned session.
 
 The Keepwork persona executor now uses `createMcpAgentRuntime` directly in the daemon. It does not call `MessagingWorkers`, launch Chromium, or fetch executable AIChat code. Existing messaging auto-reply workers are unchanged. Persona writes and terminal calls still enter the existing visible owner approval state; cancelled runs cannot start late tools. Runtime metadata is stored under the existing job; active runs become unknown on daemon restart and are not replayed.
@@ -142,3 +144,7 @@ Persona history and bounded older summaries retain daemon-owned execution counte
 Persona list/detail snapshots advertise `taskContextVersion: 1` for turn-local isolation. Older clients can ignore this additive field; newer clients omit contextMode for ordinary messages and hide isolation when the capability is absent.
 
 HTTP compatibility errors preserve the legacy `error` string and add `code: "UNSUPPORTED_FEATURE"` for unknown operations/methods and unsupported task context modes. Unknown operations retain 404/405; unsupported context modes return 422 before request acceptance or mutation. Ordinary legacy message bodies remain accepted. Verify `node --test scripts/persona-http-compat.test.cjs scripts/personas.test.cjs`.
+
+### Autonomous CRM sales
+
+`POST /agents/personas/:id/sales` supports start, pause, resume and decide for this owner. Persona views advertise `salesRuntimeVersion:1` and redact the CRM bearer. A sales cycle uses the Keepwork runtime, the named skills bound by the owner, a campaign-scoped CRM toolset, and same-owner peer consultation. No general filesystem or terminal tools are exposed. With the service running, polling continues when the page closes; empty scans and pending decisions do not start inference. Credentials, availability, limits, receipts, lessons and decisions survive service restarts. An interrupted run is not replayed and may require a new owner login. The host sends a decision ID and accept/decline from a human-controlled card; decisions do not authorize capabilities outside the campaign.

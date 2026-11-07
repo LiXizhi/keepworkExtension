@@ -46,6 +46,47 @@ test('model claims cannot manufacture daemon execution statistics',async t=>{
     assert.match(message.text,/Completed all CRM writes/);
     assert.deepEqual(message.execution,{source:'keepwork-runtime',requested:0,returned:0});
 });
+test('a legacy persona submission completes a peer round trip through the model tool loop',async t=>{
+    let turns=0;
+    const peerTransport=t.mock.method(globalThis,'fetch',async(url,init)=>{
+        assert.equal(url,'https://api.keepwork.com/core/v0/gpt/chat');
+        const body=JSON.parse(init.body);
+        assert.equal(body.localTools,undefined);
+        assert.equal(body.messages.length,2);
+        assert.match(body.messages[0].content,/负责产品运营/);
+        assert.match(body.messages[1].content,/我的分身 → 运营总监/);
+        return response({result:'OK，我在线。'});
+    });
+    const f=fixture(t,async(_url,init)=>{
+        const body=JSON.parse(init.body);
+        if(turns++===0){
+            assert.match(body.messages[0].content,/负责产品运营/);
+            assert.ok(body.localTools.some(tool=>tool.function.name==='send_persona_message'));
+            return response({tool_calls:[call('consult','send_persona_message',{personaId:'editor',text:'请回复 OK 确认是否在线'})]});
+        }
+        assert.match(JSON.stringify(body.messages.filter(m=>m.role==='tool')),/OK，我在线。/);
+        return response({result:'运营总监已回复 OK。'});
+    });
+    f.service.upsert(f.owner,{id:'default-persona',name:'我的分身',executor:'codex'});
+    f.service.upsert(f.owner,{id:'editor',name:'运营总监',prompt:'负责产品运营',executor:'keepwork'});
+    f.service.submit(f.owner,'default-persona',{requestId:'legacy-work',text:'你问一下运营总监，让他回个OK是否在线。'});
+    await until(()=>['done','error'].includes(f.service.read(f.owner,'default-persona').job.state));
+    const job=f.service.read(f.owner,'default-persona').job;
+    assert.equal(job.state,'done',job.error);
+    assert.equal(peerTransport.mock.callCount(),1);
+    assert.equal(turns,2);
+    for (const id of ['default-persona','editor']) {
+        const exchange=f.service.read(f.owner,id).messages.filter(m=>m.peerRoute);
+        assert.equal(exchange.length,2);
+        assert.deepEqual(exchange.map(m=>[m.peerRoute.from,m.peerRoute.to]),[['我的分身','运营总监'],['运营总监','我的分身']]);
+        assert.match(exchange[0].text,/确认是否在线/);
+        assert.match(exchange[1].text,/OK，我在线/);
+        const file=crypto.createHash('sha256').update(f.owner+'\0'+id).digest('hex')+'.json';
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.home,file))).messages.filter(m=>m.peerRoute),exchange);
+    }
+    assert.equal(f.service.read(f.owner,'editor').messages.at(-1).text,'OK，我在线。');
+    assert.equal(f.service.read(f.owner,'default-persona').messages.at(-1).text,'运营总监已回复 OK。');
+});
 test('failed tool results are counted as returns, never as business success',async t=>{
     let requests=0;
     const f=fixture(t,async()=>requests++===0?response({tool_calls:[call('missing','read_file',{path:'missing-file.txt'})]}):response({result:'Model claims success despite missing file'}));

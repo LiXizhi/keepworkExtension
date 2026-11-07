@@ -5,19 +5,82 @@ const os=require('node:os');
 const path=require('node:path');
 const Module=require('node:module');
 const ts=require('typescript');
-function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaMessaging','./agentRolePolicy'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaMessaging','./agentRolePolicy','./personaSales'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
-    const {Personas,nextPersonaRun}=moduleFor({'./aichatRuntime':{createMcpAgentRuntime:()=>{throw Error('test must inject runtime');}},'./aichatPresence':{latestAichatBrainRoot:()=>home,latestAichatClient:owner=>owner==='owner'?client:null},'./messagingPolicy':{defaultMessageConfig:()=>({}),knowledgeContext:()=>''},'./terminal':{runTerminal:async opts=>{calls.push(opts);return {ok:true};}}});
+    const peerRequests=[];
+    const keepworkRuntimeRequest=(login,input)=>new Promise((resolve,reject)=>{
+        assert.equal(login,client);
+        peerRequests.push({input,resolve,reject});
+        input.abortController.signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});
+    });
+    const {Personas,nextPersonaRun}=moduleFor({'./aichatRuntime':{keepworkRuntimeRequest,createMcpAgentRuntime:()=>{throw Error('test must inject runtime');}},'./aichatPresence':{latestAichatBrainRoot:()=>home,latestAichatClient:owner=>owner==='owner'?client:null},'./messagingPolicy':{defaultMessageConfig:()=>({}),knowledgeContext:()=>''},'./terminal':{runTerminal:async opts=>{calls.push(opts);return {ok:true};}}});
     const callbacks=new Map();const sessions={async create(owner,input){calls.push({owner,input});return {id:'native'};},subscribe(id,owner,fn){callbacks.set(id,fn);return()=>callbacks.delete(id);},async turn(id,owner,input){calls.push({owner,input});callbacks.get(id)?.({session:{status:'running',pending:[]}});},async interrupt(){callbacks.get('native')?.({session:{status:'interrupted'}});},respond(id,owner,input){calls.push({owner,input});}};
     const messaging={setAgentRootResolver:resolve=>{messaging.resolveRoot=resolve;},watch:()=>()=>{},setAgentPrompt:()=>{},agentBindings:()=>[],detachAgent:()=>{},assertAgentBinding:()=>{},inboxView:()=>({conversations:[]}),workers:{answer(input,signal,login,executeTool){if(!login)return Promise.reject(Error('需要登录 AIChat'));return new Promise((resolve,reject)=>{pending.push({input,resolve,reject,executeTool});signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});});}}};
     const factory=(login,executeTool)=>({close(){},answer(input,signal){return messaging.workers.answer(input,signal,login,(name,args)=>executeTool(name,args,signal));}});
     const service=new Personas(home,sessions,messaging,factory);t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
     service.upsert('owner',{id:'first',name:'我的分身',root:home,executor:'auto'});
-    return {service,home,pending,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,setClient:value=>{client=value;}};
+    return {service,home,pending,peerRequests,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,setClient:value=>{client=value;}};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
+test('personas discover same-owner peers, exchange actual replies and retain only pair context', async t=>{
+    const f=fixture(t);
+    f.service.upsert('owner',{id:'editor',name:'文案',prompt:'负责撰写文案。内部角色说明 $draft',root:f.home});
+    f.service.upsert('other',{id:'other-agent',name:'另一账号',root:f.home});
+    f.service.submit('owner','editor',{requestId:'private',text:'私人问题'});
+    f.pending[0].resolve('私人答案');await tick();
+    f.service.submit('owner','first',{requestId:'request',text:'请文案给出标题'});
+    const sender=f.pending.at(-1);
+    assert.equal(f.service.read('owner','first').peerMessagingVersion,1);
+    assert.match(sender.input.prompt,/文案/);
+    assert.doesNotMatch(sender.input.prompt,/另一账号|内部角色说明/);
+    assert.ok(sender.input.tools.some(t=>t.function.name==='send_persona_message'));
+    const peers=await sender.executeTool('list_persona_peers',{});
+    assert.deepEqual(peers.entries,[{id:'editor',name:'文案',responsibility:'负责撰写文案。',skills:['draft']}]);
+    const send=(id,text)=>sender.executeTool('send_persona_message',{personaId:id,text});
+    await assert.rejects(send('other-agent','hello'),/不存在/);
+    await assert.rejects(send('first','hello'),/另一个/);
+    const sent=send('editor','起一个标题');
+    assert.match(f.service.read('owner','editor').messages.at(-1).text,/我的分身 → 文案/);
+    await assert.rejects(send('editor','另一个请求'),/尚未送达/);
+    const peer=f.peerRequests[0];
+    assert.equal(peer.input.tools,undefined);
+    assert.doesNotMatch(JSON.stringify(peer.input.messages),/私人问题|私人答案/);
+    peer.resolve({result:'山谷里的课堂'});const receipt=await sent;
+    assert.equal(receipt.reply,'山谷里的课堂');
+    assert.match(f.service.read('owner','first').messages.at(-1).text,/文案 → 我的分身.*\n山谷里的课堂/);
+    assert.deepEqual(await send('editor','起一个标题'),receipt);
+    assert.equal(f.peerRequests.length,1);
+    sender.resolve(receipt.reply);await tick();
+    f.service.submit('owner','editor',{requestId:'reverse',text:'/协作 问我的分身如何改进'});
+    const back=f.pending.at(-1);
+    const response=back.executeTool('send_persona_message',{personaId:'first',text:'怎么改进标题？'});
+    const exchange=f.peerRequests[1].input.messages;
+    assert.equal(exchange.at(-2).content,'山谷里的课堂');
+    assert.doesNotMatch(JSON.stringify(exchange),/私人问题|私人答案/);
+    f.peerRequests[1].resolve({result:'加入读者的视角'});await response;
+    back.resolve('完成');await tick();
+    f.service.submit('owner','first',{requestId:'separate',contextMode:'isolated',text:'/协作 新任务'});
+    const fresh=f.pending.at(-1);
+    const isolated=fresh.executeTool('send_persona_message',{personaId:'editor',text:'写一条全新标语'});
+    assert.equal(f.peerRequests.at(-1).input.messages.length,2);
+    await f.service.cancel('owner','first');await assert.rejects(isolated,/未取得答复/);
+    await tick();assert.equal(f.service.read('owner','editor').job.state,'cancelled');
+});
+test('CLI collaboration uses owner tools before submission; cancellation stops the peer without replay',async t=>{
+    const f=fixture(t,'codex');
+    f.service.upsert('owner',{id:'second',name:'同伴',root:f.home});
+    f.service.submit('owner','first',{requestId:'ask',text:'/协作 请同伴提意见'});
+    assert.equal(f.calls.length,0);
+    const worker=f.pending[0],args={personaId:'second',text:'一个意见'};
+    const sent=worker.executeTool('send_persona_message',args);
+    await f.service.cancel('owner','second');
+    await assert.rejects(sent,/已送达/);
+    await assert.rejects(worker.executeTool('send_persona_message',args),/已送达/);
+    assert.equal(f.peerRequests.length,1);assert.equal(f.service.read('owner','second').job.state,'cancelled');
+    worker.resolve('对方取消了回复');await tick();
+});
 test('isolated task omits earlier conversation for one turn without deleting history or role',async t=>{
  const f=fixture(t);assert.equal(f.service.read('owner','first').taskContextVersion,1);assert.equal(f.service.list('owner')[0].taskContextVersion,1);f.service.upsert('owner',{id:'first',name:'Persona',root:f.home,prompt:'Keep this role'});
  f.service.submit('owner','first',{requestId:'old',text:'old private context'});f.pending.at(-1).resolve('old false receipt');await tick();
@@ -276,4 +339,30 @@ test('new custom agent follows owner default brain; rebinding is deferred during
 
 test('nickname-discoverable custom agents reject separator and reply-marker names even with messaging disabled',t=>{
  const f=fixture(t);for(const name of ['A & B','A＆B','A【B】','A\nB'])assert.throws(()=>f.service.upsert('owner',{id:'bad-name',name,prompt:'role',messaging:{version:1,enabled:false,groups:[]}}),/名称/);
+});
+
+test('sales: only one worker starts and an interrupted round never replays after restart', async t=>{
+    const f=fixture(t),previousFetch=global.fetch,token='kwcrm_'+'a'.repeat(64);
+    const campaign={id:'campaign',status:'启用',channel_account_id:'channel'};
+    let scans=0;
+    global.fetch=async(url,options)=>{
+        assert.equal(options.headers.Authorization,'Bearer '+token);
+        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['marketing-campaigns:read','marketing-tasks:read','sales-reports:read','sales-reports:write']}}});
+        const {args}=JSON.parse(options.body);
+        if(args.path==='/marketing-campaigns/campaign')return Response.json({ok:true,result:campaign});
+        assert.equal(args.path,'/marketing-tasks');assert.equal(args.query.availability,'sales-due');scans++;
+        return Response.json({ok:true,result:{rows:[{id:'task',campaign_id:'campaign',status:'待认领',version:1}]}});
+    };
+    t.after(()=>{global.fetch=previousFetch;});
+    const sale=await f.service.sales('owner','first',{action:'start',url:'http://localhost',token,credentialId:'credential',
+        crmPersonaId:'crm',campaignId:'campaign',expiresAt:new Date(Date.now()+86400000).toISOString(),objective:'推广试玩'});
+    assert.equal(sale.token,undefined);
+    const now=Date.now();f.service.tick(now);f.service.tick(now);await tick();await tick();
+    assert.equal(scans,1);assert.equal(f.pending.length,1);
+    assert.ok(!JSON.stringify(f.service.read('owner','first')).includes(token));
+    f.service.close();await tick();
+    const restarted=new f.Personas(f.home,f.sessions,f.messaging,()=>{throw Error('interrupted sales must not replay');});
+    try{const saved=restarted.read('owner','first');assert.equal(saved.job.state,'unknown');assert.equal(saved.sales.enabled,false);
+        restarted.tick(now+3600000);await tick();assert.equal(scans,1);assert.equal(saved.sales.cycles,1);
+    }finally{restarted.close();}
 });
