@@ -36,7 +36,15 @@ jobs:
           if [[ -n "$MARKETPLACE_VERSION" ]]; then
             [[ "$GITHUB_REF" == refs/heads/main && "$MARKETPLACE_VERSION" == "$version" ]]
             url="https://xizhi.gallery.vsassets.io/_apis/public/gallery/publisher/Xizhi/extension/keepwork/$version/assetbyname/Microsoft.VisualStudio.Code.Manifest"
-            curl -fsSL --retry 30 --retry-delay 30 --retry-all-errors "$url" -o "$RUNNER_TEMP/published.json"
+            if ! curl -fsSL "$url" -o "$RUNNER_TEMP/published.json"; then
+              package="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/Xizhi/vsextensions/keepwork/$version/vspackage"
+              curl -fsSL --compressed --retry 10 --retry-delay 30 --retry-all-errors "$package" -o "$RUNNER_TEMP/published.vsix"
+              if gzip -t "$RUNNER_TEMP/published.vsix" 2>/dev/null; then
+                gzip -dc "$RUNNER_TEMP/published.vsix" > "$RUNNER_TEMP/unwrapped.vsix"
+                mv "$RUNNER_TEMP/unwrapped.vsix" "$RUNNER_TEMP/published.vsix"
+              fi
+              unzip -p "$RUNNER_TEMP/published.vsix" extension/package.json > "$RUNNER_TEMP/published.json"
+            fi
             jq -e --arg v "$version" '.name == "keepwork" and .publisher == "Xizhi" and .version == $v' "$RUNNER_TEMP/published.json"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
