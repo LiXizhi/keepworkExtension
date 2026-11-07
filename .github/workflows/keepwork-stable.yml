@@ -35,9 +35,9 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "keepwork-v$version" ]]; then exit 1; fi
           if [[ -n "$MARKETPLACE_VERSION" ]]; then
             [[ "$GITHUB_REF" == refs/heads/main && "$MARKETPLACE_VERSION" == "$version" ]]
-            url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/Xizhi/vsextensions/keepwork/$version/vspackage"
-            curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors "$url" -o "$RUNNER_TEMP/published.vsix"
-            unzip -p "$RUNNER_TEMP/published.vsix" extension/package.json | jq -e --arg v "$version" '.name == "keepwork" and .publisher == "Xizhi" and .version == $v'
+            url="https://xizhi.gallery.vsassets.io/_apis/public/gallery/publisher/Xizhi/extension/keepwork/$version/assetbyname/Microsoft.VisualStudio.Code.Manifest"
+            curl -fsSL --retry 30 --retry-delay 30 --retry-all-errors "$url" -o "$RUNNER_TEMP/published.json"
+            jq -e --arg v "$version" '.name == "keepwork" and .publisher == "Xizhi" and .version == $v' "$RUNNER_TEMP/published.json"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
   runtime:
@@ -70,6 +70,7 @@ jobs:
             apps/mcp-runtime/release/*.zip
             apps/mcp-runtime/release/*.json
   packages:
+    if: inputs.marketplace_version == ''
     needs: gate
     runs-on: ubuntu-latest
     steps:
@@ -99,6 +100,9 @@ jobs:
           name: stable-packages
           path: release-packages/*
   publish:
+    if: >-
+      ${{ !cancelled() && needs.gate.result == 'success' && needs.runtime.result == 'success' &&
+          (needs.packages.result == 'success' || (inputs.marketplace_version != '' && needs.packages.result == 'skipped')) }}
     needs: [gate, runtime, packages]
     runs-on: ubuntu-latest
     environment: keepwork-stable
