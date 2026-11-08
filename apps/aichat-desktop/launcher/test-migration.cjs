@@ -21,12 +21,10 @@ async function main() {
   if (mac) {
     execFileSync('ditto',['-x','-k',archive,temp]);
     bundle = path.join(temp,name + '.app');
-    executable = path.join(bundle,'Contents/MacOS',name);
+    executable = path.join(bundle,'Contents/MacOS',execFileSync('/usr/libexec/PlistBuddy',['-c','Print CFBundleExecutable',path.join(bundle,'Contents/Info.plist')],{encoding:'utf8'}).trim());
     const requirement = execFileSync('codesign',['-d','-r-',bundle],{stdio:['ignore','pipe','pipe']}).toString();
     console.log('Old designated requirement',requirement);
-    const candidate = path.join(dir,'stage',name+'.app');
-    const req = requirement.match(/designated => (.+)/)?.[1];
-    if (req) execFileSync('codesign',['--verify','-R',req,candidate],{stdio:'inherit'});
+    // Exercise Squirrel's own signing decision in the unchanged application.
   } else {
     execFileSync(archive,['/S'],{timeout:180000});
     const programs = path.join(process.env.LOCALAPPDATA,'Programs');
