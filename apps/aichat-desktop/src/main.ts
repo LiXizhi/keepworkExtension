@@ -190,6 +190,12 @@ async function applyDesktopUpdate() {
   if (updateActionBusy || !(app.isPackaged || launcherManaged)) return;
   updateActionBusy = true; notifyUpdateStatus();
   try {
+    if (launcherManaged) {
+      if (updateState === 'pending restart' && await confirmUpdate('退出并更新桌面应用？', '重新启动以应用已下载的版本。')) {
+        app.relaunch({ execPath: launcher, args: [] }); app.quit();
+      }
+      return;
+    }
     if (updateState === 'available') await autoUpdater.downloadUpdate();
     if (updateState === 'pending restart' && await confirmUpdate('退出并更新桌面应用？', '应用将关闭并安装已下载的新版本。')) autoUpdater.quitAndInstall();
   } catch (error) { updateError = String(error); setUpdateState('error'); }
@@ -201,6 +207,15 @@ async function checkUpdates() {
   if (updateActionBusy) return;
   if (checking) return checking;
   checking = (async () => {
+    if (launcherManaged) {
+      try {
+        setUpdateState('checking');
+        const result = await require('./launcher-client.cjs').checkLauncher(launcher);
+        receiveShellMetadata(result); updateError = '';
+        setUpdateState(result.pending ? 'pending restart' : 'current');
+      } catch (e) { updateError = String(e); shellStale = true; setUpdateState('error'); }
+      return;
+    }
     const jobs = [runtime.check()];
     if (app.isPackaged) jobs.push(autoUpdater.checkForUpdates().catch((error: Error) => {
       updateError = error.message; shellStale = true; setUpdateState('error');
@@ -265,12 +280,6 @@ function runCommand(id: string) {
   else if (id === 'zoom-out') current.webContents.setZoomLevel(current.webContents.getZoomLevel() - 0.5);
   else if (id === 'zoom-reset') current.webContents.setZoomLevel(0);
   else if (id === 'fullscreen') current.setFullScreen(!current.isFullScreen());
-    if (launcherManaged) {
-      if (updateState === 'pending restart' && await confirmUpdate('退出并更新桌面应用？', '重新启动以应用已下载的版本。')) {
-        app.relaunch({ execPath: launcher, args: [] }); app.quit();
-      }
-      return;
-    }
 }
 async function openFolderFromMenu() {
   await ensureShown();
@@ -282,15 +291,6 @@ async function openFolderFromMenu() {
 }
 function desktopMenus() {
   const key = (accelerator: string, label: string, id: string) => ({ id, label, accelerator, shortcut: shortcut(accelerator) });
-    if (launcherManaged) {
-      try {
-        setUpdateState('checking');
-        const result = await require('./launcher-client.cjs').checkLauncher(launcher);
-        receiveShellMetadata(result); updateError = '';
-        setUpdateState(result.pending ? 'pending restart' : 'current');
-      } catch (e) { updateError = String(e); shellStale = true; setUpdateState('error'); }
-      return;
-    }
   return {
     file: [
       key('CmdOrCtrl+N', '新对话', 'new-chat'),
@@ -664,6 +664,9 @@ else {
       void modelRuntime.start().then(menu).catch((e: Error) => { console.error('local-model startup failed:', e); updateError = e.message; menu(); });
       startRuntimeHeartbeat();
     }
+    if (launcherManaged && process.env.AICHAT_LAUNCH_READY) {
+      fs.writeFileSync(process.env.AICHAT_LAUNCH_READY, 'ready');
+    }
     setTimeout(() => { void checkUpdates(); }, 15000).unref();
     setInterval(() => { void checkUpdates(); }, 6 * 60 * 60 * 1000).unref();
   });
@@ -682,6 +685,3 @@ else {
     })().finally(() => app.quit());
   });
 }
-    if (launcherManaged && process.env.AICHAT_LAUNCH_READY) {
-      fs.writeFileSync(process.env.AICHAT_LAUNCH_READY, 'ready');
-    }
