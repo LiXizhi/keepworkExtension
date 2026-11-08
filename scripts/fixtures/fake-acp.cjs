@@ -19,7 +19,7 @@ const update = value => send({method:'session/update',params:{sessionId:'same-th
 readline.createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
  const log=process.argv.find(a=>a.startsWith('--log=')); if(log)fs.appendFileSync(log.slice(6),JSON.stringify(m)+'\n');
- if(m.method==='initialize') return reply(m.id,{protocolVersion:1,agentCapabilities:{loadSession:!process.argv.includes('--no-load'),...(process.argv.includes('--native-list')?{sessionCapabilities:{list:{}}}:{})},authMethods:[{id:'cli',name:'CLI login'}]});
+ if(m.method==='initialize') return reply(m.id,{protocolVersion:1,agentCapabilities:{...(process.argv.includes('--images') ? {promptCapabilities:{image:true}} : {}),loadSession:!process.argv.includes('--no-load'),...(process.argv.includes('--native-list')?{sessionCapabilities:{list:{}}}:{})},authMethods:[{id:'cli',name:'CLI login'}]});
  if(m.method==='session/list') return reply(m.id,{sessions:[{sessionId:'same-thread',cwd:process.argv.find(a=>a.startsWith('--native-cwd=')).slice(13),title:'Native ACP',updatedAt:new Date().toISOString()}],nextCursor:null});
  if(m.method==='session/load'&&process.argv.includes('--native-list')) {update({sessionUpdate:'user_message_chunk',content:{type:'text',text:'historical user'}});update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'historical assistant'}});return reply(m.id,{});}
  if(m.method==='session/new') {

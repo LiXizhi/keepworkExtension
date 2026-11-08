@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const Module=require('node:module');
 const ts=require('typescript');
-function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaMessaging','./agentRolePolicy','./personaSales'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./personaSales'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
@@ -365,4 +365,17 @@ test('sales: only one worker starts and an interrupted round never replays after
     try{const saved=restarted.read('owner','first');assert.equal(saved.job.state,'unknown');assert.equal(saved.sales.enabled,false);
         restarted.tick(now+3600000);await tick();assert.equal(scans,1);assert.equal(saved.sales.cycles,1);
     }finally{restarted.close();}
+});
+
+test('explicit WeChat composer message uses the owned browser once without starting a model',async t=>{
+    const f=fixture(t,'codex'),sent=[];
+    f.service.wechat.send=async(owner,id,name,body)=>{sent.push([owner,id,name,body]);return 'verified bubble';};
+    const input={requestId:'wechat-example',text:'给微信 File Transfer 发个hello world.',ownerComposer:true};
+    f.service.submit('owner','first',input);
+    await tick();
+    f.service.submit('owner','first',input);
+    assert.deepEqual(sent,[['owner','first','File Transfer','hello world.']]);
+    assert.equal(f.service.read('owner','first').messages.at(-1).text,'verified bubble');
+    assert.equal(f.calls.length,0);
+    assert.equal(f.pending.length,0);
 });

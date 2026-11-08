@@ -31,6 +31,13 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
         if(!action&&req.method==='GET'){send(200,personas.read(owner,id,Number(url.searchParams.get('before')||Infinity)));return;}
         // Resolve ownership even for channel routes.
         personas.read(owner,id);
+        if(action==='wechat'){
+            if(req.method==='GET'){send(200,personas.wechat.view(owner,id));return;}
+            if(req.method==='POST' && ['connect','start','stop','unbind','qr','confirm','check','login-status','conversation'].includes(input.action)){
+                send(200,await personas.wechat.request(owner,id,input.action,input.code,input.conversation));return;
+            }
+            send(400,{error:'Unknown WeChat operation'});return;
+        }
         if(action==='messaging-options'&&req.method==='GET'){
             send(200,{version:1,nicknameVersion:1,nicknameRoutingVersion:1,roleWriteVersion:1,channels:messaging.agentBindings(owner,id).map(b=>({binding:b.id,channel:b.channel,account:b.profile,status:b.status,error:b.error,nicknameErrors:b.nicknameErrors,listening:b.listening}))});return;
         }

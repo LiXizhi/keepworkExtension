@@ -116,7 +116,17 @@ gets the desktop bridge; Dashboard and embedded pages do not gain native privile
   PRO are unchanged. **打开 KeepWork 第二大脑** or a tray click restores the same window.
   The tray's **显示桌面宠物** preference is device-local and defaults on; disabling it
   ends dictation, live calling and wake-word capture without cancelling text tasks.
-  Re-enabling never starts recording. Login startup (`--background`) remains tray-only.
+  Re-enabling never starts recording. Installed Windows and macOS clients enable background startup on first launch.
+  At login, chat loads hidden and checks the account. A verified session stays hidden.
+  A missing or rejected session, a failed profile check, or no response within 30 seconds
+  marks the tray icon with an amber exclamation point. Open chat from the icon to
+  check the account. A successful profile check restores the normal icon. Use the File or tray menu to turn login startup off. The macOS menu-bar icon and
+  Windows notification-area icon remain available with both chat and pet hidden.
+  Open the icon menu to restore chat, open settings or inspect the services.
+  Hover over the icon or open its menu to see a status symbol and description for
+  DingTalk, Feishu and WeChat. Channel status refreshes once a minute. The tray
+  icon itself reflects the AIChat sign-in check.
+  Windows may place the icon in the taskbar overflow. Choosing Quit ends the desktop session.
   **退出** destroys both windows and closes native terminals and desktop-owned MCP only.
 - Login startup is off by default and optional in the application menu.
 - Electron's per-user application directory stores the persistent `aichat` browser session,

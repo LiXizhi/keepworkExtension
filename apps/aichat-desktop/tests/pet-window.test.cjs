@@ -20,6 +20,8 @@ function fixture() {
       this.webContents.send = (_, state) => { this.state = state; }; windows.push(this); }
     isDestroyed() { return !!this.destroyed; } setMenu() {} setBounds(value) { this.bounds = value; this.resizes = (this.resizes || 0) + 1; } getBounds() { return this.bounds; }
     showInactive() { this.shown = true; } hide() { this.shown = false; } destroy() { this.destroyed = true; this.emit('closed'); }
+    isFocusable() { return this.focusable !== false; }
+    setFocusable(value) { this.focusable = value; }
     setIgnoreMouseEvents(value) { this.ignored = value; }
     loadURL(url) { this.webContents.mainFrame.url = url; this.webContents.emit('did-finish-load'); return Promise.resolve(); }
   }
@@ -163,6 +165,18 @@ test('pet target toggle crosses the real preload and native IPC allowlists', asy
       h.pet.update({ version: 1, context: 'chat', target: 'chat', canSwitchTarget: true });
     }
     assert.equal((await switched).target, 'chat');
+    h.pet.update({version:1, context:'chat',compactVoice:true});
+    assert.equal(h.windows[0].isFocusable(),false);
+    await h.invoke('expand',{expanded:true});
+    assert.equal(h.windows[0].isFocusable(),true);
+    await h.invoke('expand',{expanded:false});
+    for (const action of ['record-start','record-stop','voice-start','voice-stop']) {
+      const result = api.action(action,{context:'chat'});
+      const sent = h.commands.at(-1);
+      assert.equal(sent.action,action);
+      h.pet.result({requestId:sent.requestId,ok:true});
+      assert.equal((await result).context,'chat');
+    }
     await assert.rejects(api.action('toggle-target', { context: 'persona' }), /Stale/);
     await assert.rejects(api.action('terminal'), /Invalid pet action/);
     api = undefined;

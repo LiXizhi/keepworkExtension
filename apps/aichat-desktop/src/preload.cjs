@@ -92,7 +92,8 @@ if (process.isMainFrame) {
     } catch { /* Untrusted/offline documents never receive native chrome controls. */ }
   }, { once: true });
   contextBridge.exposeInMainWorld('aichatDesktop', Object.freeze({
-    version: 1, capabilities: Object.freeze({ files: true, terminal: true, defaultBrainFolder: true, gitSetup: true, floatingPet: true }),
+    version: 1, capabilities: Object.freeze({ files: true, terminal: true, defaultBrainFolder: true, gitSetup: true, floatingPet: true, startupSignIn: true }),
+    reportStartupSignIn: signedIn => call('startupSignIn', { signedIn }),
     publishPetState: state => call('petState', state),
     petResult: result => call('petResult', result),
     onPetCommand: callback => {

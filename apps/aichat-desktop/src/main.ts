@@ -49,6 +49,18 @@ let settingsFile: string;
 let mediaGrants: InstanceType<typeof MediaGrants>;
 let settings = { openAtLogin: false, theme: 'light', petVisible: true, petPosition: null as null | { x: number; y: number }, petPreferences: { scale: 1, appearance: 'current' } };
 let serviceBusy = false, switchingPage = false;
+const supportsLogin = production && ['win32', 'darwin'].includes(process.platform);
+let startup: { set(enabled: boolean): void; enabled(): boolean } | undefined;
+function changeLogin(enabled: boolean) {
+  if (!startup) return;
+  try {
+    startup.set(enabled);
+    settings.openAtLogin = startup.enabled();
+    atomicJson(settingsFile, settings);
+    if (enabled && !settings.openAtLogin) throw new Error('请在系统登录项或启动应用设置中允许 Keepwork 自动启动。');
+  } catch (error) { dialog.showErrorBox('登录后自动启动', String(error)); }
+  menu();
+}
 function liveWindow() {
   if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed())) return undefined;
   return win;
@@ -115,7 +127,8 @@ async function checkRuntimeHeartbeat() {
   for (const [name, supervisor] of supervisors) {
     if (!supervisor) continue;
     try {
-      await supervisor.refresh();
+      const health = await supervisor.refresh();
+      if (name === 'mcp') await refreshTrayChannels(health);
       if (serviceBusy || updateActionBusy || runtime?.restarting || quitting) return;
       if (!['running', 'attached'].includes(supervisor.state?.state)) await supervisor.start();
     } catch (error) {
@@ -124,8 +137,59 @@ async function checkRuntimeHeartbeat() {
   }
 }
 function startRuntimeHeartbeat() {
+  void runtime.refresh().then(refreshTrayChannels).catch(() => refreshTrayChannels(null));
   runtimeHeartbeat = setInterval(() => { void checkRuntimeHeartbeat(); }, 60_000);
   runtimeHeartbeat.unref?.();
+}
+let signInTimer: ReturnType<typeof setTimeout> | undefined;
+let signInAttention = false;
+let retryPageOnOpen = false;
+let trayTip = PRODUCT_NAME;
+let trayIcon: Electron.NativeImage, attentionIcon: Electron.NativeImage;
+const { channelStates, describe } = require('./trayChannels.cjs');
+let channelStatuses: string[] = channelStates(null);
+let checkingChannels = false;
+async function refreshTrayChannels(health: any) {
+  if (checkingChannels || quitting) return;
+  checkingChannels = true;
+  let snapshot;
+  try {
+    if (health?.compatible && health.messagingApi === 'messaging-v1') {
+      const headers: Record<string, string> = {};
+      if (health.requireAuth) {
+        const { readInstance, readToken } = require('../../../src/core/config');
+        if (!health.pid || readInstance()?.pid !== health.pid) throw Error('Unknown MCP instance');
+        const token = readToken();
+        if (!token) throw Error('Missing MCP credentials');
+        headers.Authorization = 'Bearer ' + token;
+      }
+      const response = await fetch('http://127.0.0.1:8089/admin/channels?view=tray', {
+        headers, redirect: 'error', signal: AbortSignal.timeout(5000),
+      });
+      if (response.ok) snapshot = await response.json();
+    }
+  } catch { /* Unavailable channels remain unknown until the next heartbeat. */ }
+  finally { checkingChannels = false; }
+  const next = channelStates(snapshot);
+  if (quitting || next.every((value: string, i: number) => channelStatuses[i] === value)) return;
+  channelStatuses = next;
+  setTrayTip(trayTip);
+  menu();
+}
+const signInTip = '点击打开聊天，检查登录状态';
+function setTrayTip(text: string) {
+  trayTip = text;
+  const heading = signInAttention ? PRODUCT_NAME + ' · ' + signInTip : trayTip;
+  tray?.setToolTip([heading, ...describe(channelStatuses)].join('\n'));
+}
+function updateSignIn(signedIn: boolean) {
+  clearTimeout(signInTimer);
+  signInTimer = undefined;
+  if (signInAttention === !signedIn) return;
+  signInAttention = !signedIn;
+  tray?.setImage(signInAttention ? attentionIcon : trayIcon);
+  setTrayTip(trayTip);
+  if (tray) menu();
 }
 function ensureShown() {
   floatingPet?.hide();
@@ -133,7 +197,10 @@ function ensureShown() {
   if (current) {
     if (current.isMinimized()) current.restore();
     current.show(); current.focus();
-    if (current.webContents.isCrashed?.()) return current.loadURL(devUrl || ENTRY).catch((error: Error) => dialog.showErrorBox(PRODUCT_NAME, error.message));
+    if (retryPageOnOpen || current.webContents.isCrashed?.()) {
+      retryPageOnOpen = false;
+      return current.loadURL(devUrl || ENTRY).catch((error: Error) => { retryPageOnOpen = true; dialog.showErrorBox(PRODUCT_NAME, error.message); });
+    }
     return Promise.resolve();
   }
   if (!opening) opening = openWindow().finally(() => { opening = null; });
@@ -256,8 +323,7 @@ function runCommand(id: string) {
   if (id === 'reload') { reloadPage(); return; }
   if (id === 'check-updates') { openUpdates(); return; }
   if (id === 'toggle-login') {
-    settings.openAtLogin = !settings.openAtLogin; atomicJson(settingsFile, settings);
-    app.setLoginItemSettings({ openAtLogin: settings.openAtLogin, args: ['--background'], ...(launcherManaged ? { path: launcher } : {}) }); menu(); return;
+    changeLogin(!settings.openAtLogin); return;
   }
   if (id === 'quit') { app.quit(); return; }
   if (id === 'mcp-status') { void mcpAction('status'); return; }
@@ -299,7 +365,7 @@ function desktopMenus() {
       key('CmdOrCtrl+R', '重新加载', 'reload'),
       { type: 'separator' },
       { id: 'check-updates', label: '检查更新…' },
-      { id: 'toggle-login', label: '登录后自动启动', checked: settings.openAtLogin === true },
+      { id: 'toggle-login', label: '登录后自动启动', enabled: supportsLogin, checked: settings.openAtLogin === true },
       { type: 'separator' },
       key('CmdOrCtrl+Q', '退出', 'quit'),
     ],
@@ -368,7 +434,8 @@ function templateFrom(items: any[]) {
 }
 function menu() {
   const items: any[] = [
-    { label: `打开 ${PRODUCT_NAME}`, click: show },
+    { label: signInAttention ? signInTip : `打开 ${PRODUCT_NAME}`, click: show },
+    { label: '设置…', click: async () => { await ensureShown(); deliverPageCommand('open-settings'); } },
     { label: '显示桌面宠物', type: 'checkbox', checked: settings.petVisible, click: (item: any) => {
       settings.petVisible = item.checked; atomicJson(settingsFile, settings);
       if (!item.checked) floatingPet?.hide(true);
@@ -385,8 +452,11 @@ function menu() {
       if (grant && opened && trustedPage(opened.webContents.getURL(), devUrl)) opened.webContents.send('aichat-desktop:folder-selected', grant.path);
     } },
     { type: 'separator' },
+    ...describe(channelStatuses).map((label: string) => ({ label, enabled: false })),
+    { type: 'separator' },
     { label: `MCP: ${runtime?.state.state || 'starting'} ${runtime?.state.version || ''} (${runtime?.state.owner || 'desktop'})`, enabled: false },
     ...(runtime?.state.error ? [{ label: String(runtime.state.error).slice(0, 100), enabled: false }] : []),
+    { label: `本地模型服务: ${modelRuntime?.state.state || 'starting'}`, enabled: false },
     { label: 'Keepwork MCP Server', submenu: [
       { label: '查看状态…', enabled: !serviceBusy && !disableDevMcp, click: () => { void mcpAction('status'); } },
       { label: '打开 Dashboard', click: () => { void shell.openExternal('http://127.0.0.1:8089/dashboard').catch((e: Error) => dialog.showErrorBox('Keepwork MCP', e.message)); } },
@@ -405,10 +475,7 @@ function menu() {
     ...(updateError ? [{ label: `更新失败: ${updateError.slice(0, 100)}`, enabled: false }] : []),
     { label: '检查更新…', click: openUpdates },
     { label: `${PRODUCT_NAME} ${app.getVersion()}`, enabled: false },
-    { label: '登录电脑后自动启动', type: 'checkbox', checked: settings.openAtLogin, click: (item: any) => {
-      settings.openAtLogin = item.checked; atomicJson(settingsFile, settings);
-      app.setLoginItemSettings({ openAtLogin: item.checked, args: ['--background'], ...(launcherManaged ? { path: launcher } : {}) });
-    } },
+    { label: '登录电脑后自动启动', type: 'checkbox', enabled: supportsLogin, checked: settings.openAtLogin, click: (item: any) => changeLogin(item.checked) },
     { label: '退出', click: () => app.quit() },
   ];
   tray?.setContextMenu(Menu.buildFromTemplate(items));
@@ -437,6 +504,11 @@ function setupBridge() {
     if (!current) throw new Error('window closed');
     assertSender(event, current.webContents, devUrl);
     if (!args || typeof args !== 'object') throw new Error('Invalid request');
+    if (method === 'startupSignIn') {
+      if (typeof args.signedIn !== 'boolean') throw new Error('Invalid sign-in status');
+      updateSignIn(args.signedIn);
+      return;
+    }
     if (method === 'petState') return floatingPet?.update(args);
     if (method === 'petResult') return floatingPet?.result(args);
     if (method === 'theme') {
@@ -512,7 +584,7 @@ function setupBridge() {
     throw new Error('Unknown desktop operation');
   });
 }
-function openWindow(startHidden = false) {
+function openWindow(startHidden = false, checkStartupSignIn = false) {
   let keepHidden = startHidden;
   const created = new BrowserWindow({ title: PRODUCT_NAME, icon: appIcon, width: 1360, height: 900, show: false,
     backgroundColor: settings.theme === 'dark' ? '#0a0a0f' : '#ffffff',
@@ -521,6 +593,10 @@ function openWindow(startHidden = false) {
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), partition: managedDeployment ? `persist:aichat-${createHash('sha256').update(JSON.stringify([managedDeployment.config.profileHome, managedDeployment.config.profile, managedDeployment.config.entryURL, managedDeployment.config.identityRealm])).digest('hex').slice(0, 24)}` : 'persist:aichat', nodeIntegration: false,
       contextIsolation: true, sandbox: true, webSecurity: true, backgroundThrottling: false, webviewTag: false } });
   win = created;
+  if (checkStartupSignIn) {
+    // Offline, stalled and older pages may never report a verified session.
+    signInTimer = setTimeout(() => updateSignIn(false), 30000);
+  }
   if (process.platform !== 'darwin') created.setMenu(null);
   created.on('page-title-updated', event => event.preventDefault());
   // Keep one page/runtime alive: the pet is only a projection of this window.
@@ -531,25 +607,28 @@ function openWindow(startHidden = false) {
     created.hide();
     if (settings.petVisible) floatingPet?.show();
     else floatingPet?.hide(true);
-    tray?.setToolTip(`${PRODUCT_NAME}（后台运行）`);
+    setTrayTip(`${PRODUCT_NAME}（后台运行）`);
   });
   created.on('closed', () => {
-    if (win === created) win = undefined;
-    if (!quitting) tray?.setToolTip(closedTip);
+    if (win === created) { clearTimeout(signInTimer); win = undefined; }
+    if (!quitting) setTrayTip(closedTip);
   });
   created.webContents.on('did-start-navigation', (_e, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { clearTerminals(); floatingPet?.reset(); } });
   created.webContents.on('will-navigate', (e, url) => { if (!trustedPage(url, devUrl)) { e.preventDefault(); if (externalUrl(url)) void shell.openExternal(url); } });
   created.webContents.on('will-redirect', (e, url, _inPlace, mainFrame) => { if (mainFrame && !trustedPage(url, devUrl)) e.preventDefault(); });
   created.webContents.setWindowOpenHandler(({ url }) => { if (externalUrl(url)) void shell.openExternal(url); return { action: 'deny' }; });
-  created.webContents.on('render-process-gone', () => floatingPet?.reset());
+  created.webContents.on('render-process-gone', () => { floatingPet?.reset(); updateSignIn(false); });
   installPermissions(created, mediaGrants, () => devUrl, dialog);
   return created.loadURL(devUrl || ENTRY).catch(() => {
+    if (created !== liveWindow()) return;
+    retryPageOnOpen = true;
+    updateSignIn(false);
     // No native privileges on this offline error page. Reload retries the official entry.
-    if (!created.isDestroyed()) void dialog.showMessageBox(created, { message: '无法连接 AIChat，请检查网络后从菜单重新加载。' });
+    if (!keepHidden || created.isVisible()) void dialog.showMessageBox(created, { message: '无法连接 AIChat，请检查网络后从菜单重新加载。' });
   }).then(() => {
     if (!created.isDestroyed()) {
-      if (!keepHidden) { created.show(); created.focus(); tray?.setToolTip(PRODUCT_NAME); }
-      else if (!created.isVisible() && settings.petVisible) floatingPet?.show();
+      if (!keepHidden) { created.show(); created.focus(); setTrayTip(PRODUCT_NAME); }
+      else if (!checkStartupSignIn && !created.isVisible() && settings.petVisible) floatingPet?.show();
     }
   });
 }
@@ -560,7 +639,12 @@ if (!app.requestSingleInstanceLock()) {
   } else app.quit();
 }
 else {
-  app.on('second-instance', show);
+  let readyForWindows = false, requestedWindow = false;
+  function requestWindow() {
+    if (readyForWindows) show();
+    else requestedWindow = true;
+  }
+  app.on('second-instance', (_event, argv) => { if (!argv.includes('--background')) requestWindow(); });
   app.whenReady().then(async () => {
     if (production) {
       try { rememberDesktopClient({ version: app.getVersion(), platform: process.platform === 'darwin' ? 'macos' : 'windows', arch: process.arch, executable: launcherManaged ? launcher : process.execPath }); }
@@ -589,7 +673,24 @@ else {
     }
     const home = app.getPath('userData'); settingsFile = path.join(home, 'settings.json');
     mediaGrants = new MediaGrants(path.join(home, 'media-grants.json'));
-    try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8')) }; } catch { /* first launch */ }
+    let saved: Partial<typeof settings> = {};
+    let firstPreference = true;
+    try {
+      saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+      settings = { ...settings, ...saved };
+      firstPreference = typeof saved.openAtLogin !== 'boolean';
+    } catch (error) { firstPreference = (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+    const background = process.argv.includes('--background') ||
+      (supportsLogin && process.platform === 'darwin' && !launcherManaged && app.getLoginItemSettings().wasOpenedAtLogin);
+    if (supportsLogin) {
+      const registration = require('./loginStartup.cjs').loginStartup(app, process.platform, launcherManaged ? launcher : '');
+      startup = registration;
+      try {
+        if (firstPreference) registration.set(true);
+        settings.openAtLogin = registration.enabled();
+        if (firstPreference) atomicJson(settingsFile, settings);
+      } catch (error) { console.warn('Unable to initialize login startup:', String(error)); }
+    }
     nativeTheme.themeSource = settings.theme === 'dark' ? 'dark' : 'light';
     files = new NativeFiles(path.join(home, 'folder-grants.json'));
     const target = `${process.platform === 'win32' ? 'windows' : 'macos'}-${process.arch}`;
@@ -636,8 +737,10 @@ else {
     });
     disconnectPermissionPet = connectPermissionPet(floatingPet);
     setupBridge();
-    const icon = appIcon.resize({ width: process.platform === 'darwin' ? 22 : 16 });
-    tray = new Tray(icon); tray.setToolTip(PRODUCT_NAME); tray.on('click', show); menu();
+    const size = { width: process.platform === 'darwin' ? 22 : 16 };
+    trayIcon = appIcon.resize(size);
+    attentionIcon = nativeImage.createFromPath(path.join(__dirname, 'keepwork-attention.png')).resize(size);
+    tray = new Tray(trayIcon); setTrayTip(PRODUCT_NAME); if (process.platform !== 'darwin') tray.on('click', show); menu();
     autoUpdater.autoDownload = true; autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on('checking-for-update', () => { updateError = ''; setUpdateState('checking'); });
     autoUpdater.on('update-available', info => { receiveShellMetadata(info); updateError = ''; setUpdateState('downloading'); });
@@ -658,8 +761,12 @@ else {
       }
       menu();
     }
-    if (process.argv.includes('--background')) tray.setToolTip(closedTip);
-    else await ensureShown();
+    readyForWindows = true;
+    app.on('activate', show);
+    if (background && !requestedWindow) {
+      setTrayTip(closedTip);
+      opening = openWindow(true, true).finally(() => { opening = null; });
+    } else await ensureShown();
     if (!disableDevMcp) {
       void modelRuntime.start().then(menu).catch((e: Error) => { console.error('local-model startup failed:', e); updateError = e.message; menu(); });
       startRuntimeHeartbeat();
@@ -670,7 +777,6 @@ else {
     setTimeout(() => { void checkUpdates(); }, 15000).unref();
     setInterval(() => { void checkUpdates(); }, 6 * 60 * 60 * 1000).unref();
   });
-  app.on('activate', show);
   app.on('window-all-closed', () => { /* Tray and Keepwork MCP stay after the window is destroyed. */ });
   app.on('before-quit', event => {
     if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }

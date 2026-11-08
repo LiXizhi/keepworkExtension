@@ -18,3 +18,8 @@
 
 #permission-bubble{background:#fff;color:#202838;border:1px solid #becce0;border-radius:16px;padding:16px;box-shadow:0 6px 24px #0003;pointer-events:auto}#permission-bubble p{font-size:14px;line-height:1.5;overflow-wrap:anywhere}#permission-bubble .actions{flex-wrap:wrap}#permission-bubble button{min-height:36px}
 
+
+#compact-controls{align-self:flex-end;max-width:100%;padding:5px;border-radius:12px;background:#f7fbf8fa;box-shadow:0 2px 7px #0002}
+#compact-controls output{display:block;max-width:220px;font-size:12px;padding:0 4px;overflow-wrap:anywhere}
+#compact-controls button{padding:5px 8px;margin:2px}
+#compact-controls button[aria-pressed=true]{background:#226145;color:white}

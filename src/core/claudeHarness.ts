@@ -288,7 +288,7 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         thread.native = true; this.save(thread);
         const run: Run = { id: randomUUID(), items: [], timer: setTimeout(() => { this.finish(thread, c, 'failed', 'Claude turn timed out; not rerun'); this.connections.delete(thread.id); stopCli(c.child); }, 30 * 60 * 1000) }; c.run = run;
         this.notify('turn/started', thread.id, { turn: { id: run.id } });
-        this.item(thread, c, { id: randomUUID(), type: 'userMessage', content: p.input });
+        this.item(thread, c, { id: randomUUID(), type: 'userMessage', content: p.input.map((part: any) => part.type === 'image' ? {type: 'image'} : part) });
         this.write(c, { type: 'user', session_id: thread.id, message: { role: 'user', content: p.input }, parent_tool_use_id: null });
         return { turn: { id: run.id } };
     }

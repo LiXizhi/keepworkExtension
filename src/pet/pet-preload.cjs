@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 if (process.isMainFrame) {
   const channel = 'aichat-desktop:pet-v1';
-  const actions = new Set(['permission-choice', 'state', 'hit-test', 'open', 'menu', 'exit-cancel', 'exit-confirm', 'expand', 'drag-start', 'drag', 'drag-end', 'toggle-target', 'input', 'send', 'stop', 'dictation', 'call', 'mute']);
+  const actions = new Set(['permission-choice', 'state', 'hit-test', 'open', 'menu', 'exit-cancel', 'exit-confirm', 'expand', 'drag-start', 'drag', 'drag-end', 'toggle-target', 'input', 'send', 'stop', 'dictation', 'call', 'mute', 'voice-start', 'voice-stop', 'record-start', 'record-stop']);
   contextBridge.exposeInMainWorld('desktopPet', Object.freeze({
     action: (action, args = {}) => {
       if (!actions.has(action)) return Promise.reject(new Error('Invalid pet action'));

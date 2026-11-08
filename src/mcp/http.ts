@@ -189,6 +189,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         agentSessionApi: 'v1',
         agentContextApi: 'v1',
         agentModeApi: 'v1',
+        agentImageTurnApi: 'v1',
         agentInventoryApi: 'v1',
         aichatPresenceApi: 'post-sse-v1',
         messagingApi: 'messaging-v1',
@@ -429,6 +430,14 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
 
             if (pathname === '/admin/channels' && req.method === 'GET') {
                 if (!assertAuth(req, url, res)) return;
+                if (url.searchParams.get('view') === 'tray') {
+                    const bindings = messaging.list();
+                    const channels = ['dingtalk', 'feishu'].map(channel => ({
+                        channel, bindings: bindings.filter(b => b.channel === channel).map(b => ({ status: b.status })),
+                    }));
+                    sendJson(res, 200, { channels, wechat: personas.wechat.trayStatus() });
+                    return;
+                }
                 sendJson(res, 200, { channels: await channelStatus.snapshot(messaging.list(), messaging.channelRoots()), supervisor: clientSupervisor.snapshot() });
                 return;
             }

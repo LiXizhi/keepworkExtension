@@ -44,6 +44,12 @@ test('one CLI and one root skill, with schemas and references loaded on demand',
     assert.equal(guide.content, loadCreationGuide().get('references/animation.md'));
     const help = JSON.parse((await call('help', {action:'run_code'})).content[0].text);
     assert.ok(help.inputSchema.properties.code && help.inputSchema.properties.expectedIdentity);
+    const creation = JSON.parse((await call('help', {action:'place_block_shapes'})).content[0].text);
+    assert.ok(creation.inputSchema.required.includes('worldPath'));
+    const { executeAuthoring } = require('../src/core/paracraftAuthoring.ts');
+    const unexpected = () => assert.fail('Invalid request reached the engine');
+    await assert.rejects(executeAuthoring('open_blank_world', {name:''}, unexpected), /Invalid authoring arguments/);
+    await assert.rejects(executeAuthoring('place_block_shapes', {}, unexpected), /Invalid authoring arguments/);
     const launchHelp = JSON.parse((await call('help', {action:'launch'})).content[0].text);
     assert.ok(launchHelp.inputSchema.properties.projectId);
     assert.ok(!launchHelp.inputSchema.required?.includes('waitSeconds'));
@@ -72,4 +78,46 @@ test('one guide read performs one file read and no catalog scan', () => {
     }
     assert.equal(reads.length,1,'Rejected guide read touched content');
   } finally {fs.readFileSync=originalRead;fs.readdirSync=originalList;}
+});
+
+test('Web authoring pins the HTTP tunnel to the selected engine before executing Lua', async () => {
+  const { registerClient, unregisterClient, dispatchAction, pollJobs, completeJob } = require('../src/core/paracraftClients.ts');
+  const id = 'wasm-authoring-test', worldPath = '/worlds/Example/';
+  await registerClient({ clientId: id, platform: 'wasm' });
+  async function reply(action, result, clientId = id) {
+    const [job] = await pollJobs(id, 500);
+    assert.equal(job.request.action, 'http_request');
+    const params = job.request.params;
+    assert.equal(params.path, '/ajax/paracraft_cli');
+    const request = JSON.parse(Buffer.from(params.bodyBase64, 'base64').toString('utf8'));
+    assert.equal(request.action, action);
+    const body = JSON.stringify({ clientId, ok: true, result });
+    completeJob(id, job.jobId, { result: { status: 200, bodyBase64: Buffer.from(body).toString('base64') } });
+    return request.params;
+  }
+  try {
+    const args = { worldPath, name: 'Bird' };
+    const success = dispatchAction(id, 'sample_actor', args);
+    await reply('world_files', { identity: { worldPath, sessionId: 8 } });
+    const execution = await reply('run_npl_code', { result: { found: true } });
+    assert.match(execution.code, /sample_actor/);
+    assert.equal((await success).body.result.found, true);
+    const mismatch = dispatchAction(id, 'sample_actor', args);
+    await reply('world_files', { identity: { worldPath, sessionId: 8 } }, 'unrelated-client');
+    assert.match((await mismatch).body.error, /client changed/);
+  } finally { unregisterClient(id); }
+});
+
+test('a browser relays single-use engine steps while the server owns the model operation', async () => {
+  const { advanceWebAuthoring } = require('../src/core/paracraftAuthoring.ts');
+  const clientId = 'iframe', worldPath = '/worlds/test/';
+  const args = { worldPath, name:'Gull' };
+  const first = await advanceWebAuthoring({clientId, name:'sample_actor', args});
+  assert.equal(first.action, 'world_files');
+  assert.throws(() => advanceWebAuthoring({clientId:'other', ticket:first.ticket}), /mismatched/);
+  const second = await advanceWebAuthoring({clientId, ticket:first.ticket, reply:{ok:true,result:{identity:{sessionId:1,worldPath}}}});
+  assert.equal(second.action, 'run_npl_code');
+  assert.throws(() => advanceWebAuthoring({clientId, ticket:first.ticket}), /Expired/);
+  const last = await advanceWebAuthoring({clientId, ticket:second.ticket, reply:{ok:true,result:{result:{found:false}}}});
+  assert.deepEqual(last,{done:true,result:{found:false}});
 });

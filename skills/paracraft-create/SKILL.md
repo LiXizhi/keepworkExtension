@@ -26,6 +26,10 @@ animation controls, not an exception for decorative geometry. Keep exportable
 color-block groups separate from the surrounding world architecture. Read the
 palette and placement examples in [voxel-art.md](references/voxel-art.md).
 
+## AIChat Text Composer and external CLI
+
+When working inside AIChat with ParacraftTool selected, use the conversation MCP bridge to discover the online `paracraft_*` actions. Read [Web authoring](references/aichat-web.md) through the skill action or its conversation alias `paracraft_read_creation_skill`. Keepwork MCP owns these instructions and all creation operations; AIChat connects the selected client. Both the browser model and an external Codex CLI operate the same selected Web client. Build layouts, BMax voxels and actor programs from the user's goal. Inspect the actor and capture the rendered result in this client. The separate `paracraft_cli` gateway supplies this guide via `action:"skill"` and relative reference paths; its desktop client list does not identify the selected iframe.
+
 ## Realistic scale by default
 
 For real-world design, **1 block = 1 meter** and the main player is about

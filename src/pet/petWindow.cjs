@@ -1,7 +1,7 @@
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const CHANNEL = 'aichat-desktop:pet-v1';
-const ACTIONS = new Set(['toggle-target', 'input', 'send', 'stop', 'dictation', 'call', 'mute']);
+const ACTIONS = new Set(['toggle-target', 'input', 'send', 'stop', 'dictation', 'call', 'mute', 'voice-start', 'voice-stop', 'record-start', 'record-stop']);
 const EMPTY = Object.freeze({ version: 1, context: '', title: '打开 AIChat 开始聊天', draft: '', messages: [], ready: false });
 const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
 const PET_SIZES = [0.5, 1, 1.5, 2, 3, 4];
@@ -21,6 +21,9 @@ function projectState(value) {
     skill: text(value.skill, 160), folder: text(value.folder, 500),
     ready: value.ready === true, busy: value.busy === true, richDraft: value.richDraft === true,
     attention: text(value.attention, 300), error: text(value.error, 300), dictating: value.dictating === true,
+    compactVoice: value.compactVoice === true,
+    classroomRecording: value.classroomRecording ? { enabled: value.classroomRecording.enabled === true,
+      phase: text(value.classroomRecording.phase, 16), error: text(value.classroomRecording.error, 200) } : null,
     canCall: value.canCall === true, voice: { active: value.voice?.active === true, muted: value.voice?.muted === true, state: text(value.voice?.state, 32) },
     pet: { name: text(pet.name, 80), sheetUrl, imageData, bgSize: percent(pet.bgSize), bgPos: percent(pet.bgPos) },
     reply: value.reply && typeof value.reply === 'object' ? {
@@ -48,7 +51,13 @@ function createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, directory, se
   let permission = null, permissionResolve, permissionReject;
   const pending = new Map();
   const view = () => { const { pixels, left, top } = geometry(); return { ...snapshot, expanded, preferences, exitPrompt, permission, petPixels: pixels, petLeft: left, petTop: top }; };
-  const send = () => { if (window && !window.isDestroyed()) window.webContents.send(CHANNEL, view()); };
+  const send = () => {
+    if (!window || window.isDestroyed()) return;
+    // A compact control click must leave the slideshow as the foreground window.
+    const focusable = !snapshot.compactVoice || expanded || !!exitPrompt || !!permission;
+    if (window.isFocusable() !== focusable) window.setFocusable(focusable);
+    window.webContents.send(CHANNEL, view());
+  };
   const rejectPending = () => { for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error('AIChat context changed')); } pending.clear(); };
   function geometry() {
     const fallback = screen.getPrimaryDisplay().workArea;

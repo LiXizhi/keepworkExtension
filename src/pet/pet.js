@@ -112,6 +112,17 @@
       $('bubble').hidden = true; $('panel').hidden = true; $('exit-bubble').hidden = true;
       $('permission-client').textContent = `请求方：${permission.client}`;
     }
+    const rec = state.classroomRecording, active = !!state.voice?.active;
+    $('compact-controls').hidden = expanded || !!exit || !!permission || !state.compactVoice;
+    $('compact-record').hidden = !rec;
+    $('compact-record').textContent = rec?.enabled ? '停止录音' : '开始录音';
+    $('compact-record').setAttribute('aria-pressed', String(!!rec?.enabled));
+    $('compact-record').disabled = !state.ready || state.dictating || (!rec?.enabled && active) || ['starting','stopping'].includes(rec?.phase);
+    $('compact-call').textContent = active ? '停止语音' : '开始语音';
+    $('compact-call').setAttribute('aria-pressed', String(active));
+    $('compact-call').disabled = !state.ready || state.dictating || (!active && !state.canCall) || ['starting','stopping'].includes(state.voice?.state);
+    $('compact-status').textContent = localError || state.error || rec?.error || (active ? ({starting:'语音连接中',stopping:'正在结束语音',paused:'语音已暂停'}[state.voice.state] || (state.voice.muted ? '语音已静音' : '语音中')) :
+      ({recording:'录音中',starting:'录音连接中',stopping:'正在停止录音'}[rec?.phase] || ''));
     positionLayers();
   }
   for (const button of document.querySelectorAll('[data-permission]')) button.onclick = async () => {
@@ -163,6 +174,8 @@
     }
     void action(name);
   };
+  $('compact-record').onclick = () => void action(state.classroomRecording?.enabled ? 'record-stop' : 'record-start');
+  $('compact-call').onclick = () => void action(state.voice?.active ? 'voice-stop' : 'voice-start');
   for (const name of ['dictation', 'call', 'mute']) $(name).onclick = () => { void action(name); };
   $('target').onclick = async () => { await queue; if (!edits && !unsynced) await action('toggle-target'); };
   $('open').onclick = () => { void api.action('open'); };
@@ -200,7 +213,7 @@
   $('pet').addEventListener('click', event => { if (event.detail === 0) void expand(!expanded); });
   $('pet').addEventListener('contextmenu', event => { event.preventDefault(); void api.action('menu'); });
   document.addEventListener('mousemove', event => {
-    const next = !!pointer || !!event.target.closest('#pet, #panel, #bubble, #exit-bubble, #permission-bubble');
+    const next = !!pointer || !!event.target.closest('#pet, #compact-controls, #panel, #bubble, #exit-bubble, #permission-bubble');
     if (next !== interactive) { interactive = next; void api.action('hit-test', { interactive }); }
   });
   api.subscribe(render); void api.action('state').then(render);
