@@ -102,7 +102,6 @@
       $('exit-status').textContent = exit.loading ? '正在检查分身和渠道…' : exit.unavailable
         ? '暂时无法获取分身列表。飞书、钉钉等已连接渠道的自动回复可能中断。仍要退出吗？'
         : exit.personas.length ? '隐藏宠物可保持后台运行；完全退出会停止本应用。' : '未发现当前账号的已配置分身。仍要完全退出吗？';
-      $('exit-confirm').disabled = exit.loading;
       if (openingExit) $('exit-cancel').focus();
     }
     if (closingExit) $('pet').focus();
@@ -171,7 +170,7 @@
   $('collapse').onclick = () => { void expand(false); };
   $('exit-cancel').onclick = () => { void api.action('exit-cancel'); };
   $('exit-confirm').onclick = () => {
-    if (!state.exitPrompt || state.exitPrompt.loading) return;
+    if (!state.exitPrompt) return;
     void api.action('exit-confirm', { id: state.exitPrompt.id }).catch(error => { $('exit-status').textContent = error.message; });
   };
   document.addEventListener('keydown', event => {
