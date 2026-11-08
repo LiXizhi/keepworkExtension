@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func zipped(t *testing.T, files map[string]string) []byte {
@@ -187,5 +188,30 @@ func TestInterruptedTransferResumes(t *testing.T) {
 	file, err := s.download(o)
 	if err != nil || file != part {
 		t.Fatal(file, err)
+	}
+}
+
+func TestDuplicateLauncherDoesNotWaitForDownload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update.lock")
+	release, err := lockStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	result := make(chan error, 1)
+	go func() {
+		unlock, e := lockStore(path)
+		if unlock != nil {
+			unlock()
+		}
+		result <- e
+	}()
+	select {
+	case e := <-result:
+		if !errors.Is(e, errBusy) {
+			t.Fatalf("duplicate launcher: %v", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second launcher waited on first installation")
 	}
 }

@@ -31,7 +31,7 @@ func (s Store) download(o Object) (string, error) {
 		start = 0
 	}
 	if start < o.Size {
-		req, err := http.NewRequest("GET", s.Base+"objects/"+o.SHA256+".zip", nil)
+		req, err := http.NewRequestWithContext(installContext, "GET", s.Base+"objects/"+o.SHA256+".zip", nil)
 		if err != nil {
 			return "", err
 		}

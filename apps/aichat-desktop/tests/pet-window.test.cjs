@@ -121,14 +121,17 @@ test('pet can move to the top of the display without resizing its transparent ca
   h.pet.dispose();
 });
 
-test('complete exit requires a loaded, current confirmation; cancel and owner changes invalidate it', async () => {
+test('complete exit accepts a current confirmation during lookup; cancel and owner changes invalidate it', async () => {
   const h = fixture(); h.pet.show(); h.pet.update({ version: 1, context: 'owner' });
   await h.invoke('menu');
   const open = () => h.menus.at(-1).items.find(item => item.label === '完全退出…').click();
   const respond = async data => { h.pet.result({ requestId: h.commands.at(-1).requestId, ok: true, data }); await new Promise(resolve => setImmediate(resolve)); };
   open(); let id = h.windows[0].state.exitPrompt.id;
   assert.equal(h.quit(), 0);
+  await h.invoke('exit-confirm', { id }); assert.equal(h.quit(), 1);
+  await respond([]); assert.equal(h.windows[0].state.exitPrompt, null);
   await assert.rejects(h.invoke('exit-confirm', { id }), /expired/);
+  open(); id = h.windows[0].state.exitPrompt.id;
   await respond([{ name: '助手', channels: ['飞书', '钉钉'], secret: 'hidden' }]);
   assert.deepEqual(h.windows[0].state.exitPrompt.personas, [{ name: '助手', channels: ['飞书', '钉钉'] }]);
   await h.invoke('exit-cancel'); await assert.rejects(h.invoke('exit-confirm', { id }), /expired/);
@@ -139,7 +142,7 @@ test('complete exit requires a loaded, current confirmation; cancel and owner ch
   h.pet.result({ requestId: h.commands.at(-1).requestId, ok: false, error: 'offline' });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.windows[0].state.exitPrompt.unavailable, true);
-  await h.invoke('exit-confirm', { id }); assert.equal(h.quit(), 1);
+  await h.invoke('exit-confirm', { id }); assert.equal(h.quit(), 2);
   await assert.rejects(h.invoke('exit-confirm', { id }), /expired/);
   h.pet.dispose();
 });

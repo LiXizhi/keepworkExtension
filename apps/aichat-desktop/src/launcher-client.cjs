@@ -6,9 +6,10 @@ const { promisify } = require('node:util');
 const execute = promisify(execFile);
 const assetPrefix = '/__keepwork_desktop__/';
 
-async function checkLauncher(executable) {
-  const { stdout } = await execute(executable, ['--check'], { windowsHide: true, timeout: 35 * 60_000 });
+async function checkLauncher(executable, signal) {
+  const { stdout } = await execute(executable, ['--check'], { signal, windowsHide: true, timeout: 35 * 60_000 });
   const result = JSON.parse(stdout);
+  if (result.busy === true) return result;
   if (typeof result.version !== 'string' || typeof result.pending !== 'boolean') throw Error('Invalid launcher response');
   return result;
 }

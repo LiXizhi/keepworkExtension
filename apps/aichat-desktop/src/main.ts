@@ -19,6 +19,8 @@ const launcher = process.env.AICHAT_LAUNCHER || '';
 const releaseRoot = process.env.AICHAT_RELEASE_ROOT || '';
 const launcherManaged = Boolean(launcher && releaseRoot && path.resolve(releaseRoot, 'desktop') === app.getAppPath());
 const production = app.isPackaged || launcherManaged;
+let exitSignal: AbortController | undefined;
+let chatLoadFailed = false;
 let usePublishedPage: (() => void) | undefined;
 let devUrl = !production ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
 let developmentServer: { close: () => void } | undefined;
@@ -277,7 +279,9 @@ async function checkUpdates() {
     if (launcherManaged) {
       try {
         setUpdateState('checking');
-        const result = await require('./launcher-client.cjs').checkLauncher(launcher);
+        exitSignal = new AbortController();
+        const result = await require('./launcher-client.cjs').checkLauncher(launcher, exitSignal.signal);
+        if (result.busy) { setUpdateState('idle'); return; }
         receiveShellMetadata(result); updateError = '';
         setUpdateState(result.pending ? 'pending restart' : 'current');
       } catch (e) { updateError = String(e); shellStale = true; setUpdateState('error'); }
@@ -619,12 +623,29 @@ function openWindow(startHidden = false, checkStartupSignIn = false) {
   created.webContents.setWindowOpenHandler(({ url }) => { if (externalUrl(url)) void shell.openExternal(url); return { action: 'deny' }; });
   created.webContents.on('render-process-gone', () => { floatingPet?.reset(); updateSignIn(false); });
   installPermissions(created, mediaGrants, () => devUrl, dialog);
-  return created.loadURL(devUrl || ENTRY).catch(() => {
-    if (created !== liveWindow()) return;
+  return created.loadURL(devUrl || ENTRY).then(async () => {
+    if (launcherManaged && !managedDeployment && !devUrl && !created.isDestroyed()) {
+      await created.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        const ready = () => document.querySelector('#app')?.childElementCount > 0;
+        if (ready()) return resolve(true);
+        const observer = new MutationObserver(() => { if (ready()) { clearTimeout(timer); observer.disconnect(); resolve(true); } });
+        const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Chat did not render')); }, 30000);
+        observer.observe(document.body, { subtree:true, childList:true });
+      })`);
+    }
+  }).catch(async (error: Error) => {
+    if (created.isDestroyed() || created !== liveWindow()) return;
     retryPageOnOpen = true;
     updateSignIn(false);
-    // No native privileges on this offline error page. Reload retries the official entry.
-    if (!keepHidden || created.isVisible()) void dialog.showMessageBox(created, { message: '无法连接 AIChat，请检查网络后从菜单重新加载。' });
+    chatLoadFailed = true;
+    console.error('Chat startup failed:', error.message);
+    if (keepHidden && !created.isVisible()) return;
+    const target = devUrl || ENTRY;
+    // This local error document has no trusted desktop bridge. The normal
+    // navigation checks still apply to the retry link.
+    const html = '<meta charset="utf-8"><title>Keepwork Desktop</title><main style="margin:12vh auto;max-width:32em;font:18px system-ui"><h2>无法打开 AIChat</h2><p>请重新加载聊天窗口。</p><a href="' +
+      target.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g,'&lt;') + '">重新加载</a></main>';
+    await created.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
   }).then(() => {
     if (!created.isDestroyed()) {
       if (!keepHidden) { created.show(); created.focus(); setTrayTip(PRODUCT_NAME); }
@@ -658,6 +679,9 @@ else {
       }
     } catch (error) { dialog.showErrorBox(PRODUCT_NAME, `Invalid deployment: ${String(error)}`); app.exit(1); return; }
     if (launcherManaged && !managedDeployment) {
+      // Electron derives the default header from productName. Fetch Headers
+      // rejects non-ByteString characters before our protocol handler is called.
+      app.userAgentFallback = app.userAgentFallback.replace(/[^\x20-\x7e]/g, '');
       usePublishedPage = require('./launcher-client.cjs').installAppPage(session.fromPartition('persist:aichat'), net, path.join(releaseRoot, 'web'));
     }
     if (!production && !devUrl && process.env.AICHAT_DESKTOP_LOCAL_SOURCE === '1') {
@@ -762,26 +786,27 @@ else {
       menu();
     }
     readyForWindows = true;
-    app.on('activate', show);
     if (background && !requestedWindow) {
       setTrayTip(closedTip);
       opening = openWindow(true, true).finally(() => { opening = null; });
+      if (launcherManaged) await opening;
     } else await ensureShown();
     if (!disableDevMcp) {
       void modelRuntime.start().then(menu).catch((e: Error) => { console.error('local-model startup failed:', e); updateError = e.message; menu(); });
       startRuntimeHeartbeat();
     }
     if (launcherManaged && process.env.AICHAT_LAUNCH_READY) {
-      fs.writeFileSync(process.env.AICHAT_LAUNCH_READY, 'ready');
+      fs.writeFileSync(process.env.AICHAT_LAUNCH_READY, chatLoadFailed ? 'error' : 'ready');
     }
     setTimeout(() => { void checkUpdates(); }, 15000).unref();
     setInterval(() => { void checkUpdates(); }, 6 * 60 * 60 * 1000).unref();
   });
+  app.on('activate', requestWindow);
   app.on('window-all-closed', () => { /* Tray and Keepwork MCP stay after the window is destroyed. */ });
   app.on('before-quit', event => {
     if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }
     if (quitting) return;
-    event.preventDefault(); quitting = true; floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
+    event.preventDefault(); quitting = true; exitSignal?.abort(); liveWindow()?.hide(); floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
     disconnectPermissionPet?.();
     if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }
     void (async () => {

@@ -7,6 +7,8 @@ import plistlib
 import subprocess
 import zipfile
 import sys
+import shutil
+import tempfile
 
 
 def main():
@@ -26,13 +28,31 @@ def main():
     flags = "-s -w -X main.publicKey=" + key
     if not mac:
         flags += " -H windowsgui"
-    subprocess.run(["go", "build", "-trimpath", "-ldflags", flags, "-o", str(exe), "."],
-                   check=True, cwd=Path(__file__).resolve().parent)
+    source = Path(__file__).resolve().parent
+    assets = source.parent / "assets"
+    with tempfile.TemporaryDirectory() as temp:
+        work = Path(temp)
+        for file in [source / "go.mod", *source.glob("*.go")]:
+            shutil.copyfile(file, work / file.name)
+        if not mac:
+            subprocess.run(["go","run","github.com/akavel/rsrc@v0.10.2","-arch","amd64",
+                            "-ico",assets/"launcher.ico","-o",work/"icon_windows_amd64.syso"],cwd=work,check=True)
+        else:
+            iconset = work / "Keepwork.iconset"
+            iconset.mkdir()
+            for size in (16,32,128,256,512):
+                for scale, suffix in ((1,""),(2,"@2x")):
+                    subprocess.run(["sips","-z",str(size*scale),str(size*scale),assets/"keepwork-mac.png",
+                                    "--out",iconset/f"icon_{size}x{size}{suffix}.png"],check=True,stdout=subprocess.DEVNULL)
+            resources = bundle / "Contents/Resources"
+            resources.mkdir(exist_ok=True)
+            subprocess.run(["iconutil","-c","icns",iconset,"-o",resources/"Keepwork.icns"],check=True)
+        subprocess.run(["go","build","-trimpath","-ldflags",flags,"-o",str(exe),"."],cwd=work,check=True)
     archive = out / f"Keepwork-Launcher-{osname}-{arch}.zip"
     if mac:
         info = dict(CFBundleExecutable="Keepwork", CFBundleIdentifier="com.keepwork.desktop.launcher",
                     CFBundleName="Keepwork", CFBundlePackageType="APPL", CFBundleVersion="1",
-                    CFBundleShortVersionString="1.0", LSUIElement=True)
+                    CFBundleShortVersionString="1.1", CFBundleIconFile="Keepwork.icns", LSUIElement=True)
         (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
         subprocess.run(["codesign", "--force", "--options", "runtime", "--sign",
                         os.environ.get("KP_LAUNCHER_MAC_IDENTITY", "-"), str(bundle)], check=True)

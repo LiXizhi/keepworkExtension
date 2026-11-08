@@ -152,7 +152,7 @@ function createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, directory, se
     if (!visible) throw new Error('Pet is hidden');
     if (action === 'exit-cancel') { exitPrompt = null; send(); return; }
     if (action === 'exit-confirm') {
-      if (!exitPrompt || exitPrompt.loading || args.id !== exitPrompt.id) throw new Error('Exit confirmation expired');
+      if (!exitPrompt || args.id !== exitPrompt.id) throw new Error('Exit confirmation expired');
       exitPrompt = null; send(); services.quit?.(); return;
     }
     if (action === 'menu') { showMenu(); return; }
