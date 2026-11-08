@@ -48,7 +48,7 @@ def main():
     stem = f"KeepWork-Launcher-Migration-{VERSION}-{arch}"
     if platform == "win32":
         app = stage / "app"
-        app.mkdir()
+        (app / "resources").mkdir(parents=True)
         with zipfile.ZipFile(archive) as z:
             (app / (PRODUCT + ".exe")).write_bytes(z.read("Keepwork.exe"))
         # Use the same NSIS app identity, install mode and shortcut names as 0.1.8.
