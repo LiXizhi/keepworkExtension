@@ -1,0 +1,66 @@
+name: Verify public Desktop launchers
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Expected published Desktop version
+        required: true
+permissions:
+  contents: read
+jobs:
+  first-launch:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: win32-x64 }
+          - { runner: macos-15, target: darwin-arm64 }
+          - { runner: macos-15-intel, target: darwin-x64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Download ZIP, verify digest, activate signed release and probe MCP
+        shell: python
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          import hashlib, json, os, pathlib, platform, subprocess, sys, time, urllib.request, zipfile
+          from urllib.parse import urljoin
+          target = os.environ["TARGET"]
+          version = os.environ["VERSION"]
+          base = f"https://cdn.keepwork.com/keepwork/aichat-desktop/{target}/"
+          def read(url):
+              with urllib.request.urlopen(url, timeout=120) as response:
+                  return response.read()
+          descriptor = json.loads(read(base + "latest-client.json?t=" + str(time.time_ns())))
+          native = "windows-x64" if sys.platform == "win32" else "macos-" + ("arm64" if platform.machine() == "arm64" else "x64")
+          name = f"Keepwork-Launcher-{native}.zip"
+          assert descriptor["fileName"] == name and descriptor["url"] == base + name, descriptor
+          payload = read(base + name)
+          assert len(payload) == descriptor["size"] and hashlib.sha256(payload).hexdigest() == descriptor["sha256"]
+          archive = pathlib.Path(name)
+          archive.write_bytes(payload)
+          if sys.platform == "win32":
+              with zipfile.ZipFile(archive) as z:
+                  z.extractall("launcher")
+              exe = pathlib.Path("launcher/Keepwork.exe").resolve()
+              parent = pathlib.Path(os.environ["LOCALAPPDATA"])
+          else:
+              subprocess.run(["ditto", "-x", "-k", archive, "launcher"], check=True)
+              bundle = pathlib.Path("launcher/Keepwork.app")
+              subprocess.run(["codesign", "--verify", "--strict", bundle], check=True)
+              exe = (bundle / "Contents/MacOS/Keepwork").resolve()
+              parent = pathlib.Path.home() / "Library/Application Support"
+          state = parent / "Keepwork/DesktopLauncher/state.json"
+          assert not state.exists(), "Expected a clean hosted runner"
+          result = json.loads(subprocess.check_output([exe, "--check"], timeout=800))
+          assert result == {"pending":True, "version":version}, result
+          subprocess.run([exe, "--background"], check=True, timeout=180)
+          installed = json.loads(state.read_text())
+          assert installed["Active"]["Version"] == version and installed["Pending"] is None, installed
+          health = json.loads(read("http://127.0.0.1:8089/health"))
+          assert health["name"] == "keepwork-mcp" and health.get("runtimeCommit"), health.get("name")
+          print(f"{native}: downloaded {len(payload)} bytes, Desktop {version} activated, MCP {health.get('runtimeVersion')} healthy")
