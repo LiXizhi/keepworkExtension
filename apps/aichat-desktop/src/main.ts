@@ -560,7 +560,9 @@ if (!app.requestSingleInstanceLock()) {
   } else app.quit();
 }
 else {
-  app.on('second-instance', show);
+  let desktopReady = false, openRequested = false;
+  const requestOpen = () => { if (desktopReady) show(); else openRequested = true; };
+  app.on('second-instance', (_event, argv) => { if (!argv.includes('--background')) requestOpen(); });
   app.whenReady().then(async () => {
     if (production) {
       try { rememberDesktopClient({ version: app.getVersion(), platform: process.platform === 'darwin' ? 'macos' : 'windows', arch: process.arch, executable: launcherManaged ? launcher : process.execPath }); }
@@ -574,6 +576,9 @@ else {
       }
     } catch (error) { dialog.showErrorBox(PRODUCT_NAME, `Invalid deployment: ${String(error)}`); app.exit(1); return; }
     if (launcherManaged && !managedDeployment) {
+      // Electron derives the default header from productName. Fetch Headers
+      // rejects non-ByteString characters before our protocol handler is called.
+      app.userAgentFallback = app.userAgentFallback.replace(/[^\x20-\x7e]/g, '');
       usePublishedPage = require('./launcher-client.cjs').installAppPage(session.fromPartition('persist:aichat'), net, path.join(releaseRoot, 'web'));
     }
     if (!production && !devUrl && process.env.AICHAT_DESKTOP_LOCAL_SOURCE === '1') {
@@ -658,7 +663,8 @@ else {
       }
       menu();
     }
-    if (process.argv.includes('--background')) tray.setToolTip(closedTip);
+    desktopReady = true;
+    if (!openRequested && process.argv.includes('--background')) tray.setToolTip(closedTip);
     else await ensureShown();
     if (!disableDevMcp) {
       void modelRuntime.start().then(menu).catch((e: Error) => { console.error('local-model startup failed:', e); updateError = e.message; menu(); });
@@ -670,7 +676,7 @@ else {
     setTimeout(() => { void checkUpdates(); }, 15000).unref();
     setInterval(() => { void checkUpdates(); }, 6 * 60 * 60 * 1000).unref();
   });
-  app.on('activate', show);
+  app.on('activate', requestOpen);
   app.on('window-all-closed', () => { /* Tray and Keepwork MCP stay after the window is destroyed. */ });
   app.on('before-quit', event => {
     if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }
