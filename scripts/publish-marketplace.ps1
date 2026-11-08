@@ -10,10 +10,14 @@ try {
     }
     $vsix = "apps/vscode-extension/keepwork-$version.vsix"
     if (!(Test-Path -LiteralPath $vsix)) { throw "Missing release artifact $vsix" }
+    $azureCli = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin'
+    if (!(Get-Command az -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $azureCli)) {
+        $env:PATH = "$azureCli;$env:PATH"
+    }
     & ./apps/vscode-extension/node_modules/.bin/vsce.cmd publish --azure-credential --packagePath $vsix
     if ($LASTEXITCODE) { throw 'Marketplace publish failed.' }
     gh workflow run keepwork-stable.yml --repo LiXizhi/keepworkExtension --ref main -f "marketplace_version=$version"
-    if ($LASTEXITCODE) { throw "Marketplace published. Retry MCP dispatch for version $version." }
+    if ($LASTEXITCODE) { throw "Marketplace published. Retry coordinated MCP and Desktop code dispatch for version $version." }
 } finally {
     Pop-Location
 }
