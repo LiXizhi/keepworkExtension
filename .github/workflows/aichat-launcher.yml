@@ -170,6 +170,6 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           KP_DESKTOP_LAUNCHER_PUBLIC_KEY: ${{ vars.KP_DESKTOP_LAUNCHER_PUBLIC_KEY }}
-          KP_DESKTOP_MANIFEST_PRIVATE_KEY: ${{ secrets.KP_DESKTOP_MANIFEST_PRIVATE_KEY }}
+          KP_DESKTOP_MANIFEST_PRIVATE_KEY: ${{ inputs.mode != 'launchers' && secrets.KP_DESKTOP_MANIFEST_PRIVATE_KEY || '' }}
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}

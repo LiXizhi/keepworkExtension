@@ -44,10 +44,9 @@ function entry(filePath, key, sha256 = qiniu.sha256(filePath)) {
 async function main() {
   const [mode, dir, sequence] = process.argv.slice(2);
   if (!['code','launchers','code-and-launchers','initial','refresh-platforms'].includes(mode) || !dir) throw Error('Expected code|initial|refresh-platforms DIR SEQUENCE');
-  const key = crypto.createPrivateKey(process.env.KP_DESKTOP_MANIFEST_PRIVATE_KEY);
-  const publicKey = crypto.createPublicKey(key);
-  const jwk = publicKey.export({format:'jwk'});
-  if (jwk.crv !== 'Ed25519' || Buffer.from(jwk.x, 'base64url').toString('base64') !== process.env.KP_DESKTOP_LAUNCHER_PUBLIC_KEY) throw Error('Signing key does not match the launcher');
+  const raw = Buffer.from(process.env.KP_DESKTOP_LAUNCHER_PUBLIC_KEY || '', 'base64');
+  if (raw.length !== 32) throw Error('Expected an Ed25519 launcher verification key');
+  const publicKey = crypto.createPublicKey({ format:'jwk', key:{kty:'OKP',crv:'Ed25519',x:raw.toString('base64url')} });
   const response = await fetch(base + 'stable.json?verify=' + Date.now());
   if (!response.ok && response.status !== 404) throw Error('Stable preflight HTTP ' + response.status);
   const previous = response.ok ? unpack(await response.json(), publicKey) : null;
@@ -56,9 +55,14 @@ async function main() {
   const baseline = retry ? {...previous, sequence:previous.sequence - 1} : previous;
   const { manifest, uploads } = mode === 'launchers' ? {manifest:previous, uploads:[]} : plan(dir, baseline, ['initial','refresh-platforms'].includes(mode), Number(sequence));
   if (retry && JSON.stringify(previous) !== JSON.stringify(manifest)) throw Error('Cannot reuse a live sequence with different artifacts');
-  const data = Buffer.from(JSON.stringify(manifest));
   const file = path.join(dir, 'stable.json');
-  fs.writeFileSync(file, JSON.stringify({ payload: data.toString('base64'), signature: crypto.sign(null, data, key).toString('base64') }));
+  if (mode !== 'launchers') {
+    const key = crypto.createPrivateKey(process.env.KP_DESKTOP_MANIFEST_PRIVATE_KEY);
+    const data = Buffer.from(JSON.stringify(manifest));
+    const signature = crypto.sign(null, data, key);
+    if (!crypto.verify(null, data, publicKey, signature)) throw Error('Signing key does not match the launcher');
+    fs.writeFileSync(file, JSON.stringify({payload:data.toString('base64'), signature:signature.toString('base64')}));
+  }
   const config = {accessKey:qiniu.required(process.env.KP_QINIU_ACCESS_KEY,'access key'), secretKey:qiniu.required(process.env.KP_QINIU_SECRET_KEY,'secret key'), bucket:'haqi', uploadHost:'https://up-z2.qiniup.com'};
   const downloads = [], downloadManifests = [];
   if (mode === 'initial' || mode === 'code-and-launchers' || mode === 'launchers') {
