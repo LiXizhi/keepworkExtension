@@ -146,14 +146,18 @@ func unpack(file, dir string) error {
 		}
 	}
 	// Check resolved targets as well as individual link paths.
+	canonicalRoot, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
 	for dest := range links {
 		resolved, err := filepath.EvalSymlinks(dest)
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(dir, resolved)
+		rel, err := filepath.Rel(canonicalRoot, resolved)
 		if err != nil || !filepath.IsLocal(rel) {
-			return errors.New("archive link escapes package")
+			return fmt.Errorf("archive link escapes package: %s", dest)
 		}
 	}
 	return nil

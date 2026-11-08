@@ -66,6 +66,7 @@ jobs:
     if: inputs.mode != 'code'
     environment: aichat-desktop-production
     strategy:
+      fail-fast: false
       matrix:
         include:
           - { runner: windows-latest, platform: win32, arch: x64, target: windows-x64 }
