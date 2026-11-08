@@ -28,6 +28,7 @@ async function main() {
         open: () => { global.opened = true; global.pet.hide(); },
         command: command => {
           global.petCommands.push(command.action);
+          if (command.action === 'exit-info' && global.holdExitInfo) return;
           const state = global.petState;
           if (command.action === 'input' && global.rejectInput) { global.rejectInput = false; global.pet.result({ requestId: command.requestId, ok: false, error: 'Temporary input failure' }); return; }
           if (command.action === 'input') state.draft = command.text;
@@ -126,7 +127,12 @@ async function main() {
     if (process.env.PET_EXIT_SCREENSHOT) await page.locator('#stack').screenshot({ path: process.env.PET_EXIT_SCREENSHOT });
     await page.getByRole('button', { name: '继续运行', exact: true }).click();
     await page.getByRole('alertdialog').waitFor({ state: 'hidden' });
-    await application.evaluate(() => global.petMenuItems.find(item => item.label === '完全退出…').click());
+    await application.evaluate(() => {
+      global.holdExitInfo = true;
+      global.petMenuItems.find(item => item.label === '完全退出…').click();
+    });
+    await page.getByText('正在检查分身和渠道…', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '确认退出', exact: true }).isEnabled(), true);
     await page.getByRole('button', { name: '确认退出', exact: true }).click();
     assert.equal(await application.evaluate(() => global.quitRequested), 1);
     await application.evaluate(() => {
