@@ -56,7 +56,7 @@ def main():
         project.mkdir()
         (project / "package.json").write_text(json.dumps(dict(name="aichat-desktop", productName=PRODUCT,
             version=VERSION, description="Keepwork Desktop launcher migration", author="Keepwork")))
-        config = dict(appId=APP_ID, productName=PRODUCT, directories=dict(output=str(directory)),
+        config = dict(electronVersion="44.1.1",appId=APP_ID, productName=PRODUCT, directories=dict(output=str(directory)),
             artifactName=stem+".exe", win=dict(target="nsis",icon=str(DESKTOP/"assets/keepwork.png")),
             nsis=dict(oneClick=False,perMachine=False,allowElevation=False,createDesktopShortcut=True,
                       deleteAppDataOnUninstall=False),publish=dict(provider="generic",url=url))

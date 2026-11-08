@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       marketplace_version:
-        description: Already published Marketplace version (local Entra release, MCP CDN only)
+        description: Already published Marketplace version (local Entra release, MCP and shared Desktop code)
         type: string
         default: ''
   push:
@@ -164,3 +164,13 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_DIST_TAG_TOKEN }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
         run: npm dist-tag add "keepwork-mcp-runtime@$RELEASE_VERSION" latest
+  desktop-code:
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    needs: [gate, publish]
+    uses: ./.github/workflows/aichat-launcher.yml
+    with:
+      mode: code
+      version: ${{ needs.gate.outputs.version }}
+      web_commit: main
+      publish: true
+    secrets: inherit

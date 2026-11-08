@@ -1,5 +1,11 @@
 name: AIChat Desktop launcher release
 on:
+  workflow_call:
+    inputs:
+      mode: { type: string, required: true }
+      version: { type: string, required: true }
+      web_commit: { type: string, required: true }
+      publish: { type: boolean, required: true }
   workflow_dispatch:
     inputs:
       mode:
@@ -35,7 +41,9 @@ jobs:
           SHA: ${{ inputs.web_commit }}
           VERSION: ${{ inputs.version }}
         run: |
-          [[ "$GITHUB_REF" == refs/heads/main && "$SHA" =~ ^[0-9a-f]{40}$ && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == "refs/tags/keepwork-v$VERSION" ]]
+          [[ "$SHA" == main || "$SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
       - uses: actions/checkout@v4
         with:
           repository: LiXizhi/AIChat
@@ -148,7 +156,7 @@ jobs:
       - if: inputs.mode == 'initial'
         uses: actions/download-artifact@v4
         with: { pattern: 'bootstrap-*', path: artifacts, merge-multiple: true }
-      - run: node apps/aichat-desktop/launcher/publish.cjs "$MODE" artifacts "$GITHUB_RUN_NUMBER"
+      - run: node apps/aichat-desktop/launcher/publish.cjs "$MODE" artifacts "$GITHUB_RUN_ID"
         env:
           MODE: ${{ inputs.mode }}
           KP_DESKTOP_LAUNCHER_PUBLIC_KEY: ${{ vars.KP_DESKTOP_LAUNCHER_PUBLIC_KEY }}

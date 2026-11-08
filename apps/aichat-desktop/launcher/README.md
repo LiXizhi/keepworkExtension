@@ -37,3 +37,5 @@ The store is under `%LOCALAPPDATA%\Keepwork\DesktopLauncher` on Windows and `~/L
 Run `go test ./...` in this directory on either supported OS. The local HTTPS fixture exercises first installation and a menu-only update for all target descriptors. To exercise real artifacts, set `KP_LAUNCHER_TEST_PACKAGES` to the directory containing app.json, the native target descriptor and both ZIPs, then run `go test -count=1 -run TestPackagedRuntime -v`. This runs native PTY checks and opens the packaged chat page in a hidden Electron window with remote API traffic disabled and an isolated browser profile.
 
 Run `npm run check --prefix apps/aichat-desktop` from the repository root for the Desktop suite. Initial and platform-refresh workflows exercise native packages on each target runner.
+
+The coordinated Marketplace release calls this same workflow in code mode after MCP promotion. It builds from the extension release commit and the checked-out AIChat backup main revision, and uses the globally unique Actions run ID for the signed sequence. Installed launcher clients retain cached platform archives.
