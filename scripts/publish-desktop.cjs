@@ -61,7 +61,7 @@ async function migrationEntries(dir, target) {
   const platform = TARGETS[target];
   if (!platform) throw Error('Unsupported migration target');
   const win = platform.platform === 'windows';
-  const installer = 'Keepwork-Launcher-Migration-0.1.10-' + platform.arch + (win ? '.exe' : '.zip');
+  const installer = 'KeepWork-Launcher-Migration-0.1.10-' + platform.arch + (win ? '.exe' : '.zip');
   const feed = win ? 'latest.yml' : 'latest-mac.yml';
   const descriptor = fs.readFileSync(path.join(dir, feed), 'utf8');
   const meta = win ? require(require.resolve('js-yaml', {paths:[path.resolve(__dirname,'../apps/aichat-desktop')]})).load(descriptor) : JSON.parse(descriptor);
