@@ -109,7 +109,7 @@ func (s Store) launch(m Manifest, background, candidate bool) error {
 	}
 	cmd.Env = append(cmd.Env, "AICHAT_LAUNCHER="+launcher, "AICHAT_RELEASE_ROOT="+root)
 	var receipt string
-	if candidate {
+	if candidate || !background {
 		dir, err := os.MkdirTemp(s.Home, "startup-")
 		if err != nil {
 			return err
@@ -121,7 +121,7 @@ func (s Store) launch(m Manifest, background, candidate bool) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if !candidate {
+	if !candidate && background {
 		return cmd.Process.Release()
 	}
 	exited := make(chan error, 1)
@@ -149,6 +149,7 @@ func (s Store) launch(m Manifest, background, candidate bool) error {
 	}
 }
 
+var errBusy = errors.New("launcher is busy")
 var errAlreadyRunning = errors.New("desktop already running")
 
 func run() error {
@@ -170,7 +171,18 @@ func run() error {
 	if err = os.MkdirAll(s.Home, 0700); err != nil {
 		return err
 	}
+	check := len(os.Args) > 1 && os.Args[1] == "--check"
+	bg := len(os.Args) > 1 && os.Args[1] == "--background"
 	unlock, err := lockStore(filepath.Join(s.Home, "update.lock"))
+	if errors.Is(err, errBusy) {
+		if check {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"busy": true})
+		}
+		if !bg {
+			focusProgress()
+		}
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -179,8 +191,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	check := len(os.Args) > 1 && os.Args[1] == "--check"
-	if !check && st.Active == nil {
+
+	if !check && !bg {
 		closeProgress := startProgress(s.Home)
 		defer closeProgress()
 	}
@@ -196,12 +208,12 @@ func run() error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"version": m.Version, "pending": st.Pending != nil})
 	}
-	bg := len(os.Args) > 1 && os.Args[1] == "--background"
+
 	return s.activate(st, bg, s.launch)
 }
 func (s Store) activate(st State, bg bool, launch func(Manifest, bool, bool) error) error {
 	if st.Pending != nil {
-		firstInstall.message("Starting Keepwork Desktop…")
+		firstInstall.message("正在打开 Keepwork…")
 		err := launch(*st.Pending, bg, true)
 		if errors.Is(err, errAlreadyRunning) {
 			return nil
@@ -228,7 +240,11 @@ func (s Store) activate(st State, bg bool, launch func(Manifest, bool, bool) err
 	if st.Active == nil {
 		return errors.New("no working release available")
 	}
-	return launch(*st.Active, bg, false)
+	err := launch(*st.Active, bg, false)
+	if errors.Is(err, errAlreadyRunning) {
+		return nil
+	}
+	return err
 }
 func main() {
 	if err := run(); err != nil {

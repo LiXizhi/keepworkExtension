@@ -10,7 +10,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [code, initial, refresh-platforms]
+        options: [code, code-and-launchers, initial, refresh-platforms]
         required: true
       version:
         description: Desktop app version (X.Y.Z)
@@ -93,23 +93,26 @@ jobs:
         with: { python-version: '3.12' }
       - run: go test ./...
         working-directory: apps/aichat-desktop/launcher
-      - run: |
+      - if: inputs.mode != 'code-and-launchers'
+        run: |
           npm ci
           for app in pet-companion mcp-runtime local-model-runtime; do npm ci --prefix apps/$app; done
           npm run prepare:runtime --prefix apps/pet-companion
           npm run stage --prefix apps/mcp-runtime -- --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
           npm run runtime:stage --prefix apps/local-model-runtime -- --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
           python apps/aichat-desktop/launcher/package.py ${{ matrix.target }} --out artifacts
-      - uses: actions/download-artifact@v4
+      - if: inputs.mode != 'code-and-launchers'
+        uses: actions/download-artifact@v4
         with: { name: launcher-app, path: smoke-packages }
-      - name: Exercise the assembled native runtime
+      - if: inputs.mode != 'code-and-launchers'
+        name: Exercise the assembled native runtime
         run: |
           cp artifacts/* smoke-packages/
           export KP_LAUNCHER_TEST_PACKAGES="$GITHUB_WORKSPACE/smoke-packages"
           cd apps/aichat-desktop/launcher
           go test -count=1 -run TestPackagedRuntime -v
       - name: Prepare macOS launcher signing
-        if: inputs.mode == 'initial' && runner.os == 'macOS'
+        if: (inputs.mode == 'initial' || inputs.mode == 'code-and-launchers') && runner.os == 'macOS'
         env:
           CERT: ${{ secrets.KP_MAC_CSC_LINK }}
           PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
@@ -135,11 +138,12 @@ jobs:
               echo 'KP_LAUNCHER_NOTARY_PROFILE=keepwork-launcher' >> "$GITHUB_ENV"
             fi
           fi
-      - if: inputs.mode == 'initial'
+      - if: (inputs.mode == 'initial' || inputs.mode == 'code-and-launchers')
         run: python apps/aichat-desktop/launcher/build.py launchers
-      - uses: actions/upload-artifact@v4
+      - if: inputs.mode != 'code-and-launchers'
+        uses: actions/upload-artifact@v4
         with: { name: 'launcher-platform-${{ matrix.target }}', path: artifacts }
-      - if: inputs.mode == 'initial'
+      - if: (inputs.mode == 'initial' || inputs.mode == 'code-and-launchers')
         uses: actions/upload-artifact@v4
         with: { name: 'bootstrap-${{ matrix.target }}', path: 'launchers/*.zip' }
   promote:
@@ -153,7 +157,7 @@ jobs:
         with: { node-version: '22.23.2' }
       - uses: actions/download-artifact@v4
         with: { pattern: 'launcher-*', path: artifacts, merge-multiple: true }
-      - if: inputs.mode == 'initial'
+      - if: (inputs.mode == 'initial' || inputs.mode == 'code-and-launchers')
         uses: actions/download-artifact@v4
         with: { pattern: 'bootstrap-*', path: artifacts, merge-multiple: true }
       - run: node apps/aichat-desktop/launcher/publish.cjs "$MODE" artifacts "$GITHUB_RUN_ID"

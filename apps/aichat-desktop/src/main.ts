@@ -19,6 +19,7 @@ const launcher = process.env.AICHAT_LAUNCHER || '';
 const releaseRoot = process.env.AICHAT_RELEASE_ROOT || '';
 const launcherManaged = Boolean(launcher && releaseRoot && path.resolve(releaseRoot, 'desktop') === app.getAppPath());
 const production = app.isPackaged || launcherManaged;
+const exitSignal = new AbortController();
 let usePublishedPage: (() => void) | undefined;
 let devUrl = !production ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
 let developmentServer: { close: () => void } | undefined;
@@ -210,7 +211,8 @@ async function checkUpdates() {
     if (launcherManaged) {
       try {
         setUpdateState('checking');
-        const result = await require('./launcher-client.cjs').checkLauncher(launcher);
+        const result = await require('./launcher-client.cjs').checkLauncher(launcher, exitSignal.signal);
+        if (result.busy) { setUpdateState('idle'); return; }
         receiveShellMetadata(result); updateError = '';
         setUpdateState(result.pending ? 'pending restart' : 'current');
       } catch (e) { updateError = String(e); shellStale = true; setUpdateState('error'); }
@@ -543,9 +545,25 @@ function openWindow(startHidden = false) {
   created.webContents.setWindowOpenHandler(({ url }) => { if (externalUrl(url)) void shell.openExternal(url); return { action: 'deny' }; });
   created.webContents.on('render-process-gone', () => floatingPet?.reset());
   installPermissions(created, mediaGrants, () => devUrl, dialog);
-  return created.loadURL(devUrl || ENTRY).catch(() => {
-    // No native privileges on this offline error page. Reload retries the official entry.
-    if (!created.isDestroyed()) void dialog.showMessageBox(created, { message: '无法连接 AIChat，请检查网络后从菜单重新加载。' });
+  return created.loadURL(devUrl || ENTRY).then(async () => {
+    if (launcherManaged && !managedDeployment && !devUrl && !created.isDestroyed()) {
+      await created.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+        const ready = () => document.querySelector('#app')?.childElementCount > 0;
+        if (ready()) return resolve(true);
+        const observer = new MutationObserver(() => { if (ready()) { clearTimeout(timer); observer.disconnect(); resolve(true); } });
+        const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Chat did not render')); }, 30000);
+        observer.observe(document.body, { subtree:true, childList:true });
+      })`);
+    }
+  }).catch(async (error: Error) => {
+    if (created.isDestroyed()) return;
+    const target = devUrl || ENTRY;
+    // This local error document has no trusted desktop bridge. The normal
+    // navigation checks still apply to the retry link.
+    const html = '<meta charset="utf-8"><title>Keepwork Desktop</title><main style="margin:12vh auto;max-width:32em;font:18px system-ui"><h2>无法打开 AIChat</h2><p>请重新加载聊天窗口。</p><a href="' +
+      target.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g,'&lt;') + '">重新加载</a></main>';
+    await created.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    console.error('Chat startup failed:', error.message);
   }).then(() => {
     if (!created.isDestroyed()) {
       if (!keepHidden) { created.show(); created.focus(); tray?.setToolTip(PRODUCT_NAME); }
@@ -681,7 +699,7 @@ else {
   app.on('before-quit', event => {
     if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }
     if (quitting) return;
-    event.preventDefault(); quitting = true; floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
+    event.preventDefault(); quitting = true; exitSignal.abort(); liveWindow()?.hide(); floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
     disconnectPermissionPet?.();
     if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }
     void (async () => {

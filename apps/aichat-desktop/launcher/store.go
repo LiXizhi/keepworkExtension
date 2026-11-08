@@ -193,7 +193,7 @@ func (s Store) object(o Object) (string, error) {
 	if err = os.Mkdir(tree, 0700); err != nil {
 		return "", err
 	}
-	firstInstall.message("Verifying and installing files…")
+	firstInstall.message("正在校验并安装文件…")
 	if err = unpack(file, tree); err != nil {
 		return "", err
 	}
