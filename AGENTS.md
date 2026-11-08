@@ -181,6 +181,7 @@ npm run mcp --prefix apps/vscode-extension     # stdio MCP for Cursor
 
 ### Visual Studio Marketplace release
 
+- For a Marketplace release use the checked-in `scripts/publish-marketplace.ps1` (or the matching VS Code task). The coordinated workflow validates the published VSIX, promotes MCP, then publishes the shared Desktop ZIP and signed manifest. Verify the desktop-code job before reporting completion. A manual portal upload needs a `keepwork-stable.yml` dispatch with its exact marketplace_version.
 - Marketplace identity: `Xizhi.keepwork`; public page: `https://marketplace.visualstudio.com/items?itemName=Xizhi.keepwork`.
 - Prefer Microsoft Entra ID via `@vscode/vsce --azure-credential`; do not put PATs, access tokens, or Azure credentials in repository files, chat, logs, or command arguments.
 - The Entra identity must be a **Contributor** (or Owner) of Marketplace publisher `Xizhi` and must have permission to modify the existing `keepwork` extension. When authorization fails, retrieve the profile ID with `az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id -o tsv`, then add that identity in publisher management.

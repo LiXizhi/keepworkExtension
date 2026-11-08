@@ -51,6 +51,7 @@ async function main() {
     if(app.getVersion()!=='0.1.8')throw Error(app.getVersion());
     await app.whenReady();const requireApp=r('module').createRequire(app.getAppPath()+'/package.json');
     const u=requireApp('electron-updater').autoUpdater; const note=t=>r('fs').appendFileSync(${JSON.stringify(log)},t+'\\n');
+    u.logger={info:(...s)=>note(s.join(' ')),warn:(...s)=>note(s.join(' ')),error:(...s)=>note(s.join(' ')),debug:()=>{}};
     u.setFeedURL({provider:'generic',url:${JSON.stringify('http://127.0.0.1:'+feed.address().port+'/')}});
     u.disableDifferentialDownload=true;
     u.on('error',e=>note(String(e)));u.once('update-downloaded',()=>{note('downloaded');setTimeout(()=>u.quitAndInstall(false,true),1000)});
@@ -61,6 +62,10 @@ async function main() {
   const expected=mac?path.join(dir,'stage',name+'.app/Contents/MacOS/Keepwork'):path.join(dir,'stage/app',name+'.exe');
   const hash=f=>createHash('sha256').update(fs.readFileSync(f)).digest('hex');
   for(let i=0;i<210;i++){if(fs.existsSync(installed)&&fs.statSync(installed).size===fs.statSync(expected).size&&hash(installed)===hash(expected)){console.log('0.1.8 updater installed the launcher at',installed);return;}await delay(1000);}
+  if (!mac) {
+    console.error('Installed executable',installed,'size',fs.existsSync(installed)&&fs.statSync(installed).size);
+    console.error(execFileSync('tasklist',['/fo','csv'],{encoding:'utf8'}).split('\n').filter(s=>/Keepwork|install|setup|elevate/i.test(s)).join('\n'));
+  }
   throw Error('Migration did not replace the installed application: '+(fs.existsSync(log)?fs.readFileSync(log,'utf8'):'no updater event'));
 }
 main().then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1);});

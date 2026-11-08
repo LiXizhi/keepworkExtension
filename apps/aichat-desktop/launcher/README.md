@@ -39,3 +39,10 @@ Run `go test ./...` in this directory on either supported OS. The local HTTPS fi
 Run `npm run check --prefix apps/aichat-desktop` from the repository root for the Desktop suite. Initial and platform-refresh workflows exercise native packages on each target runner.
 
 The coordinated Marketplace release calls this same workflow in code mode after MCP promotion. It builds from the extension release commit and the checked-out AIChat backup main revision, and uses the globally unique Actions run ID for the signed sequence. Installed launcher clients retain cached platform archives.
+
+The Windows migration publishes a launcher installer to the existing NSIS updater feed
+after a clean runner installs the public 0.1.8 application and upgrades it in place.
+The ad-hoc signatures on the Intel and Apple Silicon 0.1.8 applications pin the old
+executable hash. Squirrel.Mac rejected the replacement on both architectures.
+For those installations, quit Desktop and open the matching public launcher once.
+The launcher reuses the Desktop profile and handles subsequent signed code updates.

@@ -58,7 +58,7 @@ def main():
             version=VERSION, description="Keepwork Desktop launcher migration", author="Keepwork")))
         config = dict(electronVersion="44.1.1",appId=APP_ID, productName=PRODUCT, directories=dict(output=str(directory)),
             artifactName=stem+".exe", win=dict(target="nsis",icon=str(DESKTOP/"assets/keepwork.png")),
-            nsis=dict(oneClick=False,perMachine=False,allowElevation=False,createDesktopShortcut=True,
+            nsis=dict(oneClick=True,perMachine=False,allowElevation=False,createDesktopShortcut=True,
                       deleteAppDataOnUninstall=False),publish=dict(provider="generic",url=url))
         cfg = project / "migration.json"
         cfg.write_text(json.dumps(config))
