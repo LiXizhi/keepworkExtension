@@ -38,7 +38,17 @@ if request.operation=="sample_actor" then
     local scale=entity:GetScaling()
     local box=loaded and asset:GetBoundingBox({})
     local span=box and box.max_x and {(box.max_x-box.min_x)*scale,(box.max_y-box.min_y)*scale,(box.max_z-box.min_z)*scale}
-    return {found=true, position={B:block_float(x,y,z)}, model=entity:GetMainAssetPath(),
+    local referencePosition
+    if args.relativeTo then
+        assert(validName(args.relativeTo), "invalid reference actor name")
+        local reference = globals:GetActorByName(args.relativeTo)
+        if reference then
+            local rx, ry, rz = reference:GetPosition()
+            referencePosition = {B:block_float(rx, ry, rz)}
+        end
+    end
+    return {found=true, position={B:block_float(x,y,z)}, referencePosition=referencePosition,
+        referenceName=args.relativeTo, model=entity:GetMainAssetPath(),
         scale=scale, modelSpanWorldUnits=span or nil, loaded=loaded, programMessage=lastMessage}
 end
 assert(GameLogic.GetGameMode()=="edit" and not GameLogic.IsReadOnly() and not GameLogic.isRemote, "requires local writable edit mode")

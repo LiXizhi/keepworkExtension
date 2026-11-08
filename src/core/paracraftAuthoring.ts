@@ -45,8 +45,8 @@ export const creationTools = [
         'Create and start a named movie actor controlled by your supplied editable CodeBlock program. Absolute block coordinates: station is the movie block; its code block is one cell along +Z. position is the actor starting point. Use human or the returned world BMax filename as model.',
         ['name','model','position','station','code'],{name,model:{type:'string'},scale:{type:'number',minimum:0.01,maximum:8},position:vector,station:vector,code:{type:'string',minLength:1,maxLength:16000}}),
     tool('sample_actor',
-        'Read a live actor in block units with model, scale, load state and CodeBlock diagnostics. For a repeating behavior provide seconds (1–15) to trace positions throughout a cycle with one call.',
-        ['name'], { name, seconds: { type: 'integer', minimum: 1, maximum: 15 } }),
+        'Read a live actor in block units with model, scale, load state and CodeBlock diagnostics. For following or coordinated movement set relativeTo to the other actor name for positions from the same engine tick. For a repeating behavior provide seconds (1–15) to trace positions throughout a cycle with one call.',
+        ['name'], { name, relativeTo: name, seconds: { type: 'integer', minimum: 1, maximum: 15 } }),
 ];
 
 
@@ -92,7 +92,10 @@ export async function executeAuthoring(name:string, args:Record<string,unknown>,
     do {
         if(trace.length) await new Promise(resolve=>setTimeout(resolve,500));
         sample=await execute();
-        trace.push({ms:Date.now()-start,position:sample.position,found:sample.found});
+        trace.push({
+            ms: Date.now() - start, position: sample.position, found: sample.found,
+            ...(args.relativeTo ? { referencePosition: sample.referencePosition ?? null } : {}),
+        });
     } while(Date.now()-start<seconds*1000);
     return {...sample,trace};
 }

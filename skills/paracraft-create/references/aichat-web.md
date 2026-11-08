@@ -3,7 +3,9 @@ name: paracraft-web-authoring
 description: Compose editable scenes in a selected Web or desktop Paracraft client using Keepwork MCP authoring tools and the client’s bundled engine wiki.
 ---
 
-# Paracraft CLI Wiki Adapter
+# Paracraft creation in the selected client
+
+For a new blank world, the first engine call is `open_blank_world`. The MCP skill is available before connection. The engine wiki requires a connected client.
 
 ## Selected Transport
 Both iframe Web Paracraft and desktop Paracraft use this skill. Call exposed
@@ -40,16 +42,16 @@ make_voxel_model 从你提供的 boxes 生成新模型。按轮廓分体块，�
 
 ### 写代码控制演员
 
-create_scripted_actor 把你为本轮目标写的 code 放入可编辑的原生代码方块，并启动相邻电影方块里的演员。model 可为 human 或本轮返回的 BMax 路径。演员 position 和控制站 station 都是绝对方块坐标。station 和它 +Z 一格留空，把控制站放在画面边缘。工具已设置演员名。代码使用普通 CodeBlock API：getPos()、getPos("演员名")、setPos(x,y,z)、turnTo("演员名")、anim(id)、wait(seconds)、registerClickEvent(function() ... end)。getPos() 返回三个数，用 local x,y,z=getPos() 接收。先记住起点，再按设计写相对路线、停留、互动或跟随逻辑；每个循环都要 wait。运行时地面高度与几何相匹配。
+create_scripted_actor 把你为本轮目标写的 code 放入可编辑的原生代码方块，并启动相邻电影方块里的演员。model 可为 human 或本轮返回的 BMax 路径。演员 position 和控制站 station 都是绝对方块坐标。station 和它 +Z 一格留空，把控制站放在画面边缘。工具已设置演员名。代码使用普通 CodeBlock API：getPos()、getPos("演员名")、setPos(x,y,z)、turnTo("演员名")、anim(id)、wait(seconds)、registerClickEvent(function() ... end)。getPos() 返回三个数，用 local x,y,z=getPos() 接收。先记住起点，再按设计写相对路线、停留、互动或跟随逻辑；每个循环都要 wait。需要走路时使用行走动画并在转向时更新朝向。跟在身后的演员应读取领队当前位置，用运动方向确定身后偏移；固定的世界轴偏移在折返后会落到领队前面。运行时地面高度与几何相匹配。
 
-先完成用户要求的积木、模型和行为，再集中验收。用 sample_actor 检查 loaded、真实比例与 programMessage；循环运动可传 seconds（最多 15 秒），对照时间序列核验运动范围、停留以及回到起点；落地高度要与承托面的顶面一致。程序错误时用 read_code_block 读取原文，再用 update_code_block 修正、restart_actor_program 重新运行，重新取样。拍照时直接用 frame_scene：center 取作品包围盒的中点（绝对方块坐标），distance 取作品宽度的约两倍，pitch 为度数，通常 25–45。随后 take_screenshot 检查构图，按实拍调整距离或方位即可。整个过程无需移动玩家。仅在用户要求时保存或发布。
+先完成用户要求的积木、模型和行为，再集中验收。搭建和模型回执已有数量、包围盒与文件路径，可直接用于下一步。用 sample_actor 检查 loaded、比例与 programMessage。验收跟随时一次调用即可：name 填跟随者，relativeTo 填领队，seconds 选足以跨过一次折返的时长（最多 15 秒）。每个 trace 项的 position 与 referencePosition 来自同一帧；对照换向前后两者的位移和间距。referencePosition 为空时检查领队名字和运行状态。其他循环运动可直接查看单个角色的轨迹；落地高度要与承托面的顶面一致。程序错误时用 read_code_block 读取原文，再用 update_code_block 修正、restart_actor_program 重新运行，重新取样。拍照时直接用 frame_scene：center 取作品包围盒的中点（绝对方块坐标），distance 取作品宽度的约两倍，pitch 为度数，通常 25–45。机位朝向建筑开敞面，取景同时包含演员路线。随后用 take_screenshot 检查构图。若有遮挡，按看不清的具体对象调整机位。主体和角色清晰、位移采样已覆盖折返后，直接返回已有截图和回执。整个过程无需移动玩家。仅在用户要求时保存或发布。
 
 ## Discover Engine Guidance
-Before the first world operation in this chat, read `index.md` with
+After connection and before editing, read `index.md` with
 `read_official_wiki` unless a complete successful result for the current
 `documentationClient` is already present in the conversation. Reuse that result
 on later turns; do not reread the index for every user message. Read linked topic
-pages only when their contents are needed and not already available.
+pages for a specific unanswered API question or engine error. Use the authoring schemas above directly for supported building, BMax and actor operations.
 The bundled paracraft-cli wiki is the source of truth for operations,
 capabilities and safeguards. Require source:"bundled", readOnly:true and full
 page content. A filename, prior call name, assistant summary, failed read or

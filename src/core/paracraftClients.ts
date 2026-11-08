@@ -820,7 +820,10 @@ export async function dispatchAction(id: string, action: string, params: Record<
             return { status: 400, body: { ok: false, error: error instanceof Error ? error.message : String(error) } };
         }
     }
-    return dispatchNative(id,action,params);
+    if (!ACTIONS.has(action)) {
+        return { status: 400, body: { ok: false, error: `unknown action: ${action}` } };
+    }
+    return dispatchNative(id, action, params);
 }
 async function dispatchNative(id:string,action:string,params:Record<string,unknown>):Promise<{status:number;body:unknown}> {
     const client = getLive(id);

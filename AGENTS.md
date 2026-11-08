@@ -214,6 +214,12 @@ npm run mcp --prefix apps/vscode-extension     # stdio MCP for Cursor
 
 ### Debug the HTTP MCP server without the extension
 
+For Paracraft development, the dev task serves `skills/paracraft-create/` from
+this checkout on each request. Check live skill content via `paracraft_cli`
+with action `skill` and the actual schemas via `/paracraft/authoring`.
+See [development checks](skills/paracraft-create/references/local-development.md)
+before claiming the selected AIChat Web client ran a new revision.
+
 Run the VS Code task **Keepwork MCP: Dev Server (8089)**, or start the same workflow from a terminal:
 
 ```bash

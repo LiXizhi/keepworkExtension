@@ -97,6 +97,7 @@ test('Web authoring pins the HTTP tunnel to the selected engine before executing
   }
   try {
     const args = { worldPath, name: 'Bird' };
+    assert.equal((await dispatchAction(id, 'run_npl_code', { code: 'return 1' })).status, 400);
     const success = dispatchAction(id, 'sample_actor', args);
     await reply('world_files', { identity: { worldPath, sessionId: 8 } });
     const execution = await reply('run_npl_code', { result: { found: true } });
@@ -120,4 +121,36 @@ test('a browser relays single-use engine steps while the server owns the model o
   assert.throws(() => advanceWebAuthoring({clientId, ticket:first.ticket}), /Expired/);
   const last = await advanceWebAuthoring({clientId, ticket:second.ticket, reply:{ok:true,result:{result:{found:false}}}});
   assert.deepEqual(last,{done:true,result:{found:false}});
+});
+
+test('a paired actor trace retains the reference position from each native sample', async () => {
+  const { executeAuthoring } = require('../src/core/paracraftAuthoring.ts');
+  const args = {worldPath:'/worlds/stage/', name:'Follower', relativeTo:'Leader', seconds:1};
+  let calls = 0;
+  const result = await executeAuthoring('sample_actor', args, async (action, params) => {
+    if (action === 'world_files') return {identity:{worldPath:args.worldPath,sessionId:1}};
+    assert.equal(action, 'run_npl_code');
+    assert.match(params.code, /"relativeTo":"Leader"/);
+    const x = ++calls;
+    return {result:{found:true, position:[x,5,0], ...(x === 1 ? {} : {referencePosition:[x+1,5,0]})}};
+  });
+  assert.equal(result.trace[0].referencePosition, null);
+  assert.ok(calls >= 2);
+  assert.deepEqual(result.trace.at(-1).referencePosition, [calls+1,5,0]);
+  assert.deepEqual(result.trace.at(-1).position, [calls,5,0]);
+});
+
+test('the dev server reads skill edits on the next request', t => {
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'paracraft-skill-'));
+  const previous = process.env.KEEPWORK_PARACRAFT_DEV_SKILL_ROOT;
+  t.after(() => {
+    if (previous === undefined) delete process.env.KEEPWORK_PARACRAFT_DEV_SKILL_ROOT;
+    else process.env.KEEPWORK_PARACRAFT_DEV_SKILL_ROOT = previous;
+    fs.rmSync(root, {recursive:true, force:true});
+  });
+  process.env.KEEPWORK_PARACRAFT_DEV_SKILL_ROOT = root;
+  for (const revision of ['v1', 'v2']) {
+    fs.writeFileSync(path.join(root, 'SKILL.md'), revision);
+    assert.equal(readCreationGuide().content, revision);
+  }
 });
