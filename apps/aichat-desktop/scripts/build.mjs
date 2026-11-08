@@ -9,6 +9,6 @@ await build({ entryPoints: [`${root}/src/main.ts`], outfile: `${root}/dist/main.
 await fs.copyFile(`${root}/src/preload.cjs`, `${root}/dist/preload.cjs`);
 await fs.copyFile(`${root}/assets/keepwork.png`, `${root}/dist/keepwork.png`);
 await fs.copyFile(`${root}/assets/keepwork-mac.png`, `${root}/dist/keepwork-mac.png`);
-await createRequire(import.meta.url)('./dev-electron.cjs').prepare();
+if (process.env.KP_PORTABLE_BUILD !== '1') await createRequire(import.meta.url)('./dev-electron.cjs').prepare();
 
 for (const file of ['pet.html', 'pet.css', 'pet.js', 'pet-preload.cjs', 'updates.html', 'updates.css', 'updates.js', 'updates-preload.cjs']) await fs.copyFile(`${root}/${file.startsWith('pet') ? '../../src/pet' : 'src'}/${file}`, `${root}/dist/${file}`);

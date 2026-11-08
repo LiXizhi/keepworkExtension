@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, Tray } from 'electron';
+import { app, net, session, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, Tray } from 'electron';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -15,11 +15,16 @@ let disconnectPermissionPet: (() => void) | undefined;
 const { RuntimeSupervisor } = require('./runtime.cjs');
 const { ENTRY, trustedPage, assertSender, externalUrl } = require('./security.cjs');
 const { MediaGrants, installPermissions } = require('./permissions.cjs');
-let devUrl = !app.isPackaged ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
+const launcher = process.env.AICHAT_LAUNCHER || '';
+const releaseRoot = process.env.AICHAT_RELEASE_ROOT || '';
+const launcherManaged = Boolean(launcher && releaseRoot && path.resolve(releaseRoot, 'desktop') === app.getAppPath());
+const production = app.isPackaged || launcherManaged;
+let usePublishedPage: (() => void) | undefined;
+let devUrl = !production ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
 let developmentServer: { close: () => void } | undefined;
 let managedDeployment: any;
 let applicationMenu: Menu;
-const disableDevMcp = !app.isPackaged && process.env.AICHAT_DESKTOP_DISABLE_MCP === '1';
+const disableDevMcp = !production && process.env.AICHAT_DESKTOP_DISABLE_MCP === '1';
 if (devUrl && !/^http:\/\/(127\.0\.0\.1|localhost):\d+\//.test(devUrl)) throw new Error('Development URL must be loopback HTTP');
 app.setAppUserModelId('com.keepwork.aichat-desktop');
 const PRODUCT_NAME = 'KeepWork 第二大脑';
@@ -27,7 +32,7 @@ const MAC_APP_NAME = 'Keepwork';
 if (process.platform === 'darwin') app.setName(MAC_APP_NAME);
 // Keep the original profile across product renames; explicit test/user profiles win.
 if (!app.commandLine.hasSwitch('user-data-dir')) {
-  app.setPath('userData', path.join(app.getPath('appData'), app.isPackaged ? 'AIChat Desktop' : 'aichat-desktop'));
+  app.setPath('userData', path.join(app.getPath('appData'), production ? 'AIChat Desktop' : 'aichat-desktop'));
 }
 let win: BrowserWindow | undefined, tray: Tray, quitting = false, runtime: any, modelRuntime: any, files: any;
 let runtimeHeartbeat: ReturnType<typeof setInterval> | undefined;
@@ -139,7 +144,7 @@ function updatesSnapshot() {
   return { checking: !!checking, mcp: { ...mcp,
     state: updateActionBusy && serviceBusy ? 'applying' : mcp.state,
     canApply: !updateActionBusy && !serviceBusy && (['available', 'ready'].includes(mcp.state) || (mcp.state === 'error' && !!runtime?.record.pending)) },
-    desktop: { state: app.isPackaged ? updateState : 'unavailable', currentVersion: app.getVersion(),
+    desktop: { state: production ? updateState : 'unavailable', currentVersion: app.getVersion(),
       latest: shellLatest, checkedAt: shellCheckedAt, stale: shellStale, progress: updateProgress, error: updateError,
       canApply: !updateActionBusy && ['available', 'pending restart'].includes(updateState) } };
 }
@@ -182,7 +187,7 @@ async function applyMcpUpdate() {
   finally { serviceBusy = false; updateActionBusy = false; menu(); notifyUpdateStatus(); }
 }
 async function applyDesktopUpdate() {
-  if (updateActionBusy || !app.isPackaged) return;
+  if (updateActionBusy || !(app.isPackaged || launcherManaged)) return;
   updateActionBusy = true; notifyUpdateStatus();
   try {
     if (updateState === 'available') await autoUpdater.downloadUpdate();
@@ -237,7 +242,7 @@ function runCommand(id: string) {
   if (id === 'check-updates') { openUpdates(); return; }
   if (id === 'toggle-login') {
     settings.openAtLogin = !settings.openAtLogin; atomicJson(settingsFile, settings);
-    app.setLoginItemSettings({ openAtLogin: settings.openAtLogin, args: ['--background'] }); menu(); return;
+    app.setLoginItemSettings({ openAtLogin: settings.openAtLogin, args: ['--background'], ...(launcherManaged ? { path: launcher } : {}) }); menu(); return;
   }
   if (id === 'quit') { app.quit(); return; }
   if (id === 'mcp-status') { void mcpAction('status'); return; }
@@ -247,7 +252,7 @@ function runCommand(id: string) {
   if (id === 'local-source') { void useLocalSource(); return; }
   if (id === 'published-site') {
     if (switchingPage) return;
-    developmentServer?.close(); developmentServer = undefined; devUrl = ''; menu(); reloadPage(); return;
+    usePublishedPage?.(); developmentServer?.close(); developmentServer = undefined; devUrl = ''; menu(); reloadPage(); return;
   }
   if (!current) return;
   if (id === 'undo') current.webContents.undo();
@@ -260,6 +265,12 @@ function runCommand(id: string) {
   else if (id === 'zoom-out') current.webContents.setZoomLevel(current.webContents.getZoomLevel() - 0.5);
   else if (id === 'zoom-reset') current.webContents.setZoomLevel(0);
   else if (id === 'fullscreen') current.setFullScreen(!current.isFullScreen());
+    if (launcherManaged) {
+      if (updateState === 'pending restart' && await confirmUpdate('退出并更新桌面应用？', '重新启动以应用已下载的版本。')) {
+        app.relaunch({ execPath: launcher, args: [] }); app.quit();
+      }
+      return;
+    }
 }
 async function openFolderFromMenu() {
   await ensureShown();
@@ -271,6 +282,15 @@ async function openFolderFromMenu() {
 }
 function desktopMenus() {
   const key = (accelerator: string, label: string, id: string) => ({ id, label, accelerator, shortcut: shortcut(accelerator) });
+    if (launcherManaged) {
+      try {
+        setUpdateState('checking');
+        const result = await require('./launcher-client.cjs').checkLauncher(launcher);
+        receiveShellMetadata(result); updateError = '';
+        setUpdateState(result.pending ? 'pending restart' : 'current');
+      } catch (e) { updateError = String(e); shellStale = true; setUpdateState('error'); }
+      return;
+    }
   return {
     file: [
       key('CmdOrCtrl+N', '新对话', 'new-chat'),
@@ -377,7 +397,7 @@ function menu() {
       { label: '使用本地源码服务器…', click: () => { void useLocalSource(); } },
       { label: '使用线上服务器', click: () => {
         if (switchingPage) return;
-        developmentServer?.close(); developmentServer = undefined; devUrl = ''; menu(); reloadPage();
+        usePublishedPage?.(); developmentServer?.close(); developmentServer = undefined; devUrl = ''; menu(); reloadPage();
       } },
       { label: '重新加载（本地跳过缓存）', accelerator: 'CmdOrCtrl+R', click: reloadPage },
     ] },
@@ -387,7 +407,7 @@ function menu() {
     { label: `${PRODUCT_NAME} ${app.getVersion()}`, enabled: false },
     { label: '登录电脑后自动启动', type: 'checkbox', checked: settings.openAtLogin, click: (item: any) => {
       settings.openAtLogin = item.checked; atomicJson(settingsFile, settings);
-      app.setLoginItemSettings({ openAtLogin: item.checked, args: ['--background'] });
+      app.setLoginItemSettings({ openAtLogin: item.checked, args: ['--background'], ...(launcherManaged ? { path: launcher } : {}) });
     } },
     { label: '退出', click: () => app.quit() },
   ];
@@ -534,7 +554,7 @@ function openWindow(startHidden = false) {
   });
 }
 if (!app.requestSingleInstanceLock()) {
-  if (!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
+  if (!production && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
     console.error('Quit the existing Desktop app from its tray menu before starting the development task.');
     app.exit(1);
   } else app.quit();
@@ -542,8 +562,8 @@ if (!app.requestSingleInstanceLock()) {
 else {
   app.on('second-instance', show);
   app.whenReady().then(async () => {
-    if (app.isPackaged) {
-      try { rememberDesktopClient({ version: app.getVersion(), platform: process.platform === 'darwin' ? 'macos' : 'windows', arch: process.arch, executable: process.execPath }); }
+    if (production) {
+      try { rememberDesktopClient({ version: app.getVersion(), platform: process.platform === 'darwin' ? 'macos' : 'windows', arch: process.arch, executable: launcherManaged ? launcher : process.execPath }); }
       catch (error) { console.warn('Unable to record desktop version:', String(error)); }
     }
     try {
@@ -553,7 +573,10 @@ else {
         if (managedDeployment.config.relay?.gateway) process.env.AICHAT_RELAY_GATEWAY = managedDeployment.config.relay.gateway;
       }
     } catch (error) { dialog.showErrorBox(PRODUCT_NAME, `Invalid deployment: ${String(error)}`); app.exit(1); return; }
-    if (!app.isPackaged && !devUrl && process.env.AICHAT_DESKTOP_LOCAL_SOURCE === '1') {
+    if (launcherManaged && !managedDeployment) {
+      usePublishedPage = require('./launcher-client.cjs').installAppPage(session.fromPartition('persist:aichat'), net, path.join(releaseRoot, 'web'));
+    }
+    if (!production && !devUrl && process.env.AICHAT_DESKTOP_LOCAL_SOURCE === '1') {
       try {
         const { startDevelopmentServer } = require('./dev-server.cjs');
         const server = await startDevelopmentServer(process.env.AICHAT_SOURCE_DIR || path.resolve(__dirname, '../../../../apps/official/apps/tools/AIChat'), 3001, {managementHome:path.join(app.getPath('userData'),'source-packages')});
@@ -572,15 +595,15 @@ else {
     const target = `${process.platform === 'win32' ? 'windows' : 'macos'}-${process.arch}`;
     const stagedRuntime = path.resolve(__dirname, '../../mcp-runtime/staging', target);
     const stagedModelRuntime = path.resolve(__dirname, '../../local-model-runtime/runtime-staging', target);
-    runtime = new RuntimeSupervisor(path.join(home, 'mcp-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion(), {}, {
+    runtime = new RuntimeSupervisor(path.join(home, launcherManaged ? 'launcher-mcp' : 'mcp-runtimes'), launcherManaged ? path.join(releaseRoot, 'mcp') : app.isPackaged ? path.join(process.resourcesPath, 'mcp-runtime') : process.env.AICHAT_MCP_RUNTIME_DIR || (fs.existsSync(path.join(stagedRuntime, 'runtime.json')) ? stagedRuntime : ''), app.getVersion(), {}, {
       onUpdate: mcpUpdateChanged,
-      ...(managedDeployment ? { updates: false } : {}),
-      ...(!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE ? {
+      ...(managedDeployment || launcherManaged ? { updates: false } : {}),
+      ...(!production && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE ? {
         updates: false,
         development: { node: process.env.AICHAT_DESKTOP_FRESH_MCP_NODE, entry: path.resolve(__dirname, '../../mcp-runtime/dist/cli.cjs') },
       } : {}),
     });
-    modelRuntime = new RuntimeSupervisor(path.join(home, 'local-model-runtimes'), app.isPackaged ? path.join(process.resourcesPath, 'local-model-runtime') : process.env.KP_LOCAL_MODEL_RUNTIME_DIR || (fs.existsSync(path.join(stagedModelRuntime, 'runtime.json')) ? stagedModelRuntime : ''), app.getVersion(), {}, {
+    modelRuntime = new RuntimeSupervisor(path.join(home, 'local-model-runtimes'), launcherManaged ? path.join(releaseRoot, 'model') : app.isPackaged ? path.join(process.resourcesPath, 'local-model-runtime') : process.env.KP_LOCAL_MODEL_RUNTIME_DIR || (fs.existsSync(path.join(stagedModelRuntime, 'runtime.json')) ? stagedModelRuntime : ''), app.getVersion(), {}, {
       product: 'keepwork-local-model-node-runtime', entry: 'app/dist/src/cli.js', port: 18089, healthPath: '/v1/health', updates: false,
       matcher: (body: any) => body.service === 'keepwork-local-model' && body.protocolVersion === '1.0.0',
     });
@@ -629,7 +652,7 @@ else {
       try { await runtime.start(); }
       catch (e: unknown) {
         updateError = e instanceof Error ? e.message : String(e);
-        if (!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
+        if (!production && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
           console.error(updateError); app.exit(1); return;
         }
       }
@@ -659,3 +682,6 @@ else {
     })().finally(() => app.quit());
   });
 }
+    if (launcherManaged && process.env.AICHAT_LAUNCH_READY) {
+      fs.writeFileSync(process.env.AICHAT_LAUNCH_READY, 'ready');
+    }

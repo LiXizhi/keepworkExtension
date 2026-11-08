@@ -1,5 +1,8 @@
 # KeepWork 第二大脑
 
+For the small Windows and macOS launcher and code-only CDN releases, see the [launcher release guide](launcher/README.md).
+
+
 An independent Electron window for `https://keepwork.com/chat`, with native folder grants,
 workspace files and PTY terminals. Keepwork MCP runs as a separately supervised bundled
 NodeRuntime. The existing KP Local Helper is not replaced; speaker models are not included.

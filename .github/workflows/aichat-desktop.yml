@@ -35,8 +35,21 @@ defaults:
   run:
     shell: bash
 jobs:
+  verify-source:
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[publish desktop]') && !contains(github.event.head_commit.message, '[prepare desktop release]')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.x', cache: false }
+      - run: npm ci && npm ci --prefix apps/aichat-desktop
+      - run: npm run check --prefix apps/aichat-desktop
+      - run: go test ./...
+        working-directory: apps/aichat-desktop/launcher
   build:
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[prepare desktop release]')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[publish desktop]')
     environment: aichat-desktop-production
     strategy:
       fail-fast: false

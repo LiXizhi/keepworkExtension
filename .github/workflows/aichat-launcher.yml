@@ -1,0 +1,156 @@
+name: AIChat Desktop launcher release
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [code, initial, refresh-platforms]
+        required: true
+      version:
+        description: Desktop app version (X.Y.Z)
+        required: true
+      web_commit:
+        description: Full source commit in LiXizhi/AIChat
+        required: true
+      publish:
+        description: Promote the signed CDN manifest
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: aichat-launcher-stable
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  app:
+    environment: aichat-desktop-production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate source pins
+        env:
+          SHA: ${{ inputs.web_commit }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$GITHUB_REF" == refs/heads/main && "$SHA" =~ ^[0-9a-f]{40}$ && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - uses: actions/checkout@v4
+        with:
+          repository: LiXizhi/AIChat
+          ref: ${{ inputs.web_commit }}
+          ssh-key: ${{ secrets.KP_DESKTOP_WEB_CHECKOUT_KEY }}
+          path: web-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: |
+          npm ci --ignore-scripts
+          for app in aichat-desktop mcp-runtime local-model-runtime; do
+            npm ci --ignore-scripts --prefix apps/$app
+            npm run build --prefix apps/$app
+          done
+        env:
+          KP_PORTABLE_BUILD: '1'
+      - run: node --test apps/aichat-desktop/tests/launcher-release.test.cjs
+      - env:
+          VERSION: ${{ inputs.version }}
+        run: python apps/aichat-desktop/launcher/package.py app --web web-source --version "$VERSION" --out artifacts
+      - uses: actions/upload-artifact@v4
+        with: { name: launcher-app, path: artifacts }
+  platforms:
+    needs: app
+    if: inputs.mode != 'code'
+    environment: aichat-desktop-production
+    strategy:
+      matrix:
+        include:
+          - { runner: windows-latest, platform: win32, arch: x64, target: windows-x64 }
+          - { runner: macos-15, platform: darwin, arch: arm64, target: macos-arm64 }
+          - { runner: macos-15-intel, platform: darwin, arch: x64, target: macos-x64 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      KP_DESKTOP_LAUNCHER_PUBLIC_KEY: ${{ vars.KP_DESKTOP_LAUNCHER_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.23.2' }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.x', cache: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: go test ./...
+        working-directory: apps/aichat-desktop/launcher
+      - run: |
+          npm ci
+          for app in pet-companion mcp-runtime local-model-runtime; do npm ci --prefix apps/$app; done
+          npm run prepare:runtime --prefix apps/pet-companion
+          npm run stage --prefix apps/mcp-runtime -- --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+          npm run runtime:stage --prefix apps/local-model-runtime -- --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+          python apps/aichat-desktop/launcher/package.py ${{ matrix.target }} --out artifacts
+      - uses: actions/download-artifact@v4
+        with: { name: launcher-app, path: smoke-packages }
+      - name: Exercise the assembled native runtime
+        run: |
+          cp artifacts/* smoke-packages/
+          export KP_LAUNCHER_TEST_PACKAGES="$GITHUB_WORKSPACE/smoke-packages"
+          cd apps/aichat-desktop/launcher
+          go test -count=1 -run TestPackagedRuntime -v
+      - name: Prepare macOS launcher signing
+        if: inputs.mode == 'initial' && runner.os == 'macOS'
+        env:
+          CERT: ${{ secrets.KP_MAC_CSC_LINK }}
+          PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.KP_APPLE_ID }}
+          APP_PASSWORD: ${{ secrets.KP_APPLE_APP_SPECIFIC_PASSWORD }}
+          TEAM: ${{ secrets.KP_APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$CERT" ]]; then
+            keychain="$RUNNER_TEMP/launcher.keychain-db"
+            password=$(openssl rand -hex 24)
+            security create-keychain -p "$password" "$keychain"
+            security unlock-keychain -p "$password" "$keychain"
+            security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+            printf '%s' "${CERT#data:application/x-pkcs12;base64,}" | base64 -D > "$RUNNER_TEMP/identity.p12"
+            security import "$RUNNER_TEMP/identity.p12" -k "$keychain" -P "$PASSWORD" -T /usr/bin/codesign
+            rm "$RUNNER_TEMP/identity.p12"
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+            identity=$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/ {print $2; exit}')
+            test -n "$identity"
+            echo "KP_LAUNCHER_MAC_IDENTITY=$identity" >> "$GITHUB_ENV"
+            if [[ -n "$APPLE_ID" && -n "$APP_PASSWORD" && -n "$TEAM" ]]; then
+              xcrun notarytool store-credentials keepwork-launcher --apple-id "$APPLE_ID" --password "$APP_PASSWORD" --team-id "$TEAM"
+              echo 'KP_LAUNCHER_NOTARY_PROFILE=keepwork-launcher' >> "$GITHUB_ENV"
+            fi
+          fi
+      - if: inputs.mode == 'initial'
+        run: python apps/aichat-desktop/launcher/build.py launchers
+      - uses: actions/upload-artifact@v4
+        with: { name: 'launcher-platform-${{ matrix.target }}', path: artifacts }
+      - if: inputs.mode == 'initial'
+        uses: actions/upload-artifact@v4
+        with: { name: 'bootstrap-${{ matrix.target }}', path: 'launchers/*.zip' }
+  promote:
+    needs: [app, platforms]
+    if: ${{ !cancelled() && inputs.publish && needs.app.result == 'success' && (needs.platforms.result == 'success' || (inputs.mode == 'code' && needs.platforms.result == 'skipped')) }}
+    environment: aichat-desktop-production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'launcher-*', path: artifacts, merge-multiple: true }
+      - if: inputs.mode == 'initial'
+        uses: actions/download-artifact@v4
+        with: { pattern: 'bootstrap-*', path: artifacts, merge-multiple: true }
+      - run: node apps/aichat-desktop/launcher/publish.cjs "$MODE" artifacts "$GITHUB_RUN_NUMBER"
+        env:
+          MODE: ${{ inputs.mode }}
+          KP_DESKTOP_LAUNCHER_PUBLIC_KEY: ${{ vars.KP_DESKTOP_LAUNCHER_PUBLIC_KEY }}
+          KP_DESKTOP_MANIFEST_PRIVATE_KEY: ${{ secrets.KP_DESKTOP_MANIFEST_PRIVATE_KEY }}
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
