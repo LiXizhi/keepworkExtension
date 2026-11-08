@@ -181,6 +181,9 @@ func run() error {
 	if err = os.MkdirAll(s.Home, 0700); err != nil {
 		return err
 	}
+	if handled, err := handleSetup(s.Home); handled {
+		return err
+	}
 	check := len(os.Args) > 1 && os.Args[1] == "--check"
 	bg := len(os.Args) > 1 && os.Args[1] == "--background"
 	unlock, err := lockStore(filepath.Join(s.Home, "update.lock"))

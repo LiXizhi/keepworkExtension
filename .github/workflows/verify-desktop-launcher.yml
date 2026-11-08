@@ -19,6 +19,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - name: Download ZIP, verify digest, activate signed release and probe MCP
@@ -43,17 +44,10 @@ jobs:
           assert len(payload) == descriptor["size"] and hashlib.sha256(payload).hexdigest() == descriptor["sha256"]
           archive = pathlib.Path(name)
           archive.write_bytes(payload)
-          if sys.platform == "win32":
-              with zipfile.ZipFile(archive) as z:
-                  z.extractall("launcher")
-              exe = pathlib.Path("launcher/Keepwork.exe").resolve()
-              parent = pathlib.Path(os.environ["LOCALAPPDATA"])
-          else:
-              subprocess.run(["ditto", "-x", "-k", archive, "launcher"], check=True)
-              bundle = pathlib.Path("launcher/Keepwork.app")
-              subprocess.run(["codesign", "--verify", "--strict", bundle], check=True)
-              exe = (bundle / "Contents/MacOS/Keepwork").resolve()
-              parent = pathlib.Path.home() / "Library/Application Support"
+          import runpy
+          verify = runpy.run_path("apps/aichat-desktop/launcher/verify-install.py")["verify"]
+          exe = verify(archive)
+          parent = pathlib.Path(os.environ["LOCALAPPDATA"]) if sys.platform == "win32" else pathlib.Path.home() / "Library/Application Support"
           state = parent / "Keepwork/DesktopLauncher/state.json"
           assert not state.exists(), "Expected a clean hosted runner"
           result = json.loads(subprocess.check_output([exe, "--check"], timeout=800))

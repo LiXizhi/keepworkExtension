@@ -32,9 +32,19 @@ def main():
     assets = source.parent / "assets"
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
-        for file in [source / "go.mod", *source.glob("*.go")]:
+        for file in [source / "go.mod", source / "go.sum", *source.glob("*.go")]:
             shutil.copyfile(file, work / file.name)
         if not mac:
+            tool = shutil.which("makensis") or os.environ.get("MAKENSIS")
+            if not tool:
+                tool = str(Path(os.environ["ProgramFiles(x86)"]) / "NSIS/makensis.exe")
+            shutil.copyfile(source / "setup.nsi", work / "setup.nsi")
+            for asset in ("launcher.ico", "welcome.bmp"):
+                shutil.copyfile(assets / asset, work / asset)
+            subprocess.run([tool, "/INPUTCHARSET", "UTF8", "setup.nsi"], cwd=work, check=True)
+            (work / "setup_embed_windows.go").write_text(
+                'package main\nimport _ "embed"\n//go:embed Setup.exe\nvar installerBytes []byte\n'
+                'func init(){setupProgram=installerBytes}\n', encoding="utf8")
             subprocess.run(["go","run","github.com/akavel/rsrc@v0.10.2","-arch","amd64",
                             "-ico",assets/"launcher.ico","-o",work/"icon_windows_amd64.syso"],cwd=work,check=True)
         else:

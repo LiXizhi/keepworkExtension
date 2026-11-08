@@ -43,7 +43,7 @@ function entry(filePath, key, sha256 = qiniu.sha256(filePath)) {
 }
 async function main() {
   const [mode, dir, sequence] = process.argv.slice(2);
-  if (!['code','code-and-launchers','initial','refresh-platforms'].includes(mode) || !dir) throw Error('Expected code|initial|refresh-platforms DIR SEQUENCE');
+  if (!['code','launchers','code-and-launchers','initial','refresh-platforms'].includes(mode) || !dir) throw Error('Expected code|initial|refresh-platforms DIR SEQUENCE');
   const key = crypto.createPrivateKey(process.env.KP_DESKTOP_MANIFEST_PRIVATE_KEY);
   const publicKey = crypto.createPublicKey(key);
   const jwk = publicKey.export({format:'jwk'});
@@ -54,14 +54,14 @@ async function main() {
   const retry = previous?.sequence === Number(sequence);
   if (!retry && (mode === 'initial') !== !previous) throw Error('Initial publication requires an empty channel');
   const baseline = retry ? {...previous, sequence:previous.sequence - 1} : previous;
-  const { manifest, uploads } = plan(dir, baseline, ['initial','refresh-platforms'].includes(mode), Number(sequence));
+  const { manifest, uploads } = mode === 'launchers' ? {manifest:previous, uploads:[]} : plan(dir, baseline, ['initial','refresh-platforms'].includes(mode), Number(sequence));
   if (retry && JSON.stringify(previous) !== JSON.stringify(manifest)) throw Error('Cannot reuse a live sequence with different artifacts');
   const data = Buffer.from(JSON.stringify(manifest));
   const file = path.join(dir, 'stable.json');
   fs.writeFileSync(file, JSON.stringify({ payload: data.toString('base64'), signature: crypto.sign(null, data, key).toString('base64') }));
   const config = {accessKey:qiniu.required(process.env.KP_QINIU_ACCESS_KEY,'access key'), secretKey:qiniu.required(process.env.KP_QINIU_SECRET_KEY,'secret key'), bucket:'haqi', uploadHost:'https://up-z2.qiniup.com'};
   const downloads = [], downloadManifests = [];
-  if (mode === 'initial' || mode === 'code-and-launchers') {
+  if (mode === 'initial' || mode === 'code-and-launchers' || mode === 'launchers') {
     for (const target of targets) {
       const [platform, arch] = target.split('-');
       const legacyTarget = (platform === 'windows' ? 'win32' : 'darwin') + '-' + arch;
@@ -81,7 +81,9 @@ async function main() {
       downloadManifests.push(metadata);
     }
   }
-  if (!retry) {
+  if (mode === 'launchers') {
+    await publish(downloads, config);
+  } else if (!retry) {
     await publish([...uploads, ...downloads], config);
     await publish([entry(file, 'stable.json')], config);
   } else if (downloads.length) {

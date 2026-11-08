@@ -1,6 +1,6 @@
 # Desktop launcher releases
 
-The native launcher runs on Windows x64, Apple Silicon and Intel Macs. Users extract the launcher ZIP and keep the executable or app in a permanent location. First launch needs network access. The launcher downloads the signed release manifest, the shared app ZIP and the dependency ZIP for that machine. Download progress is visible and interrupted transfers can resume. Subsequent launches use the locally installed release. Desktop checks again after startup and every six hours. The update window can apply a staged release by restarting Desktop.
+The native launcher runs on Windows x64, Apple Silicon and Intel Macs. Open Keepwork.exe or Keepwork.app from the extracted ZIP. Windows Setup installs the launcher in the current user's Programs folder and creates a Start menu shortcut and an Installed apps uninstall entry. On Mac, Install & Open copies the verified app into ~/Applications and registers it with Launch Services. Users may delete the extracted download after setup. First launch needs network access. The launcher downloads the signed release manifest, the shared app ZIP and the dependency ZIP for that machine. Download progress is visible and interrupted transfers can resume. Subsequent launches use the locally installed release. Desktop checks again after startup and every six hours. The update window can apply a staged release by restarting Desktop.
 
 ## Publish
 
@@ -9,6 +9,7 @@ Use **Actions → AIChat Desktop launcher release** on keepworkExtension main. E
 | Mode | Use | CDN changes |
 | --- | --- | --- |
 | initial | Set up this channel once | One shared ZIP, three native dependency ZIPs, three small launcher downloads, the signed stable manifest and the website's platform download descriptors |
+| launchers | Change the native setup or launcher | Three small downloads and their website descriptors; the signed app manifest and runtime packages stay at their current release |
 | code | Change menus, window behavior, web UI, MCP implementation, local-model code, skills or pet code | One shared ZIP and the signed stable manifest |
 | refresh-platforms | Change Electron, Node, native packages, locked runtime dependencies, or bundled model data | Rebuild the platform dependency archives and shared archive, then promote the manifest |
 
