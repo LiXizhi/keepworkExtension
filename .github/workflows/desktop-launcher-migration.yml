@@ -1,0 +1,38 @@
+name: Desktop launcher migration
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  migration:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: win32-x64 }
+          - { runner: macos-15, target: darwin-arm64 }
+          - { runner: macos-15-intel, target: darwin-x64 }
+    runs-on: ${{ matrix.runner }}
+    environment: aichat-desktop-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.23.2' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - if: runner.os == 'Windows'
+        run: npm ci --ignore-scripts --legacy-peer-deps --prefix apps/aichat-desktop
+      - run: python apps/aichat-desktop/launcher/migration.py ${{ matrix.target }} migration
+      - run: node apps/aichat-desktop/launcher/test-migration.cjs migration ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: migration-${{ matrix.target }}
+          path: |
+            migration/*.exe
+            migration/*.zip
+            migration/*.blockmap
+            migration/*.yml
+      - name: Publish verified migration through the existing updater
+        run: node scripts/publish-desktop.cjs --dir migration --target ${{ matrix.target }} --channel migration
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}

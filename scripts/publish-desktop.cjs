@@ -57,10 +57,33 @@ async function publishRelease(entries, config, transport = qiniu) {
   for (const group of [binaries, descriptors]) await publish(group, config, transport);
 }
 
+async function migrationEntries(dir, target) {
+  const platform = TARGETS[target];
+  if (!platform) throw Error('Unsupported migration target');
+  const win = platform.platform === 'windows';
+  const installer = 'Keepwork-Launcher-Migration-0.1.10-' + platform.arch + (win ? '.exe' : '.zip');
+  const feed = win ? 'latest.yml' : 'latest-mac.yml';
+  const descriptor = fs.readFileSync(path.join(dir, feed), 'utf8');
+  const meta = win ? require(require.resolve('js-yaml', {paths:[path.resolve(__dirname,'../apps/aichat-desktop')]})).load(descriptor) : JSON.parse(descriptor);
+  const bytes = fs.readFileSync(path.join(dir, installer));
+  const sha512 = require('node:crypto').createHash('sha512').update(bytes).digest('base64');
+  if (meta.version !== '0.1.10' || meta.files?.length !== 1 || meta.files[0].url !== installer ||
+      meta.files[0].size !== bytes.length || meta.files[0].sha512 !== sha512) throw Error('Migration descriptor mismatch');
+  const base = 'keepwork/aichat-desktop/' + target + '/';
+  const response = await fetch(DOMAIN + '/' + base + feed + '?check=' + Date.now());
+  if (!response.ok) throw Error('Cannot verify existing updater feed');
+  const live = await response.text();
+  if (!/^version: 0\.1\.8\s*$/m.test(live) && !(live.includes(sha512) && live.includes(installer))) throw Error('Unexpected live updater release');
+  return [installer, ...(win ? [installer + '.blockmap'] : []), feed].map(name => {
+    const filePath = path.join(dir, name), remoteKey = base + name;
+    return {name,filePath,remoteKey,url:DOMAIN + '/' + remoteKey,size:fs.statSync(filePath).size,sha256:qiniu.sha256(filePath)};
+  });
+}
+
 async function main() {
   const args = qiniu.readArgs(process.argv.slice(2));
   const dir = path.resolve(args.dir);
-  const entries = collect(dir, args.target);
+  const entries = args.channel === 'migration' ? await migrationEntries(dir, args.target) : collect(dir, args.target);
   if (args.dryRun) { console.log(entries.map(e => e.name)); return; }
   const config = { accessKey: qiniu.required(process.env.KP_QINIU_ACCESS_KEY, 'KP_QINIU_ACCESS_KEY'), secretKey: qiniu.required(process.env.KP_QINIU_SECRET_KEY, 'KP_QINIU_SECRET_KEY'), bucket: 'haqi', uploadHost: 'https://up-z2.qiniup.com' };
   await publishRelease(entries, config);
