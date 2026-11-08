@@ -19,7 +19,8 @@ const launcher = process.env.AICHAT_LAUNCHER || '';
 const releaseRoot = process.env.AICHAT_RELEASE_ROOT || '';
 const launcherManaged = Boolean(launcher && releaseRoot && path.resolve(releaseRoot, 'desktop') === app.getAppPath());
 const production = app.isPackaged || launcherManaged;
-const exitSignal = new AbortController();
+let exitSignal: AbortController | undefined;
+let chatLoadFailed = false;
 let usePublishedPage: (() => void) | undefined;
 let devUrl = !production ? process.env.AICHAT_DESKTOP_DEV_URL || '' : '';
 let developmentServer: { close: () => void } | undefined;
@@ -211,6 +212,7 @@ async function checkUpdates() {
     if (launcherManaged) {
       try {
         setUpdateState('checking');
+        exitSignal = new AbortController();
         const result = await require('./launcher-client.cjs').checkLauncher(launcher, exitSignal.signal);
         if (result.busy) { setUpdateState('idle'); return; }
         receiveShellMetadata(result); updateError = '';
@@ -557,6 +559,7 @@ function openWindow(startHidden = false) {
     }
   }).catch(async (error: Error) => {
     if (created.isDestroyed()) return;
+    chatLoadFailed = true;
     const target = devUrl || ENTRY;
     // This local error document has no trusted desktop bridge. The normal
     // navigation checks still apply to the retry link.
@@ -689,7 +692,7 @@ else {
       startRuntimeHeartbeat();
     }
     if (launcherManaged && process.env.AICHAT_LAUNCH_READY) {
-      fs.writeFileSync(process.env.AICHAT_LAUNCH_READY, 'ready');
+      fs.writeFileSync(process.env.AICHAT_LAUNCH_READY, chatLoadFailed ? 'error' : 'ready');
     }
     setTimeout(() => { void checkUpdates(); }, 15000).unref();
     setInterval(() => { void checkUpdates(); }, 6 * 60 * 60 * 1000).unref();
@@ -699,7 +702,7 @@ else {
   app.on('before-quit', event => {
     if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }
     if (quitting) return;
-    event.preventDefault(); quitting = true; exitSignal.abort(); liveWindow()?.hide(); floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
+    event.preventDefault(); quitting = true; exitSignal?.abort(); liveWindow()?.hide(); floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
     disconnectPermissionPet?.();
     if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }
     void (async () => {

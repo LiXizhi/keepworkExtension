@@ -25,7 +25,7 @@ func showError(message string) {
 	_ = exec.Command("/usr/bin/osascript", "-e", "on run argv", "-e", "display alert \"Keepwork Desktop\" message (item 1 of argv) as critical", "-e", "end run", message).Run()
 }
 
-func progressWindow(file string) func() {
+func progressWindow(file string, _ func()) func() {
 	const script = `ObjC.import('AppKit');
 function run(args) {
  const app=$.NSApplication.sharedApplication;

@@ -25,7 +25,7 @@ func focusProgress() {
 }
 
 // Keep window creation, message dispatch and destruction on the same OS thread.
-func progressWindow(file string) func() {
+func progressWindow(file string, cancel func()) func() {
 	ready := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -43,7 +43,7 @@ func progressWindow(file string) func() {
 		}
 		metric := func(index uintptr) uintptr { v, _, _ := user.NewProc("GetSystemMetrics").Call(index); return v }
 		width, height := uintptr(440), uintptr(156)
-		hwnd := create("STATIC", windowTitle, 0x00c00000|0x00800000|0x00080000, (metric(0)-width)/2, (metric(1)-height)/2, width, height, 0)
+		hwnd := create("#32770", windowTitle, 0x00c00000|0x00800000|0x00080000, (metric(0)-width)/2, (metric(1)-height)/2, width, height, 0)
 		if hwnd == 0 {
 			close(ready)
 			return
@@ -82,10 +82,15 @@ func progressWindow(file string) func() {
 					break
 				}
 				if m.Message == 0x10 || (m.Message == 0x112 && m.Wparam&0xfff0 == 0xf060) {
-					continue
+					cancel()
+					return
 				}
 				user.NewProc("TranslateMessage").Call(uintptr(unsafe.Pointer(&m)))
 				user.NewProc("DispatchMessageW").Call(uintptr(unsafe.Pointer(&m)))
+			}
+			if visible, _, _ := user.NewProc("IsWindowVisible").Call(hwnd); visible == 0 {
+				cancel()
+				return
 			}
 			data, _ := os.ReadFile(file)
 			v := string(data)

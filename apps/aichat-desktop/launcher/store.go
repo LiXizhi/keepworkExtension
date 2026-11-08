@@ -62,7 +62,11 @@ func (s Store) verify(data []byte) (m Manifest, err error) {
 }
 
 func (s Store) get(name string) (io.ReadCloser, error) {
-	res, err := s.Client.Get(s.Base + name)
+	req, err := http.NewRequestWithContext(installContext, "GET", s.Base+name, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.Client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +91,9 @@ func unpack(file, dir string) error {
 	links := map[string]string{}
 	var total uint64
 	for _, f := range z.File {
+		if err := installContext.Err(); err != nil {
+			return err
+		}
 		name := strings.TrimSuffix(f.Name, "/")
 		rel := filepath.FromSlash(name)
 		if !fs.ValidPath(name) || !filepath.IsLocal(rel) || strings.ContainsAny(name, "\\:") {
@@ -211,6 +218,9 @@ func (s Store) object(o Object) (string, error) {
 func overlay(src, dest string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := installContext.Err(); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(src, p)

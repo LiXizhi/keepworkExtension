@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,8 +133,17 @@ func (s Store) launch(m Manifest, background, candidate bool) error {
 	defer tick.Stop()
 	for {
 		select {
+		case <-installContext.Done():
+			_ = cmd.Process.Kill()
+			<-exited
+			return context.Canceled
 		case <-tick.C:
-			if _, err := os.Stat(receipt); err == nil {
+			if b, err := os.ReadFile(receipt); err == nil {
+				if string(b) != "ready" {
+					_ = cmd.Process.Kill()
+					<-exited
+					return errors.New("AIChat could not render its window")
+				}
 				return nil
 			}
 		case err := <-exited:
@@ -215,6 +225,9 @@ func (s Store) activate(st State, bg bool, launch func(Manifest, bool, bool) err
 	if st.Pending != nil {
 		firstInstall.message("正在打开 Keepwork…")
 		err := launch(*st.Pending, bg, true)
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
 		if errors.Is(err, errAlreadyRunning) {
 			return nil
 		}
@@ -247,7 +260,7 @@ func (s Store) activate(st State, bg bool, launch func(Manifest, bool, bool) err
 	return err
 }
 func main() {
-	if err := run(); err != nil {
+	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, err)
 		if len(os.Args) == 1 {
 			showError(err.Error())

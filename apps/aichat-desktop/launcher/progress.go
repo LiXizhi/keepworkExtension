@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ type progress struct {
 }
 
 var firstInstall *progress
+var installContext = context.Background()
 
 func startProgress(home string) func() {
 	dir, err := os.MkdirTemp(home, "progress-")
@@ -25,8 +27,10 @@ func startProgress(home string) func() {
 	p := &progress{file: filepath.Join(dir, "status")}
 	p.message("正在准备 Keepwork…")
 	firstInstall = p
-	stop := progressWindow(p.file)
-	return func() { firstInstall = nil; os.RemoveAll(dir); stop() }
+	ctx, cancel := context.WithCancel(context.Background())
+	installContext = ctx
+	stop := progressWindow(p.file, cancel)
+	return func() { stop(); cancel(); installContext = context.Background(); firstInstall = nil; os.RemoveAll(dir) }
 }
 func (p *progress) message(s string) {
 	if p != nil {

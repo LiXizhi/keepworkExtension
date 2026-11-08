@@ -58,7 +58,7 @@ jobs:
           assert not state.exists(), "Expected a clean hosted runner"
           result = json.loads(subprocess.check_output([exe, "--check"], timeout=800))
           assert result == {"pending":True, "version":version}, result
-          subprocess.run([exe, "--background"], check=True, timeout=180)
+          subprocess.run([exe], check=True, timeout=180)
           installed = json.loads(state.read_text())
           assert installed["Active"]["Version"] == version and installed["Pending"] is None, installed
           health = json.loads(read("http://127.0.0.1:8089/health"))
