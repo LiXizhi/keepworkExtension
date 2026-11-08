@@ -140,7 +140,7 @@ def platform_runtime(a, target):
         for f in ("package.json", "package-lock.json"):
             shutil.copyfile(DESKTOP / f, Path(tmp) / f)
         npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
-        subprocess.run([npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=tmp, check=True)
+        subprocess.run([npm, "ci", "--legacy-peer-deps", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=tmp, check=True)
         deps = Path(tmp) / "node_modules"
         if target.startswith("macos"):
             (deps / "node-pty/prebuilds" / target.replace("macos", "darwin") / "spawn-helper").chmod(0o755)
