@@ -1,5 +1,11 @@
 name: Desktop launcher migration
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      verify_live:
+        description: Test the deployed updater feed on a clean 0.1.8 installation
+        type: boolean
+        default: true
 permissions:
   contents: read
 jobs:
@@ -20,8 +26,9 @@ jobs:
       - if: runner.os == 'Windows'
         run: npm ci --ignore-scripts --legacy-peer-deps --prefix apps/aichat-desktop
       - run: python apps/aichat-desktop/launcher/migration.py ${{ matrix.target }} migration
-      - run: node apps/aichat-desktop/launcher/test-migration.cjs migration ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - run: node apps/aichat-desktop/launcher/test-migration.cjs migration ${{ matrix.target }} ${{ inputs.verify_live && '--cdn' || '--staged' }}
+      - if: inputs.verify_live == false
+        uses: actions/upload-artifact@v4
         with:
           name: migration-${{ matrix.target }}
           path: |
@@ -29,7 +36,8 @@ jobs:
             migration/*.zip
             migration/*.blockmap
             migration/*.yml
-      - name: Publish verified migration through the existing updater
+      - if: inputs.verify_live == false
+        name: Publish verified migration through the existing updater
         run: node scripts/publish-desktop.cjs --dir migration --target ${{ matrix.target }} --channel migration
         env:
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}

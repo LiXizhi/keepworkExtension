@@ -52,7 +52,7 @@ async function main() {
     await app.whenReady();const requireApp=r('module').createRequire(app.getAppPath()+'/package.json');
     const u=requireApp('electron-updater').autoUpdater; const note=t=>r('fs').appendFileSync(${JSON.stringify(log)},t+'\\n');
     u.logger={info:(...s)=>note(s.join(' ')),warn:(...s)=>note(s.join(' ')),error:(...s)=>note(s.join(' ')),debug:()=>{}};
-    u.setFeedURL({provider:'generic',url:${JSON.stringify('http://127.0.0.1:'+feed.address().port+'/')}});
+    if (!${process.argv.includes('--cdn')}) u.setFeedURL({provider:'generic',url:${JSON.stringify('http://127.0.0.1:'+feed.address().port+'/')}});
     u.disableDifferentialDownload=true;
     u.on('error',e=>note(String(e)));u.once('update-downloaded',()=>{note('downloaded');setTimeout(()=>u.quitAndInstall(false,true),1000)});
     await u.checkForUpdates();return true;})()`;
