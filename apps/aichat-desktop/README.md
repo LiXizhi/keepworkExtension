@@ -46,7 +46,7 @@ Start and F5 use it because Cocoa reads the menu name from the bundle's
 packages declare the same name; the product title and existing data directories
 remain KeepWork 第二大脑 and the original profile paths.
 
-From this repository, install root dependencies and `npm ci --prefix apps/aichat-desktop`.
+From the repository root, run `npm ci`, `npm ci --include=dev --prefix apps/mcp-runtime`, and `npm ci --prefix apps/aichat-desktop`. Desktop startup rebuilds the MCP runtime using its own copy of esbuild.
 Run `npm run check --prefix apps/aichat-desktop` and
 `node apps/aichat-desktop/scripts/native-smoke.cjs` on each target OS. Native dependencies
 must load inside the pinned Electron runtime, not merely the system Node executable.
