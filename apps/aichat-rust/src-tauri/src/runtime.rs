@@ -17,6 +17,14 @@ pub const MCP_PORT: u16 = 8089;
 pub const LOCAL_MODEL_PORT: u16 = 18089;
 pub const DEFAULT_MCP_FEED_BASE: &str = "https://cdn.keepwork.com/keepwork/mcp-stable";
 
+fn default_runtime_node() -> String {
+    if cfg!(target_os = "windows") {
+        "bin/node.exe".to_string()
+    } else {
+        "bin/node".to_string()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeManifest {
@@ -27,6 +35,7 @@ pub struct RuntimeManifest {
     pub commit: String,
     #[serde(default)]
     pub built_at: String,
+    #[serde(default = "default_runtime_node")]
     pub node: String,
     pub entry: String,
     #[serde(default)]
@@ -110,6 +119,19 @@ pub fn current_runtime_platform() -> &'static str {
         "darwin"
     } else if cfg!(target_os = "windows") {
         "win32"
+    } else {
+        "linux"
+    }
+}
+
+/// Platform name used by published MCP runtime manifests and the CDN feed
+/// (`macos-arm64.json`, `windows-x64.json`). The desktop client feed keeps the
+/// Rust target-style names returned by [`current_runtime_platform`].
+pub fn mcp_feed_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
     } else {
         "linux"
     }
@@ -949,7 +971,7 @@ impl RuntimeSupervisor {
             }
         };
 
-        let expected_platform = current_runtime_platform();
+        let expected_platform = mcp_feed_platform();
         let expected_arch = current_runtime_arch();
         if let Err(err) = validate_update_manifest(
             &remote,
@@ -1202,5 +1224,74 @@ mod tests {
         assert_eq!(validated.commit, commit);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runtime_manifest_defaults_missing_node_to_bundled_node_binary() {
+        let raw = r#"{
+            "product": "keepwork-mcp-node-runtime",
+            "platform": "macos",
+            "arch": "arm64",
+            "version": "0.1.44",
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "entry": "app/cli.cjs"
+        }"#;
+        let manifest: RuntimeManifest = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            manifest.node,
+            if cfg!(target_os = "windows") { "bin/node.exe" } else { "bin/node" }
+        );
+    }
+
+    #[test]
+    fn mcp_feed_platform_uses_published_artifact_names() {        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(current_runtime_platform(), "darwin");
+            assert_eq!(mcp_feed_platform(), "macos");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(current_runtime_platform(), "win32");
+            assert_eq!(mcp_feed_platform(), "windows");
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(mcp_feed_platform(), "linux");
+    }
+
+    #[test]
+    fn update_manifest_accepts_published_mcp_platform() {
+        let manifest = RuntimeUpdateManifest {
+            schema_version: 1,
+            product: "keepwork-mcp-node-runtime".to_string(),
+            platform: mcp_feed_platform().to_string(),
+            arch: current_runtime_arch().to_string(),
+            version: "0.1.44".to_string(),
+            commit: "a".repeat(40),
+            built_at: "2026-11-09T00:00:00Z".to_string(),
+            url: "https://cdn.keepwork.com/keepwork/mcp-stable/0.1.44/macos-arm64.zip"
+                .to_string(),
+            sha256: "b".repeat(64),
+            size: 1024,
+        };
+        assert!(validate_update_manifest(
+            &manifest,
+            "keepwork-mcp-node-runtime",
+            mcp_feed_platform(),
+            current_runtime_arch(),
+        )
+        .is_ok());
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut wrong = manifest.clone();
+            wrong.platform = current_runtime_platform().to_string();
+            assert!(validate_update_manifest(
+                &wrong,
+                "keepwork-mcp-node-runtime",
+                mcp_feed_platform(),
+                current_runtime_arch(),
+            )
+            .is_err());
+        }
     }
 }

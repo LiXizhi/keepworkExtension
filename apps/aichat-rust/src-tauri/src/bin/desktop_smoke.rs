@@ -9,7 +9,9 @@ use aichat_rust_lib::{
     login_startup::LoginStartup,
     menu::{is_allowed_host_command, menu_payload, MenuContextState},
     permissions::MediaGrants,
-    security::{assert_sender, external_url, trusted_page, ENTRY},
+    security::{
+        allowed_in_app_popup, allowed_navigation, assert_sender, external_url, trusted_page, ENTRY,
+    },
     tray_channels::{channel_states, describe},
 };
 use serde_json::json;
@@ -24,6 +26,31 @@ async fn main() {
     // 1. Security & sender assertions
     assert!(trusted_page(ENTRY, None));
     assert!(!trusted_page("https://evil.example/chat", None));
+    assert!(allowed_navigation(
+        "https://keepwork.com/api/raw/official/apps/tools/AIChat/tools/calendar/calendar.html",
+        None
+    ));
+    assert!(allowed_navigation(
+        "https://open.weixin.qq.com/connect/qrconnect?appid=wxc97e44ce7c18725e",
+        None
+    ));
+    assert!(allowed_navigation(
+        "https://cdn.keepwork.com/apps/aichat/release/d29b1ecb4622/tools/calendar/calendar.html?locale=zh-CN&host=aichat&token=eyJ.demo",
+        None
+    ));
+    assert!(!allowed_navigation("https://cdn.keepwork.com.evil.com/x", None));
+    assert!(!allowed_navigation("https://evilkeepwork.com/x", None));
+    assert!(!allowed_navigation("http://cdn.keepwork.com/x", None));
+    assert!(!allowed_navigation("https://evil.example/chat", None));
+    assert!(allowed_in_app_popup(
+        "https://accounts.google.com/o/oauth2/v2/auth",
+        None
+    ));
+    assert!(allowed_in_app_popup(
+        "https://login.dingtalk.com/oauth2/auth",
+        None
+    ));
+    assert!(!allowed_in_app_popup("https://evil.example/oauth", None));
     assert!(assert_sender("main", "main", true, ENTRY, None).is_ok());
     assert!(assert_sender("main", "main", false, ENTRY, None).is_err());
     assert_eq!(
@@ -96,6 +123,7 @@ async fn main() {
     assert!(lock.wake_port() > 0);
     lock.release();
 
+    assert!(is_allowed_host_command("check-updates"));
     assert!(is_allowed_host_command("help:check-updates"));
     let menu = menu_payload(
         "help",
@@ -104,18 +132,28 @@ async fn main() {
             local_source_enabled: false,
             pet_visible: true,
             open_at_login: true,
+            mcp_state: "running".to_string(),
+            mcp_owner: "desktop".to_string(),
+            mcp_error: String::new(),
             mcp_version: "0.2.88".to_string(),
-            desktop_version: "0.2.0".to_string(),
+            desktop_version: "0.2.2".to_string(),
+            entry_url: ENTRY.to_string(),
+            update_label: "桌面更新：idle".to_string(),
+            update_error: String::new(),
         },
     )
     .unwrap();
     assert_eq!(menu["menuId"], "help");
+    assert_eq!(menu["menu"]["id"], "help");
+    assert_eq!(menu["items"], menu["menu"]["items"]);
 
     let tray_summary = describe(&channel_states(&json!({})), false, false);
     assert!(tray_summary.attention);
 
     let script = build_main_window_init_script("darwin", "data:image/png;base64,AA==");
     assert!(script.contains("window.aichatDesktop"));
+    assert!(script.contains("keepwork-desktop-input-guard"));
+    assert!(script.contains("contextmenu"));
 
     let _ = fs::remove_dir_all(&root);
     println!("desktop-smoke: OK");

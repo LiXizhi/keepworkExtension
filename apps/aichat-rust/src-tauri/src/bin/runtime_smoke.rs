@@ -1,5 +1,5 @@
 use aichat_rust_lib::runtime::{
-    create_zip_from_dir, current_runtime_arch, current_runtime_platform, sha256_hex,
+    create_zip_from_dir, current_runtime_arch, mcp_feed_platform, sha256_hex,
     validate_runtime_dir, RuntimeConfig, RuntimeManifest, RuntimeSupervisor, RuntimeUpdateManifest,
 };
 use std::fs;
@@ -21,7 +21,7 @@ async fn main() {
 
     let bundled_manifest = RuntimeManifest {
         product: "keepwork-mcp-node-runtime".to_string(),
-        platform: current_runtime_platform().to_string(),
+        platform: mcp_feed_platform().to_string(),
         arch: current_runtime_arch().to_string(),
         version: "0.2.80".to_string(),
         commit: "1".repeat(40),
@@ -44,7 +44,7 @@ async fn main() {
     let remote_commit = "2".repeat(40);
     let remote_rt_manifest = RuntimeManifest {
         product: "keepwork-mcp-node-runtime".to_string(),
-        platform: current_runtime_platform().to_string(),
+        platform: mcp_feed_platform().to_string(),
         arch: current_runtime_arch().to_string(),
         version: "0.2.88".to_string(),
         commit: remote_commit.clone(),
@@ -74,7 +74,7 @@ async fn main() {
     let feed_manifest = RuntimeUpdateManifest {
         schema_version: 1,
         product: "keepwork-mcp-node-runtime".to_string(),
-        platform: current_runtime_platform().to_string(),
+        platform: mcp_feed_platform().to_string(),
         arch: current_runtime_arch().to_string(),
         version: "0.2.88".to_string(),
         commit: remote_commit.clone(),

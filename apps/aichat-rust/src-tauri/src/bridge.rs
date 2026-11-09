@@ -1,4 +1,4 @@
-use crate::menu::{top_menu_bar_labels, HOST_COMMANDS};
+use crate::menu::{top_menu_bar_labels, HOST_COMMANDS, PAGE_COMMANDS};
 use serde_json::json;
 
 /// Generates the main-frame initialization script injected into `KeepWork 第二大脑` (`main` window).
@@ -12,6 +12,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
         "iconDataUrl": icon_data_url,
         "menus": top_menu_bar_labels(),
         "hostCommands": HOST_COMMANDS,
+        "pageCommands": PAGE_COMMANDS,
     });
 
     format!(
@@ -19,6 +20,40 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
   if (window !== window.top) return;
   const bootstrap = {bootstrap};
   window.__AICHAT_DESKTOP_BOOTSTRAP__ = bootstrap;
+
+  // Native desktop chrome should not be text-selectable. Inputs, the composer
+  // and message bodies stay selectable for copy/paste; message copy is the
+  // only intentional long-press selection.
+  const mountInputGuard = () => {{
+    if (document.getElementById("keepwork-desktop-input-guard")) return;
+    const guardStyle = document.createElement("style");
+    guardStyle.id = "keepwork-desktop-input-guard";
+    guardStyle.textContent = `
+      html, body, body * {{ -webkit-user-select: none !important; user-select: none !important; }}
+      body input, body textarea, body select,
+      body [contenteditable]:not([contenteditable="false"]),
+      body [contenteditable]:not([contenteditable="false"]) *,
+      body .chat-msg-bubble, body .chat-msg-bubble *,
+      body .md-body, body .md-body *,
+      body pre, body pre *, body code {{
+        -webkit-user-select: text !important; user-select: text !important;
+      }}
+    `;
+    (document.head || document.documentElement).appendChild(guardStyle);
+  }};
+  if (document.documentElement) mountInputGuard();
+  if (document.readyState === "loading") {{
+    document.addEventListener("DOMContentLoaded", mountInputGuard, {{ once: true }});
+  }}
+
+  // Suppress the native/webview context menu on app chrome; keep the edit menu
+  // on text fields and message bodies where copy/paste is meaningful.
+  document.addEventListener("contextmenu", (event) => {{
+    const target = event.target;
+    if (target && target.closest
+        && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .chat-msg-bubble, .md-body, pre, code')) return;
+    event.preventDefault();
+  }}, true);
 
   const invoke = (cmd, args = {{}}) => {{
     if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {{
@@ -391,6 +426,9 @@ mod tests {
         let script = build_main_window_init_script("darwin", "data:image/png;base64,AAAA");
         assert!(script.contains("if (window !== window.top) return;"));
         assert!(script.contains("keepwork-desktop-titlebar"));
+        assert!(script.contains("keepwork-desktop-input-guard"));
+        assert!(script.contains("user-select: none"));
+        assert!(script.contains("contextmenu"));
         assert!(script.contains("Object.freeze"));
         assert!(script.contains("reportStartupSignIn"));
         assert!(script.contains("defaultBrainFolder"));

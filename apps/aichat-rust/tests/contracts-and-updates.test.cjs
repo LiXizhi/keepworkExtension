@@ -59,6 +59,67 @@ test("window.aichatDesktop v1 bridge and 34px closed-Shadow-DOM titlebar contrac
   }
 });
 
+test("desktop menu protocol matches aichat-desktop page/host command routing", () => {
+  const menuRs = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "menu.rs"),
+    "utf8"
+  );
+  const libRs = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    "utf8"
+  );
+  const bridgeRs = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "bridge.rs"),
+    "utf8"
+  );
+  const bridgeTs = fs.readFileSync(path.join(appRoot, "src", "bridge.ts"), "utf8");
+
+  // 页面命令集合（与 apps/aichat-desktop 的 PAGE_COMMANDS 一致）。
+  assert.ok(menuRs.includes("pub const PAGE_COMMANDS"));
+  for (const id of [
+    "new-chat",
+    "toggle-sidebar",
+    "toggle-files",
+    "open-settings",
+    "experience-simple",
+    "experience-professional",
+    "theme-light",
+    "theme-dark",
+  ]) {
+    assert.ok(menuRs.includes(`"${id}"`), `menu.rs missing page command ${id}`);
+    assert.ok(bridgeTs.includes(`"${id}"`), `bridge.ts missing page command ${id}`);
+  }
+  assert.ok(menuRs.includes("pub fn is_allowed_page_command"));
+  assert.ok(menuRs.includes("pub fn canonical_host_command"));
+  assert.ok(menuRs.includes('"file:open-folder", "open-folder"'));
+  assert.ok(menuRs.includes('"view:reload", "reload"'));
+
+  // 菜单载荷：桌面版形状 + 冗余兼容字段。
+  assert.ok(menuRs.includes('"menuId": menu_id'));
+  assert.ok(menuRs.includes('"menu": {'));
+  assert.ok(bridgeRs.includes('"pageCommands": PAGE_COMMANDS'));
+  assert.ok(bridgeRs.includes('"hostCommands": HOST_COMMANDS'));
+
+  const openMenu = libRs.slice(
+    libRs.indexOf("fn desktop_open_menu"),
+    libRs.indexOf("fn desktop_titlebar_action")
+  );
+  assert.ok(openMenu.includes('payload["anchor"]'));
+  assert.ok(openMenu.includes('payload["x"]'));
+  assert.ok(openMenu.includes('payload["y"]'));
+
+  const runCommand = libRs.slice(
+    libRs.indexOf("async fn desktop_run_menu_command"),
+    libRs.indexOf("fn desktop_open_menu")
+  );
+  assert.ok(runCommand.includes("is_allowed_page_command"));
+  assert.ok(runCommand.includes('"type": "command"'));
+  assert.ok(runCommand.includes("Unsupported menu command"));
+
+  // 未知 id 不再兜底广播。
+  assert.ok(libRs.includes('Err(format!("Unsupported menu command: {other}"))'));
+});
+
 test("self-update and automatic update flows are preserved for both MCP and Desktop app", () => {
   const runtimeRs = fs.readFileSync(
     path.join(appRoot, "src-tauri", "src", "runtime.rs"),
@@ -111,6 +172,11 @@ test("floating pet window preserves click stability, screenshot permission bubbl
   );
   assert.ok(petTs.includes("permission-choice"));
   assert.ok(petTs.includes("exit-confirm"));
+  assert.match(
+    petTs,
+    /api\.action\("drag-start", \{ screenX: event\.screenX, screenY: event\.screenY \}\)/
+  );
+  assert.match(petTs, /state = \{ \.\.\.state, \.\.\.\(snap as PetSnapshot\) \}/);
   assert.ok(petRs.includes("run_permission_bridge_session"));
   assert.ok(petRs.includes("sanitize_pet_state"));
 });

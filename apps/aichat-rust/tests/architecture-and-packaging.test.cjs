@@ -15,6 +15,10 @@ const cargoToml = fs.readFileSync(
   path.join(appRoot, "src-tauri", "Cargo.toml"),
   "utf8"
 );
+const cargoLock = fs.readFileSync(
+  path.join(appRoot, "src-tauri", "Cargo.lock"),
+  "utf8"
+);
 const capabilityConf = JSON.parse(
   fs.readFileSync(
     path.join(appRoot, "src-tauri", "capabilities", "default.json"),
@@ -54,12 +58,77 @@ test("does not depend on Electron and uses Tauri 2 + Rust architecture", () => {
   assert.match(cargoToml, /macos-private-api/);
 });
 
-test("versions across package.json, Cargo.toml, and tauri.conf.json are synchronized", () => {
+test("versions across package.json, Cargo.toml, Cargo.lock, and tauri.conf.json are synchronized", () => {
   assert.equal(pkg.version, tauriConf.version);
   assert.match(cargoToml, new RegExp(`version = "${pkg.version}"`));
+  assert.ok(
+    cargoLock.includes(`name = "aichat-rust"\nversion = "${pkg.version}"`),
+    "Cargo.lock must match the app version"
+  );
   assert.equal(tauriConf.identifier, "com.keepwork.aichat-desktop");
   assert.equal(tauriConf.productName, "Keepwork");
   assert.equal(tauriWinConf.productName, "KeepWork 第二大脑");
+});
+
+test("main window navigation accepts same-origin tool iframes", () => {
+  const lib = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    "utf8"
+  );
+  const security = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "security.rs"),
+    "utf8"
+  );
+  assert.match(lib, /\.on_navigation\(/);
+  assert.match(
+    lib,
+    /allowed_navigation\(url_str/,
+    "on_navigation must use allowed_navigation so /api/raw tool iframes stay in-app"
+  );
+  assert.match(security, /pub fn allowed_navigation\(/);
+  assert.match(security, /fn is_keepwork_cdn\(/);
+  assert.match(security, /cdn\.keepwork\.com/);
+  assert.match(
+    security,
+    /SENSITIVE_QUERY_KEYS/,
+    "external links carrying a token must never open in the system browser"
+  );
+});
+
+test("main window opens login providers as in-app popups and external links in browser", () => {
+  const lib = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    "utf8"
+  );
+  const security = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "security.rs"),
+    "utf8"
+  );
+  assert.match(lib, /\.on_new_window\(/);
+  assert.match(lib, /allowed_in_app_popup\(url/);
+  assert.match(lib, /NewWindowResponse::Deny/);
+  assert.match(security, /pub fn allowed_in_app_popup\(/);
+  assert.match(security, /fn is_login_iframe\(/);
+});
+
+test("MCP runtime bootstraps from bundle or launcher and follows published feed names", () => {
+  const lib = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    "utf8"
+  );
+  const runtime = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "runtime.rs"),
+    "utf8"
+  );
+  assert.match(runtime, /pub fn mcp_feed_platform\(/);
+  assert.match(lib, /mcp_feed_platform\(\)/);
+  assert.match(lib, /resolve_bundled_mcp_dir/);
+  assert.match(lib, /launcher_mcp_runtime/);
+  assert.match(
+    lib,
+    /ensure_started\(true\)/,
+    "start MCP before the webview's first health probe"
+  );
 });
 
 test("packaging scripts target macOS universal and Windows x64 + ARM64", () => {

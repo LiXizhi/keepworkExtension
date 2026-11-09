@@ -134,6 +134,7 @@ declare global {
       iconDataUrl: string;
       menus: Array<{ id: string; label: string }>;
       hostCommands: string[];
+      pageCommands?: string[];
     };
   }
 }

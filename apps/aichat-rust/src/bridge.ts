@@ -11,25 +11,45 @@ import type {
   UpdatesSnapshot,
 } from "./types";
 
+// 与 `apps/aichat-desktop` 的 `preload.cjs` / `menu.rs` 保持一致的无前缀 id。
 const ALLOWED_HOST_COMMANDS = new Set([
-  "file:open-folder",
-  "file:new-window",
-  "file:close-window",
-  "view:reload",
-  "view:force-reload",
-  "view:toggle-devtools",
-  "view:reset-zoom",
-  "view:zoom-in",
-  "view:zoom-out",
-  "view:toggle-fullscreen",
-  "view:toggle-source",
-  "view:toggle-pet",
-  "view:toggle-login-startup",
-  "help:mcp-dashboard",
-  "help:check-updates",
-  "help:restart-mcp",
-  "help:open-keepwork",
+  "open-folder",
+  "reload",
+  "check-updates",
+  "toggle-login",
+  "quit",
+  "undo",
+  "redo",
+  "cut",
+  "copy",
+  "paste",
+  "select-all",
+  "zoom-in",
+  "zoom-out",
+  "zoom-reset",
+  "fullscreen",
+  "mcp-status",
+  "mcp-dashboard",
+  "mcp-restart",
+  "open-browser",
+  "local-source",
+  "published-site",
+  "close-window",
+  "toggle-pet",
+  "open-keepwork",
 ]);
+
+/** 页面命令：由 AIChat 页面自行执行，桌面进程只投递。 */
+export const PAGE_COMMANDS = [
+  "new-chat",
+  "toggle-sidebar",
+  "toggle-files",
+  "open-settings",
+  "experience-simple",
+  "experience-professional",
+  "theme-light",
+  "theme-dark",
+] as const;
 
 export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
   if (window !== window.top) return null;

@@ -7,6 +7,10 @@
     "urls": [
       "https://keepwork.com/chat",
       "https://keepwork.com/chat/*",
+      "https://keepwork.com/chat*",
+      "https://keepwork.com/*",
+      "https://cdn.keepwork.com",
+      "https://cdn.keepwork.com/*",
       "http://127.0.0.1:*",
       "http://127.0.0.1:*/*",
       "http://localhost:*",
@@ -17,6 +21,7 @@
     "core:default",
     "core:window:allow-start-dragging",
     "core:event:default",
+    "allow-desktop-commands",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",

@@ -24,13 +24,13 @@ const detail = document.getElementById("detail");
 
 if (reloadBtn && bridge) {
   reloadBtn.addEventListener("click", () => {
-    void bridge.runMenuCommand("view:reload");
+    void bridge.runMenuCommand("reload");
   });
 }
 
 if (updatesBtn && bridge) {
   updatesBtn.addEventListener("click", () => {
-    void bridge.runMenuCommand("help:check-updates");
+    void bridge.runMenuCommand("check-updates");
   });
 }
 

@@ -131,8 +131,10 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   function positionLayers(): void {
     if (typeof state.petLeft !== "number" || typeof state.petTop !== "number") return;
     const petPixels = state.petPixels || 112;
-    $("pet").style.left = `${state.petLeft}px`;
-    $("pet").style.top = `${state.petTop}px`;
+    // Composite the moving sprite with a transform; changing left/top plus the
+    // drop-shadow filter on every pointermove leaves visible ghost trails in
+    // WKWebView.
+    $("pet").style.transform = `translate3d(${state.petLeft}px, ${state.petTop}px, 0)`;
     const stack = $("stack");
     const width = Math.min(348, window.innerWidth - 12);
     const above = Math.max(0, state.petTop - 12);
@@ -524,11 +526,12 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
   $("pet").addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
+    document.body.classList.add("dragging");
     pointer = {
       x: event.screenX,
       y: event.screenY,
       moved: false,
-      ready: api.action("drag-start"),
+      ready: api.action("drag-start", { screenX: event.screenX, screenY: event.screenY }),
     };
     $("pet").setPointerCapture(event.pointerId);
   });
@@ -539,9 +542,13 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       pointer.moved = true;
     }
     if (pointer.moved) {
-      void pointer.ready.then(() =>
-        api.action("drag", { screenX: event.screenX, screenY: event.screenY })
-      );
+      void pointer.ready
+        .then(() => api.action("drag", { screenX: event.screenX, screenY: event.screenY }))
+        .then((snap) => {
+          if (!snap || typeof snap !== "object") return;
+          state = { ...state, ...(snap as PetSnapshot) };
+          positionLayers();
+        });
     }
   });
 
@@ -550,6 +557,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   const release = async (event: PointerEvent): Promise<void> => {
     const current = pointer;
     pointer = null;
+    document.body.classList.remove("dragging");
     if (!current) return;
     releasedTap = !current.moved && event.type === "pointerup";
     if (!releasedTap) firstTap = false;

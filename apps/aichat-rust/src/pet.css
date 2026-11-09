@@ -5,8 +5,9 @@
 /* Same default 抱抱龙 and idle frame as AIChat, including before the first snapshot. */
 #art{background-image:url("https://cdn.keepwork.com/maisi/magichaqi/pet/dragon_green_20260528090748.webp");background-size:400% 400%;background-position:0% 0%}
 /* Native canvas is stable; only these DOM layers animate or change visibility. */
-#pet{width:var(--pet-pixels,112px);height:calc(var(--pet-pixels,112px) + 16px)}
+#pet{width:var(--pet-pixels,112px);height:calc(var(--pet-pixels,112px) + 16px);left:0;top:0;will-change:transform;backface-visibility:hidden}
 #art{width:var(--pet-pixels,112px);height:var(--pet-pixels,112px);transform-origin:50% 90%;will-change:transform}
+body.dragging #art{filter:none}
 #stack{bottom:calc(var(--pet-pixels,112px) + 28px);max-height:calc(100% - var(--pet-pixels,112px) - 34px)}
 #panel{animation:pet-composer-in 180ms ease-out;transform-origin:bottom right}
 @keyframes pet-composer-in{from{opacity:0;transform:translateY(7px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}

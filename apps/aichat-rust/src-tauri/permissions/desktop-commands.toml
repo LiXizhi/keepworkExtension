@@ -1,0 +1,28 @@
+[[permission]]
+identifier = "allow-desktop-commands"
+description = "Allows the trusted Keepwork main, pet and updates windows to use the desktop bridge commands."
+commands.allow = [
+  "desktop_report_startup_signin",
+  "desktop_publish_pet_state",
+  "desktop_pet_result",
+  "desktop_check_git",
+  "desktop_install_git",
+  "desktop_roots",
+  "desktop_pick_folder",
+  "desktop_default_brain_folder",
+  "desktop_revoke_folder",
+  "desktop_file",
+  "desktop_terminal",
+  "desktop_status",
+  "desktop_check_updates",
+  "desktop_install_update",
+  "desktop_run_menu_command",
+  "desktop_open_menu",
+  "desktop_titlebar_action",
+  "desktop_sync_theme",
+  "desktop_pet_action",
+  "updates_window_status",
+  "updates_window_check",
+  "updates_window_apply_mcp",
+  "updates_window_apply_desktop",
+]

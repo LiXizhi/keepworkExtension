@@ -25,14 +25,17 @@ use crate::dev_server::DevServer;
 use crate::files::{FolderGrant, NativeFiles};
 use crate::git_setup::{check_git, install_git, GitInstallResult, GitStatus};
 use crate::login_startup::{load_settings, save_settings, DesktopSettings, LoginStartup};
-use crate::menu::{is_allowed_host_command, menu_payload, MenuContextState};
+use crate::menu::{
+    canonical_host_command, is_allowed_host_command, is_allowed_page_command, menu_payload,
+    MenuContextState,
+};
 use crate::permissions::MediaGrants;
 use crate::pet::{PetController, WorkArea};
 use crate::runtime::{
-    current_runtime_arch, current_runtime_platform, RuntimeConfig, RuntimeStatusSnapshot,
-    RuntimeSupervisor, DEFAULT_MCP_FEED_BASE, LOCAL_MODEL_PORT, MCP_PORT,
+    current_runtime_arch, current_runtime_platform, mcp_feed_platform, RuntimeConfig,
+    RuntimeStatusSnapshot, RuntimeSupervisor, DEFAULT_MCP_FEED_BASE, LOCAL_MODEL_PORT, MCP_PORT,
 };
-use crate::security::{assert_sender, external_url, trusted_page, ENTRY};
+use crate::security::{allowed_in_app_popup, allowed_navigation, assert_sender, external_url, ENTRY};
 use crate::terminal::TerminalSessionManager;
 use crate::tray_channels::{channel_states, describe, fetch_tray_channels, ChannelStatus};
 use crate::updates::{default_desktop_feed_url, UpdateManager, UpdatesSnapshot};
@@ -49,6 +52,7 @@ use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    webview::NewWindowResponse,
 };
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -81,6 +85,8 @@ pub struct AppCore {
     pub dev_server: Mutex<Option<DevServer>>,
     pub entry_url: Mutex<String>,
     pub local_source_enabled: AtomicBool,
+    /// 当前 WebView 缩放比例（Tauri 2.12 没有 zoom 读取接口，需要自己记账）。
+    pub zoom: Mutex<f64>,
     pub signed_in: AtomicBool,
     pub quitting: AtomicBool,
     pub channels: Mutex<Vec<ChannelStatus>>,
@@ -288,17 +294,32 @@ pub fn show_main_window(app: &AppHandle, core: &AppCore) {
     let _ = core;
 }
 
-pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
-    if let Some(existing) = app.get_webview_window("pet") {
-        if show_now {
-            let _ = existing.show();
+fn pet_work_area(app: &AppHandle) -> WorkArea {
+    let monitors = app.available_monitors().unwrap_or_default();
+    if !monitors.is_empty() {
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        for monitor in monitors {
+            let scale = monitor.scale_factor();
+            let pos = monitor.position().to_logical::<i32>(scale);
+            let size = monitor.size().to_logical::<i32>(scale);
+            min_x = min_x.min(pos.x);
+            min_y = min_y.min(pos.y);
+            max_x = max_x.max(pos.x + size.width);
+            max_y = max_y.max(pos.y + size.height);
         }
-        broadcast_pet_state(app, core);
-        return;
+        if max_x > min_x && max_y > min_y {
+            return WorkArea {
+                x: min_x,
+                y: min_y,
+                width: max_x - min_x,
+                height: max_y - min_y,
+            };
+        }
     }
-
-    let area = app
-        .primary_monitor()
+    app.primary_monitor()
         .ok()
         .flatten()
         .map(|m| {
@@ -312,8 +333,23 @@ pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
                 height: size.height,
             }
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
+    let area = pet_work_area(app);
     core.pet.set_work_area(area);
+    if let Some(existing) = app.get_webview_window("pet") {
+        // Keep the transparent canvas on the union of all displays so the pet
+        // can cross screen boundaries after a display was added or moved.
+        let _ = existing.set_position(tauri::LogicalPosition::new(area.x as f64, area.y as f64));
+        let _ = existing.set_size(tauri::LogicalSize::new(area.width as f64, area.height as f64));
+        if show_now {
+            let _ = existing.show();
+        }
+        broadcast_pet_state(app, core);
+        return;
+    }
 
     if let Ok(builder) = WebviewWindowBuilder::new(app, "pet", WebviewUrl::App("pet.html".into()))
         .title("桌面宠物")
@@ -582,6 +618,12 @@ async fn desktop_run_menu_command(
     id: String,
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state)?;
+    // 页面动作（含旧 id 别名映射到的新页面 id）只投递给 AIChat 页面。
+    let canonical = canonical_host_command(&id).unwrap_or(id.as_str()).to_string();
+    if is_allowed_page_command(&id) || is_allowed_page_command(&canonical) {
+        broadcast_to_main(&app, "menu-message", &json!({ "type": "command", "id": canonical }));
+        return Ok(true);
+    }
     if !is_allowed_host_command(&id) {
         return Err(format!("Unsupported menu command: {id}"));
     }
@@ -600,16 +642,36 @@ fn desktop_open_menu(
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state)?;
     let settings = state.settings();
+    let mcp = state.mcp_supervisor.snapshot();
+    let updates = state.updates.snapshot(&mcp);
+    let entry_url = state
+        .entry_url
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| ENTRY.to_string());
+    let update_label = if !mcp.pending_version.trim().is_empty() {
+        "MCP 更新将在退出并重新打开后生效".to_string()
+    } else {
+        format!("桌面更新：{}", updates.desktop.state)
+    };
     let ctx = MenuContextState {
         local_source_available: resolve_local_aichat_source_dir().is_some(),
         local_source_enabled: state.local_source_enabled.load(Ordering::Relaxed),
         pet_visible: settings.pet_visible,
         open_at_login: state.login_startup.is_enabled(),
-        mcp_version: state.mcp_supervisor.snapshot().version,
+        mcp_state: mcp.state,
+        mcp_owner: mcp.owner,
+        mcp_error: mcp.error,
+        mcp_version: mcp.version,
         desktop_version: APP_VERSION.to_string(),
+        entry_url,
+        update_label,
+        update_error: updates.desktop.error,
     };
     if let Some(mut payload) = menu_payload(&menu_id, &ctx) {
         payload["anchor"] = json!({ "left": left, "bottom": bottom });
+        payload["x"] = json!(left);
+        payload["y"] = json!(bottom);
         broadcast_to_main(&app, "menu-message", &payload);
     }
     Ok(true)
@@ -838,13 +900,221 @@ async fn updates_window_apply_desktop(
     Ok(state.updates.snapshot(&state.mcp_supervisor.snapshot()))
 }
 
+/// 退出桌面端：关闭原生终端、停止两个受管 Runtime 后退出进程
+/// （托盘「完全退出」与菜单「退出」共用）。
+fn quit_desktop(app: &AppHandle, core: &Arc<AppCore>) {
+    core.quitting.store(true, Ordering::Relaxed);
+    core.terminals.close_all();
+    core.mcp_supervisor.stop();
+    core.local_model_supervisor.stop();
+    app.exit(0);
+}
+
+fn current_entry_url(core: &Arc<AppCore>) -> String {
+    core.entry_url
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| ENTRY.to_string())
+}
+
+fn reload_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.eval("window.location.reload()");
+    }
+}
+
+fn navigate_main_window(app: &AppHandle, url: &str) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.eval(&format!("window.location.replace({})", json!(url)));
+    }
+}
+
+/// 按比例步进缩放（Tauri 2.12 无 zoom 读取接口，用 `AppCore::zoom` 记账）。
+fn step_zoom(app: &AppHandle, core: &Arc<AppCore>, factor: f64) -> Result<(), String> {
+    let Some(win) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let mut guard = core
+        .zoom
+        .lock()
+        .map_err(|_| "Zoom state is unavailable".to_string())?;
+    let next = (*guard * factor).clamp(0.5, 3.0);
+    *guard = next;
+    win.set_zoom(next).map_err(|e| e.to_string())
+}
+
+fn reset_zoom(app: &AppHandle, core: &Arc<AppCore>) -> Result<(), String> {
+    if let Ok(mut guard) = core.zoom.lock() {
+        *guard = 1.0;
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        win.set_zoom(1.0).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 启动本地 AIChat 源码服务器（需要目录内存在 `AIChat.html`）。取消选择不改状态。
+fn start_local_source(app: &AppHandle, core: &Arc<AppCore>) -> Result<(), String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    let picked = app.dialog().file().blocking_pick_folder();
+    let Some(folder) = picked else {
+        return Ok(());
+    };
+    let src_dir = folder.into_path().map_err(|e| e.to_string())?;
+    if !src_dir.join("AIChat.html").is_file() {
+        app.dialog()
+            .message(format!(
+                "所选文件夹不包含 AIChat.html：{}",
+                src_dir.display()
+            ))
+            .title("无法使用本地源码服务器")
+            .kind(MessageDialogKind::Warning)
+            .blocking_show();
+        return Err(format!(
+            "Missing AIChat entry file: {}",
+            src_dir.join("AIChat.html").display()
+        ));
+    }
+    let srv = DevServer::start(&src_dir, "AIChat.html")?;
+    let url = srv.url();
+    if let Ok(mut guard) = core.dev_server.lock() {
+        if let Some(mut previous) = guard.take() {
+            previous.stop();
+        }
+        *guard = Some(srv);
+    }
+    if let Ok(mut entry) = core.entry_url.lock() {
+        *entry = url.clone();
+    }
+    core.local_source_enabled.store(true, Ordering::Relaxed);
+    navigate_main_window(app, &url);
+    Ok(())
+}
+
+/// 切回线上入口：关闭本地 dev server 并重新加载主窗口。
+fn use_published_site(app: &AppHandle, core: &Arc<AppCore>) {
+    if let Ok(mut guard) = core.dev_server.lock() {
+        if let Some(mut previous) = guard.take() {
+            previous.stop();
+        }
+    }
+    if let Ok(mut entry) = core.entry_url.lock() {
+        *entry = ENTRY.to_string();
+    }
+    core.local_source_enabled.store(false, Ordering::Relaxed);
+    navigate_main_window(app, ENTRY);
+}
+
+/// 读取本机 MCP `/admin/status`（2 秒超时）；服务未运行时返回 None。
+async fn fetch_mcp_admin_status() -> Option<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok()?;
+    let resp = client
+        .get(format!("http://127.0.0.1:{MCP_PORT}/admin/status"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<Value>().await.ok()
+}
+
+fn json_text(value: &Value, key: &str) -> Option<String> {
+    match value.get(key)? {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// 「查看状态…」：优先展示本机 `/admin/status` 实时信息，失败时回退到 supervisor 快照。
+async fn show_mcp_status(app: &AppHandle, core: &Arc<AppCore>) -> Result<(), String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let snap = core.mcp_supervisor.snapshot();
+    let live = fetch_mcp_admin_status().await;
+
+    let mut state = snap.state.clone();
+    let mut owner = snap.owner.clone();
+    let mut version = snap.version.clone();
+    let mut pid = snap.pid.to_string();
+    let mut port = snap.port.to_string();
+    let mut workspace = String::new();
+    let error = snap.error.clone();
+    if let Some(live) = live.as_ref() {
+        if let Some(v) = json_text(live, "version") {
+            version = v;
+        }
+        if let Some(v) = json_text(live, "pid") {
+            pid = v;
+        }
+        if let Some(v) = json_text(live, "port") {
+            port = v;
+        }
+        if let Some(v) = json_text(live, "workspaceRoot") {
+            workspace = v;
+        }
+        if let Some(v) = json_text(live, "hostKind") {
+            owner = v;
+        }
+        if state.trim().is_empty() || state == "stopped" {
+            state = "running".to_string();
+        }
+    }
+
+    let mut lines = vec![
+        format!("状态：{state}"),
+        format!("管理者：{owner}"),
+        format!("版本：{version}"),
+        format!("PID：{pid}"),
+        format!("端口：{port}"),
+    ];
+    if !workspace.trim().is_empty() {
+        lines.push(format!("工作目录：{workspace}"));
+    }
+    if !error.trim().is_empty() {
+        lines.push(format!("错误：{}", clip_text(&error, 200)));
+    }
+    if live.is_none() && state != "running" {
+        lines.push("提示：本机 MCP 服务未运行。".to_string());
+    }
+
+    let open_dashboard = app
+        .dialog()
+        .message(lines.join("\n"))
+        .title("Keepwork MCP 状态")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "打开 Dashboard".to_string(),
+            "关闭".to_string(),
+        ))
+        .blocking_show();
+    if open_dashboard {
+        open_in_system_browser(&format!("http://127.0.0.1:{MCP_PORT}/dashboard"))?;
+    }
+    Ok(())
+}
+
+fn clip_text(raw: &str, max_chars: usize) -> String {
+    raw.trim().chars().take(max_chars).collect()
+}
+
+/// 执行主机命令。`id` 允许是旧 id（会先规范化为新 id）。
 pub async fn execute_host_command(
     app: &AppHandle,
     core: &Arc<AppCore>,
     id: &str,
 ) -> Result<(), String> {
+    let id = canonical_host_command(id).unwrap_or(id);
+    // 原生菜单/托盘也可能投递页面命令，这里统一转发给 AIChat 页面。
+    if is_allowed_page_command(id) {
+        broadcast_to_main(app, "menu-message", &json!({ "type": "command", "id": id }));
+        return Ok(());
+    }
     match id {
-        "file:open-folder" => {
+        "open-folder" => {
             use tauri_plugin_dialog::DialogExt;
             if let Some(folder) = app.dialog().file().blocking_pick_folder() {
                 if let Ok(path) = folder.into_path() {
@@ -853,7 +1123,7 @@ pub async fn execute_host_command(
                 }
             }
         }
-        "file:close-window" => {
+        "close-window" => {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.hide();
                 if core.settings().pet_visible {
@@ -861,18 +1131,17 @@ pub async fn execute_host_command(
                 }
             }
         }
-        "view:reload" | "view:force-reload" => {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.eval("window.location.reload()");
-            }
-        }
-        "view:toggle-fullscreen" => {
+        "reload" => reload_main_window(app),
+        "fullscreen" => {
             if let Some(win) = app.get_webview_window("main") {
                 let cur = win.is_fullscreen().unwrap_or(false);
                 let _ = win.set_fullscreen(!cur);
             }
         }
-        "view:toggle-pet" => {
+        "zoom-in" => step_zoom(app, core, 1.1)?,
+        "zoom-out" => step_zoom(app, core, 1.0 / 1.1)?,
+        "zoom-reset" => reset_zoom(app, core)?,
+        "toggle-pet" => {
             let next = core.update_settings(|s| {
                 s.pet_visible = !s.pet_visible;
             });
@@ -892,48 +1161,26 @@ pub async fn execute_host_command(
                 }
             }
         }
-        "view:toggle-login-startup" => {
+        "toggle-login" => {
             let cur = core.login_startup.is_enabled();
             let _ = core.login_startup.set_enabled(!cur);
         }
-        "view:toggle-source" => {
-            let enable = !core.local_source_enabled.load(Ordering::Relaxed);
-            if enable {
-                if let Some(src_dir) = resolve_local_aichat_source_dir() {
-                    let srv = DevServer::start(&src_dir, "AIChat.html")?;
-                    let url = srv.url();
-                    if let Ok(mut guard) = core.dev_server.lock() {
-                        *guard = Some(srv);
-                    }
-                    if let Ok(mut entry) = core.entry_url.lock() {
-                        *entry = url.clone();
-                    }
-                    core.local_source_enabled.store(true, Ordering::Relaxed);
-                    if let Some(win) = app.get_webview_window("main") {
-                        let _ = win.eval(&format!("window.location.replace({})", json!(url)));
-                    }
-                }
-            } else {
-                if let Ok(mut guard) = core.dev_server.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut entry) = core.entry_url.lock() {
-                    *entry = ENTRY.to_string();
-                }
-                core.local_source_enabled.store(false, Ordering::Relaxed);
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.eval(&format!("window.location.replace({})", json!(ENTRY)));
-                }
-            }
-        }
-        "help:mcp-dashboard" => {
+        "local-source" => start_local_source(app, core)?,
+        "published-site" => use_published_site(app, core),
+        "quit" => quit_desktop(app, core),
+        "mcp-dashboard" => {
             open_in_system_browser(&format!("http://127.0.0.1:{MCP_PORT}/dashboard"))?;
         }
-        "help:restart-mcp" => {
+        "mcp-restart" => {
             let _ = core.mcp_supervisor.restart().await?;
             broadcast_update_status(app, core);
         }
-        "help:check-updates" => {
+        "mcp-status" => show_mcp_status(app, core).await?,
+        "open-browser" => {
+            let target = current_entry_url(core);
+            open_in_system_browser(&target)?;
+        }
+        "check-updates" => {
             open_updates_window(app, core);
             let app_clone = app.clone();
             let core_clone = Arc::clone(core);
@@ -942,22 +1189,39 @@ pub async fn execute_host_command(
                 broadcast_update_status(&app_clone, &core_clone);
             });
         }
-        "help:open-keepwork" => {
+        "open-keepwork" => {
             open_in_system_browser("https://keepwork.com")?;
         }
-        _ => {
-            broadcast_to_main(
-                app,
-                "menu-message",
-                &json!({ "type": "command", "id": id }),
-            );
+        // 编辑区动作：在受信任主框架里执行浏览器内置编辑命令（不拼接外部输入）。
+        "undo" | "redo" | "cut" | "copy" | "paste" | "select-all" => {
+            let Some(win) = app.get_webview_window("main") else {
+                return Ok(());
+            };
+            let script = match id {
+                "undo" => "document.execCommand('undo')",
+                "redo" => "document.execCommand('redo')",
+                "cut" => "document.execCommand('cut')",
+                "copy" => "document.execCommand('copy')",
+                "paste" => "document.execCommand('paste')",
+                _ => "document.execCommand('selectAll')",
+            };
+            // `paste` 常因系统剪贴板权限失败，静默忽略，避免弹出无意义错误。
+            if id == "paste" {
+                let _ = win.eval(script);
+            } else {
+                win.eval(script).map_err(|e| e.to_string())?;
+            }
         }
+        other => return Err(format!("Unsupported menu command: {other}")),
     }
     Ok(())
 }
 
 fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Result<()> {
     let open_chat = MenuItem::with_id(app, "tray:open-chat", "打开聊天", true, None::<&str>)?;
+    // 页面命令也可以从原生托盘投递（`execute_host_command` 会转发给 AIChat 页面）。
+    let new_chat = MenuItem::with_id(app, "new-chat", "新建对话", true, None::<&str>)?;
+    let open_settings = MenuItem::with_id(app, "open-settings", "设置", true, None::<&str>)?;
     let open_folder =
         MenuItem::with_id(app, "file:open-folder", "打开文件夹…", true, Some("CmdOrCtrl+O"))?;
     let toggle_pet = CheckMenuItem::with_id(
@@ -996,21 +1260,23 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
 
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let sep3 = PredefinedMenuItem::separator(app)?;
+    let sep4 = PredefinedMenuItem::separator(app)?;
 
     let tray_menu = Menu::with_items(
         app,
         &[
             &open_chat,
-            &sep1,
+            &new_chat,
+            &open_settings,
+            &sep4,
             &open_folder,
             &toggle_pet,
             &toggle_startup,
-            &sep2,
+            &sep1,
             &mcp_dashboard,
             &restart_mcp,
             &check_updates,
-            &sep3,
+            &sep2,
             &quit_item,
         ],
     )?;
@@ -1078,7 +1344,10 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
             "文件",
             true,
             &[
+                &MenuItem::with_id(app, "new-chat", "新建对话", true, Some("CmdOrCtrl+N"))?,
                 &mac_open_folder,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "reload", "重新加载", true, Some("CmdOrCtrl+R"))?,
                 &PredefinedMenuItem::separator(app)?,
                 &MenuItem::with_id(
                     app,
@@ -1110,6 +1379,16 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
             &[
                 &MenuItem::with_id(app, "view:reload", "重新加载", true, Some("CmdOrCtrl+R"))?,
                 &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "zoom-in", "放大", true, Some("CmdOrCtrl+="))?,
+                &MenuItem::with_id(app, "zoom-out", "缩小", true, Some("CmdOrCtrl+-"))?,
+                &MenuItem::with_id(app, "zoom-reset", "实际大小", true, Some("CmdOrCtrl+0"))?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "fullscreen", "全屏", true, Some("F11"))?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "open-settings", "设置", true, None::<&str>)?,
+                &MenuItem::with_id(app, "toggle-sidebar", "历史侧栏", true, None::<&str>)?,
+                &MenuItem::with_id(app, "toggle-files", "文件面板", true, None::<&str>)?,
+                &PredefinedMenuItem::separator(app)?,
                 &mac_toggle_pet,
                 &mac_toggle_startup,
             ],
@@ -1140,11 +1419,7 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
                 return;
             }
             if id == "tray:quit" {
-                core_for_menu.quitting.store(true, Ordering::Relaxed);
-                core_for_menu.terminals.close_all();
-                core_for_menu.mcp_supervisor.stop();
-                core_for_menu.local_model_supervisor.stop();
-                app_handle.exit(0);
+                quit_desktop(app_handle, &core_for_menu);
                 return;
             }
             let app_clone = app_handle.clone();
@@ -1156,6 +1431,53 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
         .build(app)?;
 
     Ok(())
+}
+
+fn valid_mcp_runtime(dir: &Path, product: &str) -> bool {
+    crate::runtime::validate_runtime_dir(dir, product).is_ok()
+}
+
+/// Reuse the MCP runtime installed by DesktopLauncher when the app bundle does
+/// not carry one (A+C bootstrap: bundled > launcher > CDN).
+fn launcher_mcp_runtime(product: &str) -> Option<PathBuf> {
+    let releases = dirs::data_local_dir()?
+        .join("Keepwork")
+        .join("DesktopLauncher")
+        .join("releases");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(releases).ok()? {
+        let Ok(entry) = entry else { continue };
+        let dir = entry.path().join("mcp");
+        if !valid_mcp_runtime(&dir, product) {
+            continue;
+        }
+        let modified = std::fs::metadata(dir.join("runtime.json"))
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().map_or(true, |(time, _)| modified > *time) {
+            best = Some((modified, dir));
+        }
+    }
+    best.map(|(_, dir)| dir)
+}
+
+fn resolve_bundled_mcp_dir(resource_base: &Path, product: &str) -> PathBuf {
+    let candidates = [
+        resource_base.join("..").join("Resources").join("mcp-runtime"),
+        resource_base
+            .join("..")
+            .join("Resources")
+            .join("resources")
+            .join("mcp-runtime"),
+        resource_base.join("resources").join("mcp-runtime"),
+    ];
+    for dir in candidates {
+        if valid_mcp_runtime(&dir, product) {
+            return dir;
+        }
+    }
+    launcher_mcp_runtime(product)
+        .unwrap_or_else(|| resource_base.join("resources").join("mcp-runtime"))
 }
 
 pub fn run() {
@@ -1193,7 +1515,7 @@ pub fn run() {
 
     let bundled_mcp_dir = std::env::var("AICHAT_MCP_BUNDLED_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| resource_base.join("resources").join("mcp-runtime"));
+        .unwrap_or_else(|_| resolve_bundled_mcp_dir(&resource_base, "keepwork-mcp-node-runtime"));
     let bundled_local_model_dir = std::env::var("AICHAT_LOCAL_MODEL_BUNDLED_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| resource_base.join("resources").join("local-model-runtime"));
@@ -1201,7 +1523,7 @@ pub fn run() {
     let mcp_feed_url = std::env::var("AICHAT_MCP_FEED_URL").unwrap_or_else(|_| {
         format!(
             "{DEFAULT_MCP_FEED_BASE}/{}-{}.json",
-            current_runtime_platform(),
+            mcp_feed_platform(),
             current_runtime_arch()
         )
     });
@@ -1285,6 +1607,7 @@ pub fn run() {
         dev_server: Mutex::new(initial_dev_srv),
         entry_url: Mutex::new(initial_entry),
         local_source_enabled: AtomicBool::new(initial_local_source),
+        zoom: Mutex::new(1.0),
         signed_in: AtomicBool::new(true),
         quitting: AtomicBool::new(false),
         channels: Mutex::new(channel_states(&Value::Null)),
@@ -1335,6 +1658,14 @@ pub fn run() {
                 Err(_) => {}
             }
 
+            // Bring the MCP daemon up before the webview's first /health probe.
+            // A missing runtime fails fast; the update checker stages one for
+            // the next launch. Runs after the single-instance lock so a second
+            // launch does not start a daemon before exiting.
+            let _ = tauri::async_runtime::block_on(
+                core_for_setup.mcp_supervisor.ensure_started(true),
+            );
+
             let _ = setup_native_menu_and_tray(&app_handle, &core_for_setup);
 
             // Configure main window navigation guard, close-to-tray, and initialization script
@@ -1345,6 +1676,7 @@ pub fn run() {
                 .unwrap_or_else(|_| ENTRY.to_string());
 
             let core_for_nav = Arc::clone(&core_for_setup);
+            let core_for_popup = Arc::clone(&core_for_setup);
             let parsed_entry: tauri::Url = entry_target
                 .parse()
                 .unwrap_or_else(|_| ENTRY.parse().unwrap());
@@ -1362,7 +1694,7 @@ pub fn run() {
             .on_navigation(move |nav_url| {
                 let dev_url = core_for_nav.current_dev_url();
                 let url_str = nav_url.as_str();
-                if trusted_page(url_str, dev_url.as_deref()) {
+                if allowed_navigation(url_str, dev_url.as_deref()) {
                     // Close active PTY sessions & reset pet state on cross-page top navigation
                     core_for_nav.terminals.close_all();
                     core_for_nav.pet.reset_state();
@@ -1370,6 +1702,17 @@ pub fn run() {
                 }
                 let _ = open_in_system_browser(url_str);
                 false
+            })
+            .on_new_window(move |url, _features| {
+                let dev_url = core_for_popup.current_dev_url();
+                if allowed_in_app_popup(url.as_str(), dev_url.as_deref()) {
+                    // Login popups (Google / Feishu / DingTalk) need window.opener
+                    // and the /sso callback to complete inside the app.
+                    NewWindowResponse::Allow
+                } else {
+                    let _ = open_in_system_browser(url.as_str());
+                    NewWindowResponse::Deny
+                }
             });
 
             #[cfg(target_os = "macos")]
