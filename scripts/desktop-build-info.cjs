@@ -9,7 +9,12 @@ function writeBuildInfo(dir, { runId, commit, target, version }) {
   for (const name of fs.readdirSync(dir).sort()) {
     if (/\.(exe|dmg|zip|blockmap|yml)$/.test(name)) files[name] = crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, name))).digest('hex');
   }
-  fs.writeFileSync(path.join(dir, 'publisher-build.json'), JSON.stringify({ runId, commit, target, version, files }, null, 2) + '\n');
+  const securityFile = path.join(dir, 'installation-security.json');
+  const installationSecurity = fs.existsSync(securityFile) ? JSON.parse(fs.readFileSync(securityFile, 'utf8').replace(/^\uFEFF/, '')) : {
+    macSigning: target.startsWith('darwin') ? (process.env.KP_MAC_RELEASE_SIGNED === 'true' ? 'developer-id-notarized' : 'ad-hoc') : undefined,
+    cleanMachineAcceptance: 'pending',
+  };
+  fs.writeFileSync(path.join(dir, 'publisher-build.json'), JSON.stringify({ runId, commit, target, version, files, installationSecurity }, null, 2) + '\n');
 }
 if (require.main === module) writeBuildInfo(path.resolve('apps/aichat-desktop/release'), {
   runId: process.env.KP_PUBLISHER_ID || '', commit: process.env.GITHUB_SHA,

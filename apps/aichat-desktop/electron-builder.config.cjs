@@ -7,6 +7,7 @@ const modelRuntime = process.env.KP_LOCAL_MODEL_RUNTIME_DIR;
 const updateTarget = process.env.AICHAT_DESKTOP_TARGET || `${process.platform}-${process.arch}`;
 module.exports = {
   appId: 'com.keepwork.aichat-desktop', productName: 'KeepWork 第二大脑',
+  protocols: [{ name: 'KeepWork 第二大脑', schemes: ['keepwork-secondbrain'] }],
   icon: 'assets/keepwork.png', directories: { output: 'release' }, files: ['dist/**/*', 'package.json'],
   // node-pty 1.1 ships Node-API prebuilds; validate them inside Electron instead
   // of requiring every installer builder to compile a second copy with MSVC.
@@ -31,8 +32,10 @@ module.exports = {
   },
   afterPack: path.join(__dirname, 'scripts/after-pack.cjs'),
   win: { target: [{ target: 'nsis', arch: ['x64'] }, { target: 'zip', arch: ['x64'] }], artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', verifyUpdateCodeSignature: true },
-  nsis: { oneClick: false, perMachine: false, allowElevation: false, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
-  mac: { icon: 'assets/keepwork-mac.png', target: ['zip'], category: 'public.app-category.productivity',
+  nsis: { oneClick: true, runAfterFinish: true, perMachine: false, allowElevation: false, createDesktopShortcut: true, deleteAppDataOnUninstall: false },
+  // Keep DMG out of updater metadata: CI notarizes/staples it before provenance hashes.
+  dmg: { sign: true, writeUpdateInfo: false },
+  mac: { icon: 'assets/keepwork-mac.png', target: ['dmg', 'zip'], category: 'public.app-category.productivity',
     identity: process.env.CSC_NAME === '-' ? '-' : undefined, hardenedRuntime: true,
     entitlements: 'assets/entitlements.mac.plist', entitlementsInherit: 'assets/entitlements.mac.plist',
     artifactName: 'KeepWork-SecondBrain-${version}-${arch}.${ext}', extendInfo: { CFBundleDisplayName: 'Keepwork', NSMicrophoneUsageDescription: 'AIChat uses the microphone for voice conversations.', NSCameraUsageDescription: 'AIChat uses the camera when you start a video conversation.' } },
