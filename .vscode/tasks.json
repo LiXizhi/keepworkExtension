@@ -105,7 +105,7 @@
     },
     {
       "label": "keepwork Desktop: Start",
-      "detail": "Sync AIChat runtime, rebuild MCP and Desktop, then restart MCP using the fresh local bundle.",
+      "detail": "Restart the previous task, rebuild Desktop and MCP, and launch the fresh local bundle.",
       "type": "shell",
       "command": "npm",
       "args": [
@@ -114,9 +114,11 @@
       "options": {
         "cwd": "${workspaceFolder}/apps/aichat-desktop",
         "env": {
-          "AICHAT_DESKTOP_LOCAL_SOURCE": "1"
+          "AICHAT_DESKTOP_LOCAL_SOURCE": "1",
+          "AICHAT_DESKTOP_REPLACE": "1"
         }
       },
+      "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" },
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",

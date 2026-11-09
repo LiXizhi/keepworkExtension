@@ -443,7 +443,7 @@ function menu() {
     { label: '显示桌面宠物', type: 'checkbox', checked: settings.petVisible, click: (item: any) => {
       settings.petVisible = item.checked; atomicJson(settingsFile, settings);
       if (!item.checked) floatingPet?.hide(true);
-      else if (liveWindow()) floatingPet?.show();
+      else if (liveWindow()) floatingPet?.show({ onCursorDisplay: true });
       else if (!liveWindow() && !opening) opening = openWindow(true).finally(() => { opening = null; });
       menu();
     } },
@@ -653,13 +653,10 @@ function openWindow(startHidden = false, checkStartupSignIn = false) {
     }
   });
 }
-if (!app.requestSingleInstanceLock()) {
-  if (!production && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
-    console.error('Quit the existing Desktop app from its tray menu before starting the development task.');
-    app.exit(1);
-  } else app.quit();
-}
-else {
+const isolatedTest = process.env.AICHAT_DESKTOP_TEST_PROFILE === '1' && app.commandLine.hasSwitch('user-data-dir');
+if (!require('./desktopLock.cjs').acquireDesktopLock(app, isolatedTest)) {
+  app.exit(process.env.AICHAT_DESKTOP_REPLACE === '1' && !production ? 1 : 0);
+} else {
   let readyForWindows = false, requestedWindow = false;
   function requestWindow() {
     if (readyForWindows) show();

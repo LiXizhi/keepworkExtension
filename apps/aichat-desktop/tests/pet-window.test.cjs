@@ -19,7 +19,11 @@ function fixture() {
       this.webContents.mainFrame = {}; this.webContents.setWindowOpenHandler = () => {};
       this.webContents.send = (_, state) => { this.state = state; }; windows.push(this); }
     isDestroyed() { return !!this.destroyed; } setMenu() {} setBounds(value) { this.bounds = value; this.resizes = (this.resizes || 0) + 1; } getBounds() { return this.bounds; }
-    showInactive() { this.shown = true; } hide() { this.shown = false; } destroy() { this.destroyed = true; this.emit('closed'); }
+    setAlwaysOnTop(flag, level) { this.level = flag && level; }
+    moveTop() { this.covered = false; }
+    isVisible() { return this.shown; }
+    showInactive() { if (!this.shown) { this.shown = true; this.emit('show'); } }
+    hide() { this.shown = false; this.emit('hide'); } destroy() { this.destroyed = true; this.emit('closed'); }
     isFocusable() { return this.focusable !== false; }
     setFocusable(value) { this.focusable = value; }
     setIgnoreMouseEvents(value) { this.ignored = value; }
@@ -46,6 +50,26 @@ test('pet window remains single-instance, transparent/topmost and restores after
   h.pet.show(); assert.equal(w.state.expanded, false); assert.equal(h.commands.length, 1);
   await h.invoke('open'); assert.equal(h.opened(), 1); assert.equal(w.shown, false);
   h.pet.dispose(); assert.equal(w.destroyed, true);
+});
+test('a fullscreen window covering a visible Windows pet is overtaken without focusing it', { skip: process.platform !== 'win32' }, t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const h = fixture(); h.pet.show();
+  const w = h.windows[0];
+  assert.equal(w.level, 'screen-saver');
+  w.covered = true; t.mock.timers.tick(2000); assert.equal(w.covered, false);
+  h.pet.hide(); w.covered = true; t.mock.timers.tick(2000); assert.equal(w.covered, true);
+  h.pet.show(); assert.equal(w.covered, false);
+  h.pet.dispose();
+});
+test('explicit tray recovery brings a pet on the projector back to the tray display', () => {
+  const h = fixture();
+  const primary = h.screen.getPrimaryDisplay();
+  const projector = { workArea: { ...primary.workArea, x: 1200 } };
+  h.screen.getDisplayNearestPoint = point => point.x >= 1200 ? projector : primary;
+  h.pet.show(); const w = h.windows[0]; assert.equal(w.bounds.x, 1200);
+  h.pet.hide(); h.pet.show({ onCursorDisplay: true }); assert.equal(w.bounds.x, 0);
+  assert.ok(h.saved.at(-1).x < 1200);
+  h.pet.dispose();
 });
 test('pet IPC rejects foreign frames, stale owners and arbitrary native operations', async () => {
   const h = fixture(); h.pet.show(); h.pet.update({ version: 1, context: 'chat-1', ready: true });

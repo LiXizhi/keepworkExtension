@@ -38,7 +38,10 @@ test('pet uses the default dragon before state, on missing artwork and after res
   publish({version:1, context:'legacy'});
   assert.equal(element('compact-controls').hidden,true);
   publish({ version: 1, context: 'persona', target: 'persona', canSwitchTarget: true, title: '我的分身', folder: '/Users/me/brain/' });
-  assert.match(element('target-title').textContent, /分身 · 我的分身/);
+  assert.equal(element('target-title').textContent, '我的分身 ⇄');
+  publish({ version: 1, context: 'persona', target: 'persona', canSwitchTarget: true, title: '小林的分身', folder: '/Users/me/brain/' });
+  assert.equal(element('target-title').textContent, '小林的分身 ⇄');
+  assert.match(read('pet.html'), /<button id="open" aria-label="打开桌面" title="打开桌面"><span aria-hidden="true">□<\/span><\/button>/);
   assert.equal(element('target-detail').textContent, 'brain');
   assert.equal(element('target').disabled, false);
   publish({ version: 1, context: 'chat', target: 'chat', canSwitchTarget: true, title: 'Fix issue', skill: 'Reviewer', folder: '/Users/me/project' });

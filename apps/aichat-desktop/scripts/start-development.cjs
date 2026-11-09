@@ -7,8 +7,13 @@ function buildDevelopment(exec = execFileSync) {
   exec(process.execPath, [path.resolve(root, '../mcp-runtime/scripts/build.mjs'), '--development'], { cwd: root, stdio: 'inherit' });
   exec(process.execPath, [path.join(__dirname, 'build.mjs')], { cwd: root, stdio: 'inherit' });
 }
-function main() {
+async function main() {
   buildDevelopment();
+  if (process.env.AICHAT_DESKTOP_REPLACE === '1') {
+    const appData = process.platform === 'win32' ? process.env.APPDATA
+      : path.join(require('node:os').homedir(), 'Library/Application Support');
+    await require('./stop-desktop.cjs').stopDesktop(appData);
+  }
   const child = spawn(process.execPath, [path.join(__dirname, 'dev-electron.cjs')], {
     cwd: root, stdio: 'inherit', env: { ...process.env, AICHAT_DESKTOP_FRESH_MCP_NODE: process.execPath },
   });
@@ -18,5 +23,5 @@ function main() {
 }
 module.exports = { buildDevelopment };
 if (require.main === module) {
-  try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+  main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

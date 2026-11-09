@@ -11,7 +11,7 @@ async function main() {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   let app;
   try {
-    const env = { ...process.env, AICHAT_DESKTOP_DEV_URL: `http://127.0.0.1:${server.address().port}/AIChat.html`, AICHAT_DESKTOP_DISABLE_MCP: '1' };
+    const env = { ...process.env, AICHAT_DESKTOP_TEST_PROFILE: '1', AICHAT_DESKTOP_DEV_URL: `http://127.0.0.1:${server.address().port}/AIChat.html`, AICHAT_DESKTOP_DISABLE_MCP: '1' };
     delete env.ELECTRON_RUN_AS_NODE;
     app = await _electron.launch({ executablePath: require('electron'), args: [path.resolve(__dirname, '..'), `--user-data-dir=${profile}`], env });
     const mainPage = await app.firstWindow();

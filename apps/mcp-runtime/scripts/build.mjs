@@ -11,7 +11,18 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRoot = path.resolve(here, '..');
 const outdir = path.join(runtimeRoot, 'dist');
 
-await fs.rm(outdir, { recursive: true, force: true });
+const development = process.argv.includes('--development');
+try {
+  await fs.rm(outdir, { recursive: true, force: true });
+} catch (error) {
+  // An earlier Windows dev daemon can still have dist as its working directory.
+  // Clean its contents without removing that directory. Child errors still propagate.
+  if (!development || error.code !== 'EBUSY' || error.syscall !== 'rmdir' ||
+      error.path !== outdir || !(await fs.lstat(outdir)).isDirectory()) throw error;
+  for (const name of await fs.readdir(outdir)) {
+    await fs.rm(path.join(outdir, name), { recursive: true, force: true });
+  }
+}
 await fs.mkdir(outdir, { recursive: true });
 
 await build({
@@ -22,7 +33,7 @@ await build({
   format: 'cjs',
   target: 'node22',
   external: ['node-pty', 'playwright-core'],
-  plugins: [aichatRuntimePlugin({ development: process.argv.includes('--development') }), runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir), petCompanionPlugin(outdir, { includeRuntime: false })],
+  plugins: [aichatRuntimePlugin({ development }), runtimeBuildInfoPlugin(runtimeRoot), creationSkillPlugin(outdir), petCompanionPlugin(outdir, { includeRuntime: false })],
   legalComments: 'none',
   logLevel: 'info',
 });

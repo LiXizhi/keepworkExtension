@@ -37,8 +37,9 @@
     setArtStyle('backgroundSize', image ? pet.bgSize || '400% 400%' : '');
     setArtStyle('backgroundPosition', image ? pet.bgPos || '0% 0%' : '');
     document.body.style.setProperty('--pet-pixels', `${state.petPixels || 112}px`);
-    $('pet').title = `${pet.name || '宠物'} · 点击聊天 · 右键设置 · 拖动移动`;
-    $('target-title').textContent = `${state.target === 'persona' ? '分身' : '会话'} · ${state.title || 'AIChat'} ⇄`;
+    $('pet').title = `${pet.name || '宠物'} · 单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动`;
+    const title = state.target === 'persona' ? state.title || '我的分身' : `会话 · ${state.title || 'AIChat'}`;
+    $('target-title').textContent = `${title} ⇄`;
     const folderName = (state.folder || '').split(/[\\/]/).filter(Boolean).pop() || state.folder || '';
     $('target-detail').textContent = state.target === 'persona' ? (folderName || '第二大脑') : `技能：${state.skill || '无'} · 文件夹：${folderName || '未绑定'}`;
     $('target').title = `${$('target-title').textContent}\n${$('target-detail').textContent}${state.folder ? `\n${state.folder}` : ''}\n点击切换到${state.target === 'persona' ? '聊天会话' : '我的分身'}`;
@@ -203,13 +204,26 @@
     if (Math.hypot(event.screenX - pointer.x, event.screenY - pointer.y) > 4) pointer.moved = true;
     if (pointer.moved) void pointer.ready.then(() => api.action('drag'));
   });
+  let releasedTap = false, firstTap = false;
   const release = async event => {
     const current = pointer; pointer = null; if (!current) return;
+    releasedTap = !current.moved && event.type === 'pointerup';
+    if (!releasedTap) firstTap = false;
     await current.ready; await api.action('drag-end');
-    if (!current.moved && event.type === 'pointerup') await expand(!expanded);
   };
   $('pet').addEventListener('pointerup', release); $('pet').addEventListener('pointercancel', release);
-  $('pet').addEventListener('click', event => { if (event.detail === 0) void expand(!expanded); });
+  $('pet').addEventListener('click', event => {
+    if (event.detail === 0) { void expand(!expanded); return; }
+    if (!releasedTap) return;
+    releasedTap = false;
+    if (event.detail === 2 && firstTap) {
+      firstTap = false;
+      if (!state.exitPrompt && !state.permission) void api.action('open');
+    } else {
+      firstTap = event.detail === 1;
+      if (firstTap) void expand(!expanded);
+    }
+  });
   $('pet').addEventListener('contextmenu', event => { event.preventDefault(); void api.action('menu'); });
   document.addEventListener('mousemove', event => {
     const next = !!pointer || !!event.target.closest('#pet, #compact-controls, #panel, #bubble, #exit-bubble, #permission-bubble');

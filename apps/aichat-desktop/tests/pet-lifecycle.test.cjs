@@ -42,7 +42,7 @@ test('closing AIChat keeps its renderer and terminals; reopening restores the sa
   const context = vm.createContext({ console, setTimeout(fn) { deadline = fn; return 1; }, clearTimeout() { deadline = null; }, process: { env: {}, platform: 'darwin' }, __dirname: path.resolve(__dirname, '../src'),
     petFixture: { show: () => calls.push('pet-show'), hide: stop => calls.push(stop ? 'pet-hide-stop-voice' : 'pet-hide') },
     require: name => {
-      if (name === 'electron') return { BrowserWindow: Window, app: { isPackaged: false, setName() {}, setAppUserModelId() {}, commandLine: { hasSwitch: () => true }, requestSingleInstanceLock: () => false, quit() {} } };
+      if (name === 'electron') return { BrowserWindow: Window, app: { isPackaged: false, setName() {}, setAppUserModelId() {}, commandLine: { hasSwitch: () => true }, getPath: () => __dirname, setPath() {}, requestSingleInstanceLock: () => false, exit() {}, quit() {} } };
       if (name === 'electron-updater') return { autoUpdater: {} };
       if (name.includes('terminalSessions')) return { TerminalSessionManager: class { closeAll() { calls.push('terminal-close'); } } };
       if (name === './permissions.cjs') return { installPermissions() {} };
