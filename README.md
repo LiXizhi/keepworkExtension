@@ -270,6 +270,8 @@ If Azure CLI was installed after VS Code started, restart VS Code or expose it t
 $env:PATH = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin;' + $env:PATH
 ```
 
+Use `scripts/publish-marketplace.ps1` for coordinated publication. After a separately completed VSIX upload, dispatch `keepwork-stable.yml` on the matching main revision with its `marketplace_version`. A successful Desktop code job uploads the shared app ZIP and the signed manifest, reusing the approved platform dependencies.
+
 Publishing an existing VSIX does not rebuild, increment the version, commit, or create a Git tag. Verify the release on the [public listing](https://marketplace.visualstudio.com/items?itemName=Xizhi.keepwork); propagation can take a few minutes. For automated publishing, follow Microsoft's workload identity federation and managed identity workflow instead of storing interactive credentials.
 
 ## Requirements

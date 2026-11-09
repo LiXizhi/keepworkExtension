@@ -18,13 +18,13 @@
 <div id="reply" role="button" tabindex="0" aria-label="打开完整回复" title="点击查看完整回复"></div>
 <div id="options" aria-label="快捷回复"></div>
 </section>
+<section id="compact-controls" hidden aria-label="桌宠语音控制"><output id="compact-status" role="status"></output><button id="compact-record">开始录音</button><button id="compact-call">开始语音</button></section>
 <section id="panel" hidden aria-label="宠物聊天">
-<header><button id="target" type="button" aria-label="切换分身或聊天会话"><span id="target-title">我的分身</span><small id="target-detail"></small></button><button id="collapse" aria-label="收起">−</button></header>
+<header><button id="target" type="button" aria-label="切换分身或聊天会话"><span id="target-title">我的分身</span><small id="target-detail"></small></button><button id="collapse" aria-label="收起">−</button><button id="open" aria-label="打开桌面" title="打开桌面"><span aria-hidden="true">□</span></button></header>
 <div id="status" role="status"></div><div id="error" role="alert"></div>
 <textarea id="draft" rows="3" maxlength="32000" placeholder="说点什么…" aria-label="消息"></textarea>
 <div class="actions"><button id="dictation">语音输入</button><button id="call">通话</button><button id="mute" hidden>静音</button><button id="send">发送</button></div>
-<button id="open">打开 AIChat ↗</button>
 </section>
 </div>
-<button id="pet" aria-label="点击聊天，拖动移动" title="点击聊天 · 拖动移动"><span id="art"></span><span id="badge" hidden>●</span></button>
+<button id="pet" aria-label="单击聊天，双击打开桌面，拖动移动" title="单击聊天 · 双击打开桌面 · 拖动移动"><span id="art"></span><span id="badge" hidden>●</span></button>
 <script src="pet.js"></script></body></html>

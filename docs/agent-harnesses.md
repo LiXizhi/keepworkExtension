@@ -1,5 +1,7 @@
 # AIChat agent sessions
 
+Optional image contract: health advertises `agentImageTurnApi: "v1"`. POST `/agents/sessions/{id}/image-turns` uses the existing authenticated turn contract plus a required `images` array of 1–4 inline PNG/JPEG/WebP/GIF data URLs, 4 MiB combined. ACP requires `promptCapabilities.image`; text-only adapters reject before submitting. The legacy `turns` request remains unchanged.
+
 `src/core/agentSessions.ts` owns sessions; `codexHarness.ts` implements the stdio
 Codex adapter; `acpHarness.ts` adapts native ACP servers; `claudeHarness.ts` adapts Claude bidirectional stream-json; `antigravityHarness.ts` adapts native agy NDJSON under the stable `gemini` persistence key. `src/mcp/agentHttp.ts` exposes the API on the shared daemon.
 Native CLI sessions have no KP Local Helper or editor-window dependency. Optional

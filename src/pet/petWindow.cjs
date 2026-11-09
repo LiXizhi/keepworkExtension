@@ -1,8 +1,8 @@
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const CHANNEL = 'aichat-desktop:pet-v1';
-const ACTIONS = new Set(['toggle-target', 'input', 'send', 'stop', 'dictation', 'call', 'mute']);
-const EMPTY = Object.freeze({ version: 1, context: '', title: '打开 AIChat 开始聊天', draft: '', messages: [], ready: false });
+const ACTIONS = new Set(['toggle-target', 'input', 'send', 'stop', 'dictation', 'call', 'mute', 'voice-start', 'voice-stop', 'record-start', 'record-stop']);
+const EMPTY = Object.freeze({ version: 1, context: '', title: '打开桌面开始聊天', draft: '', messages: [], ready: false });
 const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
 const PET_SIZES = [0.5, 1, 1.5, 2, 3, 4];
 function petPreferences(value = {}) {
@@ -21,6 +21,9 @@ function projectState(value) {
     skill: text(value.skill, 160), folder: text(value.folder, 500),
     ready: value.ready === true, busy: value.busy === true, richDraft: value.richDraft === true,
     attention: text(value.attention, 300), error: text(value.error, 300), dictating: value.dictating === true,
+    compactVoice: value.compactVoice === true,
+    classroomRecording: value.classroomRecording ? { enabled: value.classroomRecording.enabled === true,
+      phase: text(value.classroomRecording.phase, 16), error: text(value.classroomRecording.error, 200) } : null,
     canCall: value.canCall === true, voice: { active: value.voice?.active === true, muted: value.voice?.muted === true, state: text(value.voice?.state, 32) },
     pet: { name: text(pet.name, 80), sheetUrl, imageData, bgSize: percent(pet.bgSize), bgPos: percent(pet.bgPos) },
     reply: value.reply && typeof value.reply === 'object' ? {
@@ -48,7 +51,13 @@ function createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, directory, se
   let permission = null, permissionResolve, permissionReject;
   const pending = new Map();
   const view = () => { const { pixels, left, top } = geometry(); return { ...snapshot, expanded, preferences, exitPrompt, permission, petPixels: pixels, petLeft: left, petTop: top }; };
-  const send = () => { if (window && !window.isDestroyed()) window.webContents.send(CHANNEL, view()); };
+  const send = () => {
+    if (!window || window.isDestroyed()) return;
+    // A compact control click must leave the slideshow as the foreground window.
+    const focusable = !snapshot.compactVoice || expanded || !!exitPrompt || !!permission;
+    if (window.isFocusable() !== focusable) window.setFocusable(focusable);
+    window.webContents.send(CHANNEL, view());
+  };
   const rejectPending = () => { for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error('AIChat context changed')); } pending.clear(); };
   function geometry() {
     const fallback = screen.getPrimaryDisplay().workArea;
@@ -98,7 +107,7 @@ function createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, directory, se
         { label: '在哈奇星球更换宠物…', click: () => services.appearance?.() },
       ] },
       { type: 'separator' },
-      { label: '打开 AIChat', click: () => services.open() },
+      { label: '打开桌面', click: () => services.open() },
       { label: '隐藏桌面宠物', click: () => services.hide?.() },
       { type: 'separator' },
       { label: '完全退出…', click: () => { void requestExit(); } },
@@ -110,6 +119,22 @@ function createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, directory, se
     window = new BrowserWindow({ width: 128, height: 144, show: false, frame: false, transparent: true,
       backgroundColor: '#00000000', alwaysOnTop: true, skipTaskbar: true, resizable: false, minimizable: false, maximizable: false, hasShadow: false,
       webPreferences: { preload: path.join(directory, 'pet-preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true } });
+    if (process.platform === 'win32') {
+      const overlay = window;
+      let raiseTimer;
+      const stopRaising = () => { clearInterval(raiseTimer); raiseTimer = undefined; };
+      overlay.setAlwaysOnTop(true, 'screen-saver');
+      overlay.on('show', () => {
+        // A slideshow can enter the topmost band after the pet is already shown.
+        const raise = () => { if (!popup && visible && overlay.isVisible()) overlay.moveTop(); };
+        raise();
+        stopRaising();
+        raiseTimer = setInterval(raise, 1500);
+        raiseTimer.unref();
+      });
+      overlay.on('hide', stopRaising);
+      overlay.on('closed', stopRaising);
+    }
     window.setMenu(null);
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', event => event.preventDefault());
@@ -143,7 +168,7 @@ function createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, directory, se
     if (!visible) throw new Error('Pet is hidden');
     if (action === 'exit-cancel') { exitPrompt = null; send(); return; }
     if (action === 'exit-confirm') {
-      if (!exitPrompt || exitPrompt.loading || args.id !== exitPrompt.id) throw new Error('Exit confirmation expired');
+      if (!exitPrompt || args.id !== exitPrompt.id) throw new Error('Exit confirmation expired');
       exitPrompt = null; send(); services.quit?.(); return;
     }
     if (action === 'menu') { showMenu(); return; }
@@ -189,7 +214,19 @@ function createPetWindow({ BrowserWindow, ipcMain, screen, Menu }, directory, se
       if (!permission || (id && permission.id !== id)) return;
       permissionReject?.(Error('Screenshot request cancelled')); permission = null; permissionResolve = permissionReject = null; send();
     },
-    show() { if (stopped) return; captureBlocked = false; visible = true; expanded = false; create(); layout(); window.setIgnoreMouseEvents(true, { forward: true }); send(); window.showInactive(); },
+    show({ onCursorDisplay = false } = {}) {
+      if (stopped) return;
+      captureBlocked = false; visible = true; expanded = false;
+      if (onCursorDisplay) {
+        const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+        const current = geometry().bounds;
+        if (area.x !== current.x || area.y !== current.y) {
+          position = { x: area.x + area.width - 144, y: area.y + area.height - 160 };
+          services.savePosition(position);
+        }
+      }
+      create(); layout(); window.setIgnoreMouseEvents(true, { forward: true }); send(); window.showInactive();
+    },
     hide(stopVoice = false) {
       permissionWasVisible = false;
       permissionReject?.(Error('Permission pet hidden')); permission = null; permissionResolve = permissionReject = null;

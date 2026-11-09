@@ -292,3 +292,29 @@ for (const backend of ['workbuddy', 'copilot', 'cursor']) test(`${backend}: draf
  assert.equal((sessionAdapter===adapter?calls:sessionCalls).filter(m=>m==='session/prompt').length,2);
  await manager.status(backend,{...scopes[1],refresh:true});assert.equal(adapter.child.pid,pid);assert.equal(calls.filter(m=>m==='session/new').length,2);
 });
+
+for (const backend of ['codex','claude','qwen','cursor','gemini']) test(backend + ': clipboard image dispatch or definite rejection', async t => {
+ const dir = fs.mkdtempSync(path.join(os.tmpdir(),'agent-image-log-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const log=path.join(dir,'wire.jsonl');
+ const {manager,dir:root,owner}=setup(t,['--log='+log,'--log-rpc',...(backend==='qwen'?['--images']:[])]);
+ const session=await manager.create(owner,{backend,conversationId:'image-test',roots:[root]});
+ const data='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+ const url='data:image/png;base64,'+data;
+ const input={requestId:'image-one',text:'Describe the picture',images:[url]};
+ await assert.rejects(manager.turn(session.id,owner,{...input,images:['file:///secret']}),/image|text only/i);
+ if (backend==='cursor'||backend==='gemini') {
+   await assert.rejects(manager.turn(session.id,owner,input), /does not advertise image|text only/);
+   await manager.turn(session.id,owner,{requestId:'plain',text:'Plain follow-up'});
+   assert.equal((await done(manager,session.id,owner)).status,'completed');
+   return;
+ }
+ await manager.turn(session.id,owner,input);
+ const snap=await done(manager,session.id,owner);
+ assert.equal(snap.status,'completed'); assert.ok(!JSON.stringify(snap).includes(data));
+ const records=fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
+ const part=backend==='codex'? records.find(m=>m.method==='turn/start').params.input[1]
+   :backend==='claude'? records.find(m=>m.type==='user').message.content[1]
+   :records.find(m=>m.method==='session/prompt').params.prompt[1];
+ assert.deepEqual(part,backend==='codex'?{type:'image',url}:backend==='claude'?{type:'image',source:{type:'base64',media_type:'image/png',data}}:{type:'image',mimeType:'image/png',data});
+});

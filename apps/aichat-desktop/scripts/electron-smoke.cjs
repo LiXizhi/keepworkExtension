@@ -21,7 +21,7 @@ async function main() {
   const entry = `http://127.0.0.1:${server.address().port}/AIChat.html`;
   let application;
   try {
-    const env = { ...process.env, AICHAT_DESKTOP_DEV_URL: entry, AICHAT_DESKTOP_DISABLE_MCP: '1' };
+    const env = { ...process.env, AICHAT_DESKTOP_TEST_PROFILE: '1', AICHAT_DESKTOP_DEV_URL: entry, AICHAT_DESKTOP_DISABLE_MCP: '1' };
     delete env.ELECTRON_RUN_AS_NODE;
     const packaged = process.env.AICHAT_PACKAGED_EXE;
     application = await _electron.launch({ executablePath: packaged || require('electron'),

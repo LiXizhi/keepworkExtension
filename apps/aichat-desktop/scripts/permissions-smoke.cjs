@@ -16,7 +16,7 @@ async function main() {
   const entry = `http://127.0.0.1:${server.address().port}/AIChat.html`;
   let application;
   async function launch() {
-    const env = { ...process.env, AICHAT_DESKTOP_DEV_URL: entry, AICHAT_DESKTOP_DISABLE_MCP: '1' };
+    const env = { ...process.env, AICHAT_DESKTOP_TEST_PROFILE: '1', AICHAT_DESKTOP_DEV_URL: entry, AICHAT_DESKTOP_DISABLE_MCP: '1' };
     delete env.ELECTRON_RUN_AS_NODE;
     application = await _electron.launch({ executablePath: require('electron'),
       args: [path.resolve(__dirname, '..'), `--user-data-dir=${profile}`, '--use-fake-device-for-media-stream'], env, timeout: 30000 });

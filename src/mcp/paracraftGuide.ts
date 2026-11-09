@@ -5,6 +5,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 const prefix = 'keepwork://skills/paracraft-create/';
 
 function creationGuideRoot(): string {
+    // The local dev launcher supplies its checkout so edits are visible on the next request.
+    const devRoot = process.env.KEEPWORK_PARACRAFT_DEV_SKILL_ROOT;
+    if (devRoot) return devRoot;
     const roots = [path.join(__dirname, 'skills/paracraft-create'), path.resolve(__dirname, '../../skills/paracraft-create')];
     const root = roots.find(candidate => fs.existsSync(path.join(candidate, 'SKILL.md')));
     if (!root) throw new Error('Paracraft creation skill is missing from this package; rebuild or update Keepwork.');

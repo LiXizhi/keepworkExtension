@@ -52,6 +52,7 @@ async function restartServer() {
   await stopChild(serverProcess);
   serverProcess = spawn(process.execPath, [cliPath, '--port', String(port)], {
     cwd: extensionRoot,
+    env: { ...process.env, KEEPWORK_PARACRAFT_DEV_SKILL_ROOT: path.resolve(extensionRoot, '../../skills/paracraft-create') },
     stdio: 'inherit',
   });
   serverProcess.once('exit', (code) => {

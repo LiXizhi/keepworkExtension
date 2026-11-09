@@ -14,7 +14,7 @@ test('pet uses the default dragon before state, on missing artwork and after res
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, { style: {}, dataset: {}, children: [],
-      classList: { toggle() {} }, addEventListener() {}, replaceChildren(...children) { this.children = children; } });
+      setAttribute(key,value) { this[key] = value; }, classList: { toggle() {} }, addEventListener() {}, replaceChildren(...children) { this.children = children; } });
     return elements.get(id);
   };
   let publish;
@@ -28,8 +28,20 @@ test('pet uses the default dragon before state, on missing artwork and after res
     for (const key of ['backgroundImage', 'backgroundSize', 'backgroundPosition']) assert.equal(element('art').style[key], '');
   };
   expectDefault();
+  publish({version:1, context:'class', compactVoice:true, ready:true, canCall:true, classroomRecording:{enabled:true,phase:'recording'}});
+  assert.equal(element('compact-controls').hidden,false);
+  assert.equal(element('compact-record').textContent,'停止录音');
+  assert.equal(element('compact-status').textContent,'录音中');
+  publish({version:1, context:'class', compactVoice:true, ready:true, voice:{active:true}});
+  assert.equal(element('compact-call').textContent,'停止语音');
+  assert.equal(element('compact-status').textContent,'语音中');
+  publish({version:1, context:'legacy'});
+  assert.equal(element('compact-controls').hidden,true);
   publish({ version: 1, context: 'persona', target: 'persona', canSwitchTarget: true, title: '我的分身', folder: '/Users/me/brain/' });
-  assert.match(element('target-title').textContent, /分身 · 我的分身/);
+  assert.equal(element('target-title').textContent, '我的分身 ⇄');
+  publish({ version: 1, context: 'persona', target: 'persona', canSwitchTarget: true, title: '小林的分身', folder: '/Users/me/brain/' });
+  assert.equal(element('target-title').textContent, '小林的分身 ⇄');
+  assert.match(read('pet.html'), /<button id="open" aria-label="打开桌面" title="打开桌面"><span aria-hidden="true">□<\/span><\/button>/);
   assert.equal(element('target-detail').textContent, 'brain');
   assert.equal(element('target').disabled, false);
   publish({ version: 1, context: 'chat', target: 'chat', canSwitchTarget: true, title: 'Fix issue', skill: 'Reviewer', folder: '/Users/me/project' });

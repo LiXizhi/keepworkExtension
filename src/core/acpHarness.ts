@@ -340,6 +340,9 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             this.write({ method: 'session/cancel', params: { sessionId: thread.id } }); return {};
         }
         if (method !== 'turn/start') throw Object.assign(new Error('Unsupported harness method'), { rpcRejected: true });
+        if (p.input.some((part: any) => part.type === 'image') && this.capabilities.promptCapabilities?.image !== true) {
+            throw Object.assign(new Error('This ACP agent does not advertise image input. Remove the images or switch agents.'), {rpcRejected: true});
+        }
         try {
             await this.resume(thread);
             if (p.model) await this.setModel(thread, p.model);
@@ -354,7 +357,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         }
         const run = { id: randomUUID(), items: [] as any[] };
         this.active.set(thread.id, run);
-        const user = { id: randomUUID(), type: 'userMessage', content: p.input };
+        const user = { id: randomUUID(), type: 'userMessage', content: p.input.map((part: any) => part.type === 'image' ? {type: 'image'} : part) };
         run.items.push(user);
         this.notify('turn/started', thread.id, { turn: { id: run.id } });
         this.notify('item/completed', thread.id, { item: user });

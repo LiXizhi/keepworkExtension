@@ -2,7 +2,7 @@
   "name": "keepwork",
   "displayName": "Second brain(keepwork)",
   "description": "Your digital brain powered by LLM wiki and tools.",
-  "version": "0.1.42",
+  "version": "0.1.44",
   "publisher": "Xizhi",
   "license": "MIT",
   "repository": {
@@ -165,7 +165,7 @@
     "dev:server": "node scripts/dev-server.mjs",
     "start": "node dist/cli.js",
     "mcp": "node dist/cli.js --stdio",
-    "package": "npm run compile && vsce package && node scripts/assert-vsix-boundary.cjs"
+    "package": "node scripts/prepare-release-version.cjs && npm run compile:only && vsce package && node scripts/assert-vsix-boundary.cjs"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

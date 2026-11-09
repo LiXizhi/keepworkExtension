@@ -15,7 +15,7 @@ function host(platform = 'win32') {
   const electron = {
     ipcMain: { handle: (channel, handler) => { handlers[channel] = handler; } },
     nativeTheme: {},
-    app: { isPackaged: false, setAppUserModelId() {}, setName(name) { this.name = name; }, commandLine: { hasSwitch: () => true }, requestSingleInstanceLock: () => false, quit() {}, getVersion: () => '0.1.0' },
+    app: { isPackaged: false, setAppUserModelId() {}, setName(name) { this.name = name; }, commandLine: { hasSwitch: () => true }, getPath: () => __dirname, setPath() {}, requestSingleInstanceLock: () => false, exit() {}, quit() {}, getVersion: () => '0.1.0' },
     Menu: { buildFromTemplate: items => { template = items; return { items }; }, setApplicationMenu() {} },
     dialog: { showErrorBox: (_title, message) => calls.push(message) },
     shell: { openExternal: async url => calls.push(url) },

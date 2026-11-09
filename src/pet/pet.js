@@ -37,8 +37,9 @@
     setArtStyle('backgroundSize', image ? pet.bgSize || '400% 400%' : '');
     setArtStyle('backgroundPosition', image ? pet.bgPos || '0% 0%' : '');
     document.body.style.setProperty('--pet-pixels', `${state.petPixels || 112}px`);
-    $('pet').title = `${pet.name || '宠物'} · 点击聊天 · 右键设置 · 拖动移动`;
-    $('target-title').textContent = `${state.target === 'persona' ? '分身' : '会话'} · ${state.title || 'AIChat'} ⇄`;
+    $('pet').title = `${pet.name || '宠物'} · 单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动`;
+    const title = state.target === 'persona' ? state.title || '我的分身' : `会话 · ${state.title || 'AIChat'}`;
+    $('target-title').textContent = `${title} ⇄`;
     const folderName = (state.folder || '').split(/[\\/]/).filter(Boolean).pop() || state.folder || '';
     $('target-detail').textContent = state.target === 'persona' ? (folderName || '第二大脑') : `技能：${state.skill || '无'} · 文件夹：${folderName || '未绑定'}`;
     $('target').title = `${$('target-title').textContent}\n${$('target-detail').textContent}${state.folder ? `\n${state.folder}` : ''}\n点击切换到${state.target === 'persona' ? '聊天会话' : '我的分身'}`;
@@ -102,7 +103,6 @@
       $('exit-status').textContent = exit.loading ? '正在检查分身和渠道…' : exit.unavailable
         ? '暂时无法获取分身列表。飞书、钉钉等已连接渠道的自动回复可能中断。仍要退出吗？'
         : exit.personas.length ? '隐藏宠物可保持后台运行；完全退出会停止本应用。' : '未发现当前账号的已配置分身。仍要完全退出吗？';
-      $('exit-confirm').disabled = exit.loading;
       if (openingExit) $('exit-cancel').focus();
     }
     if (closingExit) $('pet').focus();
@@ -112,6 +112,17 @@
       $('bubble').hidden = true; $('panel').hidden = true; $('exit-bubble').hidden = true;
       $('permission-client').textContent = `请求方：${permission.client}`;
     }
+    const rec = state.classroomRecording, active = !!state.voice?.active;
+    $('compact-controls').hidden = expanded || !!exit || !!permission || !state.compactVoice;
+    $('compact-record').hidden = !rec;
+    $('compact-record').textContent = rec?.enabled ? '停止录音' : '开始录音';
+    $('compact-record').setAttribute('aria-pressed', String(!!rec?.enabled));
+    $('compact-record').disabled = !state.ready || state.dictating || (!rec?.enabled && active) || ['starting','stopping'].includes(rec?.phase);
+    $('compact-call').textContent = active ? '停止语音' : '开始语音';
+    $('compact-call').setAttribute('aria-pressed', String(active));
+    $('compact-call').disabled = !state.ready || state.dictating || (!active && !state.canCall) || ['starting','stopping'].includes(state.voice?.state);
+    $('compact-status').textContent = localError || state.error || rec?.error || (active ? ({starting:'语音连接中',stopping:'正在结束语音',paused:'语音已暂停'}[state.voice.state] || (state.voice.muted ? '语音已静音' : '语音中')) :
+      ({recording:'录音中',starting:'录音连接中',stopping:'正在停止录音'}[rec?.phase] || ''));
     positionLayers();
   }
   for (const button of document.querySelectorAll('[data-permission]')) button.onclick = async () => {
@@ -163,6 +174,8 @@
     }
     void action(name);
   };
+  $('compact-record').onclick = () => void action(state.classroomRecording?.enabled ? 'record-stop' : 'record-start');
+  $('compact-call').onclick = () => void action(state.voice?.active ? 'voice-stop' : 'voice-start');
   for (const name of ['dictation', 'call', 'mute']) $(name).onclick = () => { void action(name); };
   $('target').onclick = async () => { await queue; if (!edits && !unsynced) await action('toggle-target'); };
   $('open').onclick = () => { void api.action('open'); };
@@ -171,7 +184,7 @@
   $('collapse').onclick = () => { void expand(false); };
   $('exit-cancel').onclick = () => { void api.action('exit-cancel'); };
   $('exit-confirm').onclick = () => {
-    if (!state.exitPrompt || state.exitPrompt.loading) return;
+    if (!state.exitPrompt) return;
     void api.action('exit-confirm', { id: state.exitPrompt.id }).catch(error => { $('exit-status').textContent = error.message; });
   };
   document.addEventListener('keydown', event => {
@@ -191,16 +204,29 @@
     if (Math.hypot(event.screenX - pointer.x, event.screenY - pointer.y) > 4) pointer.moved = true;
     if (pointer.moved) void pointer.ready.then(() => api.action('drag'));
   });
+  let releasedTap = false, firstTap = false;
   const release = async event => {
     const current = pointer; pointer = null; if (!current) return;
+    releasedTap = !current.moved && event.type === 'pointerup';
+    if (!releasedTap) firstTap = false;
     await current.ready; await api.action('drag-end');
-    if (!current.moved && event.type === 'pointerup') await expand(!expanded);
   };
   $('pet').addEventListener('pointerup', release); $('pet').addEventListener('pointercancel', release);
-  $('pet').addEventListener('click', event => { if (event.detail === 0) void expand(!expanded); });
+  $('pet').addEventListener('click', event => {
+    if (event.detail === 0) { void expand(!expanded); return; }
+    if (!releasedTap) return;
+    releasedTap = false;
+    if (event.detail === 2 && firstTap) {
+      firstTap = false;
+      if (!state.exitPrompt && !state.permission) void api.action('open');
+    } else {
+      firstTap = event.detail === 1;
+      if (firstTap) void expand(!expanded);
+    }
+  });
   $('pet').addEventListener('contextmenu', event => { event.preventDefault(); void api.action('menu'); });
   document.addEventListener('mousemove', event => {
-    const next = !!pointer || !!event.target.closest('#pet, #panel, #bubble, #exit-bubble, #permission-bubble');
+    const next = !!pointer || !!event.target.closest('#pet, #compact-controls, #panel, #bubble, #exit-bubble, #permission-bubble');
     if (next !== interactive) { interactive = next; void api.action('hit-test', { interactive }); }
   });
   api.subscribe(render); void api.action('state').then(render);

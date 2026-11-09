@@ -11,20 +11,28 @@ async function main() {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   let app;
   try {
-    const env = { ...process.env, AICHAT_DESKTOP_DEV_URL: `http://127.0.0.1:${server.address().port}/AIChat.html`, AICHAT_DESKTOP_DISABLE_MCP: '1' };
+    const env = { ...process.env, AICHAT_DESKTOP_TEST_PROFILE: '1', AICHAT_DESKTOP_DEV_URL: `http://127.0.0.1:${server.address().port}/AIChat.html`, AICHAT_DESKTOP_DISABLE_MCP: '1' };
     delete env.ELECTRON_RUN_AS_NODE;
     app = await _electron.launch({ executablePath: require('electron'), args: [path.resolve(__dirname, '..'), `--user-data-dir=${profile}`], env });
     const mainPage = await app.firstWindow();
     await mainPage.waitForLoadState();
-    const opened = app.waitForEvent('window');
-    await app.evaluate(({ Menu }) => Menu.getApplicationMenu().items.find(item => item.label === 'Help').submenu.items.find(item => item.label === '检查更新…').click());
-    const page = await opened; await page.waitForLoadState();
+    const openFromHelp = () => app.evaluate(({ Menu }) => {
+      const help = Menu.getApplicationMenu().items.find(item => item.label === '帮助');
+      help.submenu.items.find(item => item.label === '检查更新…').click();
+    });
+    const [page] = await Promise.all([app.waitForEvent('window', {
+      predicate: async candidate => {
+        await candidate.waitForLoadState();
+        return candidate.url().endsWith('/updates.html');
+      },
+    }), openFromHelp()]);
     await page.locator('h2').first().waitFor();
     assert.equal(await page.locator('h2').count(), 2);
     assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
     assert.equal(await page.evaluate(() => typeof window.aichatDesktop), 'undefined');
-    await app.evaluate(({ Menu }) => Menu.getApplicationMenu().items.find(item => item.label === 'Help').submenu.items.find(item => item.label === '检查更新…').click());
-    assert.equal(app.windows().length, 2);
+    await openFromHelp();
+    const updateWindows = () => app.windows().filter(win => win.url().endsWith('/updates.html'));
+    assert.deepEqual(updateWindows(), [page]);
     await app.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows().find(w => w.webContents.getURL().endsWith('/updates.html'));
       win.webContents.send('aichat-update-window:v1', { checking: false,
@@ -39,7 +47,8 @@ async function main() {
     const output = path.resolve(__dirname, '../../..', '.test-runtime'); fs.mkdirSync(output, { recursive: true });
     await page.screenshot({ path: path.join(output, 'aichat-updates.png') });
     await page.close();
-    assert.equal(app.windows().length, 1);
+    assert.equal(updateWindows().length, 0);
+    assert.equal(mainPage.isClosed(), false);
     console.log('PASS: Electron Help menu, isolated update window, singleton, version/date/ownership rendering and closing');
   } finally {
     if (app) await app.close();

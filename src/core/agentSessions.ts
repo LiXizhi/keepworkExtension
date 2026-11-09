@@ -30,7 +30,25 @@ const ACTIVE = new Set(['starting', 'running', 'waiting', 'uncertain']);
 function visibleItem(item: any) {
     if (item?.type !== 'userMessage' || !Array.isArray(item.content)) return item;
     const marker = '\n</aichat_context>\n<aichat_user_message>\n';
-    return { ...item, content: item.content.map((part: any) => part.type === 'text' && part.text?.startsWith('<aichat_context ') && part.text.includes(marker) ? { ...part, text: part.text.slice(part.text.indexOf(marker) + marker.length) } : part) };
+    return { ...item, content: item.content.map((part: any) => part.type === 'image' && (part.data || part.source?.data || /^data:/i.test(part.url)) ? {type:'image'} : part.type === 'text' && part.text?.startsWith('<aichat_context ') && part.text.includes(marker) ? { ...part, text: part.text.slice(part.text.indexOf(marker) + marker.length) } : part) };
+}
+// Only inline raster data is accepted; never turn a caller-supplied path or URL into a file read.
+export function agentImageParts(backend: Backend, images: unknown) {
+    if (images === undefined) return [];
+    if (!Array.isArray(images) || !images.length || images.length > 4) throw new Error('Attach 1 to 4 images');
+    if (AGENT_CLI[backend].protocol === 'antigravity') throw new Error('This CLI accepts text only; remove the images or switch agents.');
+    let bytes = 0;
+    return images.map(url => {
+        if (typeof url !== 'string' || url.length > 5_600_000) throw new Error('Image too large');
+        const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,/.exec(url);
+        const data = match && url.slice(match[0].length);
+        if (!data || data.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new Error('Expected a base64 raster image');
+        bytes += Buffer.byteLength(data, 'base64');
+        if (bytes > 4 * 1024 * 1024) throw new Error('Image limit is 4 MiB per turn');
+        if (backend === 'codex') return {type: 'image', url};
+        if (backend === 'claude') return {type: 'image', source: {type: 'base64', media_type: match[1], data}};
+        return {type: 'image', mimeType: match[1], data};
+    });
 }
 const RESPONDABLE = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/requestUserInput']);
 function bounded(value: any, budget = { remaining: 2_000_000 }, depth = 0): any {
@@ -380,6 +398,7 @@ export class AgentSessions {
         if (s.submissions[input.requestId]) return { submission: s.submissions[input.requestId], session: this.view(s) };
         if (typeof input.text !== 'string' || !input.text.trim() || input.text.length > 200000) throw new Error('Text required (maximum 200000 characters)');
         if (s.archived || s.externalBusy || ACTIVE.has(s.status)) throw new Error('Session is archived or already running');
+        const images = agentImageParts(s.backend, input.images);
         const mode = agentMode(input.mode ?? s.mode);
         verifyRoots(s.roots);
         const context = s.aichatContext ? this.toolBridge.context(owner, s.conversationId) : null;
@@ -404,7 +423,7 @@ export class AgentSessions {
                 ? text.replace('\n</aichat_context>', PLAN_FALLBACK + '\n</aichat_context>')
                 : PLAN_FALLBACK + text) : text;
             dispatched = true;
-            const result = await this.forSession(s).call('turn/start', { threadId: s.threadId, input: [{ type: 'text', text: prompt }], cwd: s.roots[0], sandboxPolicy, approvalPolicy, ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}), ...configured?.turnOverrides });
+            const result = await this.forSession(s).call('turn/start', { threadId: s.threadId, input: [{ type: 'text', text: prompt }, ...images], cwd: s.roots[0], sandboxPolicy, approvalPolicy, ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}), ...configured?.turnOverrides });
             s.turnId = result.turn?.id; s.model = input.model || s.model; s.effort = input.effort;
             s.submissions[input.requestId] = { state: 'accepted', turnId: s.turnId };
             if (s.status === 'starting') s.status = 'running';

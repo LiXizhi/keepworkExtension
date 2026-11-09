@@ -67,7 +67,8 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
     for (let iteration = 0; iteration < limit; iteration++) {
         throwIfAborted(signal);
         const announced = new Map();
-        const response = await abortable(request({ ...options, messages, onToolCall: call => {
+        const finalSummary = options.reserveFinalResponse && iteration === limit - 1;
+        const response = await abortable(request({ ...options, ...(finalSummary ? { tools: [] } : {}), messages, onToolCall: call => {
                 // Keep the mutable SDK snapshot until the response has completed.
                 const key = call.id || `index:${call.index ?? announced.size}`;
                 announced.set(key, call);
@@ -81,6 +82,8 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
         await emit({ type: 'message', content, iteration, message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) } });
         if (!calls.length)
             return response;
+        if (finalSummary)
+            throw Error('Observer final response requested an unavailable tool');
         messages.push({ role: 'assistant', content, tool_calls: calls });
         // Complete the entire section before appending tool results (browser steering boundary).
         const results = [];

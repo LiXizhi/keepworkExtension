@@ -1,3 +1,4 @@
+import {creationTools} from '../core/paracraftAuthoring';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -145,8 +146,8 @@ export function registerCreationTools(server: McpServer, runtime: ParacraftTrans
                 if (args.action && !actions.includes(args.action)) throw new Error('unsupported_action');
                 const details = args.action ? {
                     action: args.action,
-                    description: descriptions[args.action as keyof typeof descriptions] || (args.action === 'template_info' ? 'Read one named template with source hash, or discover up to ten metadata-only candidates by category/query with pagination. Source is loaded only for a selected name.' : args.action === 'launch' ? 'Omit projectId to start/reuse an idle desktop for local worlds; supply projectId to enter that project. No clientId or login token required. Poll launch_status if waiting; never repeat a launch after a transport timeout.' : args.action === 'launch_status' ? 'Poll a launch. target=client becomes ready on desktop registration; target=project requires matching world entry. ready returns clientId.' : undefined),
-                    inputSchema: schema ? z.toJSONSchema(schema, { io: 'input' }) : undefined,
+                    description: creationTools.find(t=>t.function.name===args.action)?.function.description || descriptions[args.action as keyof typeof descriptions] || (args.action === 'template_info' ? 'Read one named template with source hash, or discover up to ten metadata-only candidates by category/query with pagination. Source is loaded only for a selected name.' : args.action === 'launch' ? 'Omit projectId to start/reuse an idle desktop for local worlds; supply projectId to enter that project. No clientId or login token required. Poll launch_status if waiting; never repeat a launch after a transport timeout.' : args.action === 'launch_status' ? 'Poll a launch. target=client becomes ready on desktop registration; target=project requires matching world entry. ready returns clientId.' : undefined),
+                    inputSchema: schema ? z.toJSONSchema(schema, { io: 'input' }) : creationTools.find(tool => tool.function.name === args.action)?.function.parameters,
                     usage: args.action === 'skill' ? { action: 'skill', params: { path: 'SKILL.md' } }
                         : args.action === 'clients' ? { action: 'clients' }
                         : args.action === 'launch' ? { action: 'launch', params: { projectId: 530 } }

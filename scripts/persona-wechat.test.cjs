@@ -1,0 +1,94 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const ts = require('typescript');
+require.extensions['.ts'] = (mod,file) => mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'), {
+    compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}
+}).outputText,file);
+const {chromium}=require('playwright-core');
+const {firstScreen,PersonaWechat}=require('../src/core/personaWechat.ts');
+test('hourly preview selection, isolation, restart and stop',async t=>{
+    const browser=await chromium.launch({channel:'chrome',headless:true});
+    t.after(()=>browser.close());
+    const p=await browser.newPage();
+    await p.setContent('<div class="header"><div class="nickname"><span class="display_name">Alice</span></div></div>'+
+        '<div class="chat_list scroll-content" style="height:122px;overflow:auto">'+
+        Array.from({length:9},(_,i)=>'<div class="chat_item" style="height:20px"><span class="nickname">chat'+i+'</span></div>').join('')+'</div>');
+    const items=p.locator('.chat_item');
+    await items.nth(8).evaluate(el=>el.classList.add('top'));
+    assert.deepEqual((await firstScreen(p)).map(r=>r.name),['chat0','chat1','chat2','chat3','chat4']);
+    await items.nth(3).evaluate(el=>el.classList.add('top'));
+    assert.deepEqual((await firstScreen(p)).map(r=>r.name),['chat3']);
+    assert.equal(await p.locator('.chat_list').evaluate(el=>el.scrollTop),0);
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wechat-preview-'));
+    t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+    let pulls=0;
+    const service=()=>new PersonaWechat(dir,()=>{},async work=>{pulls++;return work(p);});
+    let s=service();
+    await assert.rejects(s.request('alice','agent','start'),/配对码/);
+    const code=fs.readFileSync(path.join(dir,'wechat-pairing.txt'),'utf8');
+    const first=await s.request('alice','agent','start',code);
+    assert.equal(first.rows.length,1);
+    assert.equal(pulls,1);
+    assert.equal(s.view('other','agent').rows,undefined);
+    await assert.rejects(s.request('other','agent','qr'));
+    s=service();
+    s.tick(first.next-1);
+    assert.equal(pulls,1);
+    s.tick(first.next);
+    s.tick(first.next);
+    await new Promise(resolve=>setTimeout(resolve,200));
+    assert.equal(pulls,2);
+    await s.request('alice','agent','stop');
+    s.tick(Infinity);
+    assert.equal(pulls,2);
+    const checked=await s.request('alice','agent','check');
+    assert.equal(checked.enabled,false);
+    assert.equal(checked.rows[0].name,'chat3');
+    await p.evaluate(()=>{
+        document.body.insertAdjacentHTML('beforeend','<div class="box_hd"><span class="title_name">Other</span></div><div class="chat_bd scroll-content">Fixture message</div>');
+        document.querySelector('.chat_item.top').onclick=()=>document.querySelector('.title_name').textContent='chat3';
+    });
+    const opened=await s.request('alice','agent','conversation',undefined,'chat3');
+    assert.match(opened.conversation.image,/^data:image\/jpeg;base64,/);
+    assert.equal(s.view('alice','agent').conversation,undefined);
+    await assert.rejects(s.request('alice','agent','conversation',undefined,'chat8'));
+    await p.evaluate(()=>{
+        document.body.insertAdjacentHTML('beforeend','<div contenteditable="true"></div><a href="#" id="send">Send</a>');
+        document.querySelector('#send').onclick=e=>{
+            e.preventDefault();
+            const bubble=document.createElement('div');bubble.className='bubble right';
+            bubble.textContent=document.querySelector('[contenteditable]').innerText;
+            document.querySelector('.chat_bd').append(bubble);
+            document.querySelector('[contenteditable]').innerText='';
+        };
+    });
+    const signal=new AbortController().signal;
+    await assert.rejects(s.send('other','agent','chat3','secret',signal));
+    await assert.rejects(s.send('alice','agent','missing','wrong',signal));
+    for(let i=0;i<2;i++)assert.match(await s.send('alice','agent','chat3','hello world.',signal),/hello world\./);
+    assert.equal(await p.locator('.bubble.right').count(),2);
+    const oldNext=checked.next;
+    const qrPage=`<div class="qrcode"><img class="img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3C/svg%3E"></div>`;
+    await p.route('https://wx.qq.com/',route=>route.fulfill({contentType:'text/html',body:qrPage}));
+    await p.goto('https://wx.qq.com/');
+    assert.equal((await s.request('alice','agent','login-status')).status,'等待扫码');
+    const expired=await s.request('alice','agent','check');
+    assert.match(expired.qr,/^data:image\/png;base64,/);
+    assert.equal(expired.next,oldNext);
+    assert.ok((await s.request('alice','agent','qr')).qr);
+    assert.equal(s.view('alice','agent').qr,undefined);
+    await p.setContent('<div class="header"><div class="nickname"><span class="display_name">Alice</span></div></div><div class="chat_list scroll-content" style="height:100px"></div>');
+    assert.equal((await s.request('alice','agent','confirm')).status,'已连接');
+    await s.request('alice','agent','unbind');
+    assert.equal(s.view('alice','agent').rows,undefined);
+    await p.goto('https://wx.qq.com/');
+    const inline=await s.request('alice','agent','connect');
+    assert.ok(inline.qr.startsWith('data:image/png;base64,'));
+    assert.equal(inline.enabled,false);
+    assert.equal(inline.status,'等待扫码');
+    await assert.rejects(s.request('other','agent','connect'));
+    assert.equal(fs.existsSync(path.join(dir,'wechat-pairing.txt')),false);
+});

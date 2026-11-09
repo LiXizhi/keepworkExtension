@@ -1,5 +1,8 @@
 # KeepWork 第二大脑
 
+For the small Windows and macOS launcher and code-only CDN releases, see the [launcher release guide](launcher/README.md).
+
+
 An independent Electron window for `https://keepwork.com/chat`, with native folder grants,
 workspace files and PTY terminals. Keepwork MCP runs as a separately supervised bundled
 NodeRuntime. The existing KP Local Helper is not replaced; speaker models are not included.
@@ -23,7 +26,7 @@ the page and shows the floating pet; the tray restores the same live window.
 The development app automatically uses `apps/mcp-runtime/staging/<platform>-<arch>` and
 `apps/local-model-runtime/runtime-staging/<platform>-<arch>` if present;
 `AICHAT_MCP_RUNTIME_DIR` and `KP_LOCAL_MODEL_RUNTIME_DIR` override them. No runtime is required for native files
-or user terminals. Use the tray menu's **退出** before starting a fresh debugging session.
+or user terminals.
 The Start task (`npm start`) reads the shared AIChat runtime directly from local source, rebuilds the
 standalone MCP bundle and Desktop shell, then launches that exact MCP bundle using
 local Node. It stops an identified existing Keepwork MCP via its authenticated admin
@@ -36,7 +39,7 @@ Install dependencies in `apps/mcp-runtime` as well as the repository and Desktop
 MCP builds without a sibling AIChat checkout use the manifest-verified committed
 runtime copy. The local AIChat page still requires its checkout when
 `AICHAT_DESKTOP_LOCAL_SOURCE=1`; that is separate from building MCP.
-Quit an already-running Desktop from its tray before starting this task again.
+On Windows and macOS, opening Desktop again restores the running chat window. Running the VS Code Start task again terminates the previous task before rebuilding. After both builds succeed, the launcher stops any remaining Desktop instance and starts the fresh bundle. Installed and development copies keep their separate saved profiles.
 F5/Build keep their existing shell-only behavior. Neither path builds the AIChat website.
 
 On macOS, the application menu is named **Keepwork**. Development builds prepare an
@@ -113,7 +116,17 @@ gets the desktop bridge; Dashboard and embedded pages do not gain native privile
   PRO are unchanged. **打开 KeepWork 第二大脑** or a tray click restores the same window.
   The tray's **显示桌面宠物** preference is device-local and defaults on; disabling it
   ends dictation, live calling and wake-word capture without cancelling text tasks.
-  Re-enabling never starts recording. Login startup (`--background`) remains tray-only.
+  Re-enabling never starts recording. Installed Windows and macOS clients enable background startup on first launch.
+  At login, chat loads hidden and checks the account. A verified session stays hidden.
+  A missing or rejected session, a failed profile check, or no response within 30 seconds
+  marks the tray icon with an amber exclamation point. Open chat from the icon to
+  check the account. A successful profile check restores the normal icon. Use the File or tray menu to turn login startup off. The macOS menu-bar icon and
+  Windows notification-area icon remain available with both chat and pet hidden.
+  Open the icon menu to restore chat, open settings or inspect the services.
+  Hover over the icon or open its menu to see a status symbol and description for
+  DingTalk, Feishu and WeChat. Channel status refreshes once a minute. The tray
+  icon itself reflects the AIChat sign-in check.
+  Windows may place the icon in the taskbar overflow. Choosing Quit ends the desktop session.
   **退出** destroys both windows and closes native terminals and desktop-owned MCP only.
 - Login startup is off by default and optional in the application menu.
 - Electron's per-user application directory stores the persistent `aichat` browser session,

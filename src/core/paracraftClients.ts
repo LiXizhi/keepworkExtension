@@ -1,3 +1,4 @@
+import {advanceWebAuthoring, creationTools, executeAuthoring, getAuthoringCatalog} from './paracraftAuthoring';
 import { createParacraftLauncher } from './paracraftLaunch';
 import { randomUUID } from 'node:crypto';
 import * as http from 'node:http';
@@ -22,7 +23,7 @@ const PING_ACTIONS = new Set(['health']);
 const ACTIONS = new Set(['health', 'world_status', 'read_official_wiki', 'world_files', 'world_docs', 'analyze_world', 'get_scene_info', 'query_scene', 'read_scene_object', 'get_creation_capabilities', 'find_build_site', 'run_code', 'code_job', 'run_command', 'screenshot', 'camera_capture', 'open_world', 'exit', 'bring_to_front']);
 
 export function listParacraftActions(): string[] {
-    return [...ACTIONS];
+    return [...ACTIONS, ...creationTools.map(t=>t.function.name)];
 }
 
 export interface ParacraftIdentity {
@@ -789,9 +790,42 @@ export function enqueueHttpRequest(id: string, params: Record<string, unknown>):
 }
 
 export async function dispatchAction(id: string, action: string, params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+    if (creationTools.some(tool => tool.function.name === action)) {
+        const client = getLive(id);
+        if (!client) return { status: 404, body: { ok: false, error: 'unknown client' } };
+        try {
+            const result = await executeAuthoring(action, params, async (nativeAction, nativeParams) => {
+                let body;
+                if (isWasmClient(client)) {
+                    // The external WASM web server polls for HTTP requests. Pin the request
+                    // to the selected client instead of resolving a mutable instance alias.
+                    const request = JSON.stringify({ action: nativeAction, params: nativeParams });
+                    const response = await enqueueHttpRequest(id, {
+                        method: 'POST', path: '/ajax/paracraft_cli', headers: { 'Content-Type': 'application/json' },
+                        bodyBase64: Buffer.from(request).toString('base64'),
+                    }) as { result?: { status?: number; bodyBase64?: string } };
+                    const captured = response.result;
+                    if (captured?.status !== 200 || !captured.bodyBase64) throw new Error('Web Paracraft CLI request failed');
+                    body = JSON.parse(Buffer.from(captured.bodyBase64, 'base64').toString('utf8'));
+                    if (body.clientId !== id) throw new Error('Selected Web Paracraft client changed');
+                } else {
+                    const reply = await dispatchNative(id, nativeAction, nativeParams);
+                    body = reply.body as { ok?: boolean; result?: any; error?: string };
+                }
+                if (!body?.ok || body.result?.ok === false) throw new Error(body?.error || body?.result?.error || 'Engine request failed');
+                return body.result;
+            });
+            return { status: 200, body: { ok: true, result } };
+        } catch (error) {
+            return { status: 400, body: { ok: false, error: error instanceof Error ? error.message : String(error) } };
+        }
+    }
     if (!ACTIONS.has(action)) {
         return { status: 400, body: { ok: false, error: `unknown action: ${action}` } };
     }
+    return dispatchNative(id, action, params);
+}
+async function dispatchNative(id:string,action:string,params:Record<string,unknown>):Promise<{status:number;body:unknown}> {
     const client = getLive(id);
     if (!client) return { status: 404, body: { ok: false, error: 'unknown client' } };
     if (client.useNpl && client.nplPort) {
@@ -868,6 +902,17 @@ export async function tryHandleParacraft(opts: {
     const { pathname, method, sendJson, assertAuth } = opts;
     if (!pathname.startsWith('/paracraft')) return false;
 
+    if (pathname === '/paracraft/authoring/step' && method === 'POST') {
+        if (!assertAuth()) return true;
+        try { sendJson(200, await advanceWebAuthoring(parseJson(await opts.readBody()))); }
+        catch (error) { sendJson(400, { ok: false, error: error instanceof Error ? error.message : String(error) }); }
+        return true;
+    }
+    if (pathname === '/paracraft/authoring' && method === 'GET') {
+        if (!assertAuth()) return true;
+        sendJson(200,getAuthoringCatalog());
+        return true;
+    }
     if (pathname === '/paracraft/register' && method === 'POST') {
         const body = parseJson(await opts.readBody());
         sendJson(200, await registerClient(body as Partial<ParacraftIdentity>));
@@ -964,6 +1009,7 @@ export async function tryHandleParacraft(opts: {
         if (!assertAuth()) return true;
         const id = decodeURIComponent(actionMatch[1]);
         const action = decodeURIComponent(actionMatch[2]);
+        if (method!=='POST' && creationTools.some(t=>t.function.name===action)) { sendJson(405,{ok:false,error:'POST required'}); return true; }
         const body = method === 'POST' ? parseJson(await opts.readBody()) : {};
         const dispatched = await dispatchAction(id, action, body);
         sendJson(dispatched.status, dispatched.body);

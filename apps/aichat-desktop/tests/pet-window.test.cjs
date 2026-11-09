@@ -19,7 +19,13 @@ function fixture() {
       this.webContents.mainFrame = {}; this.webContents.setWindowOpenHandler = () => {};
       this.webContents.send = (_, state) => { this.state = state; }; windows.push(this); }
     isDestroyed() { return !!this.destroyed; } setMenu() {} setBounds(value) { this.bounds = value; this.resizes = (this.resizes || 0) + 1; } getBounds() { return this.bounds; }
-    showInactive() { this.shown = true; } hide() { this.shown = false; } destroy() { this.destroyed = true; this.emit('closed'); }
+    setAlwaysOnTop(flag, level) { this.level = flag && level; }
+    moveTop() { this.covered = false; }
+    isVisible() { return this.shown; }
+    showInactive() { if (!this.shown) { this.shown = true; this.emit('show'); } }
+    hide() { this.shown = false; this.emit('hide'); } destroy() { this.destroyed = true; this.emit('closed'); }
+    isFocusable() { return this.focusable !== false; }
+    setFocusable(value) { this.focusable = value; }
     setIgnoreMouseEvents(value) { this.ignored = value; }
     loadURL(url) { this.webContents.mainFrame.url = url; this.webContents.emit('did-finish-load'); return Promise.resolve(); }
   }
@@ -44,6 +50,26 @@ test('pet window remains single-instance, transparent/topmost and restores after
   h.pet.show(); assert.equal(w.state.expanded, false); assert.equal(h.commands.length, 1);
   await h.invoke('open'); assert.equal(h.opened(), 1); assert.equal(w.shown, false);
   h.pet.dispose(); assert.equal(w.destroyed, true);
+});
+test('a fullscreen window covering a visible Windows pet is overtaken without focusing it', { skip: process.platform !== 'win32' }, t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const h = fixture(); h.pet.show();
+  const w = h.windows[0];
+  assert.equal(w.level, 'screen-saver');
+  w.covered = true; t.mock.timers.tick(2000); assert.equal(w.covered, false);
+  h.pet.hide(); w.covered = true; t.mock.timers.tick(2000); assert.equal(w.covered, true);
+  h.pet.show(); assert.equal(w.covered, false);
+  h.pet.dispose();
+});
+test('explicit tray recovery brings a pet on the projector back to the tray display', () => {
+  const h = fixture();
+  const primary = h.screen.getPrimaryDisplay();
+  const projector = { workArea: { ...primary.workArea, x: 1200 } };
+  h.screen.getDisplayNearestPoint = point => point.x >= 1200 ? projector : primary;
+  h.pet.show(); const w = h.windows[0]; assert.equal(w.bounds.x, 1200);
+  h.pet.hide(); h.pet.show({ onCursorDisplay: true }); assert.equal(w.bounds.x, 0);
+  assert.ok(h.saved.at(-1).x < 1200);
+  h.pet.dispose();
 });
 test('pet IPC rejects foreign frames, stale owners and arbitrary native operations', async () => {
   const h = fixture(); h.pet.show(); h.pet.update({ version: 1, context: 'chat-1', ready: true });
@@ -119,14 +145,17 @@ test('pet can move to the top of the display without resizing its transparent ca
   h.pet.dispose();
 });
 
-test('complete exit requires a loaded, current confirmation; cancel and owner changes invalidate it', async () => {
+test('complete exit accepts a current confirmation during lookup; cancel and owner changes invalidate it', async () => {
   const h = fixture(); h.pet.show(); h.pet.update({ version: 1, context: 'owner' });
   await h.invoke('menu');
   const open = () => h.menus.at(-1).items.find(item => item.label === '完全退出…').click();
   const respond = async data => { h.pet.result({ requestId: h.commands.at(-1).requestId, ok: true, data }); await new Promise(resolve => setImmediate(resolve)); };
   open(); let id = h.windows[0].state.exitPrompt.id;
   assert.equal(h.quit(), 0);
+  await h.invoke('exit-confirm', { id }); assert.equal(h.quit(), 1);
+  await respond([]); assert.equal(h.windows[0].state.exitPrompt, null);
   await assert.rejects(h.invoke('exit-confirm', { id }), /expired/);
+  open(); id = h.windows[0].state.exitPrompt.id;
   await respond([{ name: '助手', channels: ['飞书', '钉钉'], secret: 'hidden' }]);
   assert.deepEqual(h.windows[0].state.exitPrompt.personas, [{ name: '助手', channels: ['飞书', '钉钉'] }]);
   await h.invoke('exit-cancel'); await assert.rejects(h.invoke('exit-confirm', { id }), /expired/);
@@ -137,7 +166,7 @@ test('complete exit requires a loaded, current confirmation; cancel and owner ch
   h.pet.result({ requestId: h.commands.at(-1).requestId, ok: false, error: 'offline' });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.windows[0].state.exitPrompt.unavailable, true);
-  await h.invoke('exit-confirm', { id }); assert.equal(h.quit(), 1);
+  await h.invoke('exit-confirm', { id }); assert.equal(h.quit(), 2);
   await assert.rejects(h.invoke('exit-confirm', { id }), /expired/);
   h.pet.dispose();
 });
@@ -163,6 +192,18 @@ test('pet target toggle crosses the real preload and native IPC allowlists', asy
       h.pet.update({ version: 1, context: 'chat', target: 'chat', canSwitchTarget: true });
     }
     assert.equal((await switched).target, 'chat');
+    h.pet.update({version:1, context:'chat',compactVoice:true});
+    assert.equal(h.windows[0].isFocusable(),false);
+    await h.invoke('expand',{expanded:true});
+    assert.equal(h.windows[0].isFocusable(),true);
+    await h.invoke('expand',{expanded:false});
+    for (const action of ['record-start','record-stop','voice-start','voice-stop']) {
+      const result = api.action(action,{context:'chat'});
+      const sent = h.commands.at(-1);
+      assert.equal(sent.action,action);
+      h.pet.result({requestId:sent.requestId,ok:true});
+      assert.equal((await result).context,'chat');
+    }
     await assert.rejects(api.action('toggle-target', { context: 'persona' }), /Stale/);
     await assert.rejects(api.action('terminal'), /Invalid pet action/);
     api = undefined;

@@ -80,7 +80,7 @@
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        "$candidate = Get-ChildItem -LiteralPath '${workspaceFolder}/apps/vscode-extension' -File -Filter 'keepwork-*.vsix' | ForEach-Object { if ($_.BaseName -match '^keepwork-(\\d+\\.\\d+\\.\\d+)$') { [PSCustomObject]@{ File = $_; Version = [version]$Matches[1] } } } | Sort-Object Version -Descending | Select-Object -First 1; if (-not $candidate) { throw 'No keepwork-X.Y.Z.vsix package found in apps/vscode-extension.' }; Write-Host \"Publishing $($candidate.File.Name)...\"; $env:PATH = 'C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin;' + $env:PATH; & '${workspaceFolder}/apps/vscode-extension/node_modules/.bin/vsce.cmd' publish --azure-credential --packagePath $candidate.File.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+        "& '${workspaceFolder}/scripts/publish-marketplace.ps1'"
       ],
       "problemMatcher": [],
       "presentation": {
@@ -105,7 +105,7 @@
     },
     {
       "label": "keepwork Desktop: Start",
-      "detail": "Sync AIChat runtime, rebuild MCP and Desktop, then restart MCP using the fresh local bundle.",
+      "detail": "Restart the previous task, rebuild Desktop and MCP, and launch the fresh local bundle.",
       "type": "shell",
       "command": "npm",
       "args": [
@@ -114,9 +114,11 @@
       "options": {
         "cwd": "${workspaceFolder}/apps/aichat-desktop",
         "env": {
-          "AICHAT_DESKTOP_LOCAL_SOURCE": "1"
+          "AICHAT_DESKTOP_LOCAL_SOURCE": "1",
+          "AICHAT_DESKTOP_REPLACE": "1"
         }
       },
+      "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" },
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",
