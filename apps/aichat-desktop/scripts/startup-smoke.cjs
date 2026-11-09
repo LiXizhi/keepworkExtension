@@ -37,7 +37,14 @@ async function main() {
     });
     console.log(JSON.stringify({ scenario: 'slow optional image', domMs, checkedMs: Date.now() - started, visible }));
     assert.equal(visible, true, 'Usable page remains hidden while an optional resource loads');
-    const report = JSON.parse(fs.readFileSync(path.join(home, 'startup-timing.json'), 'utf8'));
+    // The native show event can reach Playwright before connectInitial resumes
+    // and writes its receipt (notably on Windows). Wait for that separate event.
+    const actualHome = await application.evaluate(({ app }) => app.getPath('userData'));
+    assert.equal(fs.realpathSync(actualHome).toLowerCase(), fs.realpathSync(home).toLowerCase());
+    const reportFile = path.join(actualHome, 'startup-timing.json');
+    const reportDeadline = Date.now() + 3000;
+    while (!fs.existsSync(reportFile) && Date.now() < reportDeadline) await new Promise(resolve => setTimeout(resolve, 25));
+    const report = JSON.parse(fs.readFileSync(reportFile, 'utf8'));
     assert.equal(report.outcome, 'ready');
     assert.ok(report.stagesMs.windowReady >= report.stagesMs.pageStart);
     assert.ok(report.stagesMs.windowReady - report.stagesMs.pageStart < 1800);
