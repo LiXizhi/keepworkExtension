@@ -6,6 +6,11 @@ import { autoUpdater } from 'electron-updater';
 import { TerminalSessionManager } from '../../../src/core/terminalSessions';
 const { rememberDesktopClient } = require('../../../src/core/desktopClientIdentity.cjs');
 const { NativeFiles, atomicJson } = require('./files.cjs');
+const { SCHEME, parseLaunchUrl, LaunchIntents } = require('./launchIntents.cjs');
+const { createStartupWindow } = require('./startupWindow.cjs');
+const launchIntents = new LaunchIntents();
+let desktopReady = false, foregroundRequested = false, launchPageReady = false;
+let startupWindow: any;
 const { defaultBrainFolder } = require('./brainFolder.cjs');
 const { checkGit, installGit } = require('./gitSetup.cjs');
 const { createUpdateWindow } = require('./updateWindow.cjs');
@@ -49,7 +54,7 @@ const terminals = new TerminalSessionManager();
 const terminalIds = new Set<string>();
 let settingsFile: string;
 let mediaGrants: InstanceType<typeof MediaGrants>;
-let settings = { openAtLogin: false, theme: 'light', petVisible: true, petPosition: null as null | { x: number; y: number }, petPreferences: { scale: 1, appearance: 'current' } };
+let settings = { onboardingOffered: false, openAtLogin: false, theme: 'light', petVisible: true, petPosition: null as null | { x: number; y: number }, petPreferences: { scale: 1, appearance: 'current' } };
 let serviceBusy = false, switchingPage = false;
 const supportsLogin = production && ['win32', 'darwin'].includes(process.platform);
 let startup: { set(enabled: boolean): void; enabled(): boolean } | undefined;
@@ -119,7 +124,21 @@ function owner() {
   if (!current) throw new Error('window closed');
   return `desktop:${current.webContents.id}`;
 }
-function show() { void ensureShown(); }
+function show() {
+  foregroundRequested = true;
+  if (!desktopReady) { startupWindow?.open(); return; }
+  void ensureShown().catch((error: Error) => dialog.showErrorBox(PRODUCT_NAME, error.message));
+}
+function notifyLaunchIntent() {
+  const current = liveWindow();
+  if (launchPageReady && current && trustedPage(current.webContents.getURL(), devUrl)) current.webContents.send('aichat-desktop:launch-intent');
+}
+function acceptLaunchUrl(value: string) {
+  const kind = parseLaunchUrl(value);
+  if (!kind) return false;
+  if (kind === 'onboarding') launchIntents.offer(kind);
+  show(); notifyLaunchIntent(); return true;
+}
 async function checkRuntimeHeartbeat() {
   if (disableDevMcp || quitting || serviceBusy || updateActionBusy || runtime?.restarting) return;
   const supervisors = [
@@ -309,7 +328,20 @@ function setUpdateState(state: string, progress = 0) {
   menu(); notifyUpdateStatus();
 }
 const PAGE_COMMANDS = new Set(['new-chat', 'toggle-sidebar', 'toggle-files', 'open-settings', 'experience-simple', 'experience-professional', 'theme-light', 'theme-dark']);
-const HOST_COMMANDS = new Set(['open-folder', 'reload', 'check-updates', 'toggle-login', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'select-all', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'mcp-status', 'mcp-dashboard', 'mcp-restart', 'open-browser', 'local-source', 'published-site']);
+const HOST_COMMANDS = new Set(['open-folder', 'reload', 'check-updates', 'toggle-login', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'select-all', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'devtools', 'mcp-status', 'mcp-dashboard', 'mcp-restart', 'open-browser', 'local-source', 'published-site']);
+function toggleDeveloperTools(contents: BrowserWindow['webContents']) {
+  if (contents.isDevToolsOpened()) contents.closeDevTools();
+  else contents.openDevTools({ mode: 'detach' });
+}
+function installDeveloperTools(contents: BrowserWindow['webContents']) {
+  // Windows uses a custom titlebar and removes its native menu. Handle F12
+  // in the host so it also works before page initialization or inside an iframe.
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.key !== 'F12' || input.isAutoRepeat) return;
+    event.preventDefault();
+    toggleDeveloperTools(contents);
+  });
+}
 const MENU_ROLES: Record<string, string> = { undo: 'undo', redo: 'redo', cut: 'cut', copy: 'copy', paste: 'paste', 'select-all': 'selectAll', 'zoom-in': 'zoomIn', 'zoom-out': 'zoomOut', 'zoom-reset': 'resetZoom', fullscreen: 'togglefullscreen' };
 function shortcut(accelerator = '') {
   const mac = process.platform === 'darwin';
@@ -350,6 +382,7 @@ function runCommand(id: string) {
   else if (id === 'zoom-out') current.webContents.setZoomLevel(current.webContents.getZoomLevel() - 0.5);
   else if (id === 'zoom-reset') current.webContents.setZoomLevel(0);
   else if (id === 'fullscreen') current.setFullScreen(!current.isFullScreen());
+  else if (id === 'devtools') toggleDeveloperTools(current.webContents);
 }
 async function openFolderFromMenu() {
   await ensureShown();
@@ -397,6 +430,7 @@ function desktopMenus() {
       key('CmdOrCtrl+0', '实际大小', 'zoom-reset'),
       { type: 'separator' },
       key('F11', '全屏', 'fullscreen'),
+      { id: 'devtools', label: '开发者工具', shortcut: 'F12' },
       { type: 'separator' },
       { id: 'open-settings', label: '设置' },
     ],
@@ -513,6 +547,12 @@ function setupBridge() {
       updateSignIn(args.signedIn);
       return;
     }
+    if (method === 'launchIntent') { launchPageReady = true; return launchIntents.peek(); }
+    if (method === 'ackLaunchIntent') {
+      const accepted = launchIntents.acknowledge(args.id);
+      if (accepted) { settings.onboardingOffered = true; atomicJson(settingsFile, settings); }
+      return accepted;
+    }
     if (method === 'petState') return floatingPet?.update(args);
     if (method === 'petResult') return floatingPet?.result(args);
     if (method === 'theme') {
@@ -601,6 +641,7 @@ function openWindow(startHidden = false, checkStartupSignIn = false) {
     // Offline, stalled and older pages may never report a verified session.
     signInTimer = setTimeout(() => updateSignIn(false), 30000);
   }
+  installDeveloperTools(created.webContents);
   if (process.platform !== 'darwin') created.setMenu(null);
   created.on('page-title-updated', event => event.preventDefault());
   // Keep one page/runtime alive: the pet is only a projection of this window.
@@ -617,7 +658,7 @@ function openWindow(startHidden = false, checkStartupSignIn = false) {
     if (win === created) { clearTimeout(signInTimer); win = undefined; }
     if (!quitting) setTrayTip(closedTip);
   });
-  created.webContents.on('did-start-navigation', (_e, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { clearTerminals(); floatingPet?.reset(); } });
+  created.webContents.on('did-start-navigation', (_e, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) { launchPageReady = false; clearTerminals(); floatingPet?.reset(); } });
   created.webContents.on('will-navigate', (e, url) => { if (!trustedPage(url, devUrl)) { e.preventDefault(); if (externalUrl(url)) void shell.openExternal(url); } });
   created.webContents.on('will-redirect', (e, url, _inPlace, mainFrame) => { if (mainFrame && !trustedPage(url, devUrl)) e.preventDefault(); });
   created.webContents.setWindowOpenHandler(({ url }) => { if (externalUrl(url)) void shell.openExternal(url); return { action: 'deny' }; });
@@ -640,6 +681,7 @@ function openWindow(startHidden = false, checkStartupSignIn = false) {
     chatLoadFailed = true;
     console.error('Chat startup failed:', error.message);
     if (keepHidden && !created.isVisible()) return;
+    if (!launcherManaged) throw error;
     const target = devUrl || ENTRY;
     // This local error document has no trusted desktop bridge. The normal
     // navigation checks still apply to the retry link.
@@ -660,10 +702,20 @@ if (!require('./desktopLock.cjs').acquireDesktopLock(app, isolatedTest)) {
   let readyForWindows = false, requestedWindow = false;
   function requestWindow() {
     if (readyForWindows) show();
-    else requestedWindow = true;
+    else { requestedWindow = true; foregroundRequested = true; }
   }
-  app.on('second-instance', (_event, argv) => { if (!argv.includes('--background')) requestWindow(); });
+  app.on('open-url', (event, url) => { event.preventDefault(); acceptLaunchUrl(url); });
+  app.on('second-instance', (_event, argv) => {
+    let accepted = false;
+    for (const value of argv) if (acceptLaunchUrl(value)) accepted = true;
+    if (!accepted && !argv.includes('--background')) requestWindow();
+  });
+  for (const value of process.argv) {
+    const kind = parseLaunchUrl(value);
+    if (kind) { foregroundRequested = true; if (kind === 'onboarding') launchIntents.offer(kind); }
+  }
   app.whenReady().then(async () => {
+    if (app.isPackaged) app.setAsDefaultProtocolClient(SCHEME);
     if (production) {
       try { rememberDesktopClient({ version: app.getVersion(), platform: process.platform === 'darwin' ? 'macos' : 'windows', arch: process.arch, executable: launcherManaged ? launcher : process.execPath }); }
       catch (error) { console.warn('Unable to record desktop version:', String(error)); }
@@ -769,25 +821,55 @@ if (!require('./desktopLock.cjs').acquireDesktopLock(app, isolatedTest)) {
     autoUpdater.on('update-not-available', info => { receiveShellMetadata(info); updateError = ''; setUpdateState('current'); });
     autoUpdater.on('update-downloaded', info => { receiveShellMetadata(info); updateError = ''; setUpdateState('pending restart', 100); });
     autoUpdater.on('error', e => { shellStale = true; updateError = e.message; setUpdateState('error'); });
-    if (!disableDevMcp) {
-      // AIChat probes the local MCP server as soon as the remote page loads. Make
-      // the server ready first so its one-shot initial discovery includes tools
-      // such as run_terminal instead of caching an offline result for the chat.
-      try { await runtime.start(); }
-      catch (e: unknown) {
-        updateError = e instanceof Error ? e.message : String(e);
-        if (!production && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
-          console.error(updateError); app.exit(1); return;
+    if (!settings.onboardingOffered) launchIntents.offer('first-launch');
+    const connectInitial = async () => {
+      chatLoadFailed = false;
+      try {
+        startupWindow.update('启动 MCP');
+        if (!disableDevMcp) {
+          await runtime.start();
+          const health = await runtime.refresh();
+          if (!health?.compatible) throw new Error(runtime.state.error || (health ? '8089 端口被其他服务占用，请关闭冲突服务后重试。' : '未能连接 Keepwork MCP，请查看诊断后重试。'));
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!production && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
+          console.error(message); app.exit(1); return;
+        }
+        chatLoadFailed = true;
+        startupWindow.update('MCP 启动失败', message);
+        if (foregroundRequested || !background) startupWindow.open();
+        menu(); return;
       }
-      menu();
-    }
-    readyForWindows = true;
-    if (background && !requestedWindow) {
-      setTrayTip(closedTip);
-      opening = openWindow(true, true).finally(() => { opening = null; });
-      if (launcherManaged) await opening;
-    } else await ensureShown();
+      if (quitting) return;
+      readyForWindows = true;
+      menu(); startupWindow.update('连接 AIChat');
+      try {
+        const foreground = foregroundRequested || requestedWindow || !background;
+        if (foreground) {
+          const current = liveWindow();
+          if (current) { await current.loadURL(devUrl || ENTRY); retryPageOnOpen = false; current.show(); current.focus(); }
+          else await ensureShown();
+        } else {
+          setTrayTip(closedTip);
+          if (!liveWindow()) {
+            opening = openWindow(true, true).finally(() => { opening = null; });
+            if (launcherManaged) await opening;
+          }
+        }
+        if (quitting) return;
+        if (foregroundRequested) await ensureShown();
+        desktopReady = true; startupWindow.close(); notifyLaunchIntent();
+      } catch (error) {
+        chatLoadFailed = true;
+        startupWindow.update('AIChat 网页连接失败', `MCP 已就绪，请检查网络后重试。\n${error instanceof Error ? error.message : String(error)}`);
+        if (foregroundRequested || !background) startupWindow.open();
+      }
+    };
+    startupWindow = createStartupWindow({ BrowserWindow, ipcMain, shell }, __dirname, connectInitial);
+    if (!launcherManaged && !disableDevMcp && (foregroundRequested || !background)) startupWindow.open();
+    await connectInitial();
+    if (quitting) return;
     if (!disableDevMcp) {
       void modelRuntime.start().then(menu).catch((e: Error) => { console.error('local-model startup failed:', e); updateError = e.message; menu(); });
       startRuntimeHeartbeat();
@@ -803,7 +885,7 @@ if (!require('./desktopLock.cjs').acquireDesktopLock(app, isolatedTest)) {
   app.on('before-quit', event => {
     if (managedDeployment) { void managedDeployment.close(); managedDeployment = null; }
     if (quitting) return;
-    event.preventDefault(); quitting = true; exitSignal?.abort(); liveWindow()?.hide(); floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
+    event.preventDefault(); quitting = true; exitSignal?.abort(); startupWindow?.dispose(); liveWindow()?.hide(); floatingPet?.hide(true); floatingPet?.dispose(); clearTerminals(); developmentServer?.close();
     disconnectPermissionPet?.();
     if (runtimeHeartbeat) { clearInterval(runtimeHeartbeat); runtimeHeartbeat = undefined; }
     void (async () => {

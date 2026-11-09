@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-09",
+  "version": "0.1.8",
+  "mcpVersion": "0.1.34",
+  "purpose": "internal manual installation trial",
+  "sourceSnapshot": "c93a1d13ddbe014192efb74ee7d936ffe1719082",
+  "sourceBranch": "codex/desktop-0-1-8-internal-20261109",
+  "mainBranchMerged": false,
+  "ciRun": "https://github.com/LiXizhi/keepworkExtension/actions/runs/42583523538",
+  "ciWindowsAttempt": 2,
+  "ciJobs": {
+    "windows-x64": "success",
+    "macos-arm64": "success",
+    "macos-x64": "failed: upstream 504 during packaging"
+  },
+  "files": {
+    "KeepWork-SecondBrain-0.1.8-arm64.dmg": {
+      "path": "/Users/chx/Desktop/sz-run/KeepWork-0.1.8-试用包/KeepWork-SecondBrain-0.1.8-arm64.dmg",
+      "target": "darwin-arm64",
+      "size": 379539714,
+      "sha256": "00c38a1707e477b451edb4c3903598fd80461431c27d97a390e81e9c3cfcd274",
+      "source": "local build from the implementation working tree",
+      "signing": "ad-hoc; not notarized"
+    },
+    "KeepWork-SecondBrain-0.1.8-x64.exe": {
+      "path": "/Users/chx/Desktop/sz-run/KeepWork-0.1.8-试用包/KeepWork-SecondBrain-0.1.8-x64.exe",
+      "target": "win32-x64",
+      "size": 316948069,
+      "sha256": "4f47a77b45e2cebbc10dc3ea12a878d0203f78057d9461807931ae702a8730ce",
+      "source": "native Windows CI job 129051865849",
+      "signing": "NotSigned"
+    }
+  },
+  "checks": {
+    "mac": "strict ad-hoc codesign, DMG checksum, version/protocol/native files verified (local receipt)",
+    "windows": "provenance/SHA-256/updater SHA-512 verified; ZIP CRC, packaged version/protocol/bridge/startup, x64 PE and MCP runtime verified",
+    "windowsNativeCI": "shared checks, 90 desktop tests, Electron PTY, MCP and local-model runtime smoke passed"
+  },
+  "windowsInstallationSecurity": {
+    "smartScreenAcceptance": "pending-clean-machine",
+    "publisher": null,
+    "windowsSignature": "NotSigned",
+    "cleanMachineAcceptance": "pending"
+  },
+  "cdnPublished": false,
+  "webChangesPublished": false,
+  "cleanMachineInstallationAcceptance": "pending",
+  "realAccountModelKnowledgeQuestionAcceptance": "pending",
+  "note": "Mac local package predates the isolated source snapshot commit. Main working tree was preserved. CI run overall conclusion is failure because the optional Intel job failed; Windows and arm64 jobs succeeded."
+}

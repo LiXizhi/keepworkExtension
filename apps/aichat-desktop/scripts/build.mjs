@@ -12,4 +12,4 @@ await fs.copyFile(`${root}/assets/keepwork-attention.png`, `${root}/dist/keepwor
 await fs.copyFile(`${root}/assets/keepwork-mac.png`, `${root}/dist/keepwork-mac.png`);
 if (process.env.KP_PORTABLE_BUILD !== '1') await createRequire(import.meta.url)('./dev-electron.cjs').prepare();
 
-for (const file of ['pet.html', 'pet.css', 'pet.js', 'pet-preload.cjs', 'updates.html', 'updates.css', 'updates.js', 'updates-preload.cjs']) await fs.copyFile(`${root}/${file.startsWith('pet') ? '../../src/pet' : 'src'}/${file}`, `${root}/dist/${file}`);
+for (const file of ['startup.html', 'startup-preload.cjs', 'pet.html', 'pet.css', 'pet.js', 'pet-preload.cjs', 'updates.html', 'updates.css', 'updates.js', 'updates-preload.cjs']) await fs.copyFile(`${root}/${file.startsWith('pet') ? '../../src/pet' : 'src'}/${file}`, `${root}/dist/${file}`);

@@ -27,6 +27,11 @@ function collect(dir, target) {
   const fixedKey = `keepwork/aichat-desktop/${target}/${fixedName}`;
   const fixedArchive = { ...archive, name: fixedName, remoteKey: fixedKey, url: `${DOMAIN}/${fixedKey}` };
   entries.push(fixedArchive);
+  const installerFormat = target.startsWith('win32') ? 'exe' : 'dmg';
+  const installerName = archive.name.replace(/\.zip$/i, `.${installerFormat}`);
+  const installerEntries = entries.filter(entry => entry.name.endsWith(`.${installerFormat}`));
+  if (installerEntries.length > 1 || (installerEntries.length && installerEntries[0].name !== installerName)) throw new Error('Installer version/architecture must match the ZIP');
+  const installer = installerEntries[0];
   const manifest = {
     schemaVersion: 1,
     product: 'aichat-desktop',
@@ -37,6 +42,7 @@ function collect(dir, target) {
     url: fixedArchive.url,
     size: archive.size,
     sha256: archive.sha256,
+    ...(installer ? { installer: { format: installerFormat, fileName: installer.name, url: installer.url, size: installer.size, sha256: installer.sha256 } } : {}),
   };
   const manifestPath = path.join(dir, 'latest-client.json');
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);

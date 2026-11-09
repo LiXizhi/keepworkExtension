@@ -11,7 +11,7 @@ const { stopDesktop } = require('../scripts/stop-desktop.cjs');
 test('installed and development profiles share foreground handoff and task replacement', {
   skip: !['win32', 'darwin'].includes(process.platform), timeout: 45000,
 }, async t => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aichat-singleton-'));
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'aichat-singleton-')));
   const entry = path.join(dir, 'fixture.cjs');
   const children = [];
   t.after(async () => {

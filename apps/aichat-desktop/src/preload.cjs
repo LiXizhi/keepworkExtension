@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Electron only installs this preload on the application window; children get none.
 if (process.isMainFrame) {
   const call = (method, args = {}) => ipcRenderer.invoke('aichat-desktop:v1', method, args);
-  const hostCommands = new Set(['open-folder', 'reload', 'check-updates', 'toggle-login', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'select-all', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'mcp-status', 'mcp-dashboard', 'mcp-restart', 'open-browser', 'local-source', 'published-site']);
+  const hostCommands = new Set(['open-folder', 'reload', 'check-updates', 'toggle-login', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'select-all', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'devtools', 'mcp-status', 'mcp-dashboard', 'mcp-restart', 'open-browser', 'local-source', 'published-site']);
   ipcRenderer.on('aichat-desktop:page-command', (_event, id) => {
     if (typeof id === 'string') window.postMessage({ channel: 'aichat.desktop-menu.v1', type: 'command', id }, window.location.origin);
   });
@@ -92,7 +92,7 @@ if (process.isMainFrame) {
     } catch { /* Untrusted/offline documents never receive native chrome controls. */ }
   }, { once: true });
   contextBridge.exposeInMainWorld('aichatDesktop', Object.freeze({
-    version: 1, capabilities: Object.freeze({ files: true, terminal: true, defaultBrainFolder: true, gitSetup: true, floatingPet: true, startupSignIn: true }),
+    version: 1, capabilities: Object.freeze({ files: true, terminal: true, defaultBrainFolder: true, gitSetup: true, floatingPet: true, launchIntents: true, startupSignIn: true }),
     reportStartupSignIn: signedIn => call('startupSignIn', { signedIn }),
     publishPetState: state => call('petState', state),
     petResult: result => call('petResult', result),
@@ -100,6 +100,13 @@ if (process.isMainFrame) {
       const listener = (_event, command) => callback(command);
       ipcRenderer.on('aichat-desktop:pet-command', listener);
       return () => ipcRenderer.removeListener('aichat-desktop:pet-command', listener);
+    },
+    getLaunchIntent: () => call('launchIntent'),
+    acknowledgeLaunchIntent: id => call('ackLaunchIntent', { id }),
+    onLaunchIntent: callback => {
+      const listener = () => { if (typeof callback === 'function') callback(); };
+      ipcRenderer.on('aichat-desktop:launch-intent', listener);
+      return () => ipcRenderer.removeListener('aichat-desktop:launch-intent', listener);
     },
     checkGit: () => call('checkGit'), installGit: () => call('installGit'),
     roots: () => call('roots'), pickFolder: () => call('pickFolder'),

@@ -48,7 +48,7 @@ test('desktop menus are Chinese and expose a serializable page payload', async (
   assert.equal(h.calls.at(-1), 'https://keepwork.com/chat');
   const payload = vm.runInContext('menuPayload("view")', h.context);
   assert.equal(payload.label, '视图');
-  assert.equal(JSON.stringify(payload.items.filter(item => item.id).map(item => item.id)), JSON.stringify(['experience-simple', 'experience-professional', 'theme-light', 'theme-dark', 'toggle-sidebar', 'toggle-files', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'open-settings']));
+  assert.equal(JSON.stringify(payload.items.filter(item => item.id).map(item => item.id)), JSON.stringify(['experience-simple', 'experience-professional', 'theme-light', 'theme-dark', 'toggle-sidebar', 'toggle-files', 'zoom-in', 'zoom-out', 'zoom-reset', 'fullscreen', 'devtools', 'open-settings']));
   for (const item of payload.items) assert.equal(typeof item.click, 'undefined');
   assert.throws(() => vm.runInContext('menuPayload("nope")', h.context), /Invalid menu/);
 });
@@ -219,4 +219,33 @@ test('desktop update payload identifies application versions independently of MC
   assert.equal(payload.version, '0.1.0');
   assert.equal(payload.latestVersion, '0.1.6');
   assert.equal(payload.state, 'current');
+});
+
+for (const platform of ['win32', 'darwin']) test(`${platform} F12 and View menu toggle developer tools`, () => {
+  const h = host(platform);
+  const listeners = {};
+  let opened = false;
+  h.window.webContents.on = (name, callback) => { listeners[name] = callback; };
+  h.window.webContents.isDevToolsOpened = () => opened;
+  h.window.webContents.openDevTools = options => { opened = true; h.calls.push(options); };
+  h.window.webContents.closeDevTools = () => { opened = false; };
+  vm.runInContext('installDeveloperTools(windowFixture.webContents)', h.context);
+  let prevented = 0;
+  const event = { preventDefault: () => prevented++ };
+  listeners['before-input-event'](event, { type: 'keyDown', key: 'F12' });
+  assert.equal(opened, true);
+  assert.equal(prevented, 1);
+  assert.equal(h.calls[0].mode, 'detach');
+  listeners['before-input-event'](event, { type: 'keyUp', key: 'F12' });
+  assert.equal(opened, true);
+  listeners['before-input-event'](event, { type: 'keyDown', key: 'F12', isAutoRepeat: true });
+  listeners['before-input-event'](event, { type: 'keyDown', key: 'F11' });
+  assert.equal(opened, true);
+  assert.equal(prevented, 1);
+  const item = h.menu().find(item => item.label === '视图').submenu.find(item => item.label === '开发者工具');
+  assert.ok(item);
+  item.click();
+  assert.equal(opened, false);
+  vm.runInContext('runCommand("devtools")', h.context);
+  assert.equal(opened, true);
 });

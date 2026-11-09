@@ -13,6 +13,7 @@ const hash = (file, algorithm='sha256', encoding='hex') => crypto.createHash(alg
 function validateArtifact(dir, { target, version, commit }) {
   if (!TARGETS.includes(target) || !/^\d+\.\d+\.\d+$/.test(version) || !/^[a-f0-9]{40}$/.test(commit)) throw Error('Require a supported target, exact version and full commit SHA');
   const meta = JSON.parse(fs.readFileSync(path.join(dir, 'publisher-build.json'), 'utf8'));
+  if (target.startsWith('darwin') && meta.installationSecurity?.macSigning === 'ad-hoc') throw Error('Internal ad-hoc Mac artifacts cannot be publicly published');
   if (meta.target !== target || meta.version !== version || meta.commit !== commit) throw Error(`Artifact identity mismatch: ${target}`);
   const names = fs.readdirSync(dir).filter(n => /\.(exe|dmg|zip|blockmap|yml)$/.test(n));
   for (const name of names) {

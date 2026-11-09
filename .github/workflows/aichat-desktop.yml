@@ -101,7 +101,7 @@ jobs:
           echo "CSC_NAME=-" >> "$GITHUB_ENV"
           echo "KP_MAC_RELEASE_SIGNED=false" >> "$GITHUB_ENV"
       - name: Configure signed Mac release
-        if: matrix.platform == 'darwin' && (inputs.publish || inputs.release_build || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]')))
+        if: matrix.platform == 'darwin' && (inputs.release_build || ((inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]'))) && (inputs.publish_target == '' || inputs.publish_target == 'all' || inputs.publish_target == format('macos-{0}', matrix.arch))))
         env:
           KP_MAC_CSC_LINK: ${{ secrets.KP_MAC_CSC_LINK }}
           KP_MAC_CSC_KEY_PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
@@ -118,9 +118,8 @@ jobs:
             echo "APPLE_TEAM_ID=$KP_APPLE_TEAM_ID" >> "$GITHUB_ENV"
             echo "KP_MAC_RELEASE_SIGNED=true" >> "$GITHUB_ENV"
           else
-            echo "Apple signing secrets unavailable; publishing Mac with a coherent ad-hoc signature. System Settings approval may be required."
-            echo "CSC_NAME=-" >> "$GITHUB_ENV"
-            echo "KP_MAC_RELEASE_SIGNED=false" >> "$GITHUB_ENV"
+            echo "Release Mac artifacts require Developer ID signing and notarization secrets."
+            exit 1
           fi
       - name: Package desktop
         working-directory: apps/aichat-desktop
@@ -135,7 +134,27 @@ jobs:
           if [[ "$KP_MAC_RELEASE_SIGNED" == 'true' ]]; then
             spctl --assess --type execute --verbose=4 "$app"
             xcrun stapler validate "$app"
+            dmg=$(find release -maxdepth 1 -name '*.dmg' -print -quit)
+            test -n "$dmg"
+            xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
           fi
+      - name: Verify Mac system language negotiation
+        if: matrix.platform == 'darwin'
+        working-directory: apps/aichat-desktop
+        run: |
+          app=$(find release -maxdepth 2 -name '*.app' -print -quit)
+          test -n "$app"
+          node scripts/locale-smoke.cjs "$app"
+      - name: Record Windows installer signature
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem apps/aichat-desktop/release/*.exe | Select-Object -First 1
+          $signature = Get-AuthenticodeSignature -FilePath $installer.FullName
+          @{ windowsSignature = [string]$signature.Status; publisher = $signature.SignerCertificate.Subject; smartScreenAcceptance = 'pending-clean-machine'; cleanMachineAcceptance = 'pending' } | ConvertTo-Json | Set-Content -Encoding utf8 apps/aichat-desktop/release/installation-security.json
       - name: Record artifact provenance
         env:
           KP_PUBLISHER_ID: ${{ inputs.publisher_id }}
@@ -145,11 +164,13 @@ jobs:
         with:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
+            apps/aichat-desktop/release/*.dmg
             apps/aichat-desktop/release/*.exe
             apps/aichat-desktop/release/*.zip
             apps/aichat-desktop/release/*.blockmap
             apps/aichat-desktop/release/latest*.yml
             apps/aichat-desktop/release/publisher-build.json
+            apps/aichat-desktop/release/installation-security.json
   publish:
     if: inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]'))
     needs: build
