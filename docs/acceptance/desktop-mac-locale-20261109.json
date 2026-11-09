@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-09",
+  "desktopVersion": "0.1.9",
+  "target": "darwin-arm64",
+  "mcpVersion": "0.1.34",
+  "status": "internal-local-build",
+  "path": "/Users/chx/Desktop/sz-run/KeepWork-0.1.9-试用包/KeepWork-SecondBrain-0.1.9-arm64.dmg",
+  "size": 379539888,
+  "sha256": "ceb8fb48489bf7f6a50a0853a533a83193332bca51af3b59aa490908b9a0fd92",
+  "signing": "ad-hoc",
+  "notarized": false,
+  "published": false,
+  "sourceHeadBeforeLocalChanges": "47978bbc8d627fce7b95562fc460a9df22da8d40",
+  "uncommittedImplementation": true,
+  "rootCause": "Packaged Mac bundle lacked root .lproj directories and CFBundleLocalizations, causing AppKit/Chromium to choose en-US despite zh-Hans-CN system preference and automatic AIChat language.",
+  "fix": {
+    "CFBundleLocalizations": [
+      "zh-Hans",
+      "zh-Hant",
+      "en"
+    ]
+  },
+  "nativeRegression": {
+    "old018Bundle": "failed as expected: preferred zh-Hans-CN, navigator en-US",
+    "new019BundleChinese": "passed: preferred zh-Hans-CN, navigator zh-Hans",
+    "new019BundleEnglish": "passed: preferred en-US, navigator en-US",
+    "isolation": "Cloned bundle retains engine/helpers/plist; only clone business entry replaced to avoid starting real MCP or reading user data."
+  },
+  "checks": {
+    "desktop": 90,
+    "strictCodesign": "passed",
+    "dmgChecksum": "passed",
+    "zipCRC": "passed",
+    "webLanguagePrecedenceAndSDK": "2 passed; independent existing catalog test fails on missing 圈子 translation, also absent in HEAD"
+  },
+  "acceptance": {
+    "installedUserAppReplaced": false,
+    "cleanMachine": "pending",
+    "realModel": "pending"
+  },
+  "webChangesPublished": false
+}

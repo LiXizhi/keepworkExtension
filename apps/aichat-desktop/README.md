@@ -1,10 +1,19 @@
 # KeepWork 第二大脑
 
+安装、网页唤起、启动准备页与真实首问验收见 [首次使用说明](../../docs/desktop-first-use.md)。Windows 默认 EXE，Mac 默认 DMG；保留 ZIP 更新和旧网页契约。
+
 An independent Electron window for `https://keepwork.com/chat`, with native folder grants,
 workspace files and PTY terminals. Keepwork MCP runs as a separately supervised bundled
 NodeRuntime. The existing KP Local Helper is not replaced; speaker models are not included.
 
 ## Develop and verify
+
+客户端内按 **F12** 可打开/关闭开发者工具，也可通过 **视图 → 开发者工具** 打开。
+该入口在正式安装包中保留，Windows 自定义标题栏菜单和 macOS 原生菜单均可用。
+选择 **Console** 查看错误堆栈；排查刷新时的故障可开启 **Preserve log** 后再重试。
+源码修改需要重新打包客户端才能进入已安装版本。
+开发验证：构建后运行 `node apps/aichat-desktop/scripts/devtools-smoke.cjs`，
+用独立用户目录检查真实 Electron 输入、菜单命令、重复开关及沙箱隔离。
 
 ### VS Code startup and debugging
 
@@ -178,15 +187,14 @@ Archives live in immutable version directories. The every-main six-file feed is 
 Desktop updater feeds are under `https://cdn.keepwork.com/keepwork/aichat-desktop/<platform>-<arch>/`.
 Each desktop package bundles both the MCP Node runtime and the `local-model` Node runtime
 (including the signed model package). Each target also publishes `latest-client.json` for the AIChat website's single client-download
-button. That manifest points to the fixed `KeepWork-SecondBrain.zip` alias in its target
+button. That manifest retains the fixed `KeepWork-SecondBrain.zip` alias in its target
 directory (`win32-x64`, `darwin-arm64`, or `darwin-x64`). The publisher uploads and verifies
 the alias from the versioned ZIP before promoting the manifest. AIChat declares
 `CLIENT_RELEASE_VERSION` in `js/client_download.js`; update it with each website release.
 Manifest requests use that version and package requests append `?v=<manifest version>`
 to separate CDN cache entries. The fixed alias always serves the current release, not an
 archive of older releases. Versioned ZIPs remain available for updater metadata.
-Installer and updater artifacts remain
-available in the same directory but are not exposed by the website download flow.
+An optional `installer` descriptor exposes the matching EXE/DMG to new website clients; older clients keep downloading the ZIP. Installer bytes are verified before promoting metadata.
 
 ## Release prerequisites
 
@@ -196,8 +204,7 @@ Public publication requires its publish input and the `aichat-desktop-production
 Configure Qiniu credentials plus `KP_MAC_CSC_LINK`, `KP_MAC_CSC_KEY_PASSWORD`, `KP_APPLE_ID`,
 `KP_APPLE_APP_SPECIFIC_PASSWORD`, and `KP_APPLE_TEAM_ID` as environment secrets. Public Mac
 artifacts pass strict code-signature, Gatekeeper, and notarization-ticket checks when Apple secrets
-are configured. Without them, the workflow publishes a coherent ad-hoc-signed Mac ZIP; macOS users
-may need to approve it in System Settings. Windows publishing and bundled `local-model` remain
+are configured. Without them, release-quality/public Mac builds fail. Ordinary internal builds retain an explicitly ad-hoc signature and cannot enter the public artifact publisher. Windows publishing and bundled `local-model` remain
 mandatory gates.
 
 The **Coordinated Keepwork stable release** workflow requires matching committed MCP/VSIX

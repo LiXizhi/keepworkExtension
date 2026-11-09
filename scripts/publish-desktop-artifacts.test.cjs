@@ -28,3 +28,8 @@ test('preparation preserves signed ZIP bytes and only changes download metadata'
  const entry=plan[0].entries.find(e=>e.name===n);assert.deepEqual(fs.readFileSync(entry.filePath),original);
  }
 });
+test('internal ad-hoc Mac artifacts cannot enter the public publisher', t => {
+ const dir=fixture(t), file=path.join(dir,'publisher-build.json');
+ const meta=JSON.parse(fs.readFileSync(file));meta.installationSecurity={macSigning:'ad-hoc'};fs.writeFileSync(file,JSON.stringify(meta));
+ assert.throws(()=>validateArtifact(dir,identity),/Internal ad-hoc/);
+});
