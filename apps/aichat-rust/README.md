@@ -1,0 +1,44 @@
+# KeepWork 第二大脑 (`apps/aichat-rust`)
+
+基于 **Rust + Tauri 2（WRY 原生系统 WebView）** 构建的 **KeepWork 第二大脑（AIChat Desktop）** 跨平台桌面客户端，参考 `grokx` 项目的 Rust + Tauri 2 架构对原 Electron 版 `apps/aichat-desktop` 进行完整重构，不再依赖 Electron / Chromium 运行时。
+
+## 核心能力与架构
+
+- **主聊天窗口与 34px 顶部自定义标题栏**：
+  - 加载 `https://keepwork.com/chat`（或本地 Loopback `AIChat.html` 开发源码 / `deployment.json` 离线包）。
+  - 在受信任顶层主框架注入 Closed Shadow DOM 的 `#keepwork-desktop-titlebar`（34px 高度、应用图标、Windows/Linux 内联菜单、居中标题、地址胶囊、刷新按钮，并实时同步页面深浅色与皮肤 CSS 变量）。
+  - 注入只读冻结的 `window.aichatDesktop`（Bridge v1）契约，对现有 Web 端 `desktop.js`、`keepwork_fs.js`、`desktop_menu.js` 保持 100% 兼容。
+- **自我更新与自动更新（Self-Update / Auto-Update）**：
+  - **Keepwork MCP Runtime 热更新（`:8089`）**：后台从 `https://cdn.keepwork.com/keepwork/mcp-stable/<platform>-<arch>.json` 检查更新，流式下载 `.zip`，校验文件大小、SHA-256、40 位源码 Commit 与 `runtime.json` 启动配置，暂存至 `mcp-runtimes/<sha256>`，支持在「检查更新」窗口一键应用或在下次重启时自动激活，启动失败自动回滚。
+  - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），后台自动下载更新包并校验 SHA-256，持久化 `update-metadata.json`（离线时保留上次检查缓存并标记 `stale: true`）。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
+- **双本地 Runtime 守护进程监管**：
+  - 监管 `keepwork-mcp-node-runtime`（`127.0.0.1:8089`）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检，启动时自动识别并平滑接管低版本 `runtimeVersion` 的本机 MCP 进程，同时保护外部（VS Code / Local Helper）管理的同版本或高版本实例。
+- **透明置顶桌面宠物窗口（`pet.html`）**：
+  - 固定工作区画布尺寸（`DESKTOP-PET-CLICK-STABILITY-001`），支持 `0.5×`–`4×` 缩放、抱抱龙/跟随 AIChat 宠物外观、快捷回复、语音听写/通话、完全退出分身/通道确认气泡（`#exit-bubble`）以及主屏截图权限审批气泡（`#permission-bubble`，连接 `~/.keepwork-mcp/pet-permission-bridge.json`，点击后先隐藏窗口再返回授权结果以确保气泡不入镜）。
+- **本地文件夹授权、工作区文件读写与直连 PTY 终端**：
+  - `src-tauri/src/files.rs`：管理 `folder-grants.json`、路径边界校验、软链接/目录联接安全规则与文件大小上限（PPT/PPTX 500 MiB、PDF 100 MiB、通用 1024 MiB）。
+  - `src-tauri/src/brain_folder.rs`：管理 `<Documents>/MyBrain` 默认第二大脑文件夹预览与初始化授权。
+  - `src-tauri/src/terminal.rs`：基于原生 PTY（Unix `libc::openpty` / Windows Shell）提供 `desktop:<id>` 会话、游标增量输出、窗口尺寸同步与中断控制。
+
+## 开发与验证命令
+
+```bash
+# 类型检查与前端构建
+pnpm typecheck
+pnpm build
+
+# Rust 单元测试与 5 个冒烟测试二进制
+cargo test --manifest-path src-tauri/Cargo.toml --features dev-bins
+pnpm smoke
+
+# 完整检查（TypeScript + Vite + Cargo Test + Node 契约测试）
+pnpm check
+```
+
+## 多平台打包矩阵
+
+| 平台 | Rust Target | 构建命令 | 产物 |
+| --- | --- | --- | --- |
+| **macOS Universal**（Apple Silicon + Intel 单包） | `universal-apple-darwin` | `pnpm make:mac` | `Keepwork.app`、`Keepwork_<版本>_universal.dmg` |
+| **Windows x64** | `x86_64-pc-windows-msvc` | `pnpm make:win:x64` | `KeepWork 第二大脑_<版本>_x64-setup.exe` |
+| **Windows ARM64** | `aarch64-pc-windows-msvc` | `pnpm make:win:arm64` | `KeepWork 第二大脑_<版本>_arm64-setup.exe` |

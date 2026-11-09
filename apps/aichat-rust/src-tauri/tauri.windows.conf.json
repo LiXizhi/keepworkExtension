@@ -1,0 +1,28 @@
+{
+  "productName": "KeepWork 第二大脑",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "KeepWork 第二大脑",
+        "width": 1360,
+        "height": 900,
+        "minWidth": 640,
+        "minHeight": 480,
+        "resizable": true,
+        "visible": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

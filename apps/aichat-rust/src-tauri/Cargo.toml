@@ -1,0 +1,67 @@
+[package]
+name = "aichat-rust"
+version = "0.2.1"
+description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
+authors = ["Keepwork"]
+edition = "2021"
+default-run = "aichat-rust"
+
+[lib]
+name = "aichat_rust_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+dev-bins = []
+
+[[bin]]
+name = "desktop-smoke"
+path = "src/bin/desktop_smoke.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "runtime-smoke"
+path = "src/bin/runtime_smoke.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "pty-smoke"
+path = "src/bin/pty_smoke.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "pet-smoke"
+path = "src/bin/pet_smoke.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "updates-smoke"
+path = "src/bin/updates_smoke.rs"
+required-features = ["dev-bins"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "unstable", "macos-private-api"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "io-std", "sync", "time", "macros", "rt-multi-thread", "fs", "net"] }
+dirs = "6"
+dunce = "1"
+semver = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+sha2 = "0.10"
+flate2 = "1"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+junction = "1"

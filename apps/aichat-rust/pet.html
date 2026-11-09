@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://cdn.keepwork.com; connect-src 'self' ipc: http://ipc.localhost tauri://localhost">
+  <title>桌面宠物</title>
+  <link rel="stylesheet" href="/src/pet.css">
+</head>
+<body>
+  <div id="stack">
+    <section id="permission-bubble" role="alertdialog" aria-modal="true" aria-labelledby="permission-title" hidden>
+      <strong id="permission-title">允许截取主屏幕？</strong>
+      <p id="permission-client"></p>
+      <p>屏幕上的可见内容将发送给请求方的 AI。此授权不允许操作鼠标或键盘。</p>
+      <div class="actions">
+        <button data-permission="once" type="button">允许一次</button>
+        <button data-permission="always" type="button">始终允许截图</button>
+        <button data-permission="cancel" type="button">取消</button>
+      </div>
+    </section>
+    <section id="exit-bubble" role="dialog" aria-modal="true" aria-labelledby="exit-title" hidden>
+      <strong id="exit-title">完全退出？</strong>
+      <p id="exit-summary"></p>
+      <ul id="exit-personas"></ul>
+      <p id="exit-status"></p>
+      <div class="actions">
+        <button id="exit-cancel" type="button">继续运行</button>
+        <button id="exit-confirm" type="button">确认退出</button>
+      </div>
+    </section>
+    <section id="bubble" hidden>
+      <div id="reply" role="button" tabindex="0" title="点击打开桌面查看完整回复"></div>
+      <div id="options"></div>
+    </section>
+    <section id="compact-controls" aria-label="语音控制" hidden>
+      <output id="compact-status"></output>
+      <button id="compact-record" type="button" hidden>开始录音</button>
+      <button id="compact-call" type="button">开始语音</button>
+    </section>
+    <section id="panel" hidden>
+      <header>
+        <button id="target" type="button"><span id="target-title">AIChat</span><span id="target-detail"></span></button>
+        <button id="collapse" type="button" title="收起面板" aria-label="收起面板">−</button>
+        <button id="open" type="button" title="打开桌面窗口" aria-label="打开桌面窗口">□</button>
+      </header>
+      <div id="status"></div>
+      <div id="error"></div>
+      <textarea id="draft" rows="3" placeholder="和宠物说点什么…"></textarea>
+      <div class="actions">
+        <button id="dictation" type="button">语音输入</button>
+        <button id="call" type="button">通话</button>
+        <button id="mute" type="button" hidden>静音</button>
+        <button id="send" type="button">发送</button>
+      </div>
+    </section>
+  </div>
+  <button id="pet" type="button" title="单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动">
+    <span id="art">🐉</span>
+    <span id="badge" hidden>●</span>
+  </button>
+  <script type="module" src="/src/pet.ts"></script>
+</body>
+</html>

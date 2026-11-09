@@ -1,0 +1,81 @@
+:root {
+  color-scheme: light dark;
+  font: 14px/1.5 system-ui, -apple-system, sans-serif;
+}
+body {
+  margin: 28px;
+  color: light-dark(#252936, #e5e7ef);
+  background: light-dark(#f5f6fa, #181a21);
+}
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+h1 {
+  margin: 0;
+  font-size: 23px;
+}
+h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+p, footer {
+  margin: 4px 0 0;
+  color: light-dark(#626a7e, #adb4c7);
+}
+section {
+  margin: 16px 0;
+  padding: 18px;
+  border-radius: 12px;
+  background: light-dark(#fff, #252832);
+  border: 1px solid light-dark(#e1e4ed, #393e4c);
+}
+dl {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 6px 12px;
+  margin: 0;
+}
+dt {
+  color: light-dark(#626a7e, #adb4c7);
+}
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+progress {
+  width: 100%;
+  margin-top: 12px;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+.status {
+  color: light-dark(#626a7e, #adb4c7);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+button {
+  flex: none;
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  color: #fff;
+  background: #395cda;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+footer {
+  font-size: 13px;
+  line-height: 1.6;
+}
