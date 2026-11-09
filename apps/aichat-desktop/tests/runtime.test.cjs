@@ -51,32 +51,6 @@ test('invalid staged runtime falls back without losing the installed record', as
   assert.throws(() => supervisor.directory('../escape'));
   assert.throws(() => validateRuntime(home, 'windows', 'x64'));
 });
-test('slow health checks share a wall-clock startup budget and stop the owned child', async t => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-startup-deadline-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const child = new EventEmitter(); child.pid = 123; child.exitCode = null;
-  let stopped = 0, checks = 0;
-  child.kill = () => { stopped++; child.exitCode = 0; child.emit('exit', 0); };
-  const supervisor = new RuntimeSupervisor(path.join(home, 'state'), home, '0.1.0', {
-    spawn: () => child,
-    probe: async timeout => {
-      if (!checks++) return null; // Initial service discovery.
-      assert.ok(timeout > 0 && timeout <= 40, 'each HTTP timeout must fit the remaining startup budget');
-      await new Promise(resolve => setTimeout(resolve, timeout));
-      return null;
-    },
-  }, { startupTimeoutMs: 40 });
-  const exe = supervisor.platform === 'windows' ? 'node.exe' : 'bin/node';
-  fs.mkdirSync(path.dirname(path.join(home, exe)), { recursive: true });
-  fs.mkdirSync(path.join(home, 'app'), { recursive: true });
-  fs.writeFileSync(path.join(home, exe), 'fixture'); fs.writeFileSync(path.join(home, 'app/cli.cjs'), 'fixture');
-  fs.writeFileSync(path.join(home, 'runtime.json'), JSON.stringify({ schemaVersion: 1, product: 'keepwork-mcp-node-runtime', version: '0.1.0', platform: supervisor.platform, arch: supervisor.arch, entry: 'app/cli.cjs' }));
-  const started = Date.now();
-  await supervisor.start();
-  assert.match(supervisor.state.error, /启动超时/);
-  assert.ok(Date.now() - started < 1000, 'must not wait forty full network timeouts');
-  assert.equal(stopped, 1); assert.equal(supervisor.child, null);
-});
 test('failed pending launch rolls back to the current healthy runtime', async t => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-rollback-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));

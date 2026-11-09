@@ -74,8 +74,6 @@ jobs:
       - name: Test desktop publisher
         run: node --test scripts/publish-desktop.test.cjs scripts/qiniu-release.test.cjs
       - run: node apps/aichat-desktop/scripts/native-smoke.cjs
-      - name: Verify desktop startup with slow resources
-        run: node apps/aichat-desktop/scripts/startup-smoke.cjs
       - run: npm run stage --prefix apps/mcp-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
       - run: npm run smoke --prefix apps/mcp-runtime
       - run: npm run runtime:stage --prefix apps/local-model-runtime -- --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'

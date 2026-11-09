@@ -30,9 +30,9 @@ function validateRuntime(dir, platform, arch, version, options = {}) {
   }
   return m;
 }
-async function probe(port = 8089, matcher = body => body.name === 'keepwork-mcp' && body.fsApi === 'workspace', healthPath = '/health', timeoutMs = 1500) {
+async function probe(port = 8089, matcher = body => body.name === 'keepwork-mcp' && body.fsApi === 'workspace', healthPath = '/health') {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}${healthPath}`, { signal: AbortSignal.timeout(Math.max(1, timeoutMs)) });
+    const response = await fetch(`http://127.0.0.1:${port}${healthPath}`, { signal: AbortSignal.timeout(1500) });
     const body = await response.json();
     return { reachable: true, compatible: response.ok && matcher(body), ...body };
   } catch { return null; }
@@ -40,9 +40,9 @@ async function probe(port = 8089, matcher = body => body.name === 'keepwork-mcp'
 class RuntimeSupervisor {
   constructor(home, bundled, hostVersion, deps = {}, options = {}) {
     this.home = home; this.bundled = bundled; this.hostVersion = hostVersion;
-    this.options = { product: PRODUCT, port: 8089, entry: 'app/cli.cjs', updates: true, startupTimeoutMs: 10000, ...options };
+    this.options = { product: PRODUCT, port: 8089, entry: 'app/cli.cjs', updates: true, ...options };
     this.platform = process.platform === 'win32' ? 'windows' : 'macos'; this.arch = process.arch;
-    this.deps = { probe: timeoutMs => probe(this.options.port, this.options.matcher, this.options.healthPath, timeoutMs), spawn, kill: (pid, signal) => process.kill(pid, signal), ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
+    this.deps = { probe: () => probe(this.options.port, this.options.matcher, this.options.healthPath), spawn, kill: (pid, signal) => process.kill(pid, signal), ...deps }; this.state = { state: 'stopped', owner: 'desktop' };
     this.child = null; this.stopping = false;
     try { this.record = JSON.parse(fs.readFileSync(path.join(home, 'state.json'), 'utf8')); } catch { this.record = {}; }
     this.update = { stale: !!this.record.latest };
@@ -158,18 +158,14 @@ class RuntimeSupervisor {
         this.child = child;
         let failed; child.on('error', e => { failed = e; });
         let health;
-        // Bound elapsed time, including slow health requests. Forty retries of
-        // a 1.5s HTTP timeout used to hold startup for about seventy seconds.
-        const deadline = Date.now() + this.options.startupTimeoutMs;
-        while (Date.now() < deadline) {
+        for (let i = 0; i < 40; i++) {
           if (failed) throw failed;
-          health = await this.deps.probe(Math.min(1500, Math.max(1, deadline - Date.now())));
+          health = await this.deps.probe();
           if (health?.compatible) break;
           if (child.exitCode !== null) throw new Error('Runtime exited before readiness');
-          const remaining = deadline - Date.now();
-          if (remaining > 0) await delay(Math.min(250, remaining));
+          await delay(250);
         }
-        if (!health?.compatible) throw new Error(`Runtime health check failed: 启动超时（${this.options.startupTimeoutMs / 1000} 秒），请查看 MCP 诊断后重试`);
+        if (!health?.compatible) throw new Error('Runtime health check failed');
         if (health.pid && health.pid !== child.pid) {
           await this.stop(); this.stopping = false;
           this.state = { state: 'attached', owner: health.hostKind || 'external', pending: !!this.record.pending }; return;

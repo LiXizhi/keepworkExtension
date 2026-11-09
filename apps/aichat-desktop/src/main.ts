@@ -8,8 +8,6 @@ const { rememberDesktopClient } = require('../../../src/core/desktopClientIdenti
 const { NativeFiles, atomicJson } = require('./files.cjs');
 const { SCHEME, parseLaunchUrl, LaunchIntents } = require('./launchIntents.cjs');
 const { createStartupWindow } = require('./startupWindow.cjs');
-const { loadPage } = require('./pageLoad.cjs');
-const { createStartupTiming } = require('./startupTiming.cjs');
 const launchIntents = new LaunchIntents();
 let desktopReady = false, foregroundRequested = false, launchPageReady = false;
 let startupWindow: any;
@@ -152,10 +150,8 @@ function ensureShown() {
     if (current.webContents.isCrashed?.()) return current.loadURL(devUrl || ENTRY).catch((error: Error) => dialog.showErrorBox(PRODUCT_NAME, error.message));
     return Promise.resolve();
   }
-  if (opening) return opening;
-  const pending: Promise<void> = openWindow().finally(() => { opening = null; });
-  opening = pending;
-  return pending;
+  if (!opening) opening = openWindow().finally(() => { opening = null; });
+  return opening;
 }
 function updatesSnapshot() {
   const mcp = runtime?.updateSnapshot() || { state: 'unavailable' };
@@ -568,12 +564,12 @@ function openWindow(startHidden = false) {
   created.webContents.setWindowOpenHandler(({ url }) => { if (externalUrl(url)) void shell.openExternal(url); return { action: 'deny' }; });
   created.webContents.on('render-process-gone', () => floatingPet?.reset());
   installPermissions(created, mediaGrants, () => devUrl, dialog);
-  return loadPage(created, devUrl || ENTRY, { ready: () => {
+  return created.loadURL(devUrl || ENTRY).then(() => {
     if (!created.isDestroyed()) {
       if (!keepHidden) { created.show(); created.focus(); tray?.setToolTip(PRODUCT_NAME); }
       else if (!created.isVisible() && settings.petVisible) floatingPet?.show();
     }
-  } });
+  });
 }
 if (!app.requestSingleInstanceLock()) {
   if (!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
@@ -593,8 +589,6 @@ else {
     if (kind) { foregroundRequested = true; if (kind === 'onboarding') launchIntents.offer(kind); }
   }
   app.whenReady().then(async () => {
-    const startupTiming = createStartupTiming(app.getPath('userData'), app.getVersion());
-    startupTiming.mark('electronReady');
     if (app.isPackaged) app.setAsDefaultProtocolClient(SCHEME);
     if (app.isPackaged) {
       try { rememberDesktopClient({ version: app.getVersion(), platform: process.platform === 'darwin' ? 'macos' : 'windows', arch: process.arch, executable: process.execPath }); }
@@ -678,40 +672,33 @@ else {
     autoUpdater.on('error', e => { shellStale = true; updateError = e.message; setUpdateState('error'); });
     if (!settings.onboardingOffered) launchIntents.offer('first-launch');
     const connectInitial = async () => {
-      startupTiming.begin();
       try {
-        startupTiming.mark('mcpStart');
         startupWindow.update('启动 MCP');
         if (!disableDevMcp) {
           await runtime.start();
           const health = await runtime.refresh();
           if (!health?.compatible) throw new Error(runtime.state.error || (health ? '8089 端口被其他服务占用，请关闭冲突服务后重试。' : '未能连接 Keepwork MCP，请查看诊断后重试。'));
         }
-        startupTiming.mark('mcpReady');
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!app.isPackaged && process.env.AICHAT_DESKTOP_FRESH_MCP_NODE) {
           console.error(message); app.exit(1); return;
         }
         startupWindow.update('MCP 启动失败', message);
-        startupTiming.finish('mcp-error');
         menu(); return;
       }
       if (quitting) return;
       menu(); startupWindow.update('连接 AIChat');
       try {
-        startupTiming.mark('pageStart');
         const foreground = foregroundRequested || !process.argv.includes('--background');
         if (foreground) {
           const current = liveWindow();
-          if (current) { await loadPage(current, devUrl || ENTRY); current.show(); current.focus(); }
+          if (current) { await current.loadURL(devUrl || ENTRY); current.show(); current.focus(); }
           else await ensureShown();
         } else tray.setToolTip(closedTip);
         if (quitting) return;
         desktopReady = true; startupWindow.close(); notifyLaunchIntent();
-        startupTiming.mark('windowReady'); startupTiming.finish('ready');
       } catch (error) {
-        startupTiming.finish('page-error');
         startupWindow.update('AIChat 网页连接失败', `MCP 已就绪，请检查网络后重试。\n${error instanceof Error ? error.message : String(error)}`);
       }
     };
