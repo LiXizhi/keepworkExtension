@@ -77,3 +77,31 @@ test('desktop publication verifies binaries before promoting and verifying descr
     'verify:latest.yml,latest-client.json',
   ]);
 });
+
+test('additive installers preserve legacy ZIP fields and bind each installer to its target and version', t => {
+  for (const target of ['win32-x64', 'darwin-arm64', 'darwin-x64']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-installer-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const format = target.startsWith('win32') ? 'exe' : 'dmg';
+    const stem = `KeepWork-SecondBrain-0.1.8-${target.split('-')[1]}`;
+    fs.writeFileSync(path.join(dir, stem + '.zip'), 'legacy ZIP');
+    fs.writeFileSync(path.join(dir, stem + '.' + format), 'native installer');
+    fs.writeFileSync(path.join(dir, target.startsWith('win32') ? 'latest.yml' : 'latest-mac.yml'), 'version: 0.1.8\n');
+    const entries = collect(dir, target), manifest = JSON.parse(fs.readFileSync(path.join(dir, 'latest-client.json')));
+    assert.equal(manifest.format, 'zip'); assert.equal(manifest.fileName, 'KeepWork-SecondBrain.zip');
+    assert.equal(manifest.installer.format, format); assert.equal(manifest.installer.fileName, stem + '.' + format);
+    const entry = entries.find(e => e.name === manifest.installer.fileName);
+    assert.equal(entry.sha256, manifest.installer.sha256); assert.equal(entry.size, manifest.installer.size);
+    fs.renameSync(entry.filePath, path.join(dir, 'KeepWork-SecondBrain-0.1.7-x64.' + format));
+    assert.throws(() => collect(dir, target), /version\/architecture/);
+  }
+});
+
+test('failed installer verification does not promote any download or updater descriptor', async () => {
+  const uploads = [];
+  await assert.rejects(publishRelease([{ name: 'installer.dmg' }, { name: 'latest-client.json' }], {}, {
+    uploadEntry: async (_c, entry) => uploads.push(entry.name), refreshUrls: async () => {},
+    verifyEntriesWithRetry: async () => { throw Error('CDN bytes differ'); },
+  }), /CDN bytes differ/);
+  assert.deepEqual(uploads, ['installer.dmg']);
+});
