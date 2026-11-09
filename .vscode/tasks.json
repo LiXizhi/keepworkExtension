@@ -126,6 +126,27 @@
       }
     },
     {
+      "label": "keepwork Rust Desktop: Start",
+      "detail": "Launch the Rust/Tauri desktop with local AIChat source, frontend hot reload and automatic Rust rebuilds.",
+      "type": "shell",
+      "command": "pnpm",
+      "args": ["tauri", "dev"],
+      "options": {
+        "cwd": "${workspaceFolder}/apps/aichat-rust",
+        "env": {
+          "AICHAT_DESKTOP_LOCAL_SOURCE": "1",
+          "AICHAT_DESKTOP_REPLACE": "1",
+          "RUST_BACKTRACE": "1"
+        }
+      },
+      "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
       "label": "keepwork Desktop: Build",
       "type": "shell",
       "command": "npm",

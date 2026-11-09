@@ -294,32 +294,17 @@ pub fn show_main_window(app: &AppHandle, core: &AppCore) {
     let _ = core;
 }
 
-fn pet_work_area(app: &AppHandle) -> WorkArea {
-    let monitors = app.available_monitors().unwrap_or_default();
-    if !monitors.is_empty() {
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut max_y = i32::MIN;
-        for monitor in monitors {
-            let scale = monitor.scale_factor();
-            let pos = monitor.position().to_logical::<i32>(scale);
-            let size = monitor.size().to_logical::<i32>(scale);
-            min_x = min_x.min(pos.x);
-            min_y = min_y.min(pos.y);
-            max_x = max_x.max(pos.x + size.width);
-            max_y = max_y.max(pos.y + size.height);
+pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
+    if let Some(existing) = app.get_webview_window("pet") {
+        if show_now {
+            let _ = existing.show();
         }
-        if max_x > min_x && max_y > min_y {
-            return WorkArea {
-                x: min_x,
-                y: min_y,
-                width: max_x - min_x,
-                height: max_y - min_y,
-            };
-        }
+        broadcast_pet_state(app, core);
+        return;
     }
-    app.primary_monitor()
+
+    let area = app
+        .primary_monitor()
         .ok()
         .flatten()
         .map(|m| {
@@ -333,23 +318,8 @@ fn pet_work_area(app: &AppHandle) -> WorkArea {
                 height: size.height,
             }
         })
-        .unwrap_or_default()
-}
-
-pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
-    let area = pet_work_area(app);
+        .unwrap_or_default();
     core.pet.set_work_area(area);
-    if let Some(existing) = app.get_webview_window("pet") {
-        // Keep the transparent canvas on the union of all displays so the pet
-        // can cross screen boundaries after a display was added or moved.
-        let _ = existing.set_position(tauri::LogicalPosition::new(area.x as f64, area.y as f64));
-        let _ = existing.set_size(tauri::LogicalSize::new(area.width as f64, area.height as f64));
-        if show_now {
-            let _ = existing.show();
-        }
-        broadcast_pet_state(app, core);
-        return;
-    }
 
     if let Ok(builder) = WebviewWindowBuilder::new(app, "pet", WebviewUrl::App("pet.html".into()))
         .title("桌面宠物")
