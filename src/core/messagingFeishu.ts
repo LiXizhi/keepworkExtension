@@ -1,17 +1,17 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Incoming, splitReply, automatedSender, automatedText } from './messagingPolicy';
+import { cliSearchDirs, globalModuleDirs, cliChildEnv } from './cliPaths';
 
 export const FEISHU_MESSAGE_SCOPES = 'contact:user.basic_profile:readonly offline_access search:message im:chat:read im:message:readonly im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.send_as_user';
 export function resolveLark(): string {
     const binary = process.platform === 'win32' ? 'lark-cli.exe' : 'lark-cli';
-    const dirs = (process.env.PATH || '').split(path.delimiter);
-    const candidates = [process.env.KEEPWORK_LARK_PATH || '', path.join(os.homedir(), '.local/bin', binary),
-        ...dirs.map(dir => path.join(dir, binary)),
-        ...[process.env.APPDATA && path.join(process.env.APPDATA, 'npm'), ...dirs, '/usr/local/lib', '/opt/homebrew/lib'].filter(Boolean).map(dir => path.join(dir!, 'node_modules/@larksuite/cli/bin', binary))];
+    const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+    const candidates = [process.env.KEEPWORK_LARK_PATH || '',
+        ...[...dirs, ...cliSearchDirs()].map(dir => path.join(dir, binary)),
+        ...globalModuleDirs().map(dir => path.join(dir, 'node_modules/@larksuite/cli/bin', binary))];
     const found = candidates.find(file => path.isAbsolute(file) && fs.existsSync(file) && fs.statSync(file).isFile());
     if (!found) throw Error('Lark CLI unavailable; install @larksuite/cli');
     return found;
@@ -19,7 +19,7 @@ export function resolveLark(): string {
 // Never return raw CLI diagnostics: they can include account or credential data.
 export function lark(args: string[], cwd: string, signal?: AbortSignal): Promise<any> {
     return new Promise((resolve, reject) => {
-        const child = spawn(resolveLark(), args, {cwd, shell:false, windowsHide:true, stdio:'pipe', signal});
+        const child = spawn(resolveLark(), args, {cwd, shell:false, windowsHide:true, stdio:'pipe', signal, env:cliChildEnv()});
         let output = '', diagnostics = '', settled = false;
         const finish = (error?: Error, value?: any) => { if (settled) return; settled=true; clearTimeout(timer); error ? reject(error) : resolve(value); };
         const timer = setTimeout(() => {child.kill(); finish(Error('Feishu CLI timed out'));}, 45000);

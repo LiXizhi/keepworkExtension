@@ -1,15 +1,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Incoming, MessageConfig, splitReply, automatedSender, automatedText } from './messagingPolicy';
+import { cliSearchDirs, globalModuleDirs, cliChildEnv } from './cliPaths';
 
 export function resolveDws(): string {
-    const dirs = (process.env.PATH || process.env.Path || '').split(path.delimiter);
+    const dirs = (process.env.PATH || process.env.Path || '').split(path.delimiter).filter(Boolean);
     const binary = process.platform === 'win32' ? 'dws.exe' : 'dws';
-    const candidates = [process.env.KEEPWORK_DWS_PATH || '', path.join(os.homedir(), '.local', 'bin', binary), ...dirs.map(d => path.join(d, binary)),
-        ...[process.env.APPDATA && path.join(process.env.APPDATA, 'npm'), ...dirs, path.join(os.homedir(), '.npm-global', 'lib'), '/usr/local/lib', '/opt/homebrew/lib']
-            .filter((v): v is string => !!v).map(d => path.join(d, 'node_modules/dingtalk-workspace-cli/vendor', binary))];
+    const binDirs = [...dirs, ...cliSearchDirs()];
+    const candidates = [process.env.KEEPWORK_DWS_PATH || '', ...binDirs.map(d => path.join(d, binary)),
+        ...globalModuleDirs().map(d => path.join(d, 'node_modules/dingtalk-workspace-cli/vendor', binary))];
     for (const file of candidates) if (path.isAbsolute(file) && fs.existsSync(file) && fs.statSync(file).isFile()) return file;
     throw new Error('DWS CLI unavailable; install dingtalk-workspace-cli or set KEEPWORK_DWS_PATH to its native executable');
 }
@@ -17,7 +17,7 @@ export class DwsError extends Error { constructor(public uncertain: boolean, pub
 export function dws(args: string[], cwd: string): Promise<any> {
     return new Promise((resolve, reject) => {
         let child: ChildProcessWithoutNullStreams;
-        try { child = spawn(resolveDws(), args, { cwd, shell: false, windowsHide: true, stdio: 'pipe' }); } catch(e) { reject(e); return; }
+        try { child = spawn(resolveDws(), args, { cwd, shell: false, windowsHide: true, stdio: 'pipe', env: cliChildEnv() }); } catch(e) { reject(e); return; }
         let output = '', diagnostics = '', settled = false;
         const finish = (error?: Error, value?: any) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
         const timer = setTimeout(() => { child.stdin.end(); finish(new DwsError(true)); }, 45000);
@@ -36,7 +36,7 @@ export function dws(args: string[], cwd: string): Promise<any> {
 // Explicit interactive authorization only; output may contain credentials and is discarded.
 export function loginDws(root: string, profile?: string): Promise<void> {
     return new Promise((resolve, reject) => {
-        const child = spawn(resolveDws(), ['auth', 'login', ...(profile ? ['--profile', profile] : [])], {cwd:root,shell:false,windowsHide:true,stdio:'pipe'});
+        const child = spawn(resolveDws(), ['auth', 'login', ...(profile ? ['--profile', profile] : [])], {cwd:root,shell:false,windowsHide:true,stdio:'pipe',env:cliChildEnv()});
         child.stdout.resume(); child.stderr.resume();
         const timer = setTimeout(() => { child.kill(); reject(new Error('DingTalk authorization timed out; retry authorization')); }, 180000);
         child.on('error', () => { clearTimeout(timer); reject(new Error('DingTalk authorization could not start')); });
@@ -55,7 +55,7 @@ export async function listenDws(root: string, profile: string, config: MessageCo
     try {
         for (const args of listenerArgs(config)) {
             await new Promise<void>((resolve, reject) => {
-                const child = spawn(resolveDws(), [...args, '--profile', profile], { cwd: root, shell: false, windowsHide: true, stdio: 'pipe' }); children.push(child);
+                const child = spawn(resolveDws(), [...args, '--profile', profile], { cwd: root, shell: false, windowsHide: true, stdio: 'pipe', env: cliChildEnv() }); children.push(child);
                 let ready = false, output = '', diagnostics = '';
                 const timer = setTimeout(() => { reject(new Error('DWS listener not ready')); stop(); }, 45000);
                 child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
