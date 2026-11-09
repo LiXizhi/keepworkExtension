@@ -386,15 +386,22 @@ impl NativeFiles {
                         "content": b64,
                     }))
                 } else {
-                    let content = String::from_utf8(bytes)
-                        .map_err(|_| "File is not valid UTF-8; use base64 encoding".to_string())?;
-                    Ok(json!({
+                    // The web client reads `bytes` (as Electron does); non-UTF-8
+                    // files must still be readable, so only add `content` when
+                    // the text decodes cleanly.
+                    let size = bytes.len();
+                    let content = String::from_utf8(bytes.clone()).ok();
+                    let mut result = json!({
                         "ok": true,
                         "rel": rel_slash,
-                        "size": content.len(),
+                        "size": size,
                         "encoding": "utf8",
-                        "content": content,
-                    }))
+                        "bytes": bytes,
+                    });
+                    if let Some(text) = content {
+                        result["content"] = json!(text);
+                    }
+                    Ok(result)
                 }
             }
             "write" => {
@@ -417,12 +424,26 @@ impl NativeFiles {
                     base64::engine::general_purpose::STANDARD
                         .decode(raw_b64)
                         .map_err(|e| format!("Invalid base64 payload: {e}"))?
-                } else {
-                    let text = args
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "Missing file content".to_string())?;
+                } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+                    // The web client sends `{ text }` (see keepworkWriteText).
                     text.as_bytes().to_vec()
+                } else if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+                    content.as_bytes().to_vec()
+                } else if let Some(items) = args.get("bytes").and_then(|v| v.as_array()) {
+                    // keepworkWriteBlob sends `{ bytes: Uint8Array }`, which
+                    // arrives as a JSON array of byte values.
+                    let mut buffer = Vec::with_capacity(items.len());
+                    for item in items {
+                        let value = item
+                            .as_u64()
+                            .filter(|n| *n <= u8::MAX as u64)
+                            .ok_or_else(|| "Invalid byte value".to_string())?;
+                        buffer.push(value as u8);
+                    }
+                    buffer
+                } else {
+                    // Match the Electron bridge: no content/key writes an empty file.
+                    Vec::new()
                 };
                 let limit = max_file_bytes_for_path(&rel_slash);
                 if (bytes.len() as u64) > limit {
@@ -534,6 +555,7 @@ impl NativeFiles {
                         entries.push(json!({
                             "name": name,
                             "path": child_rel,
+                            "kind": if meta.is_dir() { "directory" } else { "file" },
                             "type": if meta.is_dir() { "directory" } else { "file" },
                             "isDirectory": meta.is_dir(),
                             "isFile": meta.is_file(),
@@ -732,12 +754,49 @@ mod tests {
             .handle("read", &json!({ "rootId": grant.id, "path": "notes/hello.md" }))
             .unwrap();
         assert_eq!(read_res["content"], "# Hello");
+        assert_eq!(read_res["bytes"], json!("# Hello".as_bytes()));
 
         // Missing directory list/search returns empty without error
         let missing_list = files
             .handle("list", &json!({ "rootId": grant.id, "path": "_wiki", "recursive": true }))
             .unwrap();
         assert_eq!(missing_list["files"], json!([]));
+
+        // The web client writes `{ text }` and `{ bytes }`, not `{ content }`.
+        files
+            .handle(
+                "write",
+                &json!({ "rootId": grant.id, "rel": "_wiki/index.md", "text": "# Index" }),
+            )
+            .unwrap();
+        let text_res = files
+            .handle("read", &json!({ "rootId": grant.id, "rel": "_wiki/index.md" }))
+            .unwrap();
+        assert_eq!(text_res["content"], "# Index");
+        files
+            .handle(
+                "write",
+                &json!({ "rootId": grant.id, "rel": "media/raw.bin", "bytes": [0, 255, 7] }),
+            )
+            .unwrap();
+        let bin_res = files
+            .handle("read", &json!({ "rootId": grant.id, "path": "media/raw.bin" }))
+            .unwrap();
+        assert_eq!(bin_res["bytes"], json!([0, 255, 7]));
+        assert!(bin_res.get("content").is_none());
+
+        // Folder listings must expose `kind` so clients mark directories.
+        let root_list = files
+            .handle("list", &json!({ "rootId": grant.id, "path": "" }))
+            .unwrap();
+        let wiki_entry = root_list["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "_wiki")
+            .cloned()
+            .expect("_wiki entry");
+        assert_eq!(wiki_entry["kind"], "directory");
 
         // Symlink to outside directory is followed for workspace file read, but deleting the symlink preserves outside target!
         #[cfg(unix)]
