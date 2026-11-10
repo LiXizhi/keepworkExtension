@@ -15,10 +15,13 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
         "pageCommands": PAGE_COMMANDS,
     });
 
+    let menu_chrome = include_str!("../../src/menuChrome.js").replacen("export function", "function", 1);
+
     format!(
         r#"(() => {{
   if (window !== window.top) return;
   const bootstrap = {bootstrap};
+  {menu_chrome}
   window.__AICHAT_DESKTOP_BOOTSTRAP__ = bootstrap;
 
   // Native desktop chrome should not be text-selectable. Inputs, the composer
@@ -182,7 +185,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
       .left {{ gap: 2px; }}
       .right {{ flex: 1; height: 100%; }}
       .center {{ position: absolute; left: 50%; transform: translateX(-50%); gap: 8px; max-width: calc(100% - 360px); }}
-      .icon {{ width: 18px; height: 18px; margin-right: 8px; flex: none; pointer-events: none; }}
+      .icon {{ width: 18px; height: 18px; margin-left: 6px; margin-right: 2px; flex: none; pointer-events: none; display: block; line-height: 0; transform: none; object-fit: contain; }}
       button {{
         all: unset;
         box-sizing: border-box;
@@ -208,32 +211,14 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     const left = document.createElement("div");
     left.className = "left";
     if (!isMac) {{
-      if (bootstrap.iconDataUrl) {{
-        const img = document.createElement("img");
+      {{
+        const img = document.createElement("span");
         img.className = "icon";
-        img.src = bootstrap.iconDataUrl;
-        img.alt = "";
+        img.setAttribute("aria-hidden", "true");
+        img.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><rect width="18" height="18" rx="2" fill="rgb(0,133,178)"/><path d="M3.5 3h3v4.5L11 3h3.5L8.5 9l6 6H11L6.5 10.5V15H3.5z" fill="white"/></svg>`;
         left.appendChild(img);
       }}
-      for (const m of bootstrap.menus || []) {{
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.dataset.menuId = m.id;
-        btn.setAttribute("aria-expanded", "false");
-        btn.textContent = m.label;
-        btn.addEventListener("click", () => {{
-          for (const el of left.querySelectorAll("button[data-menu-id]")) {{
-            el.setAttribute("aria-expanded", el === btn ? "true" : "false");
-          }}
-          const r = btn.getBoundingClientRect();
-          void invoke("desktop_open_menu", {{
-            menuId: m.id,
-            left: Math.round(r.left),
-            bottom: Math.round(r.bottom),
-          }});
-        }});
-        left.appendChild(btn);
-      }}
+      mountDesktopMenus({{ host, shadow, left, invoke, menus: bootstrap.menus || [] }});
     }}
 
     const center = document.createElement("div");
@@ -331,14 +316,6 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
       document.documentElement.appendChild(host);
     }}
 
-    window.addEventListener("message", (event) => {{
-      if (event.source !== window || event.data?.channel !== "aichat.desktop-menu.v1") return;
-      if (event.data.type === "closed") {{
-        for (const el of left.querySelectorAll("button[data-menu-id]")) {{
-          el.setAttribute("aria-expanded", "false");
-        }}
-      }}
-    }});
 
     const canvas = document.createElement("canvas");
     canvas.width = 1;
@@ -377,6 +354,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
 
       const bgHex = toHex(bgRaw, dark ? '#18181f' : '#f2f3f7');
       const textHex = toHex(textRaw, dark ? '#d4d4dc' : '#1a1a2e');
+      host.style.setProperty("--chrome-menu-bg", cs.getPropertyValue("--bg-card").trim() || (dark ? '#202028' : '#ffffff'));
       host.style.setProperty("--chrome-bg", bgHex);
       host.style.setProperty("--chrome-text", textHex);
       host.style.setProperty("--chrome-hover", hoverRaw);

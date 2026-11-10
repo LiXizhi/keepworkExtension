@@ -53,12 +53,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{
     image::Image,
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     webview::NewWindowResponse,
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
+
+#[cfg(target_os = "macos")]
+use tauri::menu::Submenu;
 
 #[cfg(target_os = "macos")]
 #[link(name = "objc")]
@@ -979,16 +982,7 @@ async fn desktop_run_menu_command(
     Ok(true)
 }
 
-#[tauri::command]
-fn desktop_open_menu(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: tauri::State<'_, Arc<AppCore>>,
-    menu_id: String,
-    left: i32,
-    bottom: i32,
-) -> Result<bool, String> {
-    verify_main_sender(&window, &state)?;
+fn menu_context(state: &AppCore) -> MenuContextState {
     let settings = state.settings();
     let mcp = state.mcp_supervisor.snapshot();
     let updates = state.updates.snapshot(&mcp);
@@ -1002,7 +996,7 @@ fn desktop_open_menu(
     } else {
         format!("桌面更新：{}", updates.desktop.state)
     };
-    let ctx = MenuContextState {
+    MenuContextState {
         local_source_available: resolve_local_aichat_source_dir().is_some(),
         local_source_enabled: state.local_source_enabled.load(Ordering::Relaxed),
         pet_visible: settings.pet_visible,
@@ -1015,14 +1009,37 @@ fn desktop_open_menu(
         entry_url,
         update_label,
         update_error: updates.desktop.error,
-    };
-    if let Some(mut payload) = menu_payload(&menu_id, &ctx) {
-        payload["anchor"] = json!({ "left": left, "bottom": bottom });
-        payload["x"] = json!(left);
-        payload["y"] = json!(bottom);
-        broadcast_to_main(&app, "menu-message", &payload);
     }
-    Ok(true)
+}
+
+#[tauri::command]
+async fn desktop_open_menu(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    menu_id: String,
+    left: i32,
+    bottom: i32,
+    render_mode: Option<String>,
+) -> Result<Value, String> {
+    verify_main_sender(&window, &state)?;
+    if render_mode.as_deref().is_some_and(|mode| mode != "shell") {
+        return Err("Unsupported menu render mode".to_string());
+    }
+    let ctx = menu_context(&state);
+    let mut payload = menu_payload(&menu_id, &ctx)
+        .ok_or_else(|| format!("Unsupported menu: {menu_id}"))?;
+    payload["anchor"] = json!({ "left": left, "bottom": bottom });
+    payload["x"] = json!(left);
+    payload["y"] = json!(bottom);
+    if render_mode.as_deref() == Some("shell") {
+        // The desktop owns its popup. Do not ask a remote/older page to draw a
+        // second menu. Page commands still use aichat.desktop-menu.v1 below.
+        return Ok(payload);
+    }
+    // Keep the legacy web menu request/response for older injected renderers.
+    broadcast_to_main(&app, "menu-message", &payload);
+    Ok(json!(true))
 }
 
 #[tauri::command]
@@ -1830,7 +1847,11 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
         let _ = app.set_menu(mac_menu);
     }
 
-    let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))
+    #[cfg(target_os = "windows")]
+    let tray_icon_bytes: &[u8] = include_bytes!("../icons/titlebar-k.png");
+    #[cfg(not(target_os = "windows"))]
+    let tray_icon_bytes: &[u8] = include_bytes!("../icons/32x32.png");
+    let icon = Image::from_bytes(tray_icon_bytes)
         .unwrap_or_else(|_| app.default_window_icon().cloned().unwrap());
 
     let core_for_menu = Arc::clone(core);
@@ -2200,7 +2221,12 @@ pub fn run() {
                     .title_bar_style(tauri::TitleBarStyle::Overlay)
                     .hidden_title(true);
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                main_builder = main_builder.decorations(false)
+                    .icon(Image::from_bytes(include_bytes!("../icons/titlebar-k.png"))?)?;
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 main_builder = main_builder.decorations(false);
             }

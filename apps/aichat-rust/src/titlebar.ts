@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { mountDesktopMenus } from "./menuChrome.js";
 
 const TITLEBAR_CSS = `
 :host{
@@ -56,9 +57,14 @@ const TITLEBAR_CSS = `
 .icon{
   width:18px;
   height:18px;
-  margin-right:8px;
+  margin-left:6px;
+  margin-right:2px;
   flex:none;
   pointer-events:none;
+  display:block;
+  line-height:0;
+  transform:none;
+  object-fit:contain;
 }
 button{
   all:unset;
@@ -137,36 +143,14 @@ export function mountDesktopTitlebar(options: {
   left.className = "left";
 
   if (!isMac) {
-    if (options.iconDataUrl) {
-      const icon = document.createElement("img");
+    {
+      const icon = document.createElement("span");
       icon.className = "icon";
-      icon.src = options.iconDataUrl;
-      icon.alt = "";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><rect width="18" height="18" rx="2" fill="rgb(0,133,178)"/><path d="M3.5 3h3v4.5L11 3h3.5L8.5 9l6 6H11L6.5 10.5V15H3.5z" fill="white"/></svg>`;
       left.appendChild(icon);
     }
-    for (const menu of options.menus) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.dataset.menuId = menu.id;
-      btn.setAttribute("aria-expanded", "false");
-      btn.textContent = menu.label;
-      btn.addEventListener("click", () => {
-        for (const el of left.querySelectorAll("button[data-menu-id]")) {
-          el.setAttribute("aria-expanded", el === btn ? "true" : "false");
-        }
-        const rect = btn.getBoundingClientRect();
-        window.postMessage(
-          {
-            channel: "aichat.desktop-menu.v1",
-            type: "show",
-            menuId: menu.id,
-            anchor: { left: Math.round(rect.left), bottom: Math.round(rect.bottom) },
-          },
-          window.location.origin
-        );
-      });
-      left.appendChild(btn);
-    }
+    mountDesktopMenus({ host, shadow, left, invoke, menus: options.menus });
   }
 
   const center = document.createElement("div");
@@ -287,14 +271,6 @@ export function mountDesktopTitlebar(options: {
   mountDom();
   window.addEventListener("DOMContentLoaded", mountDom, { once: true });
 
-  window.addEventListener("message", (event) => {
-    if (event.source !== window || event.data?.channel !== "aichat.desktop-menu.v1") return;
-    if (event.data.type === "closed") {
-      for (const el of left.querySelectorAll("button[data-menu-id]")) {
-        el.setAttribute("aria-expanded", "false");
-      }
-    }
-  });
 
   const canvas = document.createElement("canvas");
   canvas.width = 1;
@@ -333,6 +309,7 @@ export function mountDesktopTitlebar(options: {
 
     const bgHex = toHex(bgRaw, dark ? "#18181f" : "#f2f3f7");
     const textHex = toHex(textRaw, dark ? "#d4d4dc" : "#1a1a2e");
+    host.style.setProperty("--chrome-menu-bg", cs.getPropertyValue("--bg-card").trim() || (dark ? "#202028" : "#ffffff"));
     host.style.setProperty("--chrome-bg", bgHex);
     host.style.setProperty("--chrome-text", textHex);
     host.style.setProperty("--chrome-hover", hoverRaw);
@@ -358,7 +335,7 @@ export function mountDesktopTitlebar(options: {
     }
   };
 
-  window.addEventListener("DOMContentLoaded", () => {
+  const mountThemeObserver = (): void => {
     syncTheme();
     const observer = new MutationObserver(syncTheme);
     observer.observe(document.documentElement, {
@@ -379,5 +356,10 @@ export function mountDesktopTitlebar(options: {
     ]) {
       window.addEventListener(evt, syncTheme);
     }
-  });
+  };
+  if (document.readyState === "loading") {
+    window.addEventListener("DOMContentLoaded", mountThemeObserver, { once: true });
+  } else {
+    mountThemeObserver();
+  }
 }

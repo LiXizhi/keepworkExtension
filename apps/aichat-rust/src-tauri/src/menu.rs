@@ -204,12 +204,13 @@ fn help_menu(state: &MenuContextState) -> Value {
         json!({ "id": "check-updates", "label": "检查更新…" }),
         json!({ "type": "separator" }),
         json!({
+            "id": "menu-info:mcp",
             "label": format!("MCP：{} {}（{}）", state.mcp_state, state.mcp_version, state.mcp_owner),
             "enabled": false
         }),
     ];
     if !state.mcp_error.trim().is_empty() {
-        items.push(json!({ "label": clip(&state.mcp_error, 80), "enabled": false }));
+        items.push(json!({ "id": "menu-info:mcp-error", "label": clip(&state.mcp_error, 80), "enabled": false }));
     }
     items.push(json!({ "id": "mcp-status", "label": "查看状态…", "enabled": true }));
     items.push(json!({ "id": "mcp-dashboard", "label": "打开 Dashboard" }));
@@ -218,16 +219,18 @@ fn help_menu(state: &MenuContextState) -> Value {
     items.push(json!({ "id": "open-browser", "label": "在浏览器中打开" }));
     items.push(json!({ "id": "local-source", "label": "使用本地源码服务器…" }));
     items.push(json!({ "id": "published-site", "label": "使用线上服务器" }));
-    items.push(json!({ "label": state.entry_url, "enabled": false }));
+    items.push(json!({ "id": "menu-info:entry", "label": state.entry_url, "enabled": false }));
     items.push(json!({ "type": "separator" }));
-    items.push(json!({ "label": state.update_label, "enabled": false }));
+    items.push(json!({ "id": "menu-info:update", "label": state.update_label, "enabled": false }));
     if !state.update_error.trim().is_empty() {
         items.push(json!({
+            "id": "menu-info:update-error",
             "label": format!("更新失败：{}", clip(&state.update_error, 80)),
             "enabled": false
         }));
     }
     items.push(json!({
+        "id": "menu-info:version",
         "label": format!("桌面版本 {}", state.desktop_version),
         "enabled": false
     }));

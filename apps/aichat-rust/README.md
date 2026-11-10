@@ -4,14 +4,15 @@
 
 ## 核心能力与架构
 
-- **主聊天窗口与 34px 顶部自定义标题栏**：
+- **主聊天窗口与平台标题栏**：
   - 加载 `https://keepwork.com/chat`（或本地 Loopback `AIChat.html` 开发源码 / `deployment.json` 离线包）。
-  - 在受信任顶层主框架注入 Closed Shadow DOM 的 `#keepwork-desktop-titlebar`（34px 高度、应用图标、Windows/Linux 内联菜单、居中标题、地址胶囊、刷新按钮，并实时同步页面深浅色与皮肤 CSS 变量）。
+  - 在受信任顶层主框架内注入 Closed Shadow DOM `#keepwork-desktop-titlebar`：34px 单行 Web 标题栏，包含居中标题、地址胶囊与刷新按钮；Windows / Linux 同行显示校准居中的 K 图标及「文件 / 编辑 / 视图 / 帮助」菜单标题。Windows 使用无系统装饰的窗口，网页为此标题栏预留 34px 空间；macOS 保留系统应用菜单。
+  - Web 下拉菜单由客户端自身在 Closed Shadow DOM 内统一绘制，使用 Rust `menu_payload` 提供的菜单数据，不依赖远端页面绘制；采用紧凑的菜单布局，支持展开后横向悬停切换、键盘导航、Esc 与点击外部关闭。标题栏与菜单同步页面深浅色和皮肤 CSS 变量，地址与刷新按钮保留在顶部原位置。
   - 注入只读冻结的 `window.aichatDesktop`（Bridge v1）契约，对现有 Web 端 `desktop.js`、`keepwork_fs.js`、`desktop_menu.js` 保持 100% 兼容。
 - **菜单协议 `aichat.desktop-menu.v1` 与命令路由（对齐 `apps/aichat-desktop`）**：
   - 菜单载荷同时提供桌面版形状 `menu: { id, label, items }` 与冗余兼容字段 `menuId` / `items` / `anchor` / `x` / `y`，菜单项标签与 `CmdOrCtrl` 加速键、`shortcut`（macOS `⌘ ⇧ ⌥`）与桌面版逐项一致。
   - **页面命令**（`new-chat`、`toggle-sidebar`、`toggle-files`、`open-settings`、`experience-simple`、`experience-professional`、`theme-light`、`theme-dark`）只投递给 AIChat 页面；**主机命令**（`open-folder`、`reload`、`check-updates`、`toggle-login`、`quit`、编辑/缩放/全屏/开发者工具、`mcp-status`/`mcp-dashboard`/`mcp-restart`、`open-browser`、`local-source`、`published-site` 等）由桌面进程原生执行，未知 id 一律拒绝。
-  - 旧 id（`file:open-folder`、`view:reload`、`view:reset-zoom`、`help:check-updates` …）由 `canonical_host_command` 规范化，原生菜单/托盘与历史页面调用方继续可用；原生托盘与 macOS 系统菜单同样可以投递页面命令。
+  - 旧 id（`file:open-folder`、`view:reload`、`view:reset-zoom`、`help:check-updates` …）由 `canonical_host_command` 规范化，客户端 Web 菜单、原生托盘、macOS 系统菜单与历史页面调用方继续可用；页面命令沿用 `aichat.desktop-menu.v1` 投递，主机命令通过白名单校验的 IPC 执行。
 - **自我更新与自动更新（Self-Update / Auto-Update）**：
   - **Keepwork MCP Runtime 热更新（`:8089`）**：后台从 `https://cdn.keepwork.com/keepwork/mcp-stable/<platform>-<arch>.json` 检查更新，流式下载 `.zip`，校验文件大小、SHA-256、40 位源码 Commit 与 `runtime.json` 启动配置，暂存至 `mcp-runtimes/<sha256>`，支持在「检查更新」窗口一键应用或在下次重启时自动激活，启动失败自动回滚。
   - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），后台自动下载更新包并校验 SHA-256，持久化 `update-metadata.json`（离线时保留上次检查缓存并标记 `stale: true`）。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
