@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+
+const require = createRequire(import.meta.url);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(__dirname, "..");
@@ -21,8 +24,16 @@ for (const name of ["keepwork.png", "keepwork-mac.png", "keepwork-attention.png"
   }
 }
 
-const viteBin = path.join(appRoot, "node_modules", ".bin", process.platform === "win32" ? "vite.cmd" : "vite");
-execFileSync(viteBin, ["build"], {
+// Ship the Keepwork MCP runtime with the app when a staged copy exists; the
+// release scripts run the same step with --require, so a missing runtime still
+// fails a release but never blocks development or checks.
+try {
+  require("./bundle-mcp-runtime.cjs").bundle({});
+} catch (error) {
+  console.warn(`[aichat-rust] Bundled MCP runtime skipped: ${error instanceof Error ? error.message : String(error)}`);
+}
+
+const viteBin = path.join(appRoot, "node_modules", ".bin", process.platform === "win32" ? "vite.cmd" : "vite");execFileSync(viteBin, ["build"], {
   cwd: appRoot,
   stdio: "inherit",
 });

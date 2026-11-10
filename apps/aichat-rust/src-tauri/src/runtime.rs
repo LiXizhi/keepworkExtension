@@ -837,6 +837,7 @@ impl RuntimeSupervisor {
             .args(&manifest.args)
             .envs(&manifest.env)
             .env("KEEPWORK_MCP_HOST_KIND", "rust-node-runtime")
+            .env("KEEPWORK_MCP_HOST_VERSION", env!("CARGO_PKG_VERSION"))
             .env("KEEPWORK_MCP_RUNTIME_VERSION", &manifest.version)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

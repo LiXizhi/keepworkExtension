@@ -132,7 +132,7 @@ function displayDate(value) {
 }
 function serverMetadata(status) {
   const unknown = 'Unknown / 未提供';
-  const hosts = {'vscode-extension':'VS Code / Cursor 扩展','local-helper':'KP Local Helper','standalone':'Standalone / 独立运行时','electron-node-runtime':'AIChat Desktop / NodeRuntime'};
+  const hosts = {'vscode-extension':'VS Code / Cursor 扩展','local-helper':'KP Local Helper','standalone':'Standalone / 独立运行时','electron-node-runtime':'AIChat Desktop / NodeRuntime','rust-node-runtime':'AIChat Desktop / NodeRuntime'};
   return {
     Status:'Running',
     'MCP version / 版本':status.runtimeVersion || unknown,

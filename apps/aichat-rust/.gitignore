@@ -3,4 +3,6 @@ dist/
 releases/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/resources/mcp-runtime/*/*
+!src-tauri/resources/mcp-runtime/*/.keep
 .DS_Store

@@ -1432,22 +1432,28 @@ fn launcher_mcp_runtime(product: &str) -> Option<PathBuf> {
 }
 
 fn resolve_bundled_mcp_dir(resource_base: &Path, product: &str) -> PathBuf {
-    let candidates = [
-        resource_base.join("..").join("Resources").join("mcp-runtime"),
-        resource_base
-            .join("..")
-            .join("Resources")
-            .join("resources")
-            .join("mcp-runtime"),
-        resource_base.join("resources").join("mcp-runtime"),
+    let arch = crate::runtime::current_runtime_arch();
+    let roots = [
+        resource_base.join("..").join("Resources"),
+        resource_base.join("..").join("Resources").join("resources"),
+        resource_base.join("resources"),
     ];
-    for dir in candidates {
-        if valid_mcp_runtime(&dir, product) {
-            return dir;
+    let mut legacy = None;
+    for root in roots {
+        // scripts/bundle-mcp-runtime.cjs lays the app's own server out per slice,
+        // so a universal macOS build can carry both arm64 and x64 runtimes.
+        let per_arch = root.join("mcp-runtime").join(arch);
+        if valid_mcp_runtime(&per_arch, product) {
+            return per_arch;
+        }
+        let flat = root.join("mcp-runtime");
+        if legacy.is_none() && valid_mcp_runtime(&flat, product) {
+            legacy = Some(flat);
         }
     }
-    launcher_mcp_runtime(product)
-        .unwrap_or_else(|| resource_base.join("resources").join("mcp-runtime"))
+    legacy
+        .or_else(|| launcher_mcp_runtime(product))
+        .unwrap_or_else(|| resource_base.join("resources").join("mcp-runtime").join(arch))
 }
 
 pub fn run() {
@@ -1795,4 +1801,54 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running KeepWork 第二大脑 (aichat-rust)");
+}
+
+#[cfg(test)]
+mod bundled_runtime_tests {
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn write_runtime(dir: &Path) {
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::create_dir_all(dir.join("dist")).unwrap();
+        fs::write(dir.join("bin").join("node"), b"#!/bin/sh\n").unwrap();
+        fs::write(dir.join("dist").join("cli.cjs"), b"// mcp\n").unwrap();
+        fs::write(
+            dir.join("runtime.json"),
+            r#"{"product":"keepwork-mcp-node-runtime","platform":"darwin","arch":"arm64","version":"0.1.45","commit":"0123456789abcdef0123456789abcdef01234567","node":"bin/node","entry":"dist/cli.cjs"}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn bundled_runtime_is_resolved_per_architecture() {
+        let resource_base = std::env::temp_dir().join(format!("aichat-rust-bundle-{}", Uuid::new_v4()));
+        let arch = crate::runtime::current_runtime_arch();
+        let per_arch = resource_base.join("resources").join("mcp-runtime").join(arch);
+        let legacy = resource_base.join("resources").join("mcp-runtime");
+        write_runtime(&per_arch);
+        write_runtime(&legacy);
+        crate::runtime::validate_runtime_dir(&per_arch, "keepwork-mcp-node-runtime").expect("fixture runtime must validate");
+
+        assert_eq!(
+            resolve_bundled_mcp_dir(&resource_base, "keepwork-mcp-node-runtime"),
+            per_arch,
+            "the slice bundled by scripts/bundle-mcp-runtime.cjs must win over a flat runtime"
+        );
+        fs::remove_dir_all(&resource_base).unwrap();
+    }
+
+    #[test]
+    fn flat_bundled_runtime_still_works_for_older_layouts() {
+        let resource_base = std::env::temp_dir().join(format!("aichat-rust-flat-{}", Uuid::new_v4()));
+        let legacy = resource_base.join("resources").join("mcp-runtime");
+        write_runtime(&legacy);
+
+        assert_eq!(
+            resolve_bundled_mcp_dir(&resource_base, "keepwork-mcp-node-runtime"),
+            legacy
+        );
+        fs::remove_dir_all(&resource_base).unwrap();
+    }
 }

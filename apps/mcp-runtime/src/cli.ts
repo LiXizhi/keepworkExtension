@@ -48,7 +48,7 @@ async function main(): Promise<void> {
 
 function resolveHostKind(): McpHostKind {
     const value = String(process.env.KEEPWORK_MCP_HOST_KIND || '').trim();
-    if (value === 'electron-node-runtime' || value === 'local-helper' || value === 'vscode-extension' || value === 'standalone') {
+    if (value === 'electron-node-runtime' || value === 'rust-node-runtime' || value === 'local-helper' || value === 'vscode-extension' || value === 'standalone') {
         return value;
     }
     return 'standalone';

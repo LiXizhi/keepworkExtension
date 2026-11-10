@@ -245,7 +245,7 @@ test('overview displays build identity, source and environment with safe legacy 
         assert.equal(meta['Node.js'], 'v24.19.0');
         assert.equal(meta.Platform, 'darwin / arm64');
         assert.equal(await page.locator('#meta img').count(), 0);
-        for (const [kind, label] of [['local-helper', 'KP Local Helper'], ['standalone', 'Standalone / 独立运行时'], ['electron-node-runtime', 'AIChat Desktop / NodeRuntime']]) {
+        for (const [kind, label] of [['local-helper', 'KP Local Helper'], ['standalone', 'Standalone / 独立运行时'], ['electron-node-runtime', 'AIChat Desktop / NodeRuntime'], ['rust-node-runtime', 'AIChat Desktop / NodeRuntime']]) {
             status = { ...status, hostKind: kind, hostVersion: '2.3.4' };
             await page.locator('#refresh').click();
             await page.getByText(label, { exact: true }).waitFor();

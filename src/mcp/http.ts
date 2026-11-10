@@ -51,7 +51,7 @@ export interface HttpServerHandle {
     close(): Promise<void>;
 }
 
-export type McpHostKind = 'local-helper' | 'vscode-extension' | 'standalone' | 'electron-node-runtime';
+export type McpHostKind = 'local-helper' | 'vscode-extension' | 'standalone' | 'electron-node-runtime' | 'rust-node-runtime';
 
 export interface HttpServerOptions {
     port?: number;

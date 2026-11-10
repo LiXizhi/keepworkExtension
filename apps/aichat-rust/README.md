@@ -15,6 +15,10 @@
 - **自我更新与自动更新（Self-Update / Auto-Update）**：
   - **Keepwork MCP Runtime 热更新（`:8089`）**：后台从 `https://cdn.keepwork.com/keepwork/mcp-stable/<platform>-<arch>.json` 检查更新，流式下载 `.zip`，校验文件大小、SHA-256、40 位源码 Commit 与 `runtime.json` 启动配置，暂存至 `mcp-runtimes/<sha256>`，支持在「检查更新」窗口一键应用或在下次重启时自动激活，启动失败自动回滚。
   - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），后台自动下载更新包并校验 SHA-256，持久化 `update-metadata.json`（离线时保留上次检查缓存并标记 `stale: true`）。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
+- **自带的 Keepwork MCP Server（与 `apps/aichat-desktop` 一致）**：
+  - 安装包内直接携带 `apps/mcp-runtime` 运行时：`scripts/bundle-mcp-runtime.cjs` 在打包前把 `apps/mcp-runtime/staging/<platform>-<arch>` 校验（product / 平台 / 架构 / 版本 / 40 位源码 Commit / node 与入口文件 / 陈旧检测）后复制到 `src-tauri/resources/mcp-runtime/<arch>/`，由 Tauri `bundle.resources` 打进 `.app` / NSIS 安装包。
+  - 启动时按当前架构选择 `resources/mcp-runtime/<arch>`（macOS universal 包同时携带 arm64 与 x64 两份运行时），没有自带运行时才回退到 DesktopLauncher 已安装版本或 CDN 热更新，因此首次安装即可离线使用本机 MCP 能力，来源显示为 `AIChat Desktop / NodeRuntime`。
+  - `pnpm build` 在缺少 staging 时只告警；`pnpm make:mac` / `make:win:*` 使用 `--require`，缺运行时或运行时陈旧会直接失败，避免发出没有自带 MCP 的安装包。
 - **双本地 Runtime 守护进程监管**：
   - 监管 `keepwork-mcp-node-runtime`（`127.0.0.1:8089`）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检，启动时自动识别并平滑接管低版本 `runtimeVersion` 的本机 MCP 进程，同时保护外部（VS Code / Local Helper）管理的同版本或高版本实例。
 - **透明置顶桌面宠物窗口（`pet.html`）**：
@@ -37,6 +41,11 @@ pnpm smoke
 
 # 完整检查（TypeScript + Vite + Cargo Test + Node 契约测试）
 pnpm check
+
+# 自带 MCP 运行时：先 staging，再让打包带上它
+npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch arm64
+npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch x64
+pnpm bundle:mcp --target universal-apple-darwin
 ```
 
 ## 多平台打包矩阵
