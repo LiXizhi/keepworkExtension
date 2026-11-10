@@ -20,9 +20,14 @@ for (const dir of products) {
 }
 try {
   for (const cwd of products) {
-    execFileSync(process.execPath, [
-      process.env.npm_execpath, 'version', nextVersion, '--no-git-tag-version', '--ignore-scripts',
-    ], { cwd, stdio: 'inherit' });
+    const npmExec = process.env.npm_execpath;
+    if (npmExec) {
+      execFileSync(process.execPath, [
+        npmExec, 'version', nextVersion, '--no-git-tag-version', '--ignore-scripts',
+      ], { cwd, stdio: 'inherit' });
+    } else {
+      execFileSync('npm', ['version', nextVersion, '--no-git-tag-version', '--ignore-scripts'], { cwd, stdio: 'inherit' });
+    }
   }
 } catch (error) {
   for (const [file, contents] of originals) fs.writeFileSync(file, contents);

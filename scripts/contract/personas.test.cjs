@@ -38,7 +38,7 @@ async function persona(method, route, body) {
 test('personas api lists, runs without login, and persists', async () => {
   const health = await (await fetch(`${rust.base}/health`)).json();
   assert.equal(health.personasApi, 'personas-v1');
-  assert.equal(health.messagingApi, undefined);
+  assert.equal(health.messagingApi, 'messaging-v1');
   assert.equal(health.agentSessionApi, undefined);
 
   const missingOrigin = await fetch(`${rust.base}/agents/personas`, {

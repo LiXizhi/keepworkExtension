@@ -9,6 +9,8 @@ require.extensions['.ts'] = (mod, filename) => mod._compile(ts.transpileModule(f
 const { ManagedBrowserManager, browserUrl, browserRedact } = require('../src/core/browser.ts');
 const { browserToolSchemas } = require('../src/mcp/browserTools.ts');
 const { resolveBrowser } = require('../src/core/headless.ts');
+const browserInstall = require('../src/core/browserInstall.ts');
+process.env.KEEPWORK_BROWSER_CACHE = fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'keepwork-browser-test-'));
 
 test('browser schema and URL boundaries', () => {
     for (const url of ['file:///c:/secret', 'javascript:alert(1)', 'chrome://settings', 'https://user:pass@example.com']) assert.throws(() => browserUrl(url));
@@ -25,14 +27,41 @@ test('discovery/listing does not launch; disconnected owners are rejected', asyn
     assert.deepEqual(await manager.run('mcp\ntree', 'browser_session', { action: 'list' }), { sessions: [] });
     const headless = require('../src/core/headless.ts');
     const originalResolver = headless.resolveBrowser;
+    const originalEnsure = browserInstall.ensureBundledBrowser;
     try {
         headless.resolveBrowser = () => null;
-        await assert.rejects(manager.run('mcp\ntree', 'browser_session', { action: 'create' }), /Install Edge or Chrome/);
+        let downloads = 0;
+        browserInstall.ensureBundledBrowser = () => { downloads++; return Promise.resolve(); };
+        await assert.rejects(manager.run('mcp\ntree', 'browser_session', { action: 'create' }), /started downloading its built-in Chromium/);
+        assert.equal(downloads, 1);
         assert.deepEqual(await manager.run('mcp\ntree', 'browser_session', { action: 'list' }), { sessions: [] });
-    } finally { headless.resolveBrowser = originalResolver; }
+    } finally { headless.resolveBrowser = originalResolver; browserInstall.ensureBundledBrowser = originalEnsure; }
     await manager.closeOwner('mcp');
     await assert.rejects(manager.run('mcp\ntree', 'browser_session', { action: 'create' }), /disconnected/);
     await manager.closeAll();
+});
+
+test('bundled Chromium fallback launches the cached executable', async () => {
+    const manager = new ManagedBrowserManager();
+    const headless = require('../src/core/headless.ts');
+    const playwright = require('playwright-core');
+    const originalResolver = headless.resolveBrowser;
+    const originalExecutable = browserInstall.bundledBrowserExecutable;
+    const originalLaunch = playwright.chromium.launch;
+    try {
+        headless.resolveBrowser = () => null;
+        browserInstall.bundledBrowserExecutable = () => '/fake/cache/chromium_headless_shell-1/bin';
+        let options;
+        playwright.chromium.launch = async opts => { options = opts; throw new Error('launch-failed'); };
+        await assert.rejects(manager.run('mcp\ntree', 'browser_session', { action: 'create', visible: true }), /launch-failed/);
+        assert.equal(options.executablePath, '/fake/cache/chromium_headless_shell-1/bin');
+        assert.equal(options.headless, false);
+    } finally {
+        headless.resolveBrowser = originalResolver;
+        browserInstall.bundledBrowserExecutable = originalExecutable;
+        playwright.chromium.launch = originalLaunch;
+        await manager.closeAll();
+    }
 });
 
 test('managed browser DOM, diagnostics, screenshots, isolation and cleanup', { skip: !resolveBrowser(), timeout: 60000 }, async () => {

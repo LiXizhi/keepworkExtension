@@ -30,6 +30,7 @@ pub struct AppState {
     pub shell: ShellRunner,
     pub presence: Arc<crate::presence::PresenceState>,
     pub personas: Arc<crate::personas::PersonaStore>,
+    pub messaging: Arc<crate::messaging::MessagingService>,
 }
 
 impl AppState {
@@ -59,6 +60,19 @@ impl AppState {
         identity: Identity,
         persona_dir: PathBuf,
     ) -> Self {
+        let personas = crate::personas::PersonaStore::open(persona_dir.clone());
+        let presence = Arc::new(crate::presence::PresenceState::new());
+        let messaging_home = persona_dir
+            .parent()
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(crate::config::mcp_home_dir)
+            .join(crate::messaging::MESSAGING_HOME);
+        let messaging = crate::messaging::MessagingService::open(
+            messaging_home,
+            Arc::clone(&personas),
+            Arc::clone(&presence),
+        );
+        personas.attach_messaging(Arc::clone(&messaging));
         Self {
             port,
             root,
@@ -69,8 +83,9 @@ impl AppState {
             sessions: Mutex::new(SessionStore::default()),
             terminals: TerminalManager::default(),
             shell: ShellRunner::default(),
-            presence: Arc::new(crate::presence::PresenceState::new()),
-            personas: crate::personas::PersonaStore::open(persona_dir),
+            presence: Arc::clone(&presence),
+            messaging,
+            personas,
         }
     }
 
@@ -93,7 +108,11 @@ impl AppState {
         caps.insert("fsDirApi".into(), serde_json::json!("mkdir-v1"));
         caps.insert("aichatPresenceApi".into(), serde_json::json!("post-sse-v1"));
         caps.insert("personasApi".into(), serde_json::json!("personas-v1"));
-        // Messaging, native agent sessions and WeChat stay unadvertised.
+        caps.insert(
+            "messagingApi".into(),
+            serde_json::json!(crate::messaging::MESSAGING_API),
+        );
+        // Native agent sessions and WeChat stay unadvertised.
         caps
     }
 
@@ -513,22 +532,61 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                     &serde_json::json!({ "alwaysAllowScreenshots": false }),
                 ),
                 ("GET", "/admin/channels") => {
+                    let rows = state.messaging.list_binding_rows();
                     if query.get("view").map(String::as_str) == Some("tray") {
+                        let channels = ["dingtalk", "feishu"]
+                            .iter()
+                            .map(|channel| {
+                                let bindings = rows
+                                    .iter()
+                                    .filter(|binding| binding["channel"].as_str() == Some(*channel))
+                                    .map(|binding| serde_json::json!({ "status": binding["status"] }))
+                                    .collect::<Vec<_>>();
+                                serde_json::json!({ "channel": channel, "bindings": bindings })
+                            })
+                            .collect::<Vec<_>>();
                         json_response(
                             StatusCode::OK,
                             &serde_json::json!({
-                                "channels": [
-                                    { "channel": "dingtalk", "bindings": [] },
-                                    { "channel": "feishu", "bindings": [] },
-                                ],
+                                "channels": channels,
                                 "wechat": { "status": "off" },
                             }),
                         )
                     } else {
+                        let channels = ["dingtalk", "feishu"]
+                            .iter()
+                            .map(|channel| {
+                                let root = state
+                                    .messaging
+                                    .channel_roots()
+                                    .get(*channel)
+                                    .cloned()
+                                    .unwrap_or(serde_json::json!(""));
+                                let bindings = rows
+                                    .iter()
+                                    .filter(|binding| binding["channel"].as_str() == Some(*channel))
+                                    .map(|binding| {
+                                        serde_json::json!({
+                                            "id": binding["id"],
+                                            "root": binding["root"],
+                                            "transitioning": binding["transitioning"],
+                                            "profile": binding["profile"],
+                                            "enabled": binding["enabled"],
+                                            "status": binding["status"],
+                                            "lastPollAt": binding.get("lastPollAt").cloned().unwrap_or(serde_json::json!(null)),
+                                            "serving": binding.get("serving").cloned().unwrap_or(serde_json::json!(null)),
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                // The Rust slice omits the live CLI auth probe;
+                                // the dashboard reads structure and bindings only.
+                                serde_json::json!({ "channel": channel, "root": root, "bindings": bindings })
+                            })
+                            .collect::<Vec<_>>();
                         json_response(
                             StatusCode::OK,
                             &serde_json::json!({
-                                "channels": [],
+                                "channels": channels,
                                 "supervisor": { "enabled": false, "status": "stopped" },
                             }),
                         )
@@ -564,6 +622,46 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
             crate::presence::handle_presence_http(&state, req, &query, &headers).await
         }
         (_, "/mcp") => mcp_dispatch(state, req).await,
+        (_, path) if path.starts_with("/messaging/") => {
+            let origin = headers
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            let worker = path == "/messaging/worker" || path.starts_with("/messaging/worker/");
+            if worker {
+                // Worker pages drive a headless-browser answer harness the
+                // Rust runtime does not ship; Node accepts them only from its
+                // own loopback origin.
+                if !origin.is_empty() && origin != format!("http://127.0.0.1:{}", state.port) {
+                    return crate::personas::error_response(403, "Messaging Origin rejected", None);
+                }
+                return crate::personas::error_response(
+                    422,
+                    "本机 Rust 服务尚未提供无头消息 worker",
+                    Some("UNSUPPORTED_FEATURE"),
+                );
+            }
+            if origin.is_empty() || !origin_allowed(origin) {
+                // The whole /messaging/ mount shares one rejection message in
+                // Node, unlike the /agents/ mount.
+                return crate::personas::error_response(403, "Messaging Origin rejected", None);
+            }
+            if let Some(mut denied) = authorize(&state, &headers, &query) {
+                denied.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    "no-store".parse().expect("static header"),
+                );
+                return denied;
+            }
+            crate::messaging::handle_messaging_http(
+                Arc::clone(&state.messaging),
+                method.as_str(),
+                path,
+                &query,
+                req,
+            )
+            .await
+        }
         (_, path) if path == "/agents/personas" || path.starts_with("/agents/personas/") => {
             let origin = headers
                 .get(header::ORIGIN)
@@ -758,6 +856,17 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .fallback(dispatch)
         .layer(axum::middleware::from_fn(cors_layer))
         .with_state(state)
+}
+
+// TEMP probe: forces the Send bound so rustc reports the offending await path.
+#[allow(dead_code)]
+fn __dispatch_send_probe<F: std::future::Future + Send>(
+    _f: fn(axum::extract::State<std::sync::Arc<AppState>>, Request<axum::body::Body>) -> F,
+) {
+}
+#[allow(dead_code)]
+fn __dispatch_send_probe_use() {
+    __dispatch_send_probe(dispatch);
 }
 
 #[cfg(test)]

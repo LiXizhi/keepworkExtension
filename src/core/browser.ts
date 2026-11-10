@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chromium, Browser, BrowserContext, Page, ElementHandle } from 'playwright-core';
 import { resolveBrowser } from './headless';
+import { bundledBrowserExecutable, bundledBrowserStatus, ensureBundledBrowser } from './browserInstall';
 
 const IDLE_MS = 15 * 60_000;
 const MAX_SESSIONS = 4;
@@ -107,15 +108,22 @@ export class ManagedBrowserManager {
         return { sessionId: session.id, pages: await Promise.all([...session.tabs.values()].map(async t => ({ pageId: t.id, url: displayUrl(t.page.url()), title: browserRedact(await t.page.title().catch(() => '')) }))) };
     }
 
+    private async launch(args: BrowserArgs): Promise<Browser> {
+        const executablePath = resolveBrowser() || bundledBrowserExecutable(!args.visible);
+        if (executablePath) return chromium.launch({ executablePath, headless: !args.visible, timeout: 15000 });
+        const status = bundledBrowserStatus();
+        void ensureBundledBrowser().catch(() => {});
+        if (status === 'downloading') throw new Error('Keepwork is still downloading its built-in Chromium (first use only); retry browser_session create in about a minute');
+        throw new Error('No system Edge/Chrome found; Keepwork started downloading its built-in Chromium (first use only). Retry browser_session create in about a minute, or set EDGE_PATH/CHROME_PATH to use an existing browser');
+    }
+
     private async create(owner: string, args: BrowserArgs) {
         const url = args.url ? browserUrl(args.url) : undefined;
         if (this.sessions.size + this.launching >= MAX_SESSIONS) throw new Error('Browser session limit reached; close an unused session');
-        const executablePath = resolveBrowser();
-        if (!executablePath) throw new Error('Install Edge or Chrome, or configure EDGE_PATH/CHROME_PATH, then restart Keepwork');
         this.launching++;
         let browser: Browser | undefined;
         try {
-            browser = await chromium.launch({ executablePath, headless: !args.visible, timeout: 15000 });
+            browser = await this.launch(args);
             const context = await browser.newContext({ viewport: { width: args.width || 1280, height: args.height || 800 }, acceptDownloads: false });
             context.setDefaultTimeout(5000);
             context.setDefaultNavigationTimeout(10000);

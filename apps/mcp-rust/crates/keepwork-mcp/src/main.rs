@@ -109,6 +109,11 @@ async fn run(args: cli::Args) -> i32 {
         }
     });
 
+    // Messaging pump + binding resume runs for the process lifetime.
+    tokio::spawn(keepwork_mcp::messaging::MessagingService::run_background(
+        Arc::clone(&state.messaging),
+    ));
+
     let app = http::router(state);
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
     let code = match server.await {

@@ -45,7 +45,6 @@ test('health only advertises capabilities this build serves', async () => {
   for (const unimplemented of [
     'agentSessionApi',
     'browserApi',
-    'messagingApi',
     'webserverBase',
   ]) {
     assert.equal(health[unimplemented], undefined, `${unimplemented} must stay unadvertised until implemented`);
@@ -56,10 +55,10 @@ test('health matches the Node reference on the shared identity fields', async ()
   const node = await h.startNode();
   if (!node) return;
   try {
-    for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth', 'fsApi', 'terminalApi', 'aichatPresenceApi', 'personasApi']) {
+    for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth', 'fsApi', 'terminalApi', 'aichatPresenceApi', 'personasApi', 'messagingApi']) {
       assert.equal(rust.health[key], node.health[key], `field ${key} must match the Node daemon`);
     }
-    // P1 ports the local surface; agent/messaging surfaces stay Node-only.
+    // The Rust runtime ports the local and messaging surfaces; agent sessions stay Node-only.
     assert.equal(node.health.terminalApi, rust.health.terminalApi);
     assert.equal(node.health.fsApi, rust.health.fsApi);
     assert.equal(node.health.agentSessionApi, 'v1');
