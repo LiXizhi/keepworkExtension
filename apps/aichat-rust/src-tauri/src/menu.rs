@@ -299,8 +299,14 @@ mod tests {
         assert!(!is_allowed_host_command("evil:exec"));
         assert!(!is_allowed_host_command("file:new-window"));
 
-        assert_eq!(canonical_host_command("file:open-folder"), Some("open-folder"));
-        assert_eq!(canonical_host_command("view:reset-zoom"), Some("zoom-reset"));
+        assert_eq!(
+            canonical_host_command("file:open-folder"),
+            Some("open-folder")
+        );
+        assert_eq!(
+            canonical_host_command("view:reset-zoom"),
+            Some("zoom-reset")
+        );
         assert_eq!(canonical_host_command("zoom-in"), Some("zoom-in"));
         assert_eq!(canonical_host_command("evil:exec"), None);
 
@@ -363,8 +369,9 @@ mod tests {
             .as_str()
             .map(|l| l.len() == 80)
             .unwrap_or(false)));
-        assert!(items
-            .iter()
-            .any(|item| item["label"].as_str().map(|l| l == "更新失败：网络不可达").unwrap_or(false)));
+        assert!(items.iter().any(|item| item["label"]
+            .as_str()
+            .map(|l| l == "更新失败：网络不可达")
+            .unwrap_or(false)));
     }
 }

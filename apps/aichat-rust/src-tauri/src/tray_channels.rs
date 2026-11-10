@@ -21,17 +21,18 @@ pub struct TraySummary {
     pub channels: Vec<ChannelStatus>,
 }
 
-const KNOWN_CHANNELS: &[(&str, &str)] = &[
-    ("dingtalk", "钉钉"),
-    ("feishu", "飞书"),
-    ("wechat", "微信"),
-];
+const KNOWN_CHANNELS: &[(&str, &str)] =
+    &[("dingtalk", "钉钉"), ("feishu", "飞书"), ("wechat", "微信")];
 
 fn normalize_channel_state(entry: Option<&Value>) -> (&'static str, &'static str) {
     let Some(obj) = entry else {
         return ("off", "未开启");
     };
-    if let Some(s) = obj.get("state").or_else(|| obj.get("status")).and_then(|v| v.as_str()) {
+    if let Some(s) = obj
+        .get("state")
+        .or_else(|| obj.get("status"))
+        .and_then(|v| v.as_str())
+    {
         match s.trim().to_ascii_lowercase().as_str() {
             "connected" | "online" | "ready" | "running" => return ("connected", "已连接"),
             "error" | "failed" | "disconnected" => return ("error", "连接异常"),
@@ -43,7 +44,12 @@ fn normalize_channel_state(entry: Option<&Value>) -> (&'static str, &'static str
     if obj.get("connected").and_then(|v| v.as_bool()) == Some(true) {
         return ("connected", "已连接");
     }
-    if obj.get("error").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+    if obj
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+    {
         return ("error", "连接异常");
     }
     if obj.get("enabled").and_then(|v| v.as_bool()) == Some(true)
@@ -186,7 +192,10 @@ mod tests {
 
         let attention_summary = describe(&states, false, false);
         assert!(attention_summary.attention);
-        assert_eq!(attention_summary.primary_label, "点击打开聊天，检查登录状态");
+        assert_eq!(
+            attention_summary.primary_label,
+            "点击打开聊天，检查登录状态"
+        );
         assert!(attention_summary.tooltip.contains("钉钉：已连接"));
     }
 }

@@ -1,6 +1,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
+const path = require('node:path');
 const h = require('./harness.cjs');
 
 let rust;
@@ -27,13 +28,19 @@ test('health reports the Node identity fields and the Rust engine', async () => 
   assert.equal(health.runtimeEngine, 'rust');
   assert.equal(health.runtimeProduct, 'keepwork-mcp-runtime');
   assert.equal(typeof health.pid, 'number');
-  assert.ok(health.workspaceRoot.endsWith('.keepwork-mcp/workspace'));
+  // Node's realpath keeps the platform separator, so Windows reports backslashes.
+  const suffix = path.join('.keepwork-mcp', 'workspace');
+  assert.ok(
+    String(health.workspaceRoot).replaceAll('/', path.sep).endsWith(suffix),
+    `workspaceRoot ${health.workspaceRoot} should end with ${suffix}`
+  );
 });
 
 test('health only advertises capabilities this build serves', async () => {
   const health = await (await fetch(`${rust.base}/health`)).json();
   assert.equal(health.fsApi, 'workspace');
   assert.equal(health.terminalApi, 'pty-session-v1');
+  assert.equal(health.aichatPresenceApi, 'post-sse-v1');
   for (const unimplemented of [
     'agentSessionApi',
     'browserApi',
@@ -49,7 +56,7 @@ test('health matches the Node reference on the shared identity fields', async ()
   const node = await h.startNode();
   if (!node) return;
   try {
-    for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth']) {
+    for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth', 'fsApi', 'terminalApi', 'aichatPresenceApi']) {
       assert.equal(rust.health[key], node.health[key], `field ${key} must match the Node daemon`);
     }
     // P1 ports the local surface; agent/messaging surfaces stay Node-only.

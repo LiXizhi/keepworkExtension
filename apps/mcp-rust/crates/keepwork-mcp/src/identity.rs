@@ -68,6 +68,39 @@ pub fn server_version() -> &'static str {
     SERVER_VERSION
 }
 
+pub fn read_desktop_client() -> Option<Value> {
+    let path = crate::config::mcp_home_dir().join("desktop-client.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&content).ok()?;
+    let product = value.get("product")?.as_str()?;
+    if product != "aichat-desktop" {
+        return None;
+    }
+    let version = value.get("version")?.as_str()?;
+    let ver_regex = regex::Regex::new(r"^\d+\.\d+\.\d+(?:-[\da-z.-]+)?$").ok()?;
+    if !ver_regex.is_match(version) {
+        return None;
+    }
+    let platform = value.get("platform")?.as_str()?;
+    if platform != "macos" && platform != "windows" {
+        return None;
+    }
+    let arch = value.get("arch")?.as_str()?;
+    if arch != "arm64" && arch != "x64" {
+        return None;
+    }
+    let exec = value.get("executable")?.as_str()?;
+    if !std::path::Path::new(exec).is_file() {
+        return None;
+    }
+    Some(json!({
+        "product": product,
+        "version": version,
+        "platform": platform,
+        "arch": arch,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

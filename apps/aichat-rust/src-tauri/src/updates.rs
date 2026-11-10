@@ -243,7 +243,9 @@ impl UpdateManager {
         };
 
         UpdatesSnapshot {
-            checking: ds.checking || mcp.update_state == "checking" || mcp.update_state == "downloading",
+            checking: ds.checking
+                || mcp.update_state == "checking"
+                || mcp.update_state == "downloading",
             checked_at: ds.meta.checked_at,
             mcp: mcp_comp,
             desktop: desktop_comp,
@@ -288,7 +290,10 @@ impl UpdateManager {
             .await
             .map_err(|e| format!("无法连接桌面更新服务器：{e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("检查桌面更新失败（HTTP {}）", resp.status().as_u16()));
+            return Err(format!(
+                "检查桌面更新失败（HTTP {}）",
+                resp.status().as_u16()
+            ));
         }
         let body: Value = resp
             .json()
@@ -350,9 +355,7 @@ impl UpdateManager {
         }
 
         // Check if already downloaded and verified
-        let existing_path = self
-            .downloads_dir
-            .join(format!("{version}-{file_name}"));
+        let existing_path = self.downloads_dir.join(format!("{version}-{file_name}"));
         if existing_path.is_file() && !sha256.is_empty() {
             if let Ok(bytes) = fs::read(&existing_path) {
                 if sha256_hex(&bytes) == sha256 {
@@ -378,7 +381,8 @@ impl UpdateManager {
             }
         }
 
-        if url.is_empty() || (!url.starts_with("https://") && !url.starts_with("http://127.0.0.1:")) {
+        if url.is_empty() || (!url.starts_with("https://") && !url.starts_with("http://127.0.0.1:"))
+        {
             return Err(format!("不安全的桌面更新包地址：{url}"));
         }
         if !is_valid_hex(&sha256, 64) {
@@ -425,10 +429,8 @@ impl UpdateManager {
         fs::create_dir_all(&self.downloads_dir)
             .map_err(|e| format!("创建桌面更新缓存目录失败：{e}"))?;
         let tmp_path = existing_path.with_extension("part");
-        fs::write(&tmp_path, &pkg_bytes)
-            .map_err(|e| format!("保存桌面更新包失败：{e}"))?;
-        fs::rename(&tmp_path, &existing_path)
-            .map_err(|e| format!("落盘桌面更新包失败：{e}"))?;
+        fs::write(&tmp_path, &pkg_bytes).map_err(|e| format!("保存桌面更新包失败：{e}"))?;
+        fs::rename(&tmp_path, &existing_path).map_err(|e| format!("落盘桌面更新包失败：{e}"))?;
 
         if let Ok(mut ds) = self.desktop_state.lock() {
             ds.checking = false;

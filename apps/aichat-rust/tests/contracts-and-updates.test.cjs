@@ -177,6 +177,9 @@ test("floating pet window preserves click stability, screenshot permission bubbl
     /api\.action\("drag-start", \{ screenX: event\.screenX, screenY: event\.screenY \}\)/
   );
   assert.match(petTs, /state = \{ \.\.\.state, \.\.\.\(snap as PetSnapshot\) \}/);
+  assert.match(petTs, /requestAnimationFrame\(step\)/);
+  assert.doesNotMatch(petTs, /pointercancel", \(event\) => void release/);
+  assert.match(petTs, /if \(pointer\?\.tracking\)/);
   assert.ok(petRs.includes("run_permission_bridge_session"));
   assert.ok(petRs.includes("sanitize_pet_state"));
 });

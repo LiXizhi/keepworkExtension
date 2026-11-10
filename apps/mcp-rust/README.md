@@ -6,9 +6,9 @@ Node. Same wire contract, no Node in the installer.
 - Binds `127.0.0.1:8089` (same port, same `/mcp`, `/health`, `/admin/*` paths).
 - `/health.name` stays `keepwork-mcp`; the runtime reports
   `runtimeEngine: "rust"` and `runtimeProduct: "keepwork-mcp-runtime"`.
-- `/health` advertises `fsApi: "workspace"`, `folderBrowserApi: "folders-v1"`
-  and `terminalApi: "pty-session-v1"`; agent, messaging, persona and browser
-  surfaces stay unadvertised until P2/P3.
+- `/health` advertises `fsApi: "workspace"`, `folderBrowserApi: "folders-v1"`,
+  `terminalApi: "pty-session-v1"` and `aichatPresenceApi: "post-sse-v1"`; agent,
+  messaging, persona and browser surfaces stay unadvertised until P2/P3.
 - Only advertises capabilities it actually serves, so AIChat degrades instead of
   calling a 404 while the port is in progress.
 
@@ -52,6 +52,7 @@ crates/keepwork-mcp/
   src/paths.rs       workspace root, lexical/realpath confinement
   src/fs.rs          /fs/* routes, MIME and size caps
   src/folders.rs     /fs/locations, /fs/browse
+  src/presence.rs    /aichat/presence (JSON + SSE) & MCP keepwork/presence
   src/terminal.rs    PTY sessions, cursor replay, deny-list
   src/shell.rs       run_terminal (spawn, timeout, output cap)
   src/grep.rs        grep_files (ripgrep + loop-aware walker)

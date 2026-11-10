@@ -110,7 +110,10 @@ impl SessionEntry {
                 return Err("Terminal session is closed".to_string());
             }
         }
-        let mut guard = self.writer.lock().map_err(|_| "Lock poisoned".to_string())?;
+        let mut guard = self
+            .writer
+            .lock()
+            .map_err(|_| "Lock poisoned".to_string())?;
         let Some(file) = guard.as_mut() else {
             return Err("Terminal input stream is closed".to_string());
         };
@@ -212,11 +215,7 @@ impl TerminalSessionManager {
         }
     }
 
-    pub fn resolve_cwd(
-        &self,
-        files: &NativeFiles,
-        args: &Value,
-    ) -> Result<PathBuf, String> {
+    pub fn resolve_cwd(&self, files: &NativeFiles, args: &Value) -> Result<PathBuf, String> {
         let root_id = args
             .get("rootId")
             .and_then(|v| v.as_str())
@@ -399,8 +398,8 @@ impl TerminalSessionManager {
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
 
-            let (pipe_reader, pipe_writer) = std::io::pipe()
-                .map_err(|e| format!("Failed to create input pipe: {e}"))?;
+            let (pipe_reader, pipe_writer) =
+                std::io::pipe().map_err(|e| format!("Failed to create input pipe: {e}"))?;
             if let Some(mut child_in) = stdin {
                 let mut pr = pipe_reader;
                 thread::spawn(move || {
@@ -548,14 +547,8 @@ impl TerminalSessionManager {
                     .or_else(|| args.get("sessionId"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let cols = args
-                    .get("cols")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(80) as u16;
-                let rows = args
-                    .get("rows")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(24) as u16;
+                let cols = args.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                let rows = args.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
                 let entry_arc = map
                     .get(id)
                     .cloned()
@@ -573,10 +566,7 @@ impl TerminalSessionManager {
                     .or_else(|| args.get("sessionId"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let cursor = args
-                    .get("cursor")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let cursor = args.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let entry_arc = map
                     .get(id)
                     .cloned()
@@ -593,7 +583,10 @@ impl TerminalSessionManager {
                         }
                     }
                 }
-                let st = entry.state.lock().map_err(|_| "Lock poisoned".to_string())?;
+                let st = entry
+                    .state
+                    .lock()
+                    .map_err(|_| "Lock poisoned".to_string())?;
                 let (output, next_cursor, reset) = st.read_from(cursor);
                 Ok(json!({
                     "id": id,
@@ -646,11 +639,7 @@ impl TerminalSessionManager {
         }
     }
 
-    fn close_owner_locked(
-        &self,
-        map: &mut HashMap<String, Arc<Mutex<SessionEntry>>>,
-        owner: &str,
-    ) {
+    fn close_owner_locked(&self, map: &mut HashMap<String, Arc<Mutex<SessionEntry>>>, owner: &str) {
         let ids: Vec<String> = map
             .iter()
             .filter_map(|(id, arc)| {

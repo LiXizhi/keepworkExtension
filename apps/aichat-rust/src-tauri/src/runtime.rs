@@ -179,14 +179,20 @@ pub fn validate_runtime_dir(dir: &Path, expected_product: &str) -> Result<Runtim
 }
 
 /// Accepts any of `expected_products`; used while Node and Rust runtimes coexist.
-pub fn validate_runtime_dir_any(dir: &Path, expected_products: &[&str]) -> Result<RuntimeManifest, String> {
+pub fn validate_runtime_dir_any(
+    dir: &Path,
+    expected_products: &[&str],
+) -> Result<RuntimeManifest, String> {
     let manifest_path = dir.join("runtime.json");
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Missing runtime.json in {}: {e}", dir.display()))?;
     let manifest: RuntimeManifest = serde_json::from_str(&raw)
         .map_err(|e| format!("Invalid runtime.json in {}: {e}", dir.display()))?;
 
-    if !expected_products.iter().any(|product| *product == manifest.product) {
+    if !expected_products
+        .iter()
+        .any(|product| *product == manifest.product)
+    {
         return Err(format!(
             "Runtime product mismatch: expected {}, got {}",
             expected_products.join(" or "),
@@ -212,11 +218,17 @@ pub fn validate_runtime_dir_any(dir: &Path, expected_products: &[&str]) -> Resul
             return Err("Runtime executable or entry escapes runtime directory".to_string());
         }
         if !node_path.is_file() {
-            return Err(format!("Missing runtime node binary: {}", node_path.display()));
+            return Err(format!(
+                "Missing runtime node binary: {}",
+                node_path.display()
+            ));
         }
     }
     if !entry_path.is_file() {
-        return Err(format!("Missing runtime entry script: {}", entry_path.display()));
+        return Err(format!(
+            "Missing runtime entry script: {}",
+            entry_path.display()
+        ));
     }
     Ok(manifest)
 }
@@ -566,7 +578,14 @@ impl RuntimeSupervisor {
             snap.latest_built_at = b;
         }
         if let Some(pending_hash) = record.pending.as_deref() {
-            if let Ok(m) = validate_runtime_dir_any(&config.store_dir.join(pending_hash), &config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
+            if let Ok(m) = validate_runtime_dir_any(
+                &config.store_dir.join(pending_hash),
+                &config
+                    .products
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            ) {
                 snap.pending_version = m.version;
                 snap.update_state = "staged".to_string();
             }
@@ -601,15 +620,35 @@ impl RuntimeSupervisor {
     }
 
     /// Selects the candidate runtime directory to launch (staged `pending`, `current`, or `bundled_dir`).
-    pub fn select_best_local_runtime(&self, promote_pending: bool) -> Option<(PathBuf, RuntimeManifest, Option<String>)> {
+    pub fn select_best_local_runtime(
+        &self,
+        promote_pending: bool,
+    ) -> Option<(PathBuf, RuntimeManifest, Option<String>)> {
         let mut record = Self::load_active_record(&self.config.store_dir);
-        let bundled = validate_runtime_dir_any(&self.config.bundled_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()).ok();
+        let bundled = validate_runtime_dir_any(
+            &self.config.bundled_dir,
+            &self
+                .config
+                .products
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .ok();
 
         if promote_pending {
             if let Some(pending_hash) = record.pending.clone() {
                 if record.failed.as_deref() != Some(pending_hash.as_str()) {
                     let pending_dir = self.config.store_dir.join(&pending_hash);
-                    if let Ok(m) = validate_runtime_dir_any(&pending_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
+                    if let Ok(m) = validate_runtime_dir_any(
+                        &pending_dir,
+                        &self
+                            .config
+                            .products
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                    ) {
                         let beats_bundled = bundled
                             .as_ref()
                             .map(|b| !is_version_newer(&b.version, &m.version))
@@ -628,7 +667,15 @@ impl RuntimeSupervisor {
         if let Some(current_hash) = record.current.clone() {
             if record.failed.as_deref() != Some(current_hash.as_str()) {
                 let current_dir = self.config.store_dir.join(&current_hash);
-                if let Ok(m) = validate_runtime_dir_any(&current_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
+                if let Ok(m) = validate_runtime_dir_any(
+                    &current_dir,
+                    &self
+                        .config
+                        .products
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                ) {
                     let beats_bundled = bundled
                         .as_ref()
                         .map(|b| !is_version_newer(&b.version, &m.version))
@@ -648,12 +695,24 @@ impl RuntimeSupervisor {
         let mut best: Option<String> = None;
         let mut consider = |v: &str| {
             if parse_semver(v).is_some() {
-                if best.as_deref().map(|b| is_version_newer(v, b)).unwrap_or(true) {
+                if best
+                    .as_deref()
+                    .map(|b| is_version_newer(v, b))
+                    .unwrap_or(true)
+                {
                     best = Some(v.to_string());
                 }
             }
         };
-        if let Ok(m) = validate_runtime_dir_any(&self.config.bundled_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
+        if let Ok(m) = validate_runtime_dir_any(
+            &self.config.bundled_dir,
+            &self
+                .config
+                .products
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        ) {
             consider(&m.version);
         }
         for hash in [record.current.as_deref(), record.pending.as_deref()]
@@ -661,7 +720,15 @@ impl RuntimeSupervisor {
             .flatten()
         {
             if record.failed.as_deref() != Some(hash) {
-                if let Ok(m) = validate_runtime_dir_any(&self.config.store_dir.join(hash), &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
+                if let Ok(m) = validate_runtime_dir_any(
+                    &self.config.store_dir.join(hash),
+                    &self
+                        .config
+                        .products
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                ) {
                     consider(&m.version);
                 }
             }
@@ -674,7 +741,10 @@ impl RuntimeSupervisor {
             .timeout(Duration::from_millis(1200))
             .build()
             .ok()?;
-        let url = format!("http://127.0.0.1:{}{}", self.config.port, self.config.health_path);
+        let url = format!(
+            "http://127.0.0.1:{}{}",
+            self.config.port, self.config.health_path
+        );
         let resp = client.get(&url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
@@ -714,7 +784,9 @@ impl RuntimeSupervisor {
 
     fn classify_owner(host_kind: &str) -> &'static str {
         match host_kind {
-            "rust-node-runtime" | "tauri-node-runtime" | "electron-node-runtime" | "desktop" => "desktop",
+            "rust-node-runtime" | "tauri-node-runtime" | "electron-node-runtime" | "desktop" => {
+                "desktop"
+            }
             "vscode-extension" => "vscode-extension",
             "local-helper" => "local-helper",
             _ => "external",
@@ -775,7 +847,12 @@ impl RuntimeSupervisor {
             } else {
                 let owner = Self::classify_owner(&probe.host_kind);
                 if let Ok(mut st) = self.status.lock() {
-                    st.state = if owner == "desktop" { "running" } else { "attached" }.to_string();
+                    st.state = if owner == "desktop" {
+                        "running"
+                    } else {
+                        "attached"
+                    }
+                    .to_string();
                     st.owner = owner.to_string();
                     st.pid = probe.pid;
                     if !probe.runtime_version.is_empty() {
@@ -830,9 +907,15 @@ impl RuntimeSupervisor {
                     record.failed = Some(failed_hash);
                     record.current = None;
                     let _ = self.save_active_record(&record);
-                    if let Ok(bundled_manifest) =
-                        validate_runtime_dir_any(&self.config.bundled_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>())
-                    {
+                    if let Ok(bundled_manifest) = validate_runtime_dir_any(
+                        &self.config.bundled_dir,
+                        &self
+                            .config
+                            .products
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                    ) {
                         if let Ok(pid) = self
                             .spawn_and_verify(&self.config.bundled_dir, &bundled_manifest)
                             .await
@@ -1170,7 +1253,15 @@ impl RuntimeSupervisor {
             return (self.snapshot(), false);
         }
 
-        let extracted_manifest = match validate_runtime_dir_any(&staging_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
+        let extracted_manifest = match validate_runtime_dir_any(
+            &staging_dir,
+            &self
+                .config
+                .products
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        ) {
             Ok(m) => m,
             Err(e) => {
                 let _ = fs::remove_dir_all(&staging_dir);
@@ -1182,7 +1273,8 @@ impl RuntimeSupervisor {
             }
         };
 
-        if extracted_manifest.commit != remote.commit || extracted_manifest.version != remote.version
+        if extracted_manifest.commit != remote.commit
+            || extracted_manifest.version != remote.version
         {
             let _ = fs::remove_dir_all(&staging_dir);
             if let Ok(mut st) = self.status.lock() {
@@ -1249,14 +1341,22 @@ mod tests {
             "args": ["--port", "8089"],
             "env": {},
         });
-        fs::write(root.join("runtime.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(
+            root.join("runtime.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
 
         let parsed = validate_runtime_dir_any(&root, &["keepwork-mcp-runtime"]).unwrap();
         assert!(parsed.is_rust());
         assert_eq!(parsed.entry, "bin/keepwork-mcp");
         // The Node product must not accept a Rust runtime, and vice versa.
         assert!(validate_runtime_dir(&root, "keepwork-mcp-node-runtime").is_err());
-        assert!(validate_runtime_dir_any(&root, &["keepwork-mcp-runtime", "keepwork-mcp-node-runtime"]).is_ok());
+        assert!(validate_runtime_dir_any(
+            &root,
+            &["keepwork-mcp-runtime", "keepwork-mcp-node-runtime"]
+        )
+        .is_ok());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1314,12 +1414,17 @@ mod tests {
         let manifest: RuntimeManifest = serde_json::from_str(raw).unwrap();
         assert_eq!(
             manifest.node,
-            if cfg!(target_os = "windows") { "bin/node.exe" } else { "bin/node" }
+            if cfg!(target_os = "windows") {
+                "bin/node.exe"
+            } else {
+                "bin/node"
+            }
         );
     }
 
     #[test]
-    fn mcp_feed_platform_uses_published_artifact_names() {        #[cfg(target_os = "macos")]
+    fn mcp_feed_platform_uses_published_artifact_names() {
+        #[cfg(target_os = "macos")]
         {
             assert_eq!(current_runtime_platform(), "darwin");
             assert_eq!(mcp_feed_platform(), "macos");
@@ -1343,8 +1448,7 @@ mod tests {
             version: "0.1.44".to_string(),
             commit: "a".repeat(40),
             built_at: "2026-11-09T00:00:00Z".to_string(),
-            url: "https://cdn.keepwork.com/keepwork/mcp-stable/0.1.44/macos-arm64.zip"
-                .to_string(),
+            url: "https://cdn.keepwork.com/keepwork/mcp-stable/0.1.44/macos-arm64.zip".to_string(),
             sha256: "b".repeat(64),
             size: 1024,
         };

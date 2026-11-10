@@ -164,8 +164,7 @@ pub fn trusted_internal_page(raw_url: &str, expected_path: &str) -> bool {
     if has_credentials(&parsed) {
         return false;
     }
-    let path_matches = parsed.path() == expected_path
-        || parsed.path().ends_with(expected_path);
+    let path_matches = parsed.path() == expected_path || parsed.path().ends_with(expected_path);
     if !path_matches {
         return false;
     }
@@ -185,10 +184,11 @@ pub fn external_url(raw_url: &str) -> Option<String> {
     }
     // Never hand a URL carrying a bearer token to the system browser.
     const SENSITIVE_QUERY_KEYS: [&str; 4] = ["token", "access_token", "id_token", "authorization"];
-    if parsed
-        .query_pairs()
-        .any(|(key, _)| SENSITIVE_QUERY_KEYS.iter().any(|name| key.eq_ignore_ascii_case(name)))
-    {
+    if parsed.query_pairs().any(|(key, _)| {
+        SENSITIVE_QUERY_KEYS
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+    }) {
         return None;
     }
     match parsed.scheme() {
@@ -238,13 +238,19 @@ mod tests {
     #[test]
     fn validates_trusted_pages_and_rejects_untrusted_or_credentialed_urls() {
         assert!(trusted_page("https://keepwork.com/chat", None));
-        assert!(trusted_page("https://keepwork.com/chat?session=1#top", None));
+        assert!(trusted_page(
+            "https://keepwork.com/chat?session=1#top",
+            None
+        ));
         assert!(!trusted_page("https://keepwork.com/other", None));
         assert!(!trusted_page("https://user:pass@keepwork.com/chat", None));
         assert!(!trusted_page("https://evil.example.com/chat", None));
 
         let dev = Some("http://127.0.0.1:18432/AIChat.html");
-        assert!(trusted_page("http://127.0.0.1:18432/AIChat.html?debug=1", dev));
+        assert!(trusted_page(
+            "http://127.0.0.1:18432/AIChat.html?debug=1",
+            dev
+        ));
         assert!(!trusted_page("http://127.0.0.1:18432/other.html", dev));
     }
 
@@ -257,7 +263,10 @@ mod tests {
             None
         ));
         assert!(allowed_navigation("https://keepwork.com/docs", None));
-        assert!(allowed_navigation("https://keepwork.com/chat?session=1#top", None));
+        assert!(allowed_navigation(
+            "https://keepwork.com/chat?session=1#top",
+            None
+        ));
         assert!(allowed_navigation("tauri://localhost/index.html", None));
 
         assert!(!allowed_navigation(
@@ -278,13 +287,22 @@ mod tests {
         ));
 
         let dev = Some("http://127.0.0.1:18432/AIChat.html");
-        assert!(allowed_navigation("http://127.0.0.1:18432/AIChat.html?debug=1", dev));
+        assert!(allowed_navigation(
+            "http://127.0.0.1:18432/AIChat.html?debug=1",
+            dev
+        ));
         assert!(allowed_navigation(
             "http://127.0.0.1:18432/tools/calendar/calendar.html",
             dev
         ));
-        assert!(!allowed_navigation("http://127.0.0.1:18433/AIChat.html", dev));
-        assert!(!allowed_navigation("http://127.0.0.1:18432/other.html", None));
+        assert!(!allowed_navigation(
+            "http://127.0.0.1:18433/AIChat.html",
+            dev
+        ));
+        assert!(!allowed_navigation(
+            "http://127.0.0.1:18432/other.html",
+            None
+        ));
     }
 
     #[test]
@@ -333,23 +351,50 @@ mod tests {
             "https://login.dingtalk.com/oauth2/auth",
             None
         ));
-        assert!(allowed_in_app_popup("https://keepwork.com/sso?code=1", None));
-        assert!(allowed_in_app_popup("https://keepwork.com/chat?tool=calendar", None));
+        assert!(allowed_in_app_popup(
+            "https://keepwork.com/sso?code=1",
+            None
+        ));
+        assert!(allowed_in_app_popup(
+            "https://keepwork.com/chat?tool=calendar",
+            None
+        ));
         assert!(allowed_in_app_popup("https://keepwork.com/login", None));
 
         assert!(!allowed_in_app_popup("https://keepwork.com/docs", None));
-        assert!(!allowed_in_app_popup("https://evil-dingtalk.com/login", None));
-        assert!(!allowed_in_app_popup("https://dingtalk.com.evil.com/login", None));
+        assert!(!allowed_in_app_popup(
+            "https://evil-dingtalk.com/login",
+            None
+        ));
+        assert!(!allowed_in_app_popup(
+            "https://dingtalk.com.evil.com/login",
+            None
+        ));
         assert!(!allowed_in_app_popup("https://evilfeishu.cn/login", None));
-        assert!(!allowed_in_app_popup("http://accounts.google.com/o/oauth2/v2/auth", None));
-        assert!(!allowed_in_app_popup("https://user:pass@keepwork.com/sso", None));
+        assert!(!allowed_in_app_popup(
+            "http://accounts.google.com/o/oauth2/v2/auth",
+            None
+        ));
+        assert!(!allowed_in_app_popup(
+            "https://user:pass@keepwork.com/sso",
+            None
+        ));
         assert!(!allowed_in_app_popup("javascript:alert(1)", None));
         assert!(!allowed_in_app_popup("about:blank", None));
 
         let dev = Some("http://127.0.0.1:18432/AIChat.html");
-        assert!(allowed_in_app_popup("http://127.0.0.1:18432/login.html", dev));
-        assert!(!allowed_in_app_popup("http://127.0.0.1:18433/login.html", dev));
-        assert!(!allowed_in_app_popup("http://127.0.0.1:18432/login.html", None));
+        assert!(allowed_in_app_popup(
+            "http://127.0.0.1:18432/login.html",
+            dev
+        ));
+        assert!(!allowed_in_app_popup(
+            "http://127.0.0.1:18433/login.html",
+            dev
+        ));
+        assert!(!allowed_in_app_popup(
+            "http://127.0.0.1:18432/login.html",
+            None
+        ));
     }
 
     #[test]
@@ -362,13 +407,22 @@ mod tests {
         ));
         assert!(!trusted_page(cdn, None));
 
-        assert!(!allowed_navigation("http://cdn.keepwork.com/apps/x.html", None));
-        assert!(!allowed_navigation("https://cdn.keepwork.com:8443/apps/x.html", None));
+        assert!(!allowed_navigation(
+            "http://cdn.keepwork.com/apps/x.html",
+            None
+        ));
+        assert!(!allowed_navigation(
+            "https://cdn.keepwork.com:8443/apps/x.html",
+            None
+        ));
         assert!(!allowed_navigation(
             "https://cdn.keepwork.com.evil.com/apps/x.html",
             None
         ));
-        assert!(!allowed_navigation("https://evilkeepwork.com/apps/x.html", None));
+        assert!(!allowed_navigation(
+            "https://evilkeepwork.com/apps/x.html",
+            None
+        ));
         assert!(!allowed_navigation(
             "https://user:pass@cdn.keepwork.com/apps/x.html",
             None
@@ -387,7 +441,14 @@ mod tests {
         assert!(assert_sender("main", "main", false, "https://keepwork.com/chat", None).is_err());
         assert!(assert_sender("pet", "main", true, "https://keepwork.com/chat", None).is_err());
         assert!(assert_sender("pet", "pet", true, "tauri://localhost/pet.html", None).is_ok());
-        assert!(assert_sender("updates", "updates", true, "tauri://localhost/updates.html", None).is_ok());
+        assert!(assert_sender(
+            "updates",
+            "updates",
+            true,
+            "tauri://localhost/updates.html",
+            None
+        )
+        .is_ok());
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub struct AppState {
     pub sessions: Mutex<SessionStore>,
     pub terminals: TerminalManager,
     pub shell: ShellRunner,
+    pub presence: Arc<crate::presence::PresenceState>,
 }
 
 impl AppState {
@@ -48,6 +49,7 @@ impl AppState {
             sessions: Mutex::new(SessionStore::default()),
             terminals: TerminalManager::default(),
             shell: ShellRunner::default(),
+            presence: Arc::new(crate::presence::PresenceState::new()),
         }
     }
 
@@ -67,6 +69,7 @@ impl AppState {
             "terminalApi".into(),
             serde_json::json!(crate::terminal::TERMINAL_API),
         );
+        caps.insert("aichatPresenceApi".into(), serde_json::json!("post-sse-v1"));
         // Only surfaces this build actually serves. Unimplemented routes stay
         // unadvertised so AIChat degrades instead of calling a 404.
         caps
@@ -452,6 +455,9 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                 )
             }
         },
+        (_, "/aichat/presence") => {
+            crate::presence::handle_presence_http(&state, req, &query, &headers).await
+        }
         (_, "/mcp") => mcp_dispatch(state, req).await,
         _ => json_response(
             StatusCode::NOT_FOUND,
@@ -472,6 +478,9 @@ fn health(state: &AppState) -> Response {
     body.insert("pid".into(), serde_json::json!(std::process::id()));
     body.insert("clients".into(), serde_json::json!(state.client_count()));
     body.insert("paracraftClients".into(), serde_json::json!(0));
+    if let Some(dc) = crate::identity::read_desktop_client() {
+        body.insert("desktopClient".into(), dc);
+    }
     for (key, value) in state.health_capabilities() {
         body.insert(key, value);
     }

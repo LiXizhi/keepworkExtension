@@ -39,6 +39,7 @@ interface PetSnapshot {
   petLeft?: number;
   petTop?: number;
   petPixels?: number;
+  dragging?: boolean;
   preferences?: { appearance?: string; scale?: number };
   pet?: {
     name?: string;
@@ -114,7 +115,17 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let unsynced = false;
   let localError = "";
   let queue: Promise<boolean> = Promise.resolve(true);
-  let pointer: { x: number; y: number; moved: boolean; ready: Promise<unknown> } | null = null;
+  let pointer: {
+    x: number;
+    y: number;
+    screenX: number;
+    screenY: number;
+    moved: boolean;
+    tracking: boolean;
+    ready: Promise<unknown>;
+  } | null = null;
+  let releasedTap = false;
+  let firstTap = false;
   let renderedMessages = "";
   let choosing = false;
   let interactive: boolean | null = null;
@@ -530,7 +541,10 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     pointer = {
       x: event.screenX,
       y: event.screenY,
+      screenX: event.screenX,
+      screenY: event.screenY,
       moved: false,
+      tracking: false,
       ready: api.action("drag-start", { screenX: event.screenX, screenY: event.screenY }),
     };
     $("pet").setPointerCapture(event.pointerId);
@@ -538,22 +552,44 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
   $("pet").addEventListener("pointermove", (event) => {
     if (!pointer) return;
+    pointer.screenX = event.screenX;
+    pointer.screenY = event.screenY;
     if (Math.hypot(event.screenX - pointer.x, event.screenY - pointer.y) > 4) {
       pointer.moved = true;
     }
-    if (pointer.moved) {
-      void pointer.ready
-        .then(() => api.action("drag", { screenX: event.screenX, screenY: event.screenY }))
+    // Keep sampling after the pointer leaves this monitor. The host moves the
+    // window; that move can cancel the pointer, so release is not tied to it.
+    if (!pointer.moved || pointer.tracking) return;
+    pointer.tracking = true;
+    const step = () => {
+      const current = pointer;
+      if (!current?.tracking) return;
+      void current.ready
+        .then(() => api.action("drag", { screenX: current.screenX, screenY: current.screenY }))
         .then((snap) => {
-          if (!snap || typeof snap !== "object") return;
+          if (!pointer?.tracking) return;
+          if (!snap || typeof snap !== "object") {
+            requestAnimationFrame(step);
+            return;
+          }
           state = { ...state, ...(snap as PetSnapshot) };
           positionLayers();
+          if ((snap as PetSnapshot).dragging === false) {
+            pointer = null;
+            document.body.classList.remove("dragging");
+            releasedTap = false;
+            firstTap = false;
+            return;
+          }
+          requestAnimationFrame(step);
+        })
+        .catch(() => {
+          if (pointer?.tracking) requestAnimationFrame(step);
         });
-    }
+    };
+    requestAnimationFrame(step);
   });
 
-  let releasedTap = false;
-  let firstTap = false;
   const release = async (event: PointerEvent): Promise<void> => {
     const current = pointer;
     pointer = null;
@@ -565,8 +601,17 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     await api.action("drag-end");
   };
 
-  $("pet").addEventListener("pointerup", (event) => void release(event));
-  $("pet").addEventListener("pointercancel", (event) => void release(event));
+  // Crossing monitors moves this window and WKWebView often synthesizes pointerup
+  // while the button is still held. Keep the tracker running; the host ends it
+  // when the button is actually up.
+  $("pet").addEventListener("pointerup", (event) => {
+    if (pointer?.tracking) {
+      releasedTap = false;
+      firstTap = false;
+      return;
+    }
+    void release(event);
+  });
 
   $("pet").addEventListener("click", (event) => {
     if (event.detail === 0) {
@@ -587,6 +632,10 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   $("pet").addEventListener("contextmenu", (event) => {
     event.preventDefault();
     void api.action("menu");
+  });
+
+  window.addEventListener("resize", () => {
+    positionLayers();
   });
 
   document.addEventListener("mousemove", (event) => {

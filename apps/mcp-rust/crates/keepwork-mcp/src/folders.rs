@@ -14,7 +14,7 @@ fn is_directory(path: &Path) -> bool {
 }
 
 fn home() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+    crate::config::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn platform() -> &'static str {

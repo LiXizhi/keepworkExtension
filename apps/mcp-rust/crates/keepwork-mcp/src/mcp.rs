@@ -93,8 +93,16 @@ pub async fn handle_post(state: &Arc<AppState>, headers: &HeaderMap, body: &[u8]
             return empty_response(StatusCode::ACCEPTED, Some(&session_id));
         }
         touch(state, &session_id);
-        let response =
-            dispatch_message(state, &session_id, &method, id, parsed.get("params")).await;
+        let origin = header_value(headers, "origin");
+        let response = dispatch_message(
+            state,
+            &session_id,
+            &origin,
+            &method,
+            id,
+            parsed.get("params"),
+        )
+        .await;
         return mcp_json_response(StatusCode::OK, &response, Some(&session_id));
     }
 
@@ -228,6 +236,7 @@ pub fn handle_delete(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
         true
     };
     if removed {
+        state.presence.note_session_closed(&session_id);
         empty_response(StatusCode::OK, None)
     } else {
         json_response(
@@ -243,6 +252,7 @@ fn touch(state: &Arc<AppState>, session_id: &str) {
             session.last_seen_at = now_iso();
         }
     }
+    state.presence.touch(session_id);
 }
 
 fn wants_streamed_replies(params: Option<&Value>) -> bool {
@@ -274,6 +284,7 @@ fn initialize_result(params: Option<&Value>) -> Value {
 async fn dispatch_message(
     state: &Arc<AppState>,
     session_id: &str,
+    origin: &str,
     method: &str,
     id: Option<Value>,
     params: Option<&Value>,
@@ -281,6 +292,39 @@ async fn dispatch_message(
     let id = id.unwrap_or(Value::Null);
     match method {
         "ping" => json!({ "result": {}, "jsonrpc": "2.0", "id": id }),
+        "keepwork/presence" => {
+            if !crate::presence::presence_origin_allowed(origin) {
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32600, "message": "AIChat presence rejected" },
+                });
+            }
+            let is_live = state
+                .sessions
+                .lock()
+                .map(|s| s.sessions.contains_key(session_id))
+                .unwrap_or(false);
+            if !is_live {
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32600, "message": "AIChat presence rejected" },
+                });
+            }
+            match state.presence.handle_mcp_params(session_id, origin, params) {
+                Ok(_) => json!({
+                    "result": { "remembered": true },
+                    "jsonrpc": "2.0",
+                    "id": id,
+                }),
+                Err(_) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32600, "message": "AIChat presence rejected" },
+                }),
+            }
+        }
         "tools/list" => json!({
             "result": { "tools": tools::list() },
             "jsonrpc": "2.0",

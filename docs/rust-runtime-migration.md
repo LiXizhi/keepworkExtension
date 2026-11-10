@@ -15,7 +15,7 @@
 | 令牌 | `~/.keepwork-mcp/token`，24 字节 hex，0600 |
 | 单实例文件 | `~/.keepwork-mcp/instance.json` `{pid,port,startedAt,name}` |
 
-`/health` 只声明已经实现的能力：P1 返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`runtimeEngine`、`runtimeProduct`；`agentSessionApi`、`browserApi`、`messagingApi`、`personasApi` 等在对应阶段完成前不出现，AIChat 会按“能力缺失”降级。
+`/health` 只声明已经实现的能力：P1 返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`aichatPresenceApi`(`post-sse-v1`)、`runtimeEngine`、`runtimeProduct`；`agentSessionApi`、`browserApi`、`messagingApi`、`personasApi` 等在对应阶段完成前不出现，AIChat 会按“能力缺失”降级。
 
 ## 2. 运行时清单 v2（新增，v1 不动）
 

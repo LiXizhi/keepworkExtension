@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.14"
+version = "0.2.15"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
@@ -9,6 +9,7 @@ default-run = "aichat-rust"
 [lib]
 name = "aichat_rust_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false
 
 [features]
 default = []

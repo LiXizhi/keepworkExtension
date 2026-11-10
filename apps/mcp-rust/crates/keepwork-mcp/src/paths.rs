@@ -6,7 +6,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::{default_user_workspace, read_config_file, DEFAULT_WORKSPACE_SLOT};
+use crate::config::{default_user_workspace, home_dir, read_config_file, DEFAULT_WORKSPACE_SLOT};
 
 #[derive(Debug)]
 pub struct CoreError {
@@ -42,7 +42,7 @@ pub fn expand_user_path(raw: &str) -> String {
         return String::new();
     }
     if trimmed == "~" {
-        return dirs::home_dir()
+        return home_dir()
             .map(|home| home.to_string_lossy().into_owned())
             .unwrap_or_default();
     }
@@ -50,7 +50,7 @@ pub fn expand_user_path(raw: &str) -> String {
         .strip_prefix("~/")
         .or_else(|| trimmed.strip_prefix("~\\"))
     {
-        return dirs::home_dir()
+        return home_dir()
             .map(|home| home.join(rest).to_string_lossy().into_owned())
             .unwrap_or_else(|| trimmed.to_string());
     }
@@ -75,18 +75,33 @@ pub struct DiskInfo {
     pub resolved: String,
 }
 
+/// `fs.realpathSync.native` drops the `\\?\` prefix libuv/Rust add on Windows.
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path
+}
+
+fn node_realpath(path: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    });
+    strip_verbatim(canonical)
+}
+
 fn real_or_resolve(path: &Path) -> String {
-    fs::canonicalize(path)
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| {
-            if path.is_absolute() {
-                path.to_string_lossy().into_owned()
-            } else {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(path).to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-            }
-        })
+    node_realpath(path).to_string_lossy().into_owned()
 }
 
 pub fn inspect_disk_path(raw: &str) -> DiskInfo {
@@ -131,7 +146,7 @@ pub fn resolve_workspace_root(override_root: Option<&str>) -> PathBuf {
         let path = PathBuf::from(value);
         let _ = fs::create_dir_all(&path);
         let _ = fs::create_dir_all(path.join(DEFAULT_WORKSPACE_SLOT));
-        return fs::canonicalize(&path).unwrap_or(path);
+        return node_realpath(&path);
     }
     let fallback = default_user_workspace();
     let _ = fs::create_dir_all(&fallback);
@@ -178,15 +193,7 @@ pub fn confine_lexical(root: &str, rel: &str) -> Result<PathBuf, CoreError> {
 }
 
 fn real_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    })
+    node_realpath(path)
 }
 
 /// Resolves `rel` under `root` through real paths. Rejects `..` and symlink
@@ -323,6 +330,23 @@ pub fn assert_no_parent(rel: &str) -> Result<(), CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_windows_prefix_matches_node_realpath() {
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\C:\Users\a\.keepwork-mcp\workspace"))
+                .to_string_lossy(),
+            r"C:\Users\a\.keepwork-mcp\workspace"
+        );
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\UNC\server\share\workspace")).to_string_lossy(),
+            r"\\server\share\workspace"
+        );
+        assert_eq!(
+            strip_verbatim(PathBuf::from("/tmp/workspace")).to_string_lossy(),
+            "/tmp/workspace"
+        );
+    }
 
     #[test]
     fn expands_home_and_detects_absolute_paths() {

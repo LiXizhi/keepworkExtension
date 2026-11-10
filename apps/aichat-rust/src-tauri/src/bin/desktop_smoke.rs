@@ -38,7 +38,10 @@ async fn main() {
         "https://cdn.keepwork.com/apps/aichat/release/d29b1ecb4622/tools/calendar/calendar.html?locale=zh-CN&host=aichat&token=eyJ.demo",
         None
     ));
-    assert!(!allowed_navigation("https://cdn.keepwork.com.evil.com/x", None));
+    assert!(!allowed_navigation(
+        "https://cdn.keepwork.com.evil.com/x",
+        None
+    ));
     assert!(!allowed_navigation("https://evilkeepwork.com/x", None));
     assert!(!allowed_navigation("http://cdn.keepwork.com/x", None));
     assert!(!allowed_navigation("https://evil.example/chat", None));
@@ -73,7 +76,10 @@ async fn main() {
         )
         .unwrap();
     let read_back = files
-        .handle("read", &json!({ "rootId": root_id, "path": "notes/test.md" }))
+        .handle(
+            "read",
+            &json!({ "rootId": root_id, "path": "notes/test.md" }),
+        )
         .unwrap();
     assert_eq!(read_back["content"], "Hello Rust Desktop");
 

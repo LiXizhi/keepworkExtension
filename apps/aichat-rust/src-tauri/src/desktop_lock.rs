@@ -35,7 +35,9 @@ impl DesktopLock {
         F: Fn(bool) + Send + Sync + 'static,
     {
         if let Some(existing) = Self::read_existing(&lock_file) {
-            if existing.pid != std::process::id() && Self::ping_existing(&existing, !background_launch, replace_existing) {
+            if existing.pid != std::process::id()
+                && Self::ping_existing(&existing, !background_launch, replace_existing)
+            {
                 if !replace_existing {
                     // Existing instance is alive and handled our wake/background signal
                     return Ok(None);
@@ -188,7 +190,10 @@ mod tests {
         // Simulate a second process by reading lock and pinging
         let record = DesktopLock::read_existing(&lock_file).unwrap();
         assert!(DesktopLock::ping_existing(&record, true, false));
-        thread::sleep(Duration::from_millis(50));
+        let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+        while wakes.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
 
         primary.release();

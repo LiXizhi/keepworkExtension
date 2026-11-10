@@ -33,7 +33,11 @@ try {
   console.warn(`[aichat-rust] Bundled MCP runtime skipped: ${error instanceof Error ? error.message : String(error)}`);
 }
 
-const viteBin = path.join(appRoot, "node_modules", ".bin", process.platform === "win32" ? "vite.cmd" : "vite");execFileSync(viteBin, ["build"], {
+// Node 22 refuses to spawn .cmd shims without a shell (EINVAL). Vite's package
+// exports hide bin/vite.js, so resolve the package root and run that file.
+const vitePkg = path.dirname(require.resolve("vite", { paths: [appRoot] }));
+const viteEntry = path.join(vitePkg, "bin", "vite.js");
+execFileSync(process.execPath, [viteEntry, "build"], {
   cwd: appRoot,
   stdio: "inherit",
 });

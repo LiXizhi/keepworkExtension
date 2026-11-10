@@ -1,6 +1,6 @@
 use aichat_rust_lib::runtime::{
-    create_zip_from_dir, current_runtime_arch, mcp_feed_platform, sha256_hex,
-    validate_runtime_dir, RuntimeConfig, RuntimeManifest, RuntimeSupervisor, RuntimeUpdateManifest,
+    create_zip_from_dir, current_runtime_arch, mcp_feed_platform, sha256_hex, validate_runtime_dir,
+    RuntimeConfig, RuntimeManifest, RuntimeSupervisor, RuntimeUpdateManifest,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -115,7 +115,10 @@ async fn main() {
     let store_dir = root.join("mcp-runtimes");
     let supervisor = RuntimeSupervisor::new(RuntimeConfig {
         id: "mcp".to_string(),
-        products: vec!["keepwork-mcp-node-runtime".to_string(), "keepwork-mcp-runtime".to_string()],
+        products: vec![
+            "keepwork-mcp-node-runtime".to_string(),
+            "keepwork-mcp-runtime".to_string(),
+        ],
         port: 18099,
         health_path: "/health".to_string(),
         updates_enabled: true,

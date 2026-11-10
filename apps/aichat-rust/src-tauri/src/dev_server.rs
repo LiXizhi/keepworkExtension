@@ -87,10 +87,11 @@ fn handle_client(mut stream: TcpStream, root_dir: &Path, entry_file: &str) {
     }
 
     let path_part = raw_target.split('?').next().unwrap_or("/");
-    let decoded = url::form_urlencoded::parse(format!("p={}", path_part.trim_start_matches('/')).as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_else(|| path_part.trim_start_matches('/').to_string());
+    let decoded =
+        url::form_urlencoded::parse(format!("p={}", path_part.trim_start_matches('/')).as_bytes())
+            .next()
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_else(|| path_part.trim_start_matches('/').to_string());
 
     let rel_str = if decoded.is_empty() || decoded == "/" {
         entry_file
@@ -167,8 +168,12 @@ fn handle_client(mut stream: TcpStream, root_dir: &Path, entry_file: &str) {
 
 impl DevServer {
     pub fn start(source_dir: &Path, entry_file: &str) -> Result<Self, String> {
-        let root_dir = dunce::canonicalize(source_dir)
-            .map_err(|e| format!("Cannot resolve AIChat source directory {}: {e}", source_dir.display()))?;
+        let root_dir = dunce::canonicalize(source_dir).map_err(|e| {
+            format!(
+                "Cannot resolve AIChat source directory {}: {e}",
+                source_dir.display()
+            )
+        })?;
         let entry_path = root_dir.join(entry_file);
         if !entry_path.is_file() {
             return Err(format!(
@@ -250,7 +255,11 @@ mod tests {
     async fn serves_local_aichat_source_on_loopback_and_blocks_traversal() {
         let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("js")).unwrap();
-        fs::write(root.join("AIChat.html"), "<!doctype html><title>AIChat</title>").unwrap();
+        fs::write(
+            root.join("AIChat.html"),
+            "<!doctype html><title>AIChat</title>",
+        )
+        .unwrap();
         fs::write(root.join("js/app.js"), "export const ok = true;").unwrap();
 
         let mut server = DevServer::start(&root, "AIChat.html").unwrap();
@@ -259,7 +268,11 @@ mod tests {
         let res = client.get(server.url()).send().await.unwrap();
         assert_eq!(res.status().as_u16(), 200);
         assert_eq!(
-            res.headers().get("cache-control").unwrap().to_str().unwrap(),
+            res.headers()
+                .get("cache-control")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "no-store"
         );
         let text = res.text().await.unwrap();

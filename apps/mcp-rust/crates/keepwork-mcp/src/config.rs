@@ -31,8 +31,46 @@ pub struct InstanceInfo {
     pub name: String,
 }
 
-pub fn mcp_home_dir() -> PathBuf {
+/// Same lookup as Node `os.homedir()`: `USERPROFILE` on Windows, `HOME` elsewhere.
+///
+/// `dirs::home_dir()` asks Windows for the profile folder and ignores
+/// `USERPROFILE`, so a process started with an isolated profile (the contract
+/// harness sets one) would write its token outside the directory the client reads.
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(dir) = non_empty_env_path("USERPROFILE") {
+            return Some(dir);
+        }
+        if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+            let drive = drive.trim();
+            let path = path.trim();
+            if !drive.is_empty() && !path.is_empty() {
+                return Some(PathBuf::from(format!("{drive}{path}")));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(dir) = non_empty_env_path("HOME") {
+            return Some(dir);
+        }
+    }
     dirs::home_dir()
+}
+
+fn non_empty_env_path(key: &str) -> Option<PathBuf> {
+    let value = std::env::var(key).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+pub fn mcp_home_dir() -> PathBuf {
+    home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".keepwork-mcp")
 }

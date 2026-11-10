@@ -36,10 +36,7 @@ pub fn page_scope_key(raw_url: &str, dev_url: Option<&str>) -> Option<String> {
         return None;
     }
     let parsed = Url::parse(raw_url).ok()?;
-    let port_part = parsed
-        .port()
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default();
+    let port_part = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
     Some(format!(
         "{}://{}{}{}",
         parsed.scheme(),

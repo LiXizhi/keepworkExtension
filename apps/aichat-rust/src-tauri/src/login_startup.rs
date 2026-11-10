@@ -198,7 +198,8 @@ mod tests {
         let agents_dir = root.join("LaunchAgents");
         let exe = root.join("Keepwork.app/Contents/MacOS/aichat-rust");
 
-        let startup = LoginStartup::new(settings_file.clone(), agents_dir.clone(), exe.clone(), true);
+        let startup =
+            LoginStartup::new(settings_file.clone(), agents_dir.clone(), exe.clone(), true);
         assert!(startup.ensure_default());
         #[cfg(target_os = "macos")]
         {

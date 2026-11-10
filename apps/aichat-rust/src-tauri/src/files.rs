@@ -104,8 +104,8 @@ pub fn atomic_json_write<T: Serialize>(file_path: &Path, value: &T) -> Result<()
         Uuid::new_v4()
     );
     let tmp_path = file_path.with_file_name(tmp_name);
-    let payload = serde_json::to_vec_pretty(value)
-        .map_err(|e| format!("Failed to serialize JSON: {e}"))?;
+    let payload =
+        serde_json::to_vec_pretty(value).map_err(|e| format!("Failed to serialize JSON: {e}"))?;
 
     {
         let mut file = fs::OpenOptions::new()
@@ -172,10 +172,7 @@ impl NativeFiles {
     }
 
     pub fn roots(&self) -> Vec<FolderGrant> {
-        self.grants
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        self.grants.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn grant(&self, target_dir: &Path) -> Result<FolderGrant, String> {
@@ -193,7 +190,10 @@ impl NativeFiles {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| real_str.clone());
 
-        let mut guard = self.grants.lock().map_err(|_| "Lock poisoned".to_string())?;
+        let mut guard = self
+            .grants
+            .lock()
+            .map_err(|_| "Lock poisoned".to_string())?;
         if let Some(existing) = guard.iter().find(|item| item.path == real_str) {
             return Ok(existing.clone());
         }
@@ -208,7 +208,10 @@ impl NativeFiles {
     }
 
     pub fn revoke(&self, root_id: &str) -> Result<bool, String> {
-        let mut guard = self.grants.lock().map_err(|_| "Lock poisoned".to_string())?;
+        let mut guard = self
+            .grants
+            .lock()
+            .map_err(|_| "Lock poisoned".to_string())?;
         let before = guard.len();
         guard.retain(|item| item.id != root_id);
         let changed = guard.len() != before;
@@ -281,7 +284,10 @@ impl NativeFiles {
 
         // When follow_links == true (workspace file ops), check if it's a broken symlink when allow_missing == false
         if let Ok(sym_meta) = fs::symlink_metadata(&lexical_target) {
-            if sym_meta.file_type().is_symlink() && fs::metadata(&lexical_target).is_err() && !allow_missing {
+            if sym_meta.file_type().is_symlink()
+                && fs::metadata(&lexical_target).is_err()
+                && !allow_missing
+            {
                 return Err("Broken symbolic link".to_string());
             }
         }
@@ -289,10 +295,7 @@ impl NativeFiles {
     }
 
     pub fn handle(&self, op: &str, args: &Value) -> Result<Value, String> {
-        let root_id = args
-            .get("rootId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let root_id = args.get("rootId").and_then(|v| v.as_str()).unwrap_or("");
         let rel = args
             .get("path")
             .or_else(|| args.get("rel"))
@@ -368,12 +371,16 @@ impl NativeFiles {
                         limit
                     ));
                 }
-                let bytes = fs::read(&target).map_err(|e| format!("Failed to read {}: {e}", rel_slash))?;
+                let bytes =
+                    fs::read(&target).map_err(|e| format!("Failed to read {}: {e}", rel_slash))?;
                 let encoding = args
                     .get("encoding")
                     .and_then(|v| v.as_str())
                     .unwrap_or("utf8");
-                let base64_flag = args.get("base64").and_then(|v| v.as_bool()).unwrap_or(false)
+                let base64_flag = args
+                    .get("base64")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
                     || encoding.eq_ignore_ascii_case("base64");
                 if base64_flag {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -413,38 +420,37 @@ impl NativeFiles {
                     .get("encoding")
                     .and_then(|v| v.as_str())
                     .unwrap_or("utf8");
-                let bytes = if encoding.eq_ignore_ascii_case("base64")
-                    || args.get("base64").is_some()
-                {
-                    let raw_b64 = args
-                        .get("base64")
-                        .or_else(|| args.get("content"))
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "Missing base64 content".to_string())?;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(raw_b64)
-                        .map_err(|e| format!("Invalid base64 payload: {e}"))?
-                } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
-                    // The web client sends `{ text }` (see keepworkWriteText).
-                    text.as_bytes().to_vec()
-                } else if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
-                    content.as_bytes().to_vec()
-                } else if let Some(items) = args.get("bytes").and_then(|v| v.as_array()) {
-                    // keepworkWriteBlob sends `{ bytes: Uint8Array }`, which
-                    // arrives as a JSON array of byte values.
-                    let mut buffer = Vec::with_capacity(items.len());
-                    for item in items {
-                        let value = item
-                            .as_u64()
-                            .filter(|n| *n <= u8::MAX as u64)
-                            .ok_or_else(|| "Invalid byte value".to_string())?;
-                        buffer.push(value as u8);
-                    }
-                    buffer
-                } else {
-                    // Match the Electron bridge: no content/key writes an empty file.
-                    Vec::new()
-                };
+                let bytes =
+                    if encoding.eq_ignore_ascii_case("base64") || args.get("base64").is_some() {
+                        let raw_b64 = args
+                            .get("base64")
+                            .or_else(|| args.get("content"))
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "Missing base64 content".to_string())?;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(raw_b64)
+                            .map_err(|e| format!("Invalid base64 payload: {e}"))?
+                    } else if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+                        // The web client sends `{ text }` (see keepworkWriteText).
+                        text.as_bytes().to_vec()
+                    } else if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+                        content.as_bytes().to_vec()
+                    } else if let Some(items) = args.get("bytes").and_then(|v| v.as_array()) {
+                        // keepworkWriteBlob sends `{ bytes: Uint8Array }`, which
+                        // arrives as a JSON array of byte values.
+                        let mut buffer = Vec::with_capacity(items.len());
+                        for item in items {
+                            let value = item
+                                .as_u64()
+                                .filter(|n| *n <= u8::MAX as u64)
+                                .ok_or_else(|| "Invalid byte value".to_string())?;
+                            buffer.push(value as u8);
+                        }
+                        buffer
+                    } else {
+                        // Match the Electron bridge: no content/key writes an empty file.
+                        Vec::new()
+                    };
                 let limit = max_file_bytes_for_path(&rel_slash);
                 if (bytes.len() as u64) > limit {
                     return Err(format!(
@@ -496,11 +502,13 @@ impl NativeFiles {
                         .map_err(|e| format!("Cannot access {}: {e}", rel_slash))?;
                     if meta.is_dir() {
                         if recursive {
-                            fs::remove_dir_all(&target)
-                                .map_err(|e| format!("Failed to remove directory {}: {e}", rel_slash))?;
+                            fs::remove_dir_all(&target).map_err(|e| {
+                                format!("Failed to remove directory {}: {e}", rel_slash)
+                            })?;
                         } else {
-                            fs::remove_dir(&target)
-                                .map_err(|e| format!("Failed to remove directory {}: {e}", rel_slash))?;
+                            fs::remove_dir(&target).map_err(|e| {
+                                format!("Failed to remove directory {}: {e}", rel_slash)
+                            })?;
                         }
                     } else {
                         fs::remove_file(&target)
@@ -740,7 +748,10 @@ mod tests {
 
         // Traversal is rejected
         assert!(files
-            .handle("read", &json!({ "rootId": grant.id, "path": "../outside/secret.txt" }))
+            .handle(
+                "read",
+                &json!({ "rootId": grant.id, "path": "../outside/secret.txt" })
+            )
             .is_err());
 
         // Write and read UTF-8
@@ -751,14 +762,20 @@ mod tests {
             )
             .unwrap();
         let read_res = files
-            .handle("read", &json!({ "rootId": grant.id, "path": "notes/hello.md" }))
+            .handle(
+                "read",
+                &json!({ "rootId": grant.id, "path": "notes/hello.md" }),
+            )
             .unwrap();
         assert_eq!(read_res["content"], "# Hello");
         assert_eq!(read_res["bytes"], json!("# Hello".as_bytes()));
 
         // Missing directory list/search returns empty without error
         let missing_list = files
-            .handle("list", &json!({ "rootId": grant.id, "path": "_wiki", "recursive": true }))
+            .handle(
+                "list",
+                &json!({ "rootId": grant.id, "path": "_wiki", "recursive": true }),
+            )
             .unwrap();
         assert_eq!(missing_list["files"], json!([]));
 
@@ -770,7 +787,10 @@ mod tests {
             )
             .unwrap();
         let text_res = files
-            .handle("read", &json!({ "rootId": grant.id, "rel": "_wiki/index.md" }))
+            .handle(
+                "read",
+                &json!({ "rootId": grant.id, "rel": "_wiki/index.md" }),
+            )
             .unwrap();
         assert_eq!(text_res["content"], "# Index");
         files
@@ -780,7 +800,10 @@ mod tests {
             )
             .unwrap();
         let bin_res = files
-            .handle("read", &json!({ "rootId": grant.id, "path": "media/raw.bin" }))
+            .handle(
+                "read",
+                &json!({ "rootId": grant.id, "path": "media/raw.bin" }),
+            )
             .unwrap();
         assert_eq!(bin_res["bytes"], json!([0, 255, 7]));
         assert!(bin_res.get("content").is_none());
@@ -803,7 +826,9 @@ mod tests {
         {
             std::os::unix::fs::symlink(&outside, workspace.join("linked_out")).unwrap();
             // Terminal cwd resolution (follow_links = false) rejects ungranted outside symlink target
-            assert!(files.resolve(&grant.id, "linked_out", false, false).is_err());
+            assert!(files
+                .resolve(&grant.id, "linked_out", false, false)
+                .is_err());
             // Deleting the symlink only deletes the link, not `outside/secret.txt`
             files
                 .handle(

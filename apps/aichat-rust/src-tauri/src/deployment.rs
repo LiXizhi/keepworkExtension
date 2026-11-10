@@ -22,16 +22,14 @@ pub fn validate_entry_url(raw: &str) -> Result<String, String> {
     Err(format!("Untrusted deployment entry URL: {trimmed}"))
 }
 
-pub fn open_deployment(
-    deployment_file: &Path,
-) -> Result<(String, Option<DevServer>), String> {
+pub fn open_deployment(deployment_file: &Path) -> Result<(String, Option<DevServer>), String> {
     if !deployment_file.is_file() {
         return Ok((ENTRY.to_string(), None));
     }
     let raw = fs::read_to_string(deployment_file)
         .map_err(|e| format!("Failed to read deployment.json: {e}"))?;
-    let record: DeploymentRecord = serde_json::from_str(&raw)
-        .map_err(|e| format!("Invalid deployment.json: {e}"))?;
+    let record: DeploymentRecord =
+        serde_json::from_str(&raw).map_err(|e| format!("Invalid deployment.json: {e}"))?;
 
     if let Some(web_dir_rel) = record.web_dir.as_deref() {
         if !web_dir_rel.trim().is_empty() {
@@ -43,10 +41,7 @@ pub fn open_deployment(
             if !inside(base_dir, &web_dir) {
                 return Err("Deployment webDir escapes deployment root".to_string());
             }
-            let entry_file = record
-                .entry_file
-                .as_deref()
-                .unwrap_or("AIChat.html");
+            let entry_file = record.entry_file.as_deref().unwrap_or("AIChat.html");
             let clean_entry = validate_relative_path(entry_file)?;
             let entry_str = clean_entry.to_string_lossy().into_owned();
             let srv = DevServer::start(&web_dir, &entry_str)?;

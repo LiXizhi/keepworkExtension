@@ -68,10 +68,7 @@ where
             let trimmed = out.trim();
             // On macOS, a stub `/usr/bin/git` without CLT outputs "xcode-select: note: No developer tools were found"
             if trimmed.starts_with("git version") {
-                let version = trimmed
-                    .trim_start_matches("git version")
-                    .trim()
-                    .to_string();
+                let version = trimmed.trim_start_matches("git version").trim().to_string();
                 return GitStatus {
                     installed: true,
                     version,
@@ -125,7 +122,8 @@ pub fn install_git() -> GitInstallResult {
                 started: true,
                 installed: false,
                 method: "xcode-select".to_string(),
-                message: "已启动 macOS 命令行开发者工具安装引导，请在弹出窗口中确认安装。".to_string(),
+                message: "已启动 macOS 命令行开发者工具安装引导，请在弹出窗口中确认安装。"
+                    .to_string(),
             },
             Err(e) => GitInstallResult {
                 started: false,

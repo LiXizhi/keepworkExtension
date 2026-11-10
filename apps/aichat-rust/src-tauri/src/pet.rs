@@ -21,6 +21,12 @@ pub struct PetPreferences {
     pub scale: f64,
     pub left: Option<i32>,
     pub top: Option<i32>,
+    /// Top-left of the monitor that owned `left`/`top`, in shared logical points.
+    /// Absent prefs keep the primary monitor.
+    #[serde(default)]
+    pub monitor_x: Option<i32>,
+    #[serde(default)]
+    pub monitor_y: Option<i32>,
 }
 
 impl Default for PetPreferences {
@@ -30,6 +36,8 @@ impl Default for PetPreferences {
             scale: 1.0,
             left: None,
             top: None,
+            monitor_x: None,
+            monitor_y: None,
         }
     }
 }
@@ -108,6 +116,56 @@ pub fn clamp_pet_position(
     let l = left.unwrap_or(default_left).clamp(8, max_left);
     let t = top.unwrap_or(default_top).clamp(8, max_top);
     (l, t)
+}
+
+fn add_i32(a: i32, b: i32) -> i32 {
+    (a as i64 + b as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn sub_i32(a: i32, b: i32) -> i32 {
+    (a as i64 - b as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn contains_point(area: WorkArea, x: i32, y: i32) -> bool {
+    x >= area.x
+        && y >= area.y
+        && (x as i64) < area.x as i64 + area.width as i64
+        && (y as i64) < area.y as i64 + area.height as i64
+}
+
+pub fn monitor_at(monitors: &[WorkArea], x: i32, y: i32) -> Option<WorkArea> {
+    if let Some(hit) = monitors
+        .iter()
+        .copied()
+        .find(|area| contains_point(*area, x, y))
+    {
+        return Some(hit);
+    }
+    monitors.iter().copied().min_by_key(|area| {
+        let cx = area.x as i64 + area.width as i64 / 2;
+        let cy = area.y as i64 + area.height as i64 / 2;
+        let dx = cx - x as i64;
+        let dy = cy - y as i64;
+        dx * dx + dy * dy
+    })
+}
+
+/// The pet window stays on one monitor. Pick the monitor under the cursor and
+/// clamp the sprite there, preserving the grab offset from the pet's top-left.
+pub fn place_dragged_pet(
+    monitors: &[WorkArea],
+    cursor_x: i32,
+    cursor_y: i32,
+    grab_x: i32,
+    grab_y: i32,
+    scale: f64,
+) -> Option<(WorkArea, i32, i32)> {
+    let monitor = monitor_at(monitors, cursor_x, cursor_y)?;
+    let pixels = compute_pet_pixels(scale, monitor);
+    let local_x = sub_i32(sub_i32(cursor_x, grab_x), monitor.x);
+    let local_y = sub_i32(sub_i32(cursor_y, grab_y), monitor.y);
+    let (left, top) = clamp_pet_position(Some(local_x), Some(local_y), pixels, monitor);
+    Some((monitor, left, top))
 }
 
 pub fn is_valid_pet_data_image(raw: &str) -> bool {
@@ -361,6 +419,20 @@ pub fn sanitize_exit_personas(raw: &Value) -> Vec<PetPersonaSummary> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum DragOrigin {
+    Global {
+        grab_x: i32,
+        grab_y: i32,
+    },
+    Viewport {
+        start_x: i32,
+        start_y: i32,
+        start_left: i32,
+        start_top: i32,
+    },
+}
+
 pub struct PetController {
     prefs_path: PathBuf,
     raw_state: Mutex<Value>,
@@ -369,7 +441,8 @@ pub struct PetController {
     work_area: Mutex<WorkArea>,
     exit_prompt: Mutex<Option<PetExitPrompt>>,
     permission_prompt: Mutex<Option<PetPermissionPrompt>>,
-    drag_origin: Mutex<Option<(i32, i32, i32, i32)>>,
+    drag_origin: Mutex<Option<DragOrigin>>,
+    canvas_synced: Mutex<Option<WorkArea>>,
 }
 
 impl PetController {
@@ -384,6 +457,7 @@ impl PetController {
             exit_prompt: Mutex::new(None),
             permission_prompt: Mutex::new(None),
             drag_origin: Mutex::new(None),
+            canvas_synced: Mutex::new(None),
         }
     }
 
@@ -413,6 +487,34 @@ impl PetController {
 
     pub fn work_area(&self) -> WorkArea {
         self.work_area.lock().map(|w| *w).unwrap_or_default()
+    }
+
+    pub fn preferences(&self) -> PetPreferences {
+        self.prefs
+            .lock()
+            .map(|prefs| prefs.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn note_canvas(&self, area: WorkArea) {
+        if let Ok(mut synced) = self.canvas_synced.lock() {
+            *synced = Some(area);
+        }
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.drag_origin
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .is_some()
+    }
+
+    pub fn is_global_dragging(&self) -> bool {
+        matches!(
+            self.drag_origin.lock().ok().and_then(|guard| *guard),
+            Some(DragOrigin::Global { .. })
+        )
     }
 
     pub fn snapshot(&self) -> Value {
@@ -482,13 +584,81 @@ impl PetController {
         let pet_left = snap["petLeft"].as_i64().unwrap_or(0) as i32;
         let pet_top = snap["petTop"].as_i64().unwrap_or(0) as i32;
         if let Ok(mut drag) = self.drag_origin.lock() {
-            *drag = Some((cursor_x, cursor_y, pet_left, pet_top));
+            *drag = Some(DragOrigin::Viewport {
+                start_x: cursor_x,
+                start_y: cursor_y,
+                start_left: pet_left,
+                start_top: pet_top,
+            });
+        }
+    }
+
+    pub fn begin_global_drag(&self, cursor_x: i32, cursor_y: i32) {
+        let area = self.work_area();
+        let snap = self.snapshot();
+        let left = snap["petLeft"].as_i64().unwrap_or(0) as i32;
+        let top = snap["petTop"].as_i64().unwrap_or(0) as i32;
+        let grab_x = sub_i32(cursor_x, add_i32(area.x, left));
+        let grab_y = sub_i32(cursor_y, add_i32(area.y, top));
+        if let Ok(mut drag) = self.drag_origin.lock() {
+            *drag = Some(DragOrigin::Global { grab_x, grab_y });
+        }
+    }
+
+    /// Moves the pet with the global cursor. Returns the monitor canvas when the
+    /// window has to move; `None` means the sprite changed on the same canvas
+    /// or no global drag is active.
+    pub fn drag_global(
+        &self,
+        cursor_x: i32,
+        cursor_y: i32,
+        monitors: &[WorkArea],
+    ) -> Option<WorkArea> {
+        let _drag_guard = self.drag_origin.lock().ok()?;
+        let (grab_x, grab_y) = match *_drag_guard {
+            Some(DragOrigin::Global { grab_x, grab_y }) => (grab_x, grab_y),
+            _ => return None,
+        };
+        let scale = self
+            .prefs
+            .lock()
+            .ok()
+            .map(|prefs| prefs.scale)
+            .unwrap_or(1.0);
+        let Some((monitor, left, top)) =
+            place_dragged_pet(monitors, cursor_x, cursor_y, grab_x, grab_y, scale)
+        else {
+            return None;
+        };
+        self.set_work_area(monitor);
+        if let Ok(mut prefs) = self.prefs.lock() {
+            prefs.left = Some(left);
+            prefs.top = Some(top);
+            prefs.monitor_x = Some(monitor.x);
+            prefs.monitor_y = Some(monitor.y);
+        }
+        let changed = self
+            .canvas_synced
+            .lock()
+            .map(|current| *current != Some(monitor))
+            .unwrap_or(true);
+        if changed {
+            self.note_canvas(monitor);
+            Some(monitor)
+        } else {
+            None
         }
     }
 
     pub fn update_drag(&self, cursor_x: i32, cursor_y: i32) -> Value {
-        let origin = self.drag_origin.lock().ok().and_then(|g| *g);
-        if let Some((start_x, start_y, start_left, start_top)) = origin {
+        let origin = self.drag_origin.lock().ok().and_then(|guard| *guard);
+        if let Some(DragOrigin::Viewport {
+            start_x,
+            start_y,
+            start_left,
+            start_top,
+        }) = origin
+        {
             let dx = cursor_x - start_x;
             let dy = cursor_y - start_y;
             if let Ok(mut prefs) = self.prefs.lock() {
@@ -510,7 +680,10 @@ impl PetController {
         if let Ok(mut drag) = self.drag_origin.lock() {
             *drag = None;
         }
-        if let Ok(prefs) = self.prefs.lock() {
+        if let Ok(mut prefs) = self.prefs.lock() {
+            let area = self.work_area();
+            prefs.monitor_x = Some(area.x);
+            prefs.monitor_y = Some(area.y);
             self.save_prefs(&prefs);
         }
         self.snapshot()
@@ -740,6 +913,60 @@ mod tests {
         .unwrap();
         srv.join().unwrap();
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dragged_pet_crosses_onto_the_monitor_under_the_cursor() {
+        let lower = WorkArea {
+            x: 0,
+            y: 0,
+            width: 1710,
+            height: 1107,
+        };
+        let upper = WorkArea {
+            x: -458,
+            y: -1440,
+            width: 2560,
+            height: 1440,
+        };
+        let monitors = [lower, upper];
+
+        let (monitor, left, top) = place_dragged_pet(&monitors, 800, 40, 56, 56, 1.0).unwrap();
+        assert_eq!(monitor, lower);
+        assert_eq!((left, top), (744, 8));
+
+        let (monitor, left, top) = place_dragged_pet(&monitors, 800, -100, 56, 56, 1.0).unwrap();
+        assert_eq!(monitor, upper);
+        assert_eq!((left, top), (1202, 1284));
+
+        let (monitor, top_edge) = {
+            let (monitor, left, top) = place_dragged_pet(&monitors, 100, -1, 56, 56, 1.0).unwrap();
+            (monitor, (left, top))
+        };
+        assert_eq!(monitor, upper);
+        assert_eq!(top_edge, (502, 1304));
+
+        let root = std::env::temp_dir().join(format!("aichat-rust-pet-drag-{}", Uuid::new_v4()));
+        let controller = PetController::new(root.join("pet-prefs.json"));
+        controller.set_work_area(lower);
+        controller.note_canvas(lower);
+        controller.begin_global_drag(856, 456);
+        assert_eq!(controller.drag_global(900, 500, &monitors), None);
+        assert_eq!(controller.work_area(), lower);
+        assert_eq!(controller.drag_global(800, -100, &monitors), Some(upper));
+        assert_eq!(controller.work_area(), upper);
+        let snap = controller.snapshot();
+        let pet_left = snap["petLeft"].as_i64().unwrap();
+        let pet_top = snap["petTop"].as_i64().unwrap();
+        assert!(pet_left >= 8 && pet_left < upper.width as i64);
+        assert!(pet_top >= 8 && pet_top < upper.height as i64);
+        assert_eq!(controller.drag_global(820, -140, &monitors), None);
+        controller.end_drag();
+        assert!(!controller.is_dragging());
+        let saved = fs::read_to_string(root.join("pet-prefs.json")).unwrap();
+        assert!(saved.contains("\"monitorX\": -458"));
+        assert!(saved.contains("\"monitorY\": -1440"));
         let _ = fs::remove_dir_all(&root);
     }
 }

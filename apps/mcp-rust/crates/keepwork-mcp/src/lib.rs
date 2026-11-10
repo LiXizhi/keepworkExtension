@@ -16,6 +16,7 @@ pub mod http;
 pub mod identity;
 pub mod mcp;
 pub mod paths;
+pub mod presence;
 pub mod shell;
 pub mod terminal;
 pub mod tools;

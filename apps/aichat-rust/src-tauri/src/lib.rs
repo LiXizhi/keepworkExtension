@@ -35,7 +35,9 @@ use crate::runtime::{
     current_runtime_arch, current_runtime_platform, mcp_feed_platform, RuntimeConfig,
     RuntimeStatusSnapshot, RuntimeSupervisor, DEFAULT_MCP_FEED_BASE, LOCAL_MODEL_PORT, MCP_PORT,
 };
-use crate::security::{allowed_in_app_popup, allowed_navigation, assert_sender, external_url, ENTRY};
+use crate::security::{
+    allowed_in_app_popup, allowed_navigation, assert_sender, external_url, ENTRY,
+};
 use crate::terminal::TerminalSessionManager;
 use crate::tray_channels::{channel_states, describe, fetch_tray_channels, ChannelStatus};
 use crate::updates::{default_desktop_feed_url, UpdateManager, UpdatesSnapshot};
@@ -51,9 +53,24 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
     webview::NewWindowResponse,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
+
+#[cfg(target_os = "macos")]
+#[link(name = "objc")]
+extern "C" {
+    fn objc_getClass(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    fn sel_registerName(name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    fn objc_msgSend();
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(vkey: i32) -> i16;
+}
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -294,6 +311,155 @@ pub fn show_main_window(app: &AppHandle, core: &AppCore) {
     let _ = core;
 }
 
+fn primary_button_down() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            let class = objc_getClass(c"NSEvent".as_ptr());
+            let sel = sel_registerName(c"pressedMouseButtons".as_ptr());
+            if class.is_null() || sel.is_null() {
+                return true;
+            }
+            let send: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> usize =
+                std::mem::transmute(objc_msgSend as *const ());
+            (send(class, sel) & 1) != 0
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        unsafe { (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        true
+    }
+}
+
+fn logical_work_area(monitor: &tauri::Monitor) -> Option<WorkArea> {
+    let scale = monitor.scale_factor();
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    // Monitor geometry is already in one logical point space. Convert with each
+    // display's own scale so mixed-DPI layouts stay in that shared space.
+    let pos = monitor.position().to_logical::<f64>(scale);
+    let size = monitor.size().to_logical::<f64>(scale);
+    let width = size.width.round();
+    let height = size.height.round();
+    if !pos.x.is_finite() || !pos.y.is_finite() || width < 32.0 || height < 32.0 {
+        return None;
+    }
+    Some(WorkArea {
+        x: pos.x.round() as i32,
+        y: pos.y.round() as i32,
+        width: width as i32,
+        height: height as i32,
+    })
+}
+
+fn logical_monitors(app: &AppHandle) -> Vec<WorkArea> {
+    app.available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(logical_work_area)
+        .collect()
+}
+
+fn logical_cursor(app: &AppHandle) -> Option<(i32, i32)> {
+    // Tao scales the flipped cursor by the primary display, then we divide by
+    // that same scale to get the shared point space used by monitor positions.
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.scale_factor())
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or(1.0);
+    let cursor = app.cursor_position().ok()?;
+    let logical = cursor.to_logical::<f64>(scale);
+    if !logical.x.is_finite() || !logical.y.is_finite() {
+        return None;
+    }
+    Some((logical.x.round() as i32, logical.y.round() as i32))
+}
+
+fn initial_pet_work_area(app: &AppHandle, pet: &crate::pet::PetController) -> WorkArea {
+    let monitors = logical_monitors(app);
+    let prefs = pet.preferences();
+    if let (Some(x), Some(y)) = (prefs.monitor_x, prefs.monitor_y) {
+        if let Some(monitor) = monitors
+            .into_iter()
+            .find(|area| (area.x - x).abs() <= 4 && (area.y - y).abs() <= 4)
+        {
+            return monitor;
+        }
+    }
+    app.primary_monitor()
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(logical_work_area)
+        .unwrap_or_default()
+}
+
+fn sync_pet_canvas(window: &WebviewWindow, area: WorkArea) {
+    let _ = window.set_position(Position::Logical(LogicalPosition::new(
+        area.x as f64,
+        area.y as f64,
+    )));
+    let _ = window.set_size(Size::Logical(LogicalSize::new(
+        area.width.max(1) as f64,
+        area.height.max(1) as f64,
+    )));
+}
+
+fn drag_snapshot(pet: &crate::pet::PetController) -> Value {
+    let mut snap = pet.snapshot();
+    if let Some(obj) = snap.as_object_mut() {
+        obj.insert("dragging".to_string(), json!(pet.is_dragging()));
+    }
+    snap
+}
+
+fn move_with_global_cursor(app: &AppHandle, pet: &crate::pet::PetController) {
+    let Some((x, y)) = logical_cursor(app) else {
+        return;
+    };
+    let mut monitors = logical_monitors(app);
+    if monitors.is_empty() {
+        monitors.push(pet.work_area());
+    }
+    let Some(area) = pet.drag_global(x, y, &monitors) else {
+        return;
+    };
+    if let Some(window) = app.get_webview_window("pet") {
+        sync_pet_canvas(&window, area);
+    }
+}
+
+fn apply_pet_drag(
+    app: &AppHandle,
+    pet: &crate::pet::PetController,
+    args: &Value,
+    force_end: bool,
+) -> Value {
+    // drag-end with the button still down is a click: do not nudge the sprite.
+    // A tracked drag keeps committing the global cursor, including the frame
+    // where the button goes up, so the pet lands on the monitor under the cursor.
+    let ending = force_end || !primary_button_down();
+    if pet.is_global_dragging() && !force_end {
+        move_with_global_cursor(app, pet);
+    } else if !ending {
+        let x = args.get("screenX").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let y = args.get("screenY").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        pet.update_drag(x, y);
+    }
+    if ending {
+        pet.end_drag();
+    }
+    drag_snapshot(pet)
+}
+
 pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
     if let Some(existing) = app.get_webview_window("pet") {
         if show_now {
@@ -303,23 +469,9 @@ pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
         return;
     }
 
-    let area = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| {
-            let scale = m.scale_factor();
-            let size = m.size().to_logical::<i32>(scale);
-            let pos = m.position().to_logical::<i32>(scale);
-            WorkArea {
-                x: pos.x,
-                y: pos.y,
-                width: size.width,
-                height: size.height,
-            }
-        })
-        .unwrap_or_default();
+    let area = initial_pet_work_area(app, &core.pet);
     core.pet.set_work_area(area);
+    core.pet.note_canvas(area);
 
     if let Ok(builder) = WebviewWindowBuilder::new(app, "pet", WebviewUrl::App("pet.html".into()))
         .title("桌面宠物")
@@ -736,19 +888,25 @@ async fn desktop_pet_action(
             Ok(json!({ "ok": true }))
         }
         "drag-start" => {
-            let x = args.get("screenX").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let y = args.get("screenY").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            state.pet.start_drag(x, y);
-            Ok(state.pet.snapshot())
+            if let Some((x, y)) = logical_cursor(&app) {
+                state.pet.begin_global_drag(x, y);
+            } else {
+                let x = args.get("screenX").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let y = args.get("screenY").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                state.pet.start_drag(x, y);
+            }
+            Ok(drag_snapshot(&state.pet))
         }
         "drag" => {
-            let x = args.get("screenX").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let y = args.get("screenY").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let snap = state.pet.update_drag(x, y);
+            let was_dragging = state.pet.is_dragging();
+            let snap = apply_pet_drag(&app, &state.pet, &args, false);
+            if was_dragging && !state.pet.is_dragging() {
+                broadcast_pet_state(&app, &state);
+            }
             Ok(snap)
         }
         "drag-end" => {
-            let snap = state.pet.end_drag();
+            let snap = apply_pet_drag(&app, &state.pet, &args, true);
             broadcast_pet_state(&app, &state);
             Ok(snap)
         }
@@ -1811,6 +1969,17 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running KeepWork 第二大脑 (aichat-rust)");
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod pet_drag_host_tests {
+    #[test]
+    fn primary_button_is_up_without_a_held_click() {
+        assert!(
+            !super::primary_button_down(),
+            "idle primary button must read as up, or every drag frame will end immediately"
+        );
+    }
 }
 
 #[cfg(test)]
