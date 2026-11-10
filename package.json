@@ -6,6 +6,8 @@
   "license": "MIT",
   "scripts": {
     "dev:server": "npm run dev:server --prefix apps/vscode-extension",
+    "dev:server:rust": "node apps/mcp-rust/scripts/dev-server.cjs",
+    "bundle:mcp-rust": "node apps/aichat-rust/scripts/bundle-mcp-rust.cjs",
     "install:apps": "npm ci --include=dev --prefix apps/mcp-runtime && npm ci --prefix apps/vscode-extension && npm ci --prefix apps/local-helper && npm ci --prefix apps/local-model-runtime && npm ci --prefix apps/aichat-desktop && npm ci --prefix apps/pet-companion && npm run prepare:runtime --prefix apps/pet-companion",
     "check:layout": "node scripts/check-layout.cjs",
     "check:shared": "tsc -p ./ --noEmit && npm run check:layout && npm run check:aichat-runtime",

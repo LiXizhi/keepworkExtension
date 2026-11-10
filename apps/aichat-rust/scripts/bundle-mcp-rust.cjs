@@ -52,7 +52,19 @@ function commit() {
   throw new Error('cannot read the source commit for runtime.json');
 }
 
-function binaryFor(arch) {
+function buildTarget(arch) {
+  const manifestPath = path.join(rustRoot, 'Cargo.toml');
+  process.stdout.write(`[bundle-mcp-rust] Building keepwork-mcp (${arch.triple})...\n`);
+  execFileSync('cargo', ['build', '--release', '--manifest-path', manifestPath, '--target', arch.triple], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  });
+}
+
+function binaryFor(arch, shouldBuild = true) {
+  if (shouldBuild) {
+    buildTarget(arch);
+  }
   const name = binName(arch.platform);
   const candidates = [
     path.join(rustRoot, 'target', arch.triple, 'release', name),
@@ -82,8 +94,8 @@ function pruneOtherArches(keep) {
   }
 }
 
-function writeRuntime(arch) {
-  const source = binaryFor(arch);
+function writeRuntime(arch, shouldBuild = true) {
+  const source = binaryFor(arch, shouldBuild);
   const destination = path.join(resourcesRoot, arch.arch);
   fs.rmSync(destination, { recursive: true, force: true });
   fs.mkdirSync(path.join(destination, 'bin'), { recursive: true });
@@ -112,13 +124,14 @@ function writeRuntime(arch) {
 
 function main() {
   const args = process.argv.slice(2);
+  const shouldBuild = !args.includes('--no-build');
   const targetIndex = args.indexOf('--target');
   const triple = targetIndex >= 0 ? args[targetIndex + 1] : process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
   const runtimes = TARGETS[triple];
   if (!runtimes) throw new Error(`no bundled Rust runtime mapping for target ${triple}`);
   fs.mkdirSync(resourcesRoot, { recursive: true });
   pruneOtherArches(runtimes.map((runtime) => runtime.arch));
-  const results = runtimes.map((runtime) => writeRuntime(runtime));
+  const results = runtimes.map((runtime) => writeRuntime(runtime, shouldBuild));
   for (const result of results) {
     process.stdout.write(
       `[bundle-mcp-rust] ${result.arch}: Rust daemon ${result.version} (${result.commit.slice(0, 10)}), ${(result.bytes / 1024).toFixed(0)} KB\n`,

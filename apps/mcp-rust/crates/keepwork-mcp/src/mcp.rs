@@ -5,18 +5,23 @@
 //! and injects `notifications/keepwork/*` on the GET stream.
 
 use axum::body::{Body, Bytes};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::http::{
     empty_response, json_response, mcp_json_response, now_iso, sse_response, AppState,
 };
 use crate::tools::{self, ToolContext};
 use crate::{SERVER_NAME, SERVER_VERSION};
+
+const HISTORY_MAX: usize = 200;
+const HISTORY_PAGE_DEFAULT: usize = 25;
+const HISTORY_PAGE_MAX: usize = 200;
 
 #[derive(Debug, Clone)]
 pub struct ClientSession {
@@ -42,10 +47,100 @@ impl ClientSession {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct HistoryRow {
+    pub time: String,
+    pub session_id: String,
+    pub origin: String,
+    pub tool: String,
+    pub summary: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub duration_ms: u64,
+}
+
+impl HistoryRow {
+    pub fn to_json(&self) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("time".into(), json!(self.time));
+        obj.insert("sessionId".into(), json!(self.session_id));
+        obj.insert("origin".into(), json!(self.origin));
+        obj.insert("tool".into(), json!(self.tool));
+        obj.insert("summary".into(), json!(self.summary));
+        obj.insert("ok".into(), json!(self.ok));
+        if let Some(err) = &self.error {
+            obj.insert("error".into(), json!(err));
+        }
+        obj.insert("durationMs".into(), json!(self.duration_ms));
+        Value::Object(obj)
+    }
+}
+
 #[derive(Default)]
 pub struct SessionStore {
     pub sessions: BTreeMap<String, ClientSession>,
     pub active_streams: HashSet<String>,
+    pub history: VecDeque<HistoryRow>,
+}
+
+impl SessionStore {
+    pub fn list_history(&self, offset: Option<usize>, limit: Option<usize>) -> Value {
+        let total = self.history.len();
+        let off = offset.unwrap_or(0).min(total);
+        let lim = limit
+            .filter(|&l| l > 0)
+            .unwrap_or(HISTORY_PAGE_DEFAULT)
+            .clamp(1, HISTORY_PAGE_MAX);
+        let mut items = Vec::new();
+        if total > off {
+            let newest = total - 1 - off;
+            for i in 0..lim {
+                if let Some(idx) = newest.checked_sub(i) {
+                    if let Some(row) = self.history.get(idx) {
+                        items.push(row.to_json());
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        let has_more = off + items.len() < total;
+        json!({
+            "ok": true,
+            "history": items,
+            "total": total,
+            "offset": off,
+            "limit": lim,
+            "hasMore": has_more,
+        })
+    }
+}
+
+fn summarize_args(tool: &str, args: &Value) -> String {
+    let raw = match tool {
+        "run_terminal" => args
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "grep_files" => args
+            .get("pattern")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "web_search" => args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        "fetch_url" => args
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        _ => serde_json::to_string(args).unwrap_or_default(),
+    };
+    raw.chars().take(200).collect()
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> String {
@@ -84,8 +179,11 @@ pub async fn handle_post(state: &Arc<AppState>, headers: &HeaderMap, body: &[u8]
             .unwrap_or(false);
         if !known {
             return json_response(
-                StatusCode::NOT_FOUND,
-                &json!({ "error": "Session not found" }),
+                StatusCode::BAD_REQUEST,
+                &json!({
+                    "error": "invalid session",
+                    "hint": "POST initialize without Mcp-Session-Id to start a session",
+                }),
             );
         }
         if method == "notifications/initialized" || id.is_none() {
@@ -152,6 +250,14 @@ pub async fn handle_post(state: &Arc<AppState>, headers: &HeaderMap, body: &[u8]
 pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
     let session_id = header_value(headers, "mcp-session-id");
     if session_id.is_empty() {
+        let accept = header_value(headers, "accept").to_ascii_lowercase();
+        if accept.contains("text/html") && !accept.contains("text/event-stream") {
+            return Response::builder()
+                .status(StatusCode::FOUND)
+                .header(header::LOCATION, "/dashboard")
+                .body(Body::empty())
+                .expect("valid redirect response");
+        }
         return json_response(
             StatusCode::BAD_REQUEST,
             &json!({
@@ -166,7 +272,10 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
         if !store.sessions.contains_key(&session_id) {
             return json_response(
                 StatusCode::BAD_REQUEST,
-                &json!({ "error": "invalid session" }),
+                &json!({
+                    "error": "invalid session",
+                    "hint": "POST initialize without Mcp-Session-Id to start a session",
+                }),
             );
         }
         if store.active_streams.contains(&session_id) {
@@ -201,7 +310,10 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
         loop {
             let delay = if first { 100 } else { 25_000 };
             first = false;
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            tokio::select! {
+                _ = sender.closed() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(delay)) => {}
+            }
             if closed.load(Ordering::SeqCst) {
                 break;
             }
@@ -340,6 +452,7 @@ async fn dispatch_message(
                 .and_then(|params| params.get("arguments"))
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            let summary = summarize_args(&name, &args);
             let ctx = ToolContext {
                 port: state.port,
                 root: &state.root,
@@ -347,10 +460,44 @@ async fn dispatch_message(
                 require_auth: state.require_auth,
                 session: session_id,
             };
+            let started = Instant::now();
             let result = tools::call(&name, &args, &ctx, &state.shell).await;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let is_err = result
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let err_msg = if is_err {
+                result
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(|item| item.get("text"))
+                    .and_then(Value::as_str)
+                    .map(|s| s.chars().take(200).collect::<String>())
+            } else {
+                None
+            };
             if let Ok(mut store) = state.sessions.lock() {
                 if let Some(session) = store.sessions.get_mut(session_id) {
                     session.call_count += 1;
+                    session.last_seen_at = now_iso();
+                    if !origin.is_empty() {
+                        session.origin = origin.to_string();
+                    }
+                }
+                store.history.push_back(HistoryRow {
+                    time: now_iso(),
+                    session_id: session_id.to_string(),
+                    origin: origin.to_string(),
+                    tool: name,
+                    summary,
+                    ok: !is_err,
+                    error: err_msg,
+                    duration_ms,
+                });
+                while store.history.len() > HISTORY_MAX {
+                    store.history.pop_front();
                 }
             }
             json!({ "result": result, "jsonrpc": "2.0", "id": id })

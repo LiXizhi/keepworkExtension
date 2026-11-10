@@ -9,6 +9,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod dashboard;
 pub mod folders;
 pub mod fs;
 pub mod grep;

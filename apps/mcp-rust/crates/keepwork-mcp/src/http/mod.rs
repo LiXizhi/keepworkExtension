@@ -69,6 +69,7 @@ impl AppState {
             "terminalApi".into(),
             serde_json::json!(crate::terminal::TERMINAL_API),
         );
+        caps.insert("fsDirApi".into(), serde_json::json!("mkdir-v1"));
         caps.insert("aichatPresenceApi".into(), serde_json::json!("post-sse-v1"));
         // Only surfaces this build actually serves. Unimplemented routes stay
         // unadvertised so AIChat degrades instead of calling a 404.
@@ -336,6 +337,13 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
     let headers = req.headers().clone();
 
     match (method.as_str(), path.as_str()) {
+        ("GET", "/") | ("GET", "/dashboard") => crate::dashboard::serve_dashboard(),
+        ("GET", "/dashboard/skills/keepwork-mcp-assistant/SKILL.md") => {
+            crate::dashboard::serve_skill(
+                state.port,
+                query.get("channel").map(String::as_str).unwrap_or(""),
+            )
+        }
         ("GET", "/health") => health(&state),
         ("GET", "/exists") => exists(&query),
         ("GET", "/fs/locations") | ("GET", "/fs/browse") => {
@@ -437,24 +445,112 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                 ),
             }
         }
-        ("GET", "/admin/status") => match authorize(&state, req.headers(), &query) {
-            Some(denied) => denied,
-            None => admin_status(&state),
-        },
-        ("POST", "/admin/stop") => match authorize(&state, req.headers(), &query) {
-            Some(denied) => denied,
-            None => {
-                state.terminals.close_all();
-                tokio::spawn(async {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    std::process::exit(0);
-                });
-                json_response(
-                    StatusCode::OK,
-                    &serde_json::json!({ "ok": true, "stopping": true }),
-                )
+        (_, path) if path.starts_with("/admin/") => {
+            let origin = headers
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if !origin_allowed(origin) {
+                let mut resp = json_response(
+                    StatusCode::FORBIDDEN,
+                    &serde_json::json!({ "error": "origin not allowed" }),
+                );
+                resp.headers_mut()
+                    .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+                return resp;
             }
-        },
+            if let Some(mut denied) = authorize(&state, req.headers(), &query) {
+                denied
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+                return denied;
+            }
+            let mut resp = match (method.as_str(), path) {
+                ("GET", "/admin/status") => admin_status(&state),
+                ("GET", "/admin/history") => {
+                    let offset = query.get("offset").and_then(|v| v.parse::<usize>().ok());
+                    let limit = query.get("limit").and_then(|v| v.parse::<usize>().ok());
+                    let payload = state
+                        .sessions
+                        .lock()
+                        .map(|store| store.list_history(offset, limit))
+                        .unwrap_or_else(|_| {
+                            serde_json::json!({
+                                "ok": true,
+                                "history": [],
+                                "total": 0,
+                                "offset": 0,
+                                "limit": 25,
+                                "hasMore": false,
+                            })
+                        });
+                    json_response(StatusCode::OK, &payload)
+                }
+                ("GET", "/admin/api-docs") => crate::dashboard::api_docs(&state),
+                ("GET", "/admin/screenshot-permission") => json_response(
+                    StatusCode::OK,
+                    &serde_json::json!({ "alwaysAllowScreenshots": false }),
+                ),
+                ("GET", "/admin/channels") => {
+                    if query.get("view").map(String::as_str) == Some("tray") {
+                        json_response(
+                            StatusCode::OK,
+                            &serde_json::json!({
+                                "channels": [
+                                    { "channel": "dingtalk", "bindings": [] },
+                                    { "channel": "feishu", "bindings": [] },
+                                ],
+                                "wechat": { "status": "off" },
+                            }),
+                        )
+                    } else {
+                        json_response(
+                            StatusCode::OK,
+                            &serde_json::json!({
+                                "channels": [],
+                                "supervisor": { "enabled": false, "status": "stopped" },
+                            }),
+                        )
+                    }
+                }
+                ("GET", "/admin/personas") => json_response(
+                    StatusCode::OK,
+                    &serde_json::json!({
+                        "stats": {
+                            "total": 0,
+                            "active": 0,
+                            "messages": 0,
+                            "enabledSchedules": 0,
+                            "sessions": 0,
+                        },
+                        "personas": [],
+                        "sessions": [],
+                        "recentMessages": [],
+                    }),
+                ),
+                ("GET", "/admin/messaging-computers") => {
+                    json_response(StatusCode::OK, &serde_json::json!({ "accounts": [] }))
+                }
+                ("POST", "/admin/stop") => {
+                    state.terminals.close_all();
+                    tokio::spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        std::process::exit(0);
+                    });
+                    json_response(
+                        StatusCode::OK,
+                        &serde_json::json!({ "ok": true, "stopping": true }),
+                    )
+                }
+                _ => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": "not found" }),
+                ),
+            };
+            resp.headers_mut()
+                .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+            resp
+        }
         (_, "/aichat/presence") => {
             crate::presence::handle_presence_http(&state, req, &query, &headers).await
         }
@@ -486,6 +582,10 @@ fn health(state: &AppState) -> Response {
     }
     body.insert("runtimeEngine".into(), serde_json::json!(ENGINE));
     body.insert("runtimeProduct".into(), serde_json::json!(RUNTIME_PRODUCT));
+    body.insert(
+        "aichatClient".into(),
+        serde_json::json!(state.presence.has_remembered()),
+    );
     json_response(StatusCode::OK, &serde_json::Value::Object(body))
 }
 
@@ -573,6 +673,10 @@ fn admin_status(state: &AppState) -> Response {
     body.insert("clients".into(), serde_json::json!(clients));
     body.insert("runtimeEngine".into(), serde_json::json!(ENGINE));
     body.insert("runtimeProduct".into(), serde_json::json!(RUNTIME_PRODUCT));
+    body.insert(
+        "aichatClient".into(),
+        serde_json::json!(state.presence.has_remembered()),
+    );
     json_response(StatusCode::OK, &serde_json::Value::Object(body))
 }
 

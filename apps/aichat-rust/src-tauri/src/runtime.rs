@@ -558,6 +558,7 @@ pub struct HealthProbeResult {
     pub compatible: bool,
     pub pid: u32,
     pub runtime_version: String,
+    pub runtime_engine: String,
     pub host_kind: String,
 }
 
@@ -769,6 +770,11 @@ impl RuntimeSupervisor {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let runtime_engine = body
+            .get("runtimeEngine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("node")
+            .to_string();
         let host_kind = body
             .get("hostKind")
             .and_then(|v| v.as_str())
@@ -778,6 +784,7 @@ impl RuntimeSupervisor {
             compatible,
             pid,
             runtime_version,
+            runtime_engine,
             host_kind,
         })
     }
@@ -822,14 +829,26 @@ impl RuntimeSupervisor {
             }
 
             // Check if we should replace an older compatible MCP runtime on startup
-            let should_takeover = self.config.id == "mcp"
-                && probe.pid > 0
-                && !probe.runtime_version.is_empty()
-                && self
-                    .newest_local_version()
-                    .as_deref()
-                    .map(|local_v| is_version_newer(local_v, &probe.runtime_version))
+            let local_runtime = self.select_best_local_runtime(false);
+            let engine_switch = local_runtime
+                .as_ref()
+                .map(|(_, m, _)| {
+                    let target_engine = if m.is_rust() { "rust" } else { "node" };
+                    Self::classify_owner(&probe.host_kind) == "desktop"
+                        && !probe.runtime_engine.eq_ignore_ascii_case(target_engine)
+                })
+                .unwrap_or(false);
+            let version_upgrade = !probe.runtime_version.is_empty()
+                && local_runtime
+                    .as_ref()
+                    .map(|(_, m, _)| {
+                        let target_engine = if m.is_rust() { "rust" } else { "node" };
+                        probe.runtime_engine.eq_ignore_ascii_case(target_engine)
+                            && is_version_newer(&m.version, &probe.runtime_version)
+                    })
                     .unwrap_or(false);
+            let should_takeover =
+                self.config.id == "mcp" && probe.pid > 0 && (engine_switch || version_upgrade);
 
             if should_takeover {
                 // Re-verify identity & PID before killing

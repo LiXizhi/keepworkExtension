@@ -126,8 +126,54 @@
       }
     },
     {
+      "type": "shell",
+      "command": "node",
+      "args": ["apps/mcp-rust/scripts/dev-server.cjs"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "Keepwork MCP (Rust): Dev Server (8089)",
+      "detail": "Stop existing daemon on 8089 and run the Rust MCP server in development mode (cargo run).",
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "type": "shell",
+      "command": "node",
+      "args": ["apps/aichat-rust/scripts/bundle-mcp-rust.cjs"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "Keepwork MCP (Rust): Build & Bundle",
+      "detail": "Build release binary for keepwork-mcp and stage it into apps/aichat-rust/src-tauri/resources/mcp-runtime.",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "test:contract"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "Keepwork MCP (Rust): Contract Tests",
+      "detail": "Run dual-engine wire compatibility contract tests against Node and Rust daemons.",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
       "label": "keepwork Rust Desktop: Start",
-      "detail": "Launch the Rust/Tauri desktop with local AIChat source, frontend hot reload and automatic Rust rebuilds.",
+      "detail": "Rebuild Rust MCP runtime, then launch the Rust/Tauri desktop with local AIChat source and automatic Rust rebuilds.",
       "type": "shell",
       "command": "pnpm",
       "args": ["tauri", "dev"],
@@ -139,6 +185,7 @@
           "RUST_BACKTRACE": "1"
         }
       },
+      "dependsOn": "Keepwork MCP (Rust): Build & Bundle",
       "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" },
       "problemMatcher": [],
       "presentation": {

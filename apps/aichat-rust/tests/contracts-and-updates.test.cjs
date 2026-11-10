@@ -180,6 +180,9 @@ test("floating pet window preserves click stability, screenshot permission bubbl
   assert.match(petTs, /requestAnimationFrame\(step\)/);
   assert.doesNotMatch(petTs, /pointercancel", \(event\) => void release/);
   assert.match(petTs, /if \(pointer\?\.tracking\)/);
+  assert.match(petTs, /releasePointerCapture/);
+  const libRs = fs.readFileSync(path.join(appRoot, "src-tauri", "src", "lib.rs"), "utf8");
+  assert.match(libRs, /\.shadow\(false\)/);
   assert.ok(petRs.includes("run_permission_bridge_session"));
   assert.ok(petRs.includes("sanitize_pet_state"));
 });

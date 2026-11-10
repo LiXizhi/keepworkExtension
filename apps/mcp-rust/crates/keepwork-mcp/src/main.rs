@@ -79,6 +79,7 @@ async fn run(args: cli::Args) -> i32 {
         config::BIND_HOST,
         port
     );
+    println!("dashboard: http://{}:{}/dashboard", config::BIND_HOST, port);
     println!("workspace root: {}", root.display());
     println!(
         "auth: {}",

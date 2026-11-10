@@ -403,6 +403,9 @@ fn initial_pet_work_area(app: &AppHandle, pet: &crate::pet::PetController) -> Wo
 }
 
 fn sync_pet_canvas(window: &WebviewWindow, area: WorkArea) {
+    // A transparent window shadow is the pet's alpha mask. Moving the window
+    // leaves that mask behind as a white outline.
+    let _ = window.set_shadow(false);
     let _ = window.set_position(Position::Logical(LogicalPosition::new(
         area.x as f64,
         area.y as f64,
@@ -411,6 +414,7 @@ fn sync_pet_canvas(window: &WebviewWindow, area: WorkArea) {
         area.width.max(1) as f64,
         area.height.max(1) as f64,
     )));
+    let _ = window.set_shadow(false);
 }
 
 fn drag_snapshot(pet: &crate::pet::PetController) -> Value {
@@ -456,6 +460,12 @@ fn apply_pet_drag(
     }
     if ending {
         pet.end_drag();
+        if let Some(window) = app.get_webview_window("pet") {
+            let _ = window.set_shadow(false);
+            // The drag held the full canvas. Accept clicks again so the sprite
+            // can be pressed; the page turns click-through back on after it moves off.
+            let _ = window.set_ignore_cursor_events(false);
+        }
     }
     drag_snapshot(pet)
 }
@@ -479,12 +489,14 @@ pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
         .inner_size(area.width as f64, area.height as f64)
         .decorations(false)
         .transparent(true)
+        .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
         .visible(show_now)
         .build()
     {
+        let _ = builder.set_shadow(false);
         let _ = builder.set_ignore_cursor_events(true);
         broadcast_pet_state(app, core);
     }
@@ -741,9 +753,15 @@ async fn desktop_run_menu_command(
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state)?;
     // 页面动作（含旧 id 别名映射到的新页面 id）只投递给 AIChat 页面。
-    let canonical = canonical_host_command(&id).unwrap_or(id.as_str()).to_string();
+    let canonical = canonical_host_command(&id)
+        .unwrap_or(id.as_str())
+        .to_string();
     if is_allowed_page_command(&id) || is_allowed_page_command(&canonical) {
-        broadcast_to_main(&app, "menu-message", &json!({ "type": "command", "id": canonical }));
+        broadcast_to_main(
+            &app,
+            "menu-message",
+            &json!({ "type": "command", "id": canonical }),
+        );
         return Ok(true);
     }
     if !is_allowed_host_command(&id) {
@@ -1313,7 +1331,10 @@ pub async fn execute_host_command(
             let app_clone = app.clone();
             let core_clone = Arc::clone(core);
             tauri::async_runtime::spawn(async move {
-                let _ = core_clone.updates.check_all(&core_clone.mcp_supervisor).await;
+                let _ = core_clone
+                    .updates
+                    .check_all(&core_clone.mcp_supervisor)
+                    .await;
                 broadcast_update_status(&app_clone, &core_clone);
             });
         }
@@ -1340,6 +1361,9 @@ pub async fn execute_host_command(
                 win.eval(script).map_err(|e| e.to_string())?;
             }
         }
+        "version" | "app:version" | "tray:version" | "help:version" | "help:desktop-version" => {
+            return Ok(());
+        }
         other => return Err(format!("Unsupported menu command: {other}")),
     }
     Ok(())
@@ -1350,8 +1374,13 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
     // 页面命令也可以从原生托盘投递（`execute_host_command` 会转发给 AIChat 页面）。
     let new_chat = MenuItem::with_id(app, "new-chat", "新建对话", true, None::<&str>)?;
     let open_settings = MenuItem::with_id(app, "open-settings", "设置", true, None::<&str>)?;
-    let open_folder =
-        MenuItem::with_id(app, "file:open-folder", "打开文件夹…", true, Some("CmdOrCtrl+O"))?;
+    let open_folder = MenuItem::with_id(
+        app,
+        "file:open-folder",
+        "打开文件夹…",
+        true,
+        Some("CmdOrCtrl+O"),
+    )?;
     let toggle_pet = CheckMenuItem::with_id(
         app,
         "view:toggle-pet",
@@ -1384,6 +1413,13 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
     )?;
     let check_updates =
         MenuItem::with_id(app, "help:check-updates", "检查更新…", true, None::<&str>)?;
+    let tray_version = MenuItem::with_id(
+        app,
+        "tray:version",
+        format!("版本 {APP_VERSION}"),
+        false,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, "tray:quit", "完全退出", true, Some("CmdOrCtrl+Q"))?;
 
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -1404,6 +1440,7 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
             &mcp_dashboard,
             &restart_mcp,
             &check_updates,
+            &tray_version,
             &sep2,
             &quit_item,
         ],
@@ -1413,8 +1450,14 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
     {
         let mac_check_updates =
             MenuItem::with_id(app, "help:check-updates", "检查更新…", true, None::<&str>)?;
-        let mac_quit =
-            MenuItem::with_id(app, "tray:quit", "完全退出", true, Some("CmdOrCtrl+Q"))?;
+        let mac_version = MenuItem::with_id(
+            app,
+            "help:version",
+            format!("版本 {APP_VERSION}"),
+            false,
+            None::<&str>,
+        )?;
+        let mac_quit = MenuItem::with_id(app, "tray:quit", "完全退出", true, Some("CmdOrCtrl+Q"))?;
         let mac_open_folder = MenuItem::with_id(
             app,
             "file:open-folder",
@@ -1459,6 +1502,7 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
             true,
             &[
                 &mac_check_updates,
+                &mac_version,
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::hide(app, Some("隐藏 Keepwork"))?,
                 &PredefinedMenuItem::hide_others(app, Some("隐藏其他"))?,
@@ -1521,11 +1565,24 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
                 &mac_toggle_startup,
             ],
         )?;
+        let mac_help_version = MenuItem::with_id(
+            app,
+            "help:desktop-version",
+            format!("桌面版本 {APP_VERSION}"),
+            false,
+            None::<&str>,
+        )?;
         let help_sub = Submenu::with_items(
             app,
             "帮助",
             true,
-            &[&mac_mcp_dashboard, &mac_restart_mcp, &mac_check_updates],
+            &[
+                &mac_mcp_dashboard,
+                &mac_restart_mcp,
+                &mac_check_updates,
+                &PredefinedMenuItem::separator(app)?,
+                &mac_help_version,
+            ],
         )?;
         let mac_menu =
             Menu::with_items(app, &[&app_sub, &file_sub, &edit_sub, &view_sub, &help_sub])?;
@@ -1601,6 +1658,9 @@ fn resolve_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> PathBuf {
         resource_base.join("..").join("Resources"),
         resource_base.join("..").join("Resources").join("resources"),
         resource_base.join("resources"),
+        resource_base.join("../..").join("resources"),
+        resource_base.join("../../..").join("resources"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"),
     ];
     let mut legacy = None;
     for root in roots {
@@ -1617,7 +1677,12 @@ fn resolve_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> PathBuf {
     }
     legacy
         .or_else(|| launcher_mcp_runtime(products))
-        .unwrap_or_else(|| resource_base.join("resources").join("mcp-runtime").join(arch))
+        .unwrap_or_else(|| {
+            resource_base
+                .join("resources")
+                .join("mcp-runtime")
+                .join(arch)
+        })
 }
 
 pub fn run() {
@@ -1655,7 +1720,9 @@ pub fn run() {
 
     let bundled_mcp_dir = std::env::var("AICHAT_MCP_BUNDLED_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| resolve_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_RUST, MCP_PRODUCT_NODE]));
+        .unwrap_or_else(|_| {
+            resolve_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_RUST, MCP_PRODUCT_NODE])
+        });
     // The published feed still carries Node runtimes; a Rust build must not
     // download a Node runtime over itself.
     let bundled_mcp_is_rust =
@@ -1674,7 +1741,11 @@ pub fn run() {
 
     let mcp_supervisor = Arc::new(RuntimeSupervisor::new(RuntimeConfig {
         id: "mcp".to_string(),
-        products: vec![MCP_PRODUCT_NODE.to_string(), MCP_PRODUCT_RUST.to_string()],
+        products: if bundled_mcp_is_rust {
+            vec![MCP_PRODUCT_RUST.to_string()]
+        } else {
+            vec![MCP_PRODUCT_NODE.to_string(), MCP_PRODUCT_RUST.to_string()]
+        },
         port: MCP_PORT,
         health_path: "/health".to_string(),
         updates_enabled: !bundled_mcp_is_rust,
@@ -1706,12 +1777,8 @@ pub fn run() {
         .unwrap_or_else(|| profile_dir.clone())
         .join("Library")
         .join("LaunchAgents");
-    let login_startup = LoginStartup::new(
-        settings_path.clone(),
-        launch_agents_dir,
-        exe_path,
-        packaged,
-    );
+    let login_startup =
+        LoginStartup::new(settings_path.clone(), launch_agents_dir, exe_path, packaged);
     let _ = login_startup.ensure_default();
 
     let mut initial_entry = std::env::var("AICHAT_DESKTOP_DEV_URL")
@@ -1758,8 +1825,8 @@ pub fn run() {
         lock: Mutex::new(None),
     });
 
-    let icon_b64 = base64::engine::general_purpose::STANDARD
-        .encode(include_bytes!("../icons/keepwork.png"));
+    let icon_b64 =
+        base64::engine::general_purpose::STANDARD.encode(include_bytes!("../icons/keepwork.png"));
     let icon_data_url = format!("data:image/png;base64,{icon_b64}");
     let init_script = build_main_window_init_script(current_runtime_platform(), &icon_data_url);
 
@@ -2002,13 +2069,18 @@ mod bundled_runtime_tests {
 
     #[test]
     fn bundled_runtime_is_resolved_per_architecture() {
-        let resource_base = std::env::temp_dir().join(format!("aichat-rust-bundle-{}", Uuid::new_v4()));
+        let resource_base =
+            std::env::temp_dir().join(format!("aichat-rust-bundle-{}", Uuid::new_v4()));
         let arch = crate::runtime::current_runtime_arch();
-        let per_arch = resource_base.join("resources").join("mcp-runtime").join(arch);
+        let per_arch = resource_base
+            .join("resources")
+            .join("mcp-runtime")
+            .join(arch);
         let legacy = resource_base.join("resources").join("mcp-runtime");
         write_runtime(&per_arch);
         write_runtime(&legacy);
-        crate::runtime::validate_runtime_dir(&per_arch, "keepwork-mcp-node-runtime").expect("fixture runtime must validate");
+        crate::runtime::validate_runtime_dir(&per_arch, "keepwork-mcp-node-runtime")
+            .expect("fixture runtime must validate");
 
         assert_eq!(
             resolve_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_NODE]),
@@ -2020,7 +2092,8 @@ mod bundled_runtime_tests {
 
     #[test]
     fn flat_bundled_runtime_still_works_for_older_layouts() {
-        let resource_base = std::env::temp_dir().join(format!("aichat-rust-flat-{}", Uuid::new_v4()));
+        let resource_base =
+            std::env::temp_dir().join(format!("aichat-rust-flat-{}", Uuid::new_v4()));
         let legacy = resource_base.join("resources").join("mcp-runtime");
         write_runtime(&legacy);
 

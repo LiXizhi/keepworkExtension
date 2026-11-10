@@ -116,6 +116,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let localError = "";
   let queue: Promise<boolean> = Promise.resolve(true);
   let pointer: {
+    id: number;
     x: number;
     y: number;
     screenX: number;
@@ -124,6 +125,8 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     tracking: boolean;
     ready: Promise<unknown>;
   } | null = null;
+  let dragEpoch = 0;
+  let acceptClicksUntil = 0;
   let releasedTap = false;
   let firstTap = false;
   let renderedMessages = "";
@@ -535,10 +538,42 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
   });
 
+  const releaseCapture = (id: number) => {
+    try {
+      $("pet").releasePointerCapture(id);
+    } catch {
+      // The window move already dropped the capture.
+    }
+  };
+
+  const finishDrag = (id: number | undefined) => {
+    if (id != null) releaseCapture(id);
+    pointer = null;
+    releasedTap = false;
+    firstTap = false;
+    interactive = true;
+    acceptClicksUntil = performance.now() + 400;
+    const epoch = dragEpoch;
+    // The native move is async. Keep the drop-shadow off until it lands,
+    // or WKWebView stamps the old shadow as a ghost.
+    window.setTimeout(() => {
+      if (epoch === dragEpoch && !pointer) document.body.classList.remove("dragging");
+    }, 80);
+    const pet = $("pet");
+    // A lost pointerup leaves the button pressed, so the next click never fires.
+    pet.style.pointerEvents = "none";
+    requestAnimationFrame(() => {
+      pet.style.pointerEvents = "";
+    });
+    void api.action("hit-test", { interactive: true });
+  };
+
   $("pet").addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
+    dragEpoch += 1;
     document.body.classList.add("dragging");
     pointer = {
+      id: event.pointerId,
       x: event.screenX,
       y: event.screenY,
       screenX: event.screenX,
@@ -561,6 +596,9 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     // window; that move can cancel the pointer, so release is not tied to it.
     if (!pointer.moved || pointer.tracking) return;
     pointer.tracking = true;
+    // Global cursor tracking takes over. Holding capture across a window move
+    // sticks the button so later clicks never arrive.
+    releaseCapture(event.pointerId);
     const step = () => {
       const current = pointer;
       if (!current?.tracking) return;
@@ -575,10 +613,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
           state = { ...state, ...(snap as PetSnapshot) };
           positionLayers();
           if ((snap as PetSnapshot).dragging === false) {
-            pointer = null;
-            document.body.classList.remove("dragging");
-            releasedTap = false;
-            firstTap = false;
+            finishDrag(pointer?.id);
             return;
           }
           requestAnimationFrame(step);
@@ -594,6 +629,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const current = pointer;
     pointer = null;
     document.body.classList.remove("dragging");
+    if (current) releaseCapture(current.id);
     if (!current) return;
     releasedTap = !current.moved && event.type === "pointerup";
     if (!releasedTap) firstTap = false;
@@ -643,6 +679,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const next =
       !!pointer ||
       !!target?.closest("#pet, #compact-controls, #panel, #bubble, #exit-bubble, #permission-bubble");
+    if (!next && performance.now() < acceptClicksUntil) return;
     if (next !== interactive) {
       interactive = next;
       void api.action("hit-test", { interactive });

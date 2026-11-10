@@ -735,7 +735,10 @@ impl PetController {
     }
 
     pub fn verify_exit_confirm(&self, id: &str) -> Result<(), String> {
-        let guard = self.exit_prompt.lock().map_err(|_| "Lock poisoned".to_string())?;
+        let guard = self
+            .exit_prompt
+            .lock()
+            .map_err(|_| "Lock poisoned".to_string())?;
         let Some(prompt) = guard.as_ref() else {
             return Err("退出确认已失效".to_string());
         };
@@ -765,10 +768,7 @@ pub struct PermissionBridgeRecord {
 /// Connects to `~/.keepwork-mcp/pet-permission-bridge.json` as `role: "desktop"`,
 /// processes one or more screenshot permission requests via `handler(id, client) -> choice`,
 /// and writes the decision back.
-pub fn run_permission_bridge_session<F>(
-    bridge_file: &Path,
-    mut handler: F,
-) -> Result<(), String>
+pub fn run_permission_bridge_session<F>(bridge_file: &Path, mut handler: F) -> Result<(), String>
 where
     F: FnMut(&str, &str) -> String,
 {
@@ -859,7 +859,10 @@ mod tests {
 
         assert_eq!(state["version"], 1);
         assert_eq!(state["pet"]["imageData"], "");
-        assert_eq!(state["pet"]["sheetUrl"], "https://cdn.keepwork.com/maisi/pet.webp");
+        assert_eq!(
+            state["pet"]["sheetUrl"],
+            "https://cdn.keepwork.com/maisi/pet.webp"
+        );
         assert_eq!(state["messages"].as_array().unwrap().len(), 2);
 
         // Test exit prompt lifecycle
