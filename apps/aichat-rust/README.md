@@ -54,5 +54,5 @@ pnpm bundle:mcp --target universal-apple-darwin
 | 平台 | Rust Target | 构建命令 | 产物 |
 | --- | --- | --- | --- |
 | **macOS Universal**（Apple Silicon + Intel 单包） | `universal-apple-darwin` | `pnpm make:mac` | `Keepwork.app`、`Keepwork_<版本>_universal.dmg` |
-| **Windows x64** | `x86_64-pc-windows-msvc` | `pnpm make:win:x64` | `KeepWork 第二大脑_<版本>_x64-setup.exe` |
-| **Windows ARM64** | `aarch64-pc-windows-msvc` | `pnpm make:win:arm64` | `KeepWork 第二大脑_<版本>_arm64-setup.exe` |
+| **Windows x64** | `x86_64-pc-windows-msvc` | `pnpm make:win:x64` | `Keepwork_<版本>_x64-setup.exe` |
+| **Windows ARM64** | `aarch64-pc-windows-msvc` | `pnpm make:win:arm64` | `Keepwork_<版本>_arm64-setup.exe` |

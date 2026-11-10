@@ -62,12 +62,12 @@ test("versions across package.json, Cargo.toml, Cargo.lock, and tauri.conf.json 
   assert.equal(pkg.version, tauriConf.version);
   assert.match(cargoToml, new RegExp(`version = "${pkg.version}"`));
   assert.ok(
-    cargoLock.includes(`name = "aichat-rust"\nversion = "${pkg.version}"`),
+    cargoLock.replace(/\r\n/g, "\n").includes(`name = "aichat-rust"\nversion = "${pkg.version}"`),
     "Cargo.lock must match the app version"
   );
   assert.equal(tauriConf.identifier, "com.keepwork.aichat-desktop");
   assert.equal(tauriConf.productName, "Keepwork");
-  assert.equal(tauriWinConf.productName, "KeepWork 第二大脑");
+  assert.equal(tauriWinConf.productName, "Keepwork");
 });
 
 test("main window navigation accepts same-origin tool iframes", () => {

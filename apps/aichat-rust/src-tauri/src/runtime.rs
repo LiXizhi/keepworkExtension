@@ -287,15 +287,22 @@ pub fn extract_zip_archive(zip_path: &Path, dest_dir: &Path) -> Result<(), Strin
     {
         let zip_escaped = zip_path.to_string_lossy().replace('\'', "''");
         let dest_escaped = dest_dir.to_string_lossy().replace('\'', "''");
-        let status = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!(
-                    "Expand-Archive -LiteralPath '{zip_escaped}' -DestinationPath '{dest_escaped}' -Force"
-                ),
-            ])
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Expand-Archive -LiteralPath '{zip_escaped}' -DestinationPath '{dest_escaped}' -Force"
+            ),
+        ]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let status = cmd
             .status()
             .map_err(|e| format!("Failed to run Expand-Archive: {e}"))?;
         if !status.success() {
@@ -810,9 +817,12 @@ impl RuntimeSupervisor {
         }
         #[cfg(windows)]
         {
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .status();
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let mut cmd = Command::new("taskkill");
+            cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let _ = cmd.status();
         }
     }
 
@@ -989,6 +999,13 @@ impl RuntimeSupervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
         let child = cmd
             .spawn()

@@ -148,35 +148,40 @@ impl LoginStartup {
         #[cfg(target_os = "windows")]
         {
             use std::process::Command;
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
             if enabled {
                 let value = build_windows_run_command(&self.executable_path);
-                let status = Command::new("reg.exe")
-                    .args([
-                        "add",
-                        WINDOWS_RUN_KEY,
-                        "/v",
-                        WINDOWS_RUN_VALUE_NAME,
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        &value,
-                        "/f",
-                    ])
+                let mut cmd = Command::new("reg.exe");
+                cmd.args([
+                    "add",
+                    WINDOWS_RUN_KEY,
+                    "/v",
+                    WINDOWS_RUN_VALUE_NAME,
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &value,
+                    "/f",
+                ]);
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                let status = cmd
                     .status()
                     .map_err(|e| format!("Failed to execute reg.exe: {e}"))?;
                 if !status.success() {
                     return Err("reg.exe failed to register login startup".to_string());
                 }
             } else {
-                let _ = Command::new("reg.exe")
-                    .args([
-                        "delete",
-                        WINDOWS_RUN_KEY,
-                        "/v",
-                        WINDOWS_RUN_VALUE_NAME,
-                        "/f",
-                    ])
-                    .status();
+                let mut cmd = Command::new("reg.exe");
+                cmd.args([
+                    "delete",
+                    WINDOWS_RUN_KEY,
+                    "/v",
+                    WINDOWS_RUN_VALUE_NAME,
+                    "/f",
+                ]);
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                let _ = cmd.status();
             }
             return Ok(());
         }
