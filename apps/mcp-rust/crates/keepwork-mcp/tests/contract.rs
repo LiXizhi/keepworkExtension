@@ -45,15 +45,15 @@ async fn send(
 async fn send_headers(
     state: &Arc<AppState>,
     request: Request<Body>,
-) -> (StatusCode, axum::http::HeaderMap) {
+) -> (StatusCode, axum::http::HeaderMap, Body) {
     let response = router(Arc::clone(state))
         .oneshot(request)
         .await
         .expect("router");
     let status = response.status();
     let headers = response.headers().clone();
-    drop(response);
-    (status, headers)
+    let body = response.into_body();
+    (status, headers, body)
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -264,7 +264,7 @@ async fn duplicate_get_stream_is_rejected_and_delete_closes() {
         .header("mcp-session-id", &session)
         .body(Body::empty())
         .unwrap();
-    let (status, headers) = send_headers(&state, stream).await;
+    let (status, headers, stream_body) = send_headers(&state, stream).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::CONTENT_TYPE], "text/event-stream");
 
@@ -280,6 +280,18 @@ async fn duplicate_get_stream_is_rejected_and_delete_closes() {
         "MCP stream already open"
     );
 
+    // Dropping the first stream immediately releases active_streams so reconnect succeeds.
+    drop(stream_body);
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let reconnect = Request::builder()
+        .uri("/mcp")
+        .header("mcp-session-id", &session)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, reconnect_body) = send_headers(&state, reconnect).await;
+    assert_eq!(status, StatusCode::OK);
+    drop(reconnect_body);
+
     let delete = Request::builder()
         .method("DELETE")
         .uri("/mcp")
@@ -288,6 +300,23 @@ async fn duplicate_get_stream_is_rejected_and_delete_closes() {
         .unwrap();
     let (status, _, _) = send(&state, delete).await;
     assert_eq!(status, StatusCode::OK);
+
+    // Expired/deleted session on POST /mcp returns 400 invalid session so AIChat re-initializes.
+    let expired_post = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("mcp-session-id", &session)
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ))
+        .unwrap();
+    let (status, _, body) = send(&state, expired_post).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["error"],
+        "invalid session"
+    );
 }
 
 #[tokio::test]
@@ -367,11 +396,12 @@ async fn unknown_routes_answer_like_node() {
         "not found"
     );
 
-    let (status, _, body) = send(&state, get("/fs/list?root=/tmp")).await;
+    let root = std::env::temp_dir().to_string_lossy().replace(' ', "%20");
+    let (status, _, body) = send(&state, get(&format!("/fs/list?root={root}"))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["ok"], true);
 
-    let (status, _, body) = send(&state, get("/fs/nope?root=/tmp")).await;
+    let (status, _, body) = send(&state, get(&format!("/fs/nope?root={root}"))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["ok"], false);
 

@@ -40,7 +40,7 @@ jobs:
           npm ci
           npm ci --prefix apps/mcp-runtime
           npm ci --prefix apps/pet-companion
-          npm run prepare:runtime --prefix apps/pet-companion
+          npm run prepare:all --prefix apps/pet-companion -- darwin-arm64 darwin-x64
           npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch arm64
           npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch x64
           npm run smoke --prefix apps/mcp-runtime
