@@ -11,6 +11,16 @@ The daemon's local `~/.keepwork-mcp/messaging-v1/` registry is a service binding
 registry: root/profile/enabled plus body-free receipts and dedup hashes. Secrets remain in DWS or
 CLI-native credential storage; AIChat login stays in process memory. Restart never replays jobs.
 
+## Rust runtime scope
+
+The Rust daemon (`apps/mcp-rust`, 0.2.5) hosts the same DingTalk listener and Feishu
+polling core with the `/messaging/*` management surface and advertises
+`messagingApi: "messaging-v1"`. Node-only for now: headless worker pages, agent CLI
+executors, multi-computer coordination, group nicknames, DingTalk history backfill,
+multi-agent group routing and WeChat; those surfaces keep their `UNSUPPORTED_FEATURE`
+errors. The slice boundary and registered differences live in
+`docs/rust-runtime-migration.md`.
+
 ## Dashboard channel status
 
 Overview shows separate DingTalk (`dingtalk-cli`) and Feishu (`lark-cli`) cards above

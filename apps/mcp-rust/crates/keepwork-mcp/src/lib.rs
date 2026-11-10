@@ -1,12 +1,14 @@
 //! Keepwork local MCP daemon.
 //!
-//! P1 scope: process lifecycle, config/paths, loopback HTTP with the same
+//! Scope: process lifecycle, config/paths, loopback HTTP with the same
 //! CORS/auth contract as the Node daemon, `/health`, `/exists`, the full `/fs/*`
 //! surface, PTY `/terminal/*` sessions, `/admin/status|stop`, the MCP handshake
 //! and the five portable tools (`mcp_status`, `run_terminal`, `grep_files`,
 //! `web_search`, `fetch_url`). Personas (`personasApi: personas-v1`) persist
 //! under `~/.keepwork-mcp/personas-v1` and answer through Keepwork when AIChat
-//! is logged in. Messaging, native CLI sessions and WeChat stay unadvertised.
+//! is logged in. Messaging (`messagingApi: messaging-v1`) hosts DingTalk (`dws`
+//! listener) and Feishu (`lark-cli` polling) channels for persona bindings;
+//! native agent CLI sessions and WeChat stay unadvertised.
 
 pub mod cli;
 pub mod config;
@@ -17,6 +19,7 @@ pub mod grep;
 pub mod http;
 pub mod identity;
 pub mod mcp;
+pub mod messaging;
 pub mod paths;
 pub mod personas;
 pub mod presence;

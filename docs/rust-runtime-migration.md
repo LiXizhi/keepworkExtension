@@ -15,7 +15,7 @@
 | 令牌 | `~/.keepwork-mcp/token`，24 字节 hex，0600 |
 | 单实例文件 | `~/.keepwork-mcp/instance.json` `{pid,port,startedAt,name}` |
 
-`/health` 只声明已经实现的能力：当前返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`aichatPresenceApi`(`post-sse-v1`)、`personasApi`(`personas-v1`)、`runtimeEngine`、`runtimeProduct`。`agentSessionApi`、`browserApi`、`messagingApi` 等未实现能力不出现；缺少可选字段表示不可用或未知，不能推断整个连接损坏，也不能要求客户端与服务端产品版本相同。
+`/health` 只声明已经实现的能力：当前返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`aichatPresenceApi`(`post-sse-v1`)、`personasApi`(`personas-v1`)、`messagingApi`(`messaging-v1`)、`runtimeEngine`、`runtimeProduct`。`agentSessionApi`、`browserApi` 等未实现能力不出现；缺少可选字段表示不可用或未知，不能推断整个连接损坏，也不能要求客户端与服务端产品版本相同。
 
 ### 分身文字问答边界（Rust 运行时 0.2.4）
 
@@ -26,6 +26,14 @@
 - **任务上下文**：`taskContextVersion: 1` 表示实现 `contextMode: "isolated"`，不携带旧会话历史或摘要；省略该参数仍按原有会话模式处理。
 - **草稿与幂等**：用户文字和 requestId 落盘成功后才接受发送；写入失败不得启动模型请求。相同 requestId 不重复提交；服务重启后的未完成任务标记结果未知，不自动重放。客户端遇到不确定结果应先核查原请求，不能换 ID 自动重发。宠物在未就绪时可保留本地草稿，但不能假装发送成功或跨 context 搬运草稿。
 - **未提供的能力**：分身协作、文件写入、钉钉/飞书/微信消息、自主销售和原生 CLI 执行尚未实现。不声明对应可选能力，不把明确动作请求降为普通模型答复；操作边界返回 `UNSUPPORTED_FEATURE`，普通文字问答继续可用。
+
+### 分身消息托管边界（Rust 运行时 0.2.5）
+
+Rust 运行时 0.2.5 起托管钉钉/飞书消息渠道，`/health` 声明 `messagingApi: "messaging-v1"`，AIChat 的“连接设置”在 Rust 引擎下可用。
+
+- **已提供**：绑定生命周期（`channel-connect` / `channel-login` / `bind` / `channel-start` / `channel-stop`）、渠道占用与显式 `switchFromRoot` 切换（409 `CHANNEL_OCCUPIED`）、钉钉 `dws` ndjson 事件监听（5 分钟重连）与飞书 `lark-cli` 单页轮询（10 分钟间隔、游标检查点）、去重/触发判定/每小时回复预算、inbox 视图与动作、手动回复、Keepwork 模型自动回答、`~/.keepwork-mcp/messaging-v1` 持久化布局（`bindings.json`、`<id>.json`、`inbox.json`、`channel-roots.json`、`<id>.cursor.json`），以及 `/messaging/*` 管理面（config / profiles / groups / status / start / stop / events SSE）。
+- **仍为 Node 独有**（Rust 侧保持 `UNSUPPORTED_FEATURE`）：无头 worker 页（`/messaging/worker` 返回 422）、agent CLI 执行器、多电脑协调、群昵称同步、Circles、钉钉历史补收、多分身群路由、微信。
+- **登记的差异**（断言落在 `scripts/contract/messaging-channels.test.cjs`）：knowledge 目录缺失统一报 `Knowledge directory missing`（Node 报原始 ENOENT 文案）；executor 校验放宽（接受 `keepwork`，缺省 `auto`）；`defaults` 与 `config.json` 解析失败时保留默认值；钉钉绑定始终输出 `channel` 字段；profiles 输出去重。回复执行器固定走 Keepwork 客户端路径。
 
 ## 2. 运行时清单 v2（新增，v1 不动）
 
@@ -63,7 +71,7 @@
 | --- | --- |
 | P0 | `/health`、MCP 握手、CORS/401/403 与 Node 一致；`mcp_status` schema 逐字节相同；release 二进制 macOS ≤10MB、Windows ≤12MB —— **已完成** |
 | P1 | 本机面路由差分全绿；PTY 游标（CJK/emoji/半截转义）与 Node 一致 —— **已完成**：`scripts/contract/{fs,terminal,tools}.test.cjs` 双引擎对拍，游标按 UTF-16 码元计数 |
-| P2 | 5 个 SSE 端点帧序/重连一致；agent CLI 冒烟 mac+win —— **部分实现**：presence JSON/SSE 与基础分身文字问答已提供；agents/ACP、消息渠道和分身工具执行仍待完成 |
+| P2 | 5 个 SSE 端点帧序/重连一致；agent CLI 冒烟 mac+win —— **部分实现**：presence JSON/SSE、基础分身文字问答与钉钉/飞书消息渠道托管已提供；agents/ACP、分身工具执行、无头 worker、多电脑协调仍待完成 |
 | P3 | 105 条路由与 13 个工具 schema 全部对齐 |
 | P4 | 三平台安装/首启/升级/降级/双引擎/owner kill/卸载通过 |
 | P5 | 冻结 v1 feed，发行物不再引用 `app/cli.cjs` |
