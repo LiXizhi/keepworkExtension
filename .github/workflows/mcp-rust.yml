@@ -1,0 +1,54 @@
+name: Rust MCP daemon
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - "apps/mcp-rust/**"
+      - "scripts/contract/**"
+      - "docs/rust-runtime-migration.md"
+      - ".github/workflows/mcp-rust.yml"
+
+jobs:
+  build:
+    name: Build and contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      BIN: apps/mcp-rust/target/release/keepwork-mcp${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Format
+        working-directory: apps/mcp-rust
+        run: cargo fmt --all --check
+      - name: Lint
+        working-directory: apps/mcp-rust
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit and contract tests (Rust)
+        working-directory: apps/mcp-rust
+        run: cargo test
+      - name: Release build
+        working-directory: apps/mcp-rust
+        run: cargo build --release
+      - name: Wire contract against the Node reference when available
+        env:
+          KEEPWORK_MCP_TEST_BIN: ${{ github.workspace }}/${{ env.BIN }}
+        run: node --test scripts/contract/*.test.cjs
+      - name: Smoke (spawn, handshake, /admin/stop)
+        run: node apps/mcp-rust/scripts/smoke.cjs
+      - name: Size gate (<= 10 MiB)
+        shell: bash
+        run: |
+          bytes=$(wc -c < "$BIN")
+          echo "binary bytes: $bytes"
+          test "$bytes" -lt $((10 * 1024 * 1024))

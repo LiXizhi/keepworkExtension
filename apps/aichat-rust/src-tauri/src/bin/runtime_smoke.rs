@@ -21,6 +21,7 @@ async fn main() {
 
     let bundled_manifest = RuntimeManifest {
         product: "keepwork-mcp-node-runtime".to_string(),
+        engine: "node".to_string(),
         platform: mcp_feed_platform().to_string(),
         arch: current_runtime_arch().to_string(),
         version: "0.2.80".to_string(),
@@ -44,6 +45,7 @@ async fn main() {
     let remote_commit = "2".repeat(40);
     let remote_rt_manifest = RuntimeManifest {
         product: "keepwork-mcp-node-runtime".to_string(),
+        engine: "node".to_string(),
         platform: mcp_feed_platform().to_string(),
         arch: current_runtime_arch().to_string(),
         version: "0.2.88".to_string(),
@@ -113,7 +115,7 @@ async fn main() {
     let store_dir = root.join("mcp-runtimes");
     let supervisor = RuntimeSupervisor::new(RuntimeConfig {
         id: "mcp".to_string(),
-        product: "keepwork-mcp-node-runtime".to_string(),
+        products: vec!["keepwork-mcp-node-runtime".to_string(), "keepwork-mcp-runtime".to_string()],
         port: 18099,
         health_path: "/health".to_string(),
         updates_enabled: true,

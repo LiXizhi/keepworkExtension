@@ -1,0 +1,32 @@
+[package]
+name = "keepwork-mcp"
+version = "0.1.0"
+description = "Keepwork local MCP daemon (Rust)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "keepwork-mcp"
+path = "src/main.rs"
+
+[lib]
+name = "keepwork_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+gethostname = "0.5"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

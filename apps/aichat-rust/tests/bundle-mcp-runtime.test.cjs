@@ -103,6 +103,24 @@ test("a runtime built for another target is rejected", () => {
   );
 });
 
+test("a hand-made runtime cannot be released", () => {
+  const { root, out } = fixture(bundler.TARGETS["x86_64-pc-windows-msvc"][0]);
+  const manifestPath = path.join(root, "windows-x64", "runtime.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, entry: "dist/cli.cjs" }));
+  fs.mkdirSync(path.join(root, "windows-x64", "dist"), { recursive: true });
+  fs.writeFileSync(path.join(root, "windows-x64", "dist", "cli.cjs"), "// dev\n");
+  assert.throws(
+    () => bundler.bundle({ root, out, target: "x86_64-pc-windows-msvc", require: true, sourceChanged: () => false }),
+    /is not a staged runtime/
+  );
+  // Development builds may still use it.
+  assert.equal(
+    bundler.bundle({ root, out, target: "x86_64-pc-windows-msvc", sourceChanged: () => false }).length,
+    1
+  );
+});
+
 test("AICHAT_MCP_RUNTIME_DIR cannot feed a universal build", () => {
   const { stage, out } = fixture(bundler.TARGETS["aarch64-apple-darwin"][0]);
   const previous = process.env.AICHAT_MCP_RUNTIME_DIR;

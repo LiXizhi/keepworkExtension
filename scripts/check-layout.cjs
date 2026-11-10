@@ -8,6 +8,7 @@ const appsRoot = path.join(repoRoot, 'apps');
 const vscodeRoot = path.join(appsRoot, 'vscode-extension');
 const helperRoot = path.join(appsRoot, 'local-helper');
 const modelRoot = path.join(appsRoot, 'local-model-runtime');
+const rustRoot = path.join(appsRoot, 'mcp-rust');
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -60,9 +61,11 @@ for (const requiredPath of ['.vscode', '.vscodeignore', 'src/extension.ts', 'src
   assert.equal(fs.existsSync(path.join(vscodeRoot, requiredPath)), true, `missing VS Code app path ${requiredPath}`);
 }
 
-const applicationRoots = [vscodeRoot, helperRoot, modelRoot, path.join(appsRoot, 'aichat-desktop'), path.join(appsRoot, 'aichat-rust'), path.join(appsRoot, 'mcp-runtime')];
+const applicationRoots = [vscodeRoot, helperRoot, modelRoot, path.join(appsRoot, 'aichat-desktop'), path.join(appsRoot, 'aichat-rust'), path.join(appsRoot, 'mcp-runtime'), rustRoot];
 for (const applicationRoot of applicationRoots) {
-  for (const file of walk(path.join(applicationRoot, 'src'), '.ts')) {
+  const srcDir = path.join(applicationRoot, 'src');
+  if (!fs.existsSync(srcDir)) continue;
+  for (const file of walk(srcDir, '.ts')) {
     for (const imported of relativeImports(file)) {
       for (const otherRoot of applicationRoots.filter(candidate => candidate !== applicationRoot)) {
         assert.equal(isInside(imported, otherRoot), false, `${path.relative(repoRoot, file)} imports another application`);
@@ -75,6 +78,17 @@ for (const file of walk(sharedRoot, '.ts')) {
   for (const imported of relativeImports(file)) {
     assert.equal(isInside(imported, appsRoot), false, `${path.relative(repoRoot, file)} imports application code`);
   }
+}
+
+const rootCargo = path.join(repoRoot, 'Cargo.toml');
+assert.equal(fs.existsSync(rootCargo), false, 'the Rust daemon workspace belongs under apps/mcp-rust');
+const rustWorkspace = fs.readFileSync(path.join(rustRoot, 'Cargo.toml'), 'utf8');
+assert.match(rustWorkspace, /members\s*=\s*\[\s*"crates\/keepwork-mcp"\s*\]/, 'apps/mcp-rust must own its workspace members');
+for (const crate of ['keepwork-mcp']) {
+  const manifest = path.join(rustRoot, 'crates', crate, 'Cargo.toml');
+  assert.equal(fs.existsSync(manifest), true, `missing Rust crate ${crate}`);
+  const text = fs.readFileSync(manifest, 'utf8');
+  assert.match(text, /name = "keepwork-mcp"/);
 }
 
 process.stdout.write('repository application layout is valid\n');

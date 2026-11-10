@@ -18,7 +18,8 @@
 - **自带的 Keepwork MCP Server（与 `apps/aichat-desktop` 一致）**：
   - 安装包内直接携带 `apps/mcp-runtime` 运行时：`scripts/bundle-mcp-runtime.cjs` 在打包前把 `apps/mcp-runtime/staging/<platform>-<arch>` 校验（product / 平台 / 架构 / 版本 / 40 位源码 Commit / node 与入口文件 / 陈旧检测）后复制到 `src-tauri/resources/mcp-runtime/<arch>/`，由 Tauri `bundle.resources` 打进 `.app` / NSIS 安装包。
   - 启动时按当前架构选择 `resources/mcp-runtime/<arch>`（macOS universal 包同时携带 arm64 与 x64 两份运行时），没有自带运行时才回退到 DesktopLauncher 已安装版本或 CDN 热更新，因此首次安装即可离线使用本机 MCP 能力，来源显示为 `AIChat Desktop / NodeRuntime`。
-  - `pnpm build` 在缺少 staging 时只告警；`pnpm make:mac` / `make:win:*` 使用 `--require`，缺运行时或运行时陈旧会直接失败，避免发出没有自带 MCP 的安装包。
+  - `pnpm build` 在缺少 staging 时只告警；`pnpm make:mac` 与 `make:win:x64` 使用 `--require`，缺运行时、运行时陈旧或不是 `npm run stage` 产物（例如手工 symlink 的调试运行时）都会直接失败，避免发出没有自带 MCP 的安装包。上游暂未发布 `windows-arm64` staging，因此 `make:win:arm64` 安装包继续从 CDN 获取运行时。
+  - **Rust 守护进程（预览）**：`pnpm make:mcp-rust:mac` 把 `apps/mcp-rust` 的二进制按架构放进 `resources/mcp-runtime/<arch>/{runtime.json,bin/keepwork-mcp}`（清单 v2：`product: keepwork-mcp-runtime`、`engine: rust`），宿主发现 Rust 运行时后直接执行 `entry`（不再 spawn Node），并关闭该构建的 MCP 热更新，避免被 Node feed 覆盖。Rust 线目前只到 P0（`/health`、`/exists`、`/fs/stat`、`/admin/*`、MCP 握手与 `mcp_status`），终端、文件面板、Agent、浏览器等能力尚不可用；详见 [迁移契约](../../docs/rust-runtime-migration.md)。
 - **双本地 Runtime 守护进程监管**：
   - 监管 `keepwork-mcp-node-runtime`（`127.0.0.1:8089`）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检，启动时自动识别并平滑接管低版本 `runtimeVersion` 的本机 MCP 进程，同时保护外部（VS Code / Local Helper）管理的同版本或高版本实例。
 - **透明置顶桌面宠物窗口（`pet.html`）**：

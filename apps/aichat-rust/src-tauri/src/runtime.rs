@@ -17,6 +17,10 @@ pub const MCP_PORT: u16 = 8089;
 pub const LOCAL_MODEL_PORT: u16 = 18089;
 pub const DEFAULT_MCP_FEED_BASE: &str = "https://cdn.keepwork.com/keepwork/mcp-stable";
 
+fn default_runtime_engine() -> String {
+    "node".to_string()
+}
+
 fn default_runtime_node() -> String {
     if cfg!(target_os = "windows") {
         "bin/node.exe".to_string()
@@ -29,6 +33,9 @@ fn default_runtime_node() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeManifest {
     pub product: String,
+    /// `node` (bundled Node runtime) or `rust` (native daemon). Older manifests omit it.
+    #[serde(default = "default_runtime_engine")]
+    pub engine: String,
     pub platform: String,
     pub arch: String,
     pub version: String,
@@ -42,6 +49,12 @@ pub struct RuntimeManifest {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+}
+
+impl RuntimeManifest {
+    pub fn is_rust(&self) -> bool {
+        self.engine.eq_ignore_ascii_case("rust")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,15 +175,21 @@ pub fn is_version_newer(candidate: &str, baseline: &str) -> bool {
 }
 
 pub fn validate_runtime_dir(dir: &Path, expected_product: &str) -> Result<RuntimeManifest, String> {
+    validate_runtime_dir_any(dir, &[expected_product])
+}
+
+/// Accepts any of `expected_products`; used while Node and Rust runtimes coexist.
+pub fn validate_runtime_dir_any(dir: &Path, expected_products: &[&str]) -> Result<RuntimeManifest, String> {
     let manifest_path = dir.join("runtime.json");
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Missing runtime.json in {}: {e}", dir.display()))?;
     let manifest: RuntimeManifest = serde_json::from_str(&raw)
         .map_err(|e| format!("Invalid runtime.json in {}: {e}", dir.display()))?;
 
-    if manifest.product != expected_product {
+    if !expected_products.iter().any(|product| *product == manifest.product) {
         return Err(format!(
-            "Runtime product mismatch: expected {expected_product}, got {}",
+            "Runtime product mismatch: expected {}, got {}",
+            expected_products.join(" or "),
             manifest.product
         ));
     }
@@ -181,15 +200,20 @@ pub fn validate_runtime_dir(dir: &Path, expected_product: &str) -> Result<Runtim
         return Err("Invalid 40-char commit in runtime.json".to_string());
     }
 
-    let node_rel = validate_relative_path(&manifest.node)?;
     let entry_rel = validate_relative_path(&manifest.entry)?;
-    let node_path = dir.join(node_rel);
     let entry_path = dir.join(entry_rel);
-    if !inside(dir, &node_path) || !inside(dir, &entry_path) {
+    if !inside(dir, &entry_path) {
         return Err("Runtime executable or entry escapes runtime directory".to_string());
     }
-    if !node_path.is_file() {
-        return Err(format!("Missing runtime node binary: {}", node_path.display()));
+    if !manifest.is_rust() {
+        let node_rel = validate_relative_path(&manifest.node)?;
+        let node_path = dir.join(node_rel);
+        if !inside(dir, &node_path) {
+            return Err("Runtime executable or entry escapes runtime directory".to_string());
+        }
+        if !node_path.is_file() {
+            return Err(format!("Missing runtime node binary: {}", node_path.display()));
+        }
     }
     if !entry_path.is_file() {
         return Err(format!("Missing runtime entry script: {}", entry_path.display()));
@@ -501,13 +525,20 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 pub struct RuntimeConfig {
     pub id: String,
-    pub product: String,
+    /// Accepted runtime products; the first one is canonical for feed updates.
+    pub products: Vec<String>,
     pub port: u16,
     pub health_path: String,
     pub updates_enabled: bool,
     pub bundled_dir: PathBuf,
     pub store_dir: PathBuf,
     pub feed_url: String,
+}
+
+impl RuntimeConfig {
+    pub fn product(&self) -> &str {
+        self.products.first().map(String::as_str).unwrap_or("")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -535,7 +566,7 @@ impl RuntimeSupervisor {
             snap.latest_built_at = b;
         }
         if let Some(pending_hash) = record.pending.as_deref() {
-            if let Ok(m) = validate_runtime_dir(&config.store_dir.join(pending_hash), &config.product) {
+            if let Ok(m) = validate_runtime_dir_any(&config.store_dir.join(pending_hash), &config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
                 snap.pending_version = m.version;
                 snap.update_state = "staged".to_string();
             }
@@ -572,13 +603,13 @@ impl RuntimeSupervisor {
     /// Selects the candidate runtime directory to launch (staged `pending`, `current`, or `bundled_dir`).
     pub fn select_best_local_runtime(&self, promote_pending: bool) -> Option<(PathBuf, RuntimeManifest, Option<String>)> {
         let mut record = Self::load_active_record(&self.config.store_dir);
-        let bundled = validate_runtime_dir(&self.config.bundled_dir, &self.config.product).ok();
+        let bundled = validate_runtime_dir_any(&self.config.bundled_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()).ok();
 
         if promote_pending {
             if let Some(pending_hash) = record.pending.clone() {
                 if record.failed.as_deref() != Some(pending_hash.as_str()) {
                     let pending_dir = self.config.store_dir.join(&pending_hash);
-                    if let Ok(m) = validate_runtime_dir(&pending_dir, &self.config.product) {
+                    if let Ok(m) = validate_runtime_dir_any(&pending_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
                         let beats_bundled = bundled
                             .as_ref()
                             .map(|b| !is_version_newer(&b.version, &m.version))
@@ -597,7 +628,7 @@ impl RuntimeSupervisor {
         if let Some(current_hash) = record.current.clone() {
             if record.failed.as_deref() != Some(current_hash.as_str()) {
                 let current_dir = self.config.store_dir.join(&current_hash);
-                if let Ok(m) = validate_runtime_dir(&current_dir, &self.config.product) {
+                if let Ok(m) = validate_runtime_dir_any(&current_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
                     let beats_bundled = bundled
                         .as_ref()
                         .map(|b| !is_version_newer(&b.version, &m.version))
@@ -622,7 +653,7 @@ impl RuntimeSupervisor {
                 }
             }
         };
-        if let Ok(m) = validate_runtime_dir(&self.config.bundled_dir, &self.config.product) {
+        if let Ok(m) = validate_runtime_dir_any(&self.config.bundled_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
             consider(&m.version);
         }
         for hash in [record.current.as_deref(), record.pending.as_deref()]
@@ -630,7 +661,7 @@ impl RuntimeSupervisor {
             .flatten()
         {
             if record.failed.as_deref() != Some(hash) {
-                if let Ok(m) = validate_runtime_dir(&self.config.store_dir.join(hash), &self.config.product) {
+                if let Ok(m) = validate_runtime_dir_any(&self.config.store_dir.join(hash), &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
                     consider(&m.version);
                 }
             }
@@ -650,8 +681,14 @@ impl RuntimeSupervisor {
         }
         let body = resp.json::<Value>().await.ok()?;
         let compatible = if self.config.id == "mcp" {
+            // Missing `fsApi` means "capability unknown", not a broken peer: the
+            // Rust runtime adds surfaces phase by phase.
             body.get("name").and_then(|v| v.as_str()) == Some("keepwork-mcp")
-                && body.get("fsApi").and_then(|v| v.as_str()) == Some("workspace")
+                && body
+                    .get("fsApi")
+                    .and_then(|v| v.as_str())
+                    .map(|value| value == "workspace")
+                    .unwrap_or(true)
         } else {
             body.get("service").and_then(|v| v.as_str()) == Some("keepwork-local-model")
                 && body.get("protocolVersion").and_then(|v| v.as_str()) == Some("1.0.0")
@@ -762,7 +799,7 @@ impl RuntimeSupervisor {
         else {
             if let Ok(mut st) = self.status.lock() {
                 st.state = "error".to_string();
-                st.error = format!("未找到可用的本地运行时（{}）", self.config.product);
+                st.error = format!("未找到可用的本地运行时（{}）", self.config.product());
             }
             return self.snapshot();
         };
@@ -794,7 +831,7 @@ impl RuntimeSupervisor {
                     record.current = None;
                     let _ = self.save_active_record(&record);
                     if let Ok(bundled_manifest) =
-                        validate_runtime_dir(&self.config.bundled_dir, &self.config.product)
+                        validate_runtime_dir_any(&self.config.bundled_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>())
                     {
                         if let Ok(pid) = self
                             .spawn_and_verify(&self.config.bundled_dir, &bundled_manifest)
@@ -829,12 +866,20 @@ impl RuntimeSupervisor {
     ) -> Result<u32, String> {
         self.stop_owned_process();
 
-        let node_path = runtime_dir.join(&manifest.node);
         let entry_path = runtime_dir.join(&manifest.entry);
-        let mut cmd = Command::new(&node_path);
-        cmd.current_dir(runtime_dir)
-            .arg(&entry_path)
-            .args(&manifest.args)
+        // A Rust runtime ships a self-contained executable as `entry`; a Node
+        // runtime ships `bin/node` plus an entry script.
+        let (program, pass_entry) = if manifest.is_rust() {
+            (entry_path.clone(), false)
+        } else {
+            (runtime_dir.join(&manifest.node), true)
+        };
+        let mut cmd = Command::new(&program);
+        cmd.current_dir(runtime_dir);
+        if pass_entry {
+            cmd.arg(&entry_path);
+        }
+        cmd.args(&manifest.args)
             .envs(&manifest.env)
             .env("KEEPWORK_MCP_HOST_KIND", "rust-node-runtime")
             .env("KEEPWORK_MCP_HOST_VERSION", env!("CARGO_PKG_VERSION"))
@@ -845,7 +890,7 @@ impl RuntimeSupervisor {
 
         let child = cmd
             .spawn()
-            .map_err(|e| format!("Failed to spawn {}: {e}", node_path.display()))?;
+            .map_err(|e| format!("Failed to spawn {}: {e}", program.display()))?;
         let pid = child.id();
         if let Ok(mut guard) = self.child.lock() {
             *guard = Some(child);
@@ -976,7 +1021,7 @@ impl RuntimeSupervisor {
         let expected_arch = current_runtime_arch();
         if let Err(err) = validate_update_manifest(
             &remote,
-            &self.config.product,
+            self.config.product(),
             expected_platform,
             expected_arch,
         ) {
@@ -1022,7 +1067,7 @@ impl RuntimeSupervisor {
         if record.pending.as_deref() == Some(remote.sha256.as_str())
             && validate_runtime_dir(
                 &self.config.store_dir.join(&remote.sha256),
-                &self.config.product,
+                self.config.product(),
             )
             .is_ok()
         {
@@ -1125,7 +1170,7 @@ impl RuntimeSupervisor {
             return (self.snapshot(), false);
         }
 
-        let extracted_manifest = match validate_runtime_dir(&staging_dir, &self.config.product) {
+        let extracted_manifest = match validate_runtime_dir_any(&staging_dir, &self.config.products.iter().map(String::as_str).collect::<Vec<_>>()) {
             Ok(m) => m,
             Err(e) => {
                 let _ = fs::remove_dir_all(&staging_dir);
@@ -1188,6 +1233,34 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn accepts_a_rust_runtime_manifest_without_a_node_binary() {
+        let root = std::env::temp_dir().join(format!("aichat-rust-rt-rust-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin/keepwork-mcp"), b"bin").unwrap();
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "product": "keepwork-mcp-runtime",
+            "engine": "rust",
+            "version": "0.1.0",
+            "commit": "b".repeat(40),
+            "platform": "macos",
+            "arch": "arm64",
+            "entry": "bin/keepwork-mcp",
+            "args": ["--port", "8089"],
+            "env": {},
+        });
+        fs::write(root.join("runtime.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let parsed = validate_runtime_dir_any(&root, &["keepwork-mcp-runtime"]).unwrap();
+        assert!(parsed.is_rust());
+        assert_eq!(parsed.entry, "bin/keepwork-mcp");
+        // The Node product must not accept a Rust runtime, and vice versa.
+        assert!(validate_runtime_dir(&root, "keepwork-mcp-node-runtime").is_err());
+        assert!(validate_runtime_dir_any(&root, &["keepwork-mcp-runtime", "keepwork-mcp-node-runtime"]).is_ok());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn creates_and_extracts_zip_and_validates_runtime_manifest() {
         let root = std::env::temp_dir().join(format!("aichat-rust-rt-{}", Uuid::new_v4()));
         let src_dir = root.join("src_rt");
@@ -1198,6 +1271,7 @@ mod tests {
         let commit = "a".repeat(40);
         let manifest = RuntimeManifest {
             product: "keepwork-mcp-node-runtime".to_string(),
+            engine: "node".to_string(),
             platform: current_runtime_platform().to_string(),
             arch: current_runtime_arch().to_string(),
             version: "0.2.88".to_string(),

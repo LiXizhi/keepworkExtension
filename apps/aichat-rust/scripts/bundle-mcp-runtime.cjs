@@ -165,6 +165,11 @@ function bundle(options = {}) {
       continue;
     }
     const manifest = validateRuntime(source, runtime);
+    if (requireRuntime && manifest.entry !== 'app/cli.cjs') {
+      // A hand-made developer runtime (dist/cli.cjs, symlinked node) must never
+      // reach a release: only `npm run stage` produces a self-contained one.
+      throw new Error(`${source} is not a staged runtime (entry ${manifest.entry}). Re-run: npm run stage --prefix apps/mcp-runtime -- --platform ${runtime.platform === 'windows' ? 'win32' : 'darwin'} --arch ${runtime.arch}`);
+    }
     const changed = options.sourceChanged ? options.sourceChanged(manifest.commit) : hasRuntimeSourceChanges(manifest.commit);
     if (changed) {
       // A developer override is the tested runtime the caller chose; a staged

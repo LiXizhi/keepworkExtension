@@ -1,6 +1,6 @@
 {
   "name": "keepwork-aichat-rust",
-  "version": "0.2.12",
+  "version": "0.2.14",
   "private": true,
   "description": "Rust + Tauri 2 native desktop application for KeepWork 第二大脑 (AIChat Desktop)",
   "type": "module",
@@ -15,7 +15,9 @@
     "tauri": "tauri",
     "make:mac": "node scripts/bundle-mcp-runtime.cjs --require --target universal-apple-darwin && tauri build --target universal-apple-darwin --bundles app,dmg",
     "make:win:x64": "node scripts/bundle-mcp-runtime.cjs --require --target x86_64-pc-windows-msvc && tauri build --target x86_64-pc-windows-msvc --bundles nsis",
-    "make:win:arm64": "tauri build --target aarch64-pc-windows-msvc --bundles nsis"
+    "make:win:arm64": "tauri build --target aarch64-pc-windows-msvc --bundles nsis",
+    "make:mcp-rust:mac": "node scripts/bundle-mcp-rust.cjs --target universal-apple-darwin && tauri build --target universal-apple-darwin --bundles app,dmg",
+    "make:mcp-rust:mac:arm64": "node scripts/bundle-mcp-rust.cjs --target aarch64-apple-darwin && tauri build --target aarch64-apple-darwin --bundles app,dmg"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

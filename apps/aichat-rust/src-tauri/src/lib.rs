@@ -1403,13 +1403,19 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
     Ok(())
 }
 
-fn valid_mcp_runtime(dir: &Path, product: &str) -> bool {
-    crate::runtime::validate_runtime_dir(dir, product).is_ok()
+/// Products this desktop can launch: the packaged Node runtime and the native
+/// Rust daemon (v2 manifest, `engine: "rust"`).
+const MCP_PRODUCT_NODE: &str = "keepwork-mcp-node-runtime";
+const MCP_PRODUCT_RUST: &str = "keepwork-mcp-runtime";
+const LOCAL_MODEL_PRODUCT: &str = "keepwork-local-model-node-runtime";
+
+fn valid_mcp_runtime(dir: &Path, products: &[&str]) -> bool {
+    crate::runtime::validate_runtime_dir_any(dir, products).is_ok()
 }
 
 /// Reuse the MCP runtime installed by DesktopLauncher when the app bundle does
 /// not carry one (A+C bootstrap: bundled > launcher > CDN).
-fn launcher_mcp_runtime(product: &str) -> Option<PathBuf> {
+fn launcher_mcp_runtime(products: &[&str]) -> Option<PathBuf> {
     let releases = dirs::data_local_dir()?
         .join("Keepwork")
         .join("DesktopLauncher")
@@ -1418,7 +1424,7 @@ fn launcher_mcp_runtime(product: &str) -> Option<PathBuf> {
     for entry in std::fs::read_dir(releases).ok()? {
         let Ok(entry) = entry else { continue };
         let dir = entry.path().join("mcp");
-        if !valid_mcp_runtime(&dir, product) {
+        if !valid_mcp_runtime(&dir, products) {
             continue;
         }
         let modified = std::fs::metadata(dir.join("runtime.json"))
@@ -1431,7 +1437,7 @@ fn launcher_mcp_runtime(product: &str) -> Option<PathBuf> {
     best.map(|(_, dir)| dir)
 }
 
-fn resolve_bundled_mcp_dir(resource_base: &Path, product: &str) -> PathBuf {
+fn resolve_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> PathBuf {
     let arch = crate::runtime::current_runtime_arch();
     let roots = [
         resource_base.join("..").join("Resources"),
@@ -1443,16 +1449,16 @@ fn resolve_bundled_mcp_dir(resource_base: &Path, product: &str) -> PathBuf {
         // scripts/bundle-mcp-runtime.cjs lays the app's own server out per slice,
         // so a universal macOS build can carry both arm64 and x64 runtimes.
         let per_arch = root.join("mcp-runtime").join(arch);
-        if valid_mcp_runtime(&per_arch, product) {
+        if valid_mcp_runtime(&per_arch, products) {
             return per_arch;
         }
         let flat = root.join("mcp-runtime");
-        if legacy.is_none() && valid_mcp_runtime(&flat, product) {
+        if legacy.is_none() && valid_mcp_runtime(&flat, products) {
             legacy = Some(flat);
         }
     }
     legacy
-        .or_else(|| launcher_mcp_runtime(product))
+        .or_else(|| launcher_mcp_runtime(products))
         .unwrap_or_else(|| resource_base.join("resources").join("mcp-runtime").join(arch))
 }
 
@@ -1491,7 +1497,11 @@ pub fn run() {
 
     let bundled_mcp_dir = std::env::var("AICHAT_MCP_BUNDLED_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| resolve_bundled_mcp_dir(&resource_base, "keepwork-mcp-node-runtime"));
+        .unwrap_or_else(|_| resolve_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_RUST, MCP_PRODUCT_NODE]));
+    // The published feed still carries Node runtimes; a Rust build must not
+    // download a Node runtime over itself.
+    let bundled_mcp_is_rust =
+        crate::runtime::validate_runtime_dir(&bundled_mcp_dir, MCP_PRODUCT_RUST).is_ok();
     let bundled_local_model_dir = std::env::var("AICHAT_LOCAL_MODEL_BUNDLED_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| resource_base.join("resources").join("local-model-runtime"));
@@ -1506,10 +1516,10 @@ pub fn run() {
 
     let mcp_supervisor = Arc::new(RuntimeSupervisor::new(RuntimeConfig {
         id: "mcp".to_string(),
-        product: "keepwork-mcp-node-runtime".to_string(),
+        products: vec![MCP_PRODUCT_NODE.to_string(), MCP_PRODUCT_RUST.to_string()],
         port: MCP_PORT,
         health_path: "/health".to_string(),
-        updates_enabled: true,
+        updates_enabled: !bundled_mcp_is_rust,
         bundled_dir: bundled_mcp_dir,
         store_dir: mcp_runtimes_dir,
         feed_url: mcp_feed_url,
@@ -1517,7 +1527,7 @@ pub fn run() {
 
     let local_model_supervisor = Arc::new(RuntimeSupervisor::new(RuntimeConfig {
         id: "local-model".to_string(),
-        product: "keepwork-local-model-node-runtime".to_string(),
+        products: vec![LOCAL_MODEL_PRODUCT.to_string()],
         port: LOCAL_MODEL_PORT,
         health_path: "/v1/health".to_string(),
         updates_enabled: false,
@@ -1832,7 +1842,7 @@ mod bundled_runtime_tests {
         crate::runtime::validate_runtime_dir(&per_arch, "keepwork-mcp-node-runtime").expect("fixture runtime must validate");
 
         assert_eq!(
-            resolve_bundled_mcp_dir(&resource_base, "keepwork-mcp-node-runtime"),
+            resolve_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_NODE]),
             per_arch,
             "the slice bundled by scripts/bundle-mcp-runtime.cjs must win over a flat runtime"
         );
@@ -1846,7 +1856,7 @@ mod bundled_runtime_tests {
         write_runtime(&legacy);
 
         assert_eq!(
-            resolve_bundled_mcp_dir(&resource_base, "keepwork-mcp-node-runtime"),
+            resolve_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_NODE]),
             legacy
         );
         fs::remove_dir_all(&resource_base).unwrap();

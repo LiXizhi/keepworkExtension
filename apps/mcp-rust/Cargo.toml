@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/keepwork-mcp"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+# Size matters: this binary ships inside every desktop installer and VSIX.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

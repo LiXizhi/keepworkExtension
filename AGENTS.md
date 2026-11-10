@@ -100,6 +100,7 @@ When the user triggers **自我迭代 (Self-Iteration)** or asks to keep closing
    - For `apps/aichat-rust`: synchronously bump `package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`.
    - For shared `src/` or extension/MCP runtime: update `package.json` and `package-lock.json` in `apps/vscode-extension` and `apps/mcp-runtime` (e.g. via `node apps/vscode-extension/scripts/prepare-release-version.cjs`).
    - For other standalone apps (`apps/local-helper`, `apps/aichat-desktop`, etc.): bump the corresponding app's `package.json` / `package-lock.json`. Keep the root `package.json` at `"0.0.0"` (`private: true`).
+   - For `apps/mcp-rust`: bump `crates/keepwork-mcp/Cargo.toml` and keep `crates/keepwork-mcp` (workspace) `Cargo.lock` in sync. Its version line is independent of the desktop app.
 
 ## Client/server version compatibility
 
@@ -236,6 +237,14 @@ Commands: `keepwork.openMcpWorkspace`, `keepwork.changeMcpWorkspace`, `keepwork.
 - Keep all three extracted-archive smoke tests passing before publishing. Preserve native PTY files and macOS executable modes. Publish exactly six fixed objects: `windows-x64.zip/json`, `macos-arm64.zip/json`, `macos-x64.zip/json`. Each platform JSON contains version, commit, builtAt, size and SHA-256; no version directories or filename suffixes. Do not mutate package versions in CI.
 - Overwrite and verify the three ZIPs before overwriting and verifying their three JSON files. Serialize publishers and check current remote `main` before starting; once overwrite begins, complete the matching pairs. Fixed objects are not atomically replaced; consumers must verify hashes and retry mismatched downloads. External contract: [docs/node-runtime-cdn.md](docs/node-runtime-cdn.md). Shared Qiniu transport lives in `scripts/lib/qiniu-release.cjs`; applications must not import one another's release scripts.
 - Validate release changes with `node --test apps/mcp-runtime/scripts/*.test.cjs apps/local-helper/scripts/publish-qiniu-release.test.cjs` plus native staging/package smoke tests.
+
+### Rust MCP daemon (`apps/mcp-rust`)
+
+- Rust rewrite of the same daemon. Contract and phase gates: [docs/rust-runtime-migration.md](docs/rust-runtime-migration.md).
+- The app owns its Cargo workspace (`crates/keepwork-mcp`); the repository root must not gain a `Cargo.toml` (`scripts/check-layout.cjs` enforces this).
+- Wire compatibility is verified against the Node daemon by `scripts/contract/*.test.cjs` (same assertions, two engines, separate ports). Run `npm run check:rust` and `npm run test:contract` before shipping a slice.
+- Advertise a `/health` capability only when its routes exist; unimplemented surfaces stay absent so AIChat degrades instead of hitting 404s.
+- P0 covers lifecycle, CORS/auth, `/health`, `/exists`, `/fs/stat`, `/admin/status|stop` and the MCP handshake with `mcp_status` only. Do not mark later phases done without the corresponding contract tests.
 
 ### Extension development
 

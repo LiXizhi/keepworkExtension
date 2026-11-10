@@ -11,7 +11,11 @@
     "check:shared": "tsc -p ./ --noEmit && npm run check:layout && npm run check:aichat-runtime",
     "check:all": "npm run check:shared && npm run check --prefix apps/vscode-extension && npm run check --prefix apps/local-model-runtime && npm test --prefix apps/local-model-runtime && npm run check --prefix apps/local-helper && npm run check --prefix apps/aichat-desktop",
     "check:aichat-runtime": "node scripts/sync-aichat-runtime.cjs --check",
-    "sync:aichat-runtime": "node scripts/sync-aichat-runtime.cjs"
+    "sync:aichat-runtime": "node scripts/sync-aichat-runtime.cjs",
+    "build:mcp-rust": "cargo build --release --manifest-path apps/mcp-rust/Cargo.toml",
+    "check:rust": "cargo fmt --all --check --manifest-path apps/mcp-rust/Cargo.toml && cargo clippy --manifest-path apps/mcp-rust/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path apps/mcp-rust/Cargo.toml",
+    "test:contract": "npm run build:mcp-rust && node --test scripts/contract/*.test.cjs",
+    "smoke:mcp-rust": "node apps/mcp-rust/scripts/smoke.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
