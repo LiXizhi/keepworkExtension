@@ -558,11 +558,29 @@ fn desktop_pet_result(
     result: Value,
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state)?;
+    state.pet.resolve_command(&result);
     if result.get("type").and_then(|v| v.as_str()) == Some("exit-info") {
         state.pet.resolve_exit_info(&result);
         broadcast_pet_state(&app, &state);
     }
     Ok(true)
+}
+
+async fn request_pet_command(
+    app: &AppHandle,
+    core: &AppCore,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let (command, receiver) = core.pet.begin_command(name, args)?;
+    let request_id = command["requestId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    broadcast_to_main(app, "pet-command", &command);
+    core.pet
+        .wait_for_command(&request_id, receiver, Duration::from_secs(15))
+        .await
 }
 
 #[tauri::command]
@@ -930,9 +948,28 @@ async fn desktop_pet_action(
         }
         "exit-request" => {
             let shared = state.mcp_supervisor.snapshot().owner != "desktop";
-            let (_id, snap) = state.pet.begin_exit_prompt(shared);
-            broadcast_to_main(&app, "pet-command", &json!({ "action": "exit-info" }));
+            let (id, snap) = state.pet.begin_exit_prompt(shared);
             broadcast_pet_state(&app, &state);
+            let core = Arc::clone(state.inner());
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let context = core.pet.snapshot()["context"].clone();
+                let result =
+                    request_pet_command(&app, &core, "exit-info", &json!({ "context": context }))
+                        .await;
+                if core.pet.snapshot()["exitPrompt"]["id"].as_str() != Some(id.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(info) => {
+                        core.pet.resolve_exit_info(&info);
+                    }
+                    Err(_) => {
+                        core.pet.mark_exit_info_unavailable();
+                    }
+                }
+                broadcast_pet_state(&app, &core);
+            });
             Ok(snap)
         }
         "exit-cancel" => {
@@ -963,11 +1000,7 @@ async fn desktop_pet_action(
                     return Err("输入内容过长，请在桌面主窗口中编辑".to_string());
                 }
             }
-            let mut payload = args.clone();
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("action".to_string(), json!(name));
-            }
-            broadcast_to_main(&app, "pet-command", &payload);
+            request_pet_command(&app, &state, &name, &args).await?;
             Ok(state.pet.snapshot())
         }
         _ => Ok(state.pet.snapshot()),
@@ -1296,7 +1329,14 @@ pub async fn execute_host_command(
                     let _ = pet_win.hide();
                 }
                 // Stop dictation/call/wakeword when pet is hidden, without cancelling normal text tasks
-                broadcast_to_main(app, "pet-command", &json!({ "action": "hide" }));
+                broadcast_to_main(
+                    app,
+                    "pet-command",
+                    &json!({
+                        "version": 1, "requestId": uuid::Uuid::new_v4().to_string(),
+                        "context": core.pet.snapshot()["context"], "action": "hide"
+                    }),
+                );
             } else {
                 let main_visible = app
                     .get_webview_window("main")

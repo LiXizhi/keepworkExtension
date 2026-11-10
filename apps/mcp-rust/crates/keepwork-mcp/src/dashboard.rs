@@ -152,7 +152,7 @@ body.chat-view #view-title,body.chat-view #notice:empty{display:none}body.chat-v
 #chat-frame{display:block;width:100%;height:100%;border:0;background:white}
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP (Rust)</div><nav class="tree" aria-label="Dashboard navigation">
-<a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#chat">AI 对话</a>
+<a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#personas">Personas / 分身</a><a href="#chat">AI 对话</a>
 <details open><summary>Developer</summary><a href="#api-docs">API docs</a><a href="#tools-skills">Tools &amp; skills</a></details>
 </nav></aside><main>
 <h1 id="view-title">Overview / 概览</h1>
@@ -163,6 +163,7 @@ body.chat-view #view-title,body.chat-view #notice:empty{display:none}body.chat-v
 <h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl>
 <h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
 <section class="view" id="view-clients" hidden><div id="clients" class="scroll"></div></section>
+<section class="view" id="view-personas" hidden><div id="personas" class="scroll"></div></section>
 <section class="view" id="view-history" hidden><div id="history" class="scroll"></div>
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div></section>
 <section class="view" id="view-api-docs" hidden><p>HTTP APIs, authentication, parameters and JavaScript fetch examples.</p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
@@ -173,7 +174,7 @@ body.chat-view #view-title,body.chat-view #notice:empty{display:none}body.chat-v
 const byId = id => document.getElementById(id);
 let token = '', offset = 0, busy = false, stopped = false, view = 'overview', apiCatalog = null;
 const limit = 20;
-const viewNames = { overview: 'Overview / 概览', history: 'History', clients: 'Clients', 'api-docs': 'API docs', 'tools-skills': 'Tools & skills', chat: 'AI 对话' };
+const viewNames = { overview: 'Overview / 概览', history: 'History', clients: 'Clients', personas: 'Personas / 分身', 'api-docs': 'API docs', 'tools-skills': 'Tools & skills', chat: 'AI 对话' };
 async function request(path, method = 'GET', body) {
   const response = await fetch(path, { method, cache: 'no-store', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   if (response.status === 401) { byId('auth').hidden = false; throw new Error('Pairing token required. Use the token from ~/.keepwork-mcp/token.'); }
@@ -259,6 +260,11 @@ async function refresh() {
     metadata(serverMetadata(status));
     const clientRows = (status.clients || []).map(c => [c.sessionId.slice(0, 8), c.origin, c.connectedAt, c.lastSeenAt, c.callCount]);
     for (const t of ['clients', 'overview-clients']) table(t, ['Session', 'Origin', 'Connected', 'Last seen', 'Calls'], clientRows, 'No connected AIChat sessions.');
+    if (requestedView === 'personas') {
+      const data = await request('/admin/personas');
+      const rows = (data.personas || []).map(p => [p.name, p.state, p.executor, p.messages, p.unread, (p.enabledSchedules || 0) + '/' + (p.schedules || 0)]);
+      table('personas', ['Name', 'State', 'Executor', 'Messages', 'Unread', 'Schedules'], rows, 'No personas. / 还没有分身');
+    }
     if (requestedView === 'history') {
       let page = await request('/admin/history?offset=' + offset + '&limit=' + limit);
       table('history', ['Time', 'Client', 'Tool', 'Summary', 'Result', 'ms'], (page.history || []).map(r => [r.time, r.sessionId.slice(0, 8), r.tool, r.summary, r.ok ? 'ok' : r.error || 'fail', r.durationMs]), 'No tool calls yet.');

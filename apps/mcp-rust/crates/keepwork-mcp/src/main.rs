@@ -98,6 +98,17 @@ async fn run(args: cli::Args) -> i32 {
         }
     });
 
+    let tick_personas = Arc::clone(&state.personas);
+    let tick_presence = Arc::clone(&state.presence);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            tick_personas.tick(&tick_presence, chrono::Utc::now().timestamp_millis());
+        }
+    });
+
     let app = http::router(state);
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
     let code = match server.await {

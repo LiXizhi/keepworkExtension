@@ -4,8 +4,9 @@
 //! CORS/auth contract as the Node daemon, `/health`, `/exists`, the full `/fs/*`
 //! surface, PTY `/terminal/*` sessions, `/admin/status|stop`, the MCP handshake
 //! and the five portable tools (`mcp_status`, `run_terminal`, `grep_files`,
-//! `web_search`, `fetch_url`). Surfaces that are not implemented stay
-//! unadvertised so clients degrade instead of calling a 404.
+//! `web_search`, `fetch_url`). Personas (`personasApi: personas-v1`) persist
+//! under `~/.keepwork-mcp/personas-v1` and answer through Keepwork when AIChat
+//! is logged in. Messaging, native CLI sessions and WeChat stay unadvertised.
 
 pub mod cli;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod http;
 pub mod identity;
 pub mod mcp;
 pub mod paths;
+pub mod personas;
 pub mod presence;
 pub mod shell;
 pub mod terminal;

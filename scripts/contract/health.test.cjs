@@ -41,11 +41,11 @@ test('health only advertises capabilities this build serves', async () => {
   assert.equal(health.fsApi, 'workspace');
   assert.equal(health.terminalApi, 'pty-session-v1');
   assert.equal(health.aichatPresenceApi, 'post-sse-v1');
+  assert.equal(health.personasApi, 'personas-v1');
   for (const unimplemented of [
     'agentSessionApi',
     'browserApi',
     'messagingApi',
-    'personasApi',
     'webserverBase',
   ]) {
     assert.equal(health[unimplemented], undefined, `${unimplemented} must stay unadvertised until implemented`);
@@ -56,7 +56,7 @@ test('health matches the Node reference on the shared identity fields', async ()
   const node = await h.startNode();
   if (!node) return;
   try {
-    for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth', 'fsApi', 'terminalApi', 'aichatPresenceApi']) {
+    for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth', 'fsApi', 'terminalApi', 'aichatPresenceApi', 'personasApi']) {
       assert.equal(rust.health[key], node.health[key], `field ${key} must match the Node daemon`);
     }
     // P1 ports the local surface; agent/messaging surfaces stay Node-only.

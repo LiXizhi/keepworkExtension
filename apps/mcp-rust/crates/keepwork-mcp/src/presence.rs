@@ -302,6 +302,23 @@ impl PresenceState {
         curr.as_ref().map(|c| c.client.clone())
     }
 
+    /// Owner-scoped AIChat login. Persona runs must not fall back to another account.
+    pub fn owner_client(&self, owner_hash: &str) -> Option<AichatClient> {
+        self.owners
+            .lock()
+            .ok()
+            .and_then(|owners| owners.get(owner_hash).map(|stored| stored.client.clone()))
+    }
+
+    /// Second-brain path last reported by this owner. Empty when none was sent.
+    pub fn brain_root(&self, owner_hash: &str) -> String {
+        self.owner_brains
+            .lock()
+            .ok()
+            .and_then(|brains| brains.get(owner_hash).map(|(_, root)| root.clone()))
+            .unwrap_or_default()
+    }
+
     pub fn handle_mcp_params(
         &self,
         session_id: &str,

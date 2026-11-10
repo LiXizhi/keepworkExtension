@@ -112,6 +112,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let state: PetSnapshot = {};
   let expanded = false;
   let edits = 0;
+  let draftRevision = 0;
   let unsynced = false;
   let localError = "";
   let queue: Promise<boolean> = Promise.resolve(true);
@@ -173,6 +174,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const draftEl = $<HTMLTextAreaElement>("draft");
     if (next.context !== state.context) {
       edits = 0;
+      draftRevision++;
       unsynced = false;
       localError = "";
       draftEl.value = next.draft || "";
@@ -208,7 +210,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     $("badge").hidden = !(state.busy || state.voice?.active || state.attention || state.error);
 
     if (!edits && !unsynced) draftEl.value = state.draft || "";
-    draftEl.disabled = !state.ready || !!state.richDraft || !!state.dictating;
+    draftEl.disabled = !!state.richDraft || !!state.dictating;
 
     const sendBtn = $<HTMLButtonElement>("send");
     sendBtn.textContent = state.busy ? "停止" : "发送";
@@ -245,6 +247,10 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
           : state.busy
             ? "正在回复…"
             : "");
+    if (!state.ready && !state.richDraft && !state.dictating) {
+      $("status").textContent = [$("status").textContent, "可先输入草稿，连接后点击发送。"]
+        .filter(Boolean).join("\n");
+    }
     $("error").textContent = localError || state.error || "";
 
     const reply = state.reply;
@@ -397,12 +403,17 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const context = state.context;
     const task = queue.then(async () => {
       if (context !== state.context) throw new Error("会话已改变，请重试");
+      if (["input", "send"].includes(name) && !state.ready) {
+        throw new Error("请先在 AIChat 中连接本机服务和第二大脑，草稿已保留。");
+      }
       const next = await api.action(name, { ...args, context });
+      if (context !== state.context) return false;
       localError = "";
       if (next) render(next);
       return true;
     });
     queue = task.catch((err: unknown) => {
+      if (context !== state.context) return false;
       const msg = err instanceof Error ? err.message : String(err);
       localError = msg.replace(/^Error invoking remote method '[^']+': Error: /, "");
       $("error").textContent = localError;
@@ -438,13 +449,20 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   const draftEl = $<HTMLTextAreaElement>("draft");
   draftEl.addEventListener("input", () => {
     const context = state.context;
-    edits++;
+    const revision = ++draftRevision;
     unsynced = true;
+    // Older AIChat pages reject input while offline. Keep these edits local
+    // until the user edits again online or explicitly sends the draft.
+    if (!state.ready) {
+      render(state as unknown as Record<string, unknown>);
+      return;
+    }
+    edits++;
     void action("input", { text: draftEl.value }).then((ok) => {
       if (context === state.context) {
         edits = Math.max(0, edits - 1);
+        if (revision === draftRevision) unsynced = !ok;
         if (!edits) {
-          unsynced = !ok;
           render(state as unknown as Record<string, unknown>);
         }
       }
@@ -460,12 +478,17 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   });
 
   $("send").onclick = async () => {
+    if ($<HTMLButtonElement>("send").disabled) return;
     const name = state.busy ? "stop" : "send";
     const context = state.context;
     await queue;
-    if (context !== state.context) return;
+    if (context !== state.context || !state.ready) return;
+    if (name === "send" && (state.busy || state.richDraft || state.dictating)) return;
     if (name === "send" && unsynced) {
+      const revision = draftRevision;
       if (!(await action("input", { text: draftEl.value }))) return;
+      if (context !== state.context || revision !== draftRevision || !state.ready ||
+          state.busy || state.richDraft || state.dictating) return;
       unsynced = false;
     }
     void action(name);

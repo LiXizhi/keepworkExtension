@@ -1,12 +1,14 @@
 use crate::files::atomic_json_write;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
 
@@ -433,9 +435,32 @@ enum DragOrigin {
     },
 }
 
+type PetCommandResult = Result<Value, String>;
+
+#[derive(Default)]
+struct PetPageState {
+    raw: Value,
+    pending: HashMap<String, oneshot::Sender<PetCommandResult>>,
+}
+
+fn pet_context(raw: &Value) -> String {
+    raw.get("context")
+        .and_then(Value::as_str)
+        .map(|s| truncate_str(s, 120))
+        .unwrap_or_else(|| "default".to_string())
+}
+
+impl PetPageState {
+    fn cancel_pending(&mut self) {
+        for (_, sender) in self.pending.drain() {
+            let _ = sender.send(Err("会话已改变，请打开 AIChat 检查。".to_string()));
+        }
+    }
+}
+
 pub struct PetController {
     prefs_path: PathBuf,
-    raw_state: Mutex<Value>,
+    page_state: Mutex<PetPageState>,
     expanded: Mutex<bool>,
     prefs: Mutex<PetPreferences>,
     work_area: Mutex<WorkArea>,
@@ -450,7 +475,7 @@ impl PetController {
         let prefs = Self::load_prefs(&prefs_path);
         Self {
             prefs_path,
-            raw_state: Mutex::new(json!({})),
+            page_state: Mutex::new(PetPageState::default()),
             expanded: Mutex::new(false),
             prefs: Mutex::new(prefs),
             work_area: Mutex::new(WorkArea::default()),
@@ -519,9 +544,9 @@ impl PetController {
 
     pub fn snapshot(&self) -> Value {
         let raw = self
-            .raw_state
+            .page_state
             .lock()
-            .map(|g| g.clone())
+            .map(|g| g.raw.clone())
             .unwrap_or_else(|_| json!({}));
         let expanded = self.expanded.lock().map(|g| *g).unwrap_or(false);
         let prefs = self.prefs.lock().map(|g| g.clone()).unwrap_or_default();
@@ -532,20 +557,103 @@ impl PetController {
     }
 
     pub fn update_raw_state(&self, next: Value) -> Value {
-        if let Ok(mut guard) = self.raw_state.lock() {
-            *guard = next;
+        if let Ok(mut page) = self.page_state.lock() {
+            if pet_context(&page.raw) != pet_context(&next) {
+                page.cancel_pending();
+            }
+            page.raw = next;
         }
         self.snapshot()
     }
 
     pub fn reset_state(&self) -> Value {
-        if let Ok(mut guard) = self.raw_state.lock() {
-            *guard = json!({});
+        if let Ok(mut page) = self.page_state.lock() {
+            page.cancel_pending();
+            page.raw = json!({});
         }
         if let Ok(mut exp) = self.expanded.lock() {
             *exp = false;
         }
         self.snapshot()
+    }
+
+    /// Match the existing Electron/AIChat Bridge v1 envelope. Forwarding a
+    /// command is not acknowledgement: the page must confirm its request ID.
+    pub fn begin_command(
+        &self,
+        action: &str,
+        args: &Value,
+    ) -> Result<(Value, oneshot::Receiver<PetCommandResult>), String> {
+        let mut page = self.page_state.lock().map_err(|e| e.to_string())?;
+        let context = pet_context(&page.raw);
+        if args.get("context").and_then(Value::as_str) != Some(context.as_str()) {
+            return Err("会话已改变，请打开 AIChat 检查。".to_string());
+        }
+        if !page
+            .raw
+            .get("ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !matches!(action, "exit-info" | "toggle-target" | "hide")
+        {
+            return Err("请先在 AIChat 中连接本机服务和第二大脑，草稿已保留。".to_string());
+        }
+        if page.pending.len() >= 32 {
+            return Err("宠物操作过多，请稍候。".to_string());
+        }
+        let request_id = Uuid::new_v4().to_string();
+        let (sender, receiver) = oneshot::channel();
+        let mut command = args.as_object().cloned().unwrap_or_default();
+        command.insert("version".to_string(), json!(1));
+        command.insert("requestId".to_string(), json!(request_id));
+        command.insert("context".to_string(), json!(context));
+        command.insert("action".to_string(), json!(action));
+        page.pending.insert(request_id, sender);
+        Ok((Value::Object(command), receiver))
+    }
+
+    pub fn resolve_command(&self, result: &Value) -> bool {
+        let Some(request_id) = result.get("requestId").and_then(Value::as_str) else {
+            return false;
+        };
+        let sender = self
+            .page_state
+            .lock()
+            .ok()
+            .and_then(|mut page| page.pending.remove(request_id));
+        let Some(sender) = sender else {
+            return false;
+        };
+        let reply = if result.get("ok").and_then(Value::as_bool) == Some(true) {
+            Ok(result.get("data").cloned().unwrap_or(Value::Null))
+        } else {
+            Err(result
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|s| truncate_str(s, 300))
+                .unwrap_or_else(|| "AIChat 未确认操作，草稿已保留。".to_string()))
+        };
+        let _ = sender.send(reply);
+        true
+    }
+
+    pub async fn wait_for_command(
+        &self,
+        request_id: &str,
+        receiver: oneshot::Receiver<PetCommandResult>,
+        timeout: Duration,
+    ) -> PetCommandResult {
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(result)) => result,
+            _ => {
+                if let Ok(mut page) = self.page_state.lock() {
+                    page.pending.remove(request_id);
+                }
+                // Do not replay: a timed-out mutation may already have run.
+                Err("AIChat 未确认操作，请打开主窗口检查结果。".to_string())
+            }
+        }
     }
 
     pub fn set_expanded(&self, value: bool) -> Value {
@@ -826,6 +934,158 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    fn command_controller() -> PetController {
+        let controller = PetController::new(
+            std::env::temp_dir().join(format!("aichat-pet-commands-{}.json", Uuid::new_v4())),
+        );
+        controller.update_raw_state(json!({ "context": "alice", "ready": true }));
+        controller
+    }
+
+    #[tokio::test]
+    async fn commands_use_bridge_v1_and_wait_for_matching_page_acknowledgement() {
+        let controller = command_controller();
+        let (command, mut receiver) = controller
+            .begin_command(
+                "input",
+                &json!({
+                    "context": "alice", "text": "保留输入", "version": 99,
+                    "requestId": "untrusted", "action": "send"
+                }),
+            )
+            .unwrap();
+        assert_eq!(command["version"], 1);
+        assert_eq!(command["action"], "input");
+        assert_eq!(command["context"], "alice");
+        assert_eq!(command["text"], "保留输入");
+        let request_id = command["requestId"].as_str().unwrap();
+        assert_ne!(request_id, "untrusted");
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(!controller.resolve_command(&json!({ "requestId": "unknown", "ok": true })));
+
+        // Published Bridge v1 pages publish their updated draft before petResult.
+        controller
+            .update_raw_state(json!({ "context": "alice", "ready": true, "draft": "保留输入" }));
+        assert!(controller
+            .resolve_command(&json!({ "requestId": request_id, "ok": true, "additive": 1 })));
+        assert_eq!(
+            controller
+                .wait_for_command(request_id, receiver, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(controller.snapshot()["draft"], "保留输入");
+        assert!(!controller.resolve_command(&json!({ "requestId": request_id, "ok": true })));
+        let (next, _) = controller
+            .begin_command("send", &json!({ "context": "alice" }))
+            .unwrap();
+        assert_ne!(command["requestId"], next["requestId"]);
+    }
+
+    #[tokio::test]
+    async fn rejected_or_unanswered_commands_fail_without_being_replayed() {
+        let controller = command_controller();
+        let (command, receiver) = controller
+            .begin_command("input", &json!({ "context": "alice", "text": "草稿" }))
+            .unwrap();
+        let request_id = command["requestId"].as_str().unwrap();
+        controller.resolve_command(
+            &json!({ "requestId": request_id, "ok": false, "error": "无法修改输入" }),
+        );
+        assert_eq!(
+            controller
+                .wait_for_command(request_id, receiver, Duration::from_secs(1))
+                .await
+                .unwrap_err(),
+            "无法修改输入"
+        );
+
+        let (command, receiver) = controller
+            .begin_command("send", &json!({ "context": "alice" }))
+            .unwrap();
+        let request_id = command["requestId"].as_str().unwrap();
+        assert!(controller
+            .wait_for_command(request_id, receiver, Duration::from_millis(1))
+            .await
+            .unwrap_err()
+            .contains("检查结果"));
+        assert!(!controller.resolve_command(&json!({ "requestId": request_id, "ok": true })));
+        assert!(controller.page_state.lock().unwrap().pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn changing_context_or_reloading_cancels_pending_commands() {
+        let controller = command_controller();
+        let (command, receiver) = controller
+            .begin_command("input", &json!({ "context": "alice" }))
+            .unwrap();
+        let request_id = command["requestId"].as_str().unwrap();
+        controller.update_raw_state(json!({ "context": "bob", "ready": true }));
+        assert!(controller
+            .wait_for_command(request_id, receiver, Duration::from_secs(1))
+            .await
+            .unwrap_err()
+            .contains("会话已改变"));
+        assert!(!controller.resolve_command(&json!({ "requestId": request_id, "ok": true })));
+        assert!(controller
+            .begin_command("send", &json!({ "context": "alice" }))
+            .is_err());
+        let (command, receiver) = controller
+            .begin_command("input", &json!({ "context": "bob" }))
+            .unwrap();
+        controller.reset_state();
+        assert!(controller
+            .wait_for_command(
+                command["requestId"].as_str().unwrap(),
+                receiver,
+                Duration::from_secs(1)
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn target_switch_ack_before_new_context_remains_successful() {
+        let controller = command_controller();
+        let (command, receiver) = controller
+            .begin_command("toggle-target", &json!({ "context": "alice" }))
+            .unwrap();
+        let request_id = command["requestId"].as_str().unwrap();
+        controller.resolve_command(&json!({ "requestId": request_id, "ok": true }));
+        controller.update_raw_state(json!({ "context": "chat", "ready": true }));
+        assert!(controller
+            .wait_for_command(request_id, receiver, Duration::from_secs(1))
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn unavailable_or_legacy_pages_cannot_accept_remote_edits() {
+        let controller = command_controller();
+        for state in [
+            json!({ "context": "alice", "ready": false }),
+            json!({ "context": "alice" }),
+        ] {
+            controller.update_raw_state(state);
+            assert!(controller
+                .begin_command("input", &json!({ "context": "alice" }))
+                .is_err());
+            assert!(controller
+                .begin_command("send", &json!({ "context": "alice" }))
+                .is_err());
+            assert!(controller
+                .begin_command("exit-info", &json!({ "context": "alice" }))
+                .is_ok());
+            assert!(controller
+                .begin_command("toggle-target", &json!({ "context": "alice" }))
+                .is_ok());
+        }
+    }
 
     #[test]
     fn sanitizes_pet_state_clamps_bounds_and_handles_permission_bridge() {

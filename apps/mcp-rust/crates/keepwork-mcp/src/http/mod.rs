@@ -29,6 +29,7 @@ pub struct AppState {
     pub terminals: TerminalManager,
     pub shell: ShellRunner,
     pub presence: Arc<crate::presence::PresenceState>,
+    pub personas: Arc<crate::personas::PersonaStore>,
 }
 
 impl AppState {
@@ -38,6 +39,25 @@ impl AppState {
         require_auth: bool,
         token: String,
         identity: Identity,
+    ) -> Self {
+        Self::new_at(
+            port,
+            root,
+            require_auth,
+            token,
+            identity,
+            crate::config::mcp_home_dir().join("personas-v1"),
+        )
+    }
+
+    /// `persona_dir` is separate so tests never rewrite `~/.keepwork-mcp/personas-v1`.
+    pub fn new_at(
+        port: u16,
+        root: PathBuf,
+        require_auth: bool,
+        token: String,
+        identity: Identity,
+        persona_dir: PathBuf,
     ) -> Self {
         Self {
             port,
@@ -50,6 +70,7 @@ impl AppState {
             terminals: TerminalManager::default(),
             shell: ShellRunner::default(),
             presence: Arc::new(crate::presence::PresenceState::new()),
+            personas: crate::personas::PersonaStore::open(persona_dir),
         }
     }
 
@@ -71,8 +92,8 @@ impl AppState {
         );
         caps.insert("fsDirApi".into(), serde_json::json!("mkdir-v1"));
         caps.insert("aichatPresenceApi".into(), serde_json::json!("post-sse-v1"));
-        // Only surfaces this build actually serves. Unimplemented routes stay
-        // unadvertised so AIChat degrades instead of calling a 404.
+        caps.insert("personasApi".into(), serde_json::json!("personas-v1"));
+        // Messaging, native agent sessions and WeChat stay unadvertised.
         caps
     }
 
@@ -513,21 +534,9 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                         )
                     }
                 }
-                ("GET", "/admin/personas") => json_response(
-                    StatusCode::OK,
-                    &serde_json::json!({
-                        "stats": {
-                            "total": 0,
-                            "active": 0,
-                            "messages": 0,
-                            "enabledSchedules": 0,
-                            "sessions": 0,
-                        },
-                        "personas": [],
-                        "sessions": [],
-                        "recentMessages": [],
-                    }),
-                ),
+                ("GET", "/admin/personas") => {
+                    json_response(StatusCode::OK, &state.personas.admin_snapshot())
+                }
                 ("GET", "/admin/messaging-computers") => {
                     json_response(StatusCode::OK, &serde_json::json!({ "accounts": [] }))
                 }
@@ -555,6 +564,27 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
             crate::presence::handle_presence_http(&state, req, &query, &headers).await
         }
         (_, "/mcp") => mcp_dispatch(state, req).await,
+        (_, path) if path == "/agents/personas" || path.starts_with("/agents/personas/") => {
+            let origin = headers
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if origin.is_empty() || !origin_allowed(origin) {
+                return crate::personas::error_response(
+                    403,
+                    "Explicit allowed Origin required",
+                    None,
+                );
+            }
+            if let Some(mut denied) = authorize(&state, &headers, &query) {
+                denied.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    "no-store".parse().expect("static header"),
+                );
+                return denied;
+            }
+            crate::personas::handle(state, method.as_str(), path, &query, &headers, req).await
+        }
         _ => json_response(
             StatusCode::NOT_FOUND,
             &serde_json::json!({ "error": "not found" }),

@@ -8,16 +8,22 @@ use http_body_util::BodyExt;
 use keepwork_mcp::http::{router, AppState};
 use keepwork_mcp::identity::Identity;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
 fn test_state(require_auth: bool) -> Arc<AppState> {
-    Arc::new(AppState::new(
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let persona_dir =
+        std::env::temp_dir().join(format!("kp-persona-contract-{}-{}", std::process::id(), n));
+    Arc::new(AppState::new_at(
         8099,
         std::env::temp_dir(),
         require_auth,
         "test-token".to_string(),
         Identity::from_env(Some("standalone".to_string()), None),
+        persona_dir,
     ))
 }
 
@@ -84,7 +90,9 @@ async fn health_reports_identity_and_only_served_capabilities() {
     // P1 advertises the local surface it serves and nothing further.
     assert_eq!(value["fsApi"], "workspace");
     assert_eq!(value["terminalApi"], "pty-session-v1");
+    assert_eq!(value["personasApi"], "personas-v1");
     assert!(value.get("agentSessionApi").is_none());
+    assert!(value.get("messagingApi").is_none());
 }
 
 #[tokio::test]
@@ -412,4 +420,162 @@ async fn unknown_routes_answer_like_node() {
         .unwrap();
     let (status, _, _) = send(&state, method).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+fn persona(method: &str, path: &str, body: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::ORIGIN, "http://127.0.0.1:64533")
+        .header("x-agent-owner", "a".repeat(32));
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    builder
+        .body(Body::from(body.unwrap_or("").to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn personas_round_trip_without_a_login() {
+    let state = test_state(false);
+    let (status, _, _) = send(&state, get("/agents/personas")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _, body) = send(
+        &state,
+        Request::builder()
+            .uri("/agents/personas")
+            .header(header::ORIGIN, "http://127.0.0.1:64533")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["error"],
+        "Agent owner key required"
+    );
+
+    let (status, _, body) = send(
+        &state,
+        persona(
+            "POST",
+            "/agents/personas",
+            Some(
+                r#"{"id":"default-persona","name":"我的分身","avatar":"🧠","prompt":"hi","executor":"auto","model":"","pinned":true,"order":0,"root":""}"#,
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["name"], "我的分身");
+    assert!(created.get("owner").is_none());
+
+    let (status, _, body) = send(&state, persona("GET", "/agents/personas", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(listed["agents"].as_array().unwrap().len(), 1);
+
+    let (status, _, body) = send(
+        &state,
+        persona(
+            "POST",
+            "/agents/personas/default-persona/messages",
+            Some(r#"{"requestId":"m-bad","text":"hello","contextMode":"nope"}"#),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["code"],
+        "UNSUPPORTED_FEATURE"
+    );
+
+    let (status, _, body) = send(
+        &state,
+        persona(
+            "POST",
+            "/agents/personas/default-persona/messages",
+            Some(r#"{"requestId":"m1","text":"hello","contextMode":"conversation","ownerComposer":true}"#),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["job"]["state"],
+        "queued"
+    );
+
+    let mut detail = Value::Null;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (status, _, body) = send(
+            &state,
+            persona("GET", "/agents/personas/default-persona", None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        detail = serde_json::from_slice(&body).unwrap();
+        if detail["job"]["state"] == "needs-login" {
+            break;
+        }
+    }
+    assert_eq!(detail["job"]["state"], "needs-login");
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+
+    let (status, _, _) = send(
+        &state,
+        persona(
+            "POST",
+            "/agents/personas/default-persona/messages",
+            Some(r#"{"requestId":"m1","text":"hello again","contextMode":"conversation"}"#),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = send(
+        &state,
+        persona("GET", "/agents/personas/default-persona", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let detail: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+
+    let (status, _, body) = send(
+        &state,
+        persona("POST", "/agents/personas/default-persona/clear", Some("{}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(serde_json::from_slice::<Value>(&body).unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let (status, _, body) = send(&state, persona("GET", "/admin/personas", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(admin["personas"][0]["name"], "我的分身");
+
+    let (status, _, body) = send(&state, get("/dashboard")).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = String::from_utf8(body).unwrap();
+    assert!(html.contains("分身"));
+    assert!(html.contains("view-chat"));
+
+    let (status, headers, mut stream) =
+        send_headers(&state, persona("GET", "/agents/personas/events", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "text/event-stream");
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), stream.frame())
+        .await
+        .expect("sse timed out")
+        .expect("sse frame")
+        .expect("sse data")
+        .into_data()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&frame).contains("event: changed"));
 }
