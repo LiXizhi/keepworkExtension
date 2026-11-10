@@ -244,7 +244,7 @@ Commands: `keepwork.openMcpWorkspace`, `keepwork.changeMcpWorkspace`, `keepwork.
 - The app owns its Cargo workspace (`crates/keepwork-mcp`); the repository root must not gain a `Cargo.toml` (`scripts/check-layout.cjs` enforces this).
 - Wire compatibility is verified against the Node daemon by `scripts/contract/*.test.cjs` (same assertions, two engines, separate ports). Run `npm run check:rust` and `npm run test:contract` before shipping a slice.
 - Advertise a `/health` capability only when its routes exist; unimplemented surfaces stay absent so AIChat degrades instead of hitting 404s.
-- P0 covers lifecycle, CORS/auth, `/health`, `/exists`, `/fs/stat`, `/admin/status|stop` and the MCP handshake with `mcp_status` only. Do not mark later phases done without the corresponding contract tests.
+- P1 covers lifecycle, CORS/auth, `/health`, `/exists`, the full `/fs/*` surface (including `/fs/locations|browse`), PTY `/terminal/*`, `/admin/status|stop`, the MCP handshake and the five portable tools (`mcp_status`, `run_terminal`, `grep_files`, `web_search`, `fetch_url`). Agents, messaging, personas, browser, computer and paracraft remain unadvertised. Do not mark later phases done without the corresponding contract tests.
 
 ### Extension development
 

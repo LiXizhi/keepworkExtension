@@ -15,14 +15,14 @@ pub struct CoreError {
 }
 
 impl CoreError {
-    fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             escape: false,
         }
     }
 
-    fn escape(message: impl Into<String>) -> Self {
+    pub fn escape(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             escape: true,
@@ -175,6 +175,61 @@ pub fn confine_lexical(root: &str, rel: &str) -> Result<PathBuf, CoreError> {
         return Err(CoreError::escape(format!("Path escapes root: {rel}")));
     }
     Ok(lexical_join(&base, &normalized))
+}
+
+fn real_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+/// Resolves `rel` under `root` through real paths. Rejects `..` and symlink
+/// escapes (mirrors `confinePath` in `src/core/paths.ts`).
+pub fn confine_path(root: &str, rel: &str) -> Result<PathBuf, CoreError> {
+    let base = real_path(Path::new(root.trim()));
+    let target = real_path(&lexical_join(&base, &normalize_rel(rel)));
+    if target != base && !target.starts_with(&base) {
+        return Err(CoreError::escape(format!(
+            "Path escapes workspace root: {}",
+            if rel.is_empty() { "." } else { rel }
+        )));
+    }
+    Ok(target)
+}
+
+/// Working directory / grep path: absolute paths must exist, relative paths stay
+/// confined to the workspace root.
+pub fn resolve_workdir(root: &str, cwd: Option<&str>) -> Result<PathBuf, CoreError> {
+    let raw = cwd.unwrap_or(".").trim();
+    let raw = if raw.is_empty() { "." } else { raw };
+    if is_abs_disk_path(raw) {
+        let info = inspect_disk_path(raw);
+        if !info.exists || !info.is_directory {
+            return Err(CoreError::new(format!("Directory does not exist: {raw}")));
+        }
+        return Ok(PathBuf::from(info.resolved));
+    }
+    confine_path(root, raw)
+}
+
+/// `path.relative(root, abs)` with `/` separators; falls back to the absolute
+/// path when it is not below `root`.
+pub fn relative_to_root(root: &str, abs: &Path) -> String {
+    let base = Path::new(root);
+    match abs.strip_prefix(base) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+        _ => abs.to_string_lossy().replace('\\', "/"),
+    }
 }
 
 fn resolve_root(raw: &str) -> Result<String, CoreError> {

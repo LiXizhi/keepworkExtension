@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use crate::identity::Identity;
 use crate::mcp::{self, SessionStore};
 use crate::paths;
+use crate::shell::ShellRunner;
+use crate::terminal::TerminalManager;
 use crate::{ENGINE, RUNTIME_PRODUCT, SERVER_NAME, SERVER_VERSION};
 
 pub struct AppState {
@@ -24,6 +26,8 @@ pub struct AppState {
     pub started_at: String,
     pub identity: Identity,
     pub sessions: Mutex<SessionStore>,
+    pub terminals: TerminalManager,
+    pub shell: ShellRunner,
 }
 
 impl AppState {
@@ -42,6 +46,8 @@ impl AppState {
             started_at: now_iso(),
             identity,
             sessions: Mutex::new(SessionStore::default()),
+            terminals: TerminalManager::default(),
+            shell: ShellRunner::default(),
         }
     }
 
@@ -51,6 +57,15 @@ impl AppState {
         caps.insert(
             "workspaceRoot".into(),
             serde_json::json!(self.root.to_string_lossy()),
+        );
+        caps.insert("fsApi".into(), serde_json::json!(crate::fs::FS_API));
+        caps.insert(
+            "folderBrowserApi".into(),
+            serde_json::json!(crate::folders::FOLDER_BROWSER_API),
+        );
+        caps.insert(
+            "terminalApi".into(),
+            serde_json::json!(crate::terminal::TERMINAL_API),
         );
         // Only surfaces this build actually serves. Unimplemented routes stay
         // unadvertised so AIChat degrades instead of calling a 404.
@@ -315,22 +330,109 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
     let method = req.method().clone();
     let path = normalize_path(req.uri().path());
     let query = query_params(req.uri().query());
+    let headers = req.headers().clone();
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/health") => health(&state),
         ("GET", "/exists") => exists(&query),
-        ("GET", "/fs/stat") => fs_stat(&query),
-        (_, path) if path.starts_with("/fs") => {
-            let status = match method.as_str() {
-                "GET" | "PUT" | "DELETE" => StatusCode::NOT_FOUND,
-                _ => StatusCode::METHOD_NOT_ALLOWED,
-            };
-            let error = if status == StatusCode::NOT_FOUND {
-                "not found"
+        ("GET", "/fs/locations") | ("GET", "/fs/browse") => {
+            let origin = headers
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if !origin_allowed(origin) {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    &serde_json::json!({ "error": "origin not allowed" }),
+                );
+            }
+            if let Some(denied) = authorize(&state, &headers, &query) {
+                return denied;
+            }
+            let body = if path == "/fs/locations" {
+                Ok(crate::folders::folder_locations())
             } else {
-                "method not allowed"
+                crate::folders::browse_folders(
+                    query.get("path").map(String::as_str).unwrap_or(""),
+                    query
+                        .get("hidden")
+                        .map(|value| value == "1")
+                        .unwrap_or(false),
+                    query.get("filter").map(String::as_str).unwrap_or(""),
+                    query
+                        .get("offset")
+                        .and_then(|value| value.parse::<f64>().ok()),
+                    query
+                        .get("limit")
+                        .and_then(|value| value.parse::<f64>().ok()),
+                )
             };
-            json_response(status, &serde_json::json!({ "ok": false, "error": error }))
+            let mut response = match body {
+                Ok(value) => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("ok".into(), serde_json::json!(true));
+                    if let serde_json::Value::Object(fields) = value {
+                        map.extend(fields);
+                    }
+                    json_response(StatusCode::OK, &serde_json::Value::Object(map))
+                }
+                Err(message) => json_response(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({ "ok": false, "error": message }),
+                ),
+            };
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                "no-store".parse().expect("static header"),
+            );
+            response
+        }
+        (_, path) if path.starts_with("/fs") => {
+            let origin = headers
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if !origin_allowed(origin) {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    &serde_json::json!({ "error": "origin not allowed" }),
+                );
+            }
+            if let Some(denied) = authorize(&state, &headers, &query) {
+                return denied;
+            }
+            crate::fs::route(req, path, &query, &headers)
+                .await
+                .unwrap_or_else(|| {
+                    json_response(
+                        StatusCode::NOT_FOUND,
+                        &serde_json::json!({ "error": "not found" }),
+                    )
+                })
+        }
+        (_, path) if path.starts_with("/terminal/") => {
+            let origin = headers
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if !origin_allowed(origin) {
+                return json_response(
+                    StatusCode::FORBIDDEN,
+                    &serde_json::json!({ "ok": false, "error": "origin not allowed" }),
+                );
+            }
+            if let Some(denied) = authorize(&state, &headers, &query) {
+                return denied;
+            }
+            match crate::terminal::route(&state.terminals, &state.root, req, path, &query, &headers)
+                .await
+            {
+                Some(response) => response,
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": "not found" }),
+                ),
+            }
         }
         ("GET", "/admin/status") => match authorize(&state, req.headers(), &query) {
             Some(denied) => denied,
@@ -339,6 +441,7 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
         ("POST", "/admin/stop") => match authorize(&state, req.headers(), &query) {
             Some(denied) => denied,
             None => {
+                state.terminals.close_all();
                 tokio::spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     std::process::exit(0);
@@ -395,25 +498,6 @@ fn exists(query: &BTreeMap<String, String>) -> Response {
             "resolved": info.resolved,
         }),
     )
-}
-
-fn fs_stat(query: &BTreeMap<String, String>) -> Response {
-    let root = query.get("root").map(String::as_str).unwrap_or("");
-    let rel = query.get("path").map(String::as_str).unwrap_or("");
-    match paths::stat_path(root, rel) {
-        Ok(body) => {
-            let mut map = serde_json::Map::new();
-            map.insert("ok".into(), serde_json::json!(true));
-            if let serde_json::Value::Object(fields) = body {
-                map.extend(fields);
-            }
-            json_response(StatusCode::OK, &serde_json::Value::Object(map))
-        }
-        Err(error) => json_response(
-            StatusCode::from_u16(paths::fs_status(&error)).unwrap_or(StatusCode::BAD_REQUEST),
-            &serde_json::json!({ "ok": false, "error": error.message }),
-        ),
-    }
 }
 
 fn node_platform() -> &'static str {

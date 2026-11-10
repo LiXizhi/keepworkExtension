@@ -32,14 +32,14 @@ test('health reports the Node identity fields and the Rust engine', async () => 
 
 test('health only advertises capabilities this build serves', async () => {
   const health = await (await fetch(`${rust.base}/health`)).json();
+  assert.equal(health.fsApi, 'workspace');
+  assert.equal(health.terminalApi, 'pty-session-v1');
   for (const unimplemented of [
-    'terminalApi',
     'agentSessionApi',
     'browserApi',
     'messagingApi',
     'personasApi',
     'webserverBase',
-    'fsApi',
   ]) {
     assert.equal(health[unimplemented], undefined, `${unimplemented} must stay unadvertised until implemented`);
   }
@@ -52,9 +52,11 @@ test('health matches the Node reference on the shared identity fields', async ()
     for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth']) {
       assert.equal(rust.health[key], node.health[key], `field ${key} must match the Node daemon`);
     }
-    // Documented divergence: Node advertises surfaces the Rust build has not ported yet.
-    assert.equal(node.health.terminalApi, 'pty-session-v1');
-    assert.equal(rust.health.terminalApi, undefined);
+    // P1 ports the local surface; agent/messaging surfaces stay Node-only.
+    assert.equal(node.health.terminalApi, rust.health.terminalApi);
+    assert.equal(node.health.fsApi, rust.health.fsApi);
+    assert.equal(node.health.agentSessionApi, 'v1');
+    assert.equal(rust.health.agentSessionApi, undefined);
   } finally {
     await node.stop();
   }
@@ -89,7 +91,7 @@ test('unknown routes answer like the Node daemon', async () => {
   assert.equal(response.status, 404);
   assert.equal((await response.json()).error, 'not found');
 
-  const fsFallback = await fetch(`${rust.base}/fs/list?root=${encodeURIComponent('/')}`);
+  const fsFallback = await fetch(`${rust.base}/fs/nope?root=${encodeURIComponent('/')}`);
   assert.equal(fsFallback.status, 404);
   assert.deepEqual(await fsFallback.json(), { ok: false, error: 'not found' });
 });

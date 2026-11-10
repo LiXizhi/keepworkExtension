@@ -45,18 +45,21 @@ test('tools/list advertises mcp_status with the exact Node schema', async () => 
   const { text } = await h.mcpRequest(rust.base, session, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
   const body = JSON.parse(text);
   assert.deepEqual(Object.keys(body), ['result', 'jsonrpc', 'id']);
-  assert.deepEqual(body.result.tools, [
-    {
-      name: 'mcp_status',
-      description: 'Report Keepwork local MCP daemon status: workspace root, port, ripgrep availability.',
-      inputSchema: {
-        $schema: 'http://json-schema.org/draft-07/schema#',
-        type: 'object',
-        properties: {},
-      },
-      execution: { taskSupport: 'forbidden' },
+  const status = body.result.tools.find((tool) => tool.name === 'mcp_status');
+  assert.deepEqual(status, {
+    name: 'mcp_status',
+    description: 'Report Keepwork local MCP daemon status: workspace root, port, ripgrep availability.',
+    inputSchema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {},
     },
-  ]);
+    execution: { taskSupport: 'forbidden' },
+  });
+  assert.deepEqual(
+    body.result.tools.map((tool) => tool.name),
+    ['mcp_status', 'run_terminal', 'grep_files', 'web_search', 'fetch_url'],
+  );
 });
 
 test('the mcp_status tool output matches Node line for line', async () => {
@@ -98,7 +101,7 @@ test('the mcp_status schema is byte-identical to the Node daemon', async () => {
     assert.deepEqual(pick(rustList), pick(nodeList));
     // Documented divergence: the Rust build only lists what it implements.
     assert.equal(nodeList.result.tools.length, 13);
-    assert.equal(rustList.result.tools.length, 1);
+    assert.equal(rustList.result.tools.length, 5);
   } finally {
     await node.stop();
   }

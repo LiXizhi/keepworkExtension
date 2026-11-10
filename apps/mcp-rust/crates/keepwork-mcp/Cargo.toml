@@ -1,6 +1,6 @@
 [package]
 name = "keepwork-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Keepwork local MCP daemon (Rust)"
 edition.workspace = true
 license.workspace = true
@@ -18,12 +18,17 @@ path = "src/lib.rs"
 axum = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dirs = "6"
+encoding_rs = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gethostname = "0.5"
+percent-encoding = "2"
+portable-pty = "0.8"
 rand = "0.9"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "gzip", "brotli", "deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }
 tokio-stream = { version = "0.1", features = ["time"] }
 uuid = { version = "1", features = ["v4"] }
 

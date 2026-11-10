@@ -93,7 +93,8 @@ pub async fn handle_post(state: &Arc<AppState>, headers: &HeaderMap, body: &[u8]
             return empty_response(StatusCode::ACCEPTED, Some(&session_id));
         }
         touch(state, &session_id);
-        let response = dispatch_message(state, &session_id, &method, id, parsed.get("params"));
+        let response =
+            dispatch_message(state, &session_id, &method, id, parsed.get("params")).await;
         return mcp_json_response(StatusCode::OK, &response, Some(&session_id));
     }
 
@@ -270,7 +271,7 @@ fn initialize_result(params: Option<&Value>) -> Value {
     })
 }
 
-fn dispatch_message(
+async fn dispatch_message(
     state: &Arc<AppState>,
     session_id: &str,
     method: &str,
@@ -289,14 +290,20 @@ fn dispatch_message(
             let name = params
                 .and_then(|params| params.get("name"))
                 .and_then(Value::as_str)
-                .unwrap_or("");
+                .unwrap_or("")
+                .to_string();
+            let args = params
+                .and_then(|params| params.get("arguments"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let ctx = ToolContext {
                 port: state.port,
                 root: &state.root,
                 started_at: &state.started_at,
                 require_auth: state.require_auth,
+                session: session_id,
             };
-            let result = tools::call(name, &ctx);
+            let result = tools::call(&name, &args, &ctx, &state.shell).await;
             if let Ok(mut store) = state.sessions.lock() {
                 if let Some(session) = store.sessions.get_mut(session_id) {
                     session.call_count += 1;

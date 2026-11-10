@@ -58,7 +58,11 @@ function binaryFor(arch) {
     path.join(rustRoot, 'target', arch.triple, 'release', name),
     path.join(rustRoot, 'target', 'release', name),
   ];
-  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  // Several release profiles can exist side by side; package the newest so a
+  // stale per-target build can never ship over a fresh daemon.
+  const found = candidates
+    .filter((candidate) => fs.existsSync(candidate))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
   if (!found) {
     throw new Error(
       `missing Rust daemon binary for ${arch.arch} (looked in ${candidates.join(', ')}).\n` +

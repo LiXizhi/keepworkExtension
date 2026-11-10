@@ -81,8 +81,9 @@ async fn health_reports_identity_and_only_served_capabilities() {
     assert_eq!(value["runtimeEngine"], "rust");
     assert_eq!(value["runtimeProduct"], "keepwork-mcp-runtime");
     assert!(value.get("workspaceRoot").is_some());
-    // Unimplemented surfaces must stay unadvertised.
-    assert!(value.get("terminalApi").is_none());
+    // P1 advertises the local surface it serves and nothing further.
+    assert_eq!(value["fsApi"], "workspace");
+    assert_eq!(value["terminalApi"], "pty-session-v1");
     assert!(value.get("agentSessionApi").is_none());
 }
 
@@ -160,8 +161,9 @@ async fn mcp_initialize_lists_only_implemented_tools() {
     assert_eq!(status, StatusCode::OK);
     let value: Value = serde_json::from_slice(&body).unwrap();
     let tools = value["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 1);
+    assert_eq!(tools.len(), 5);
     assert_eq!(tools[0]["name"], "mcp_status");
+    assert_eq!(tools[1]["name"], "run_terminal");
     assert_eq!(
         tools[0]["inputSchema"],
         serde_json::json!({
@@ -366,6 +368,10 @@ async fn unknown_routes_answer_like_node() {
     );
 
     let (status, _, body) = send(&state, get("/fs/list?root=/tmp")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["ok"], true);
+
+    let (status, _, body) = send(&state, get("/fs/nope?root=/tmp")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["ok"], false);
 

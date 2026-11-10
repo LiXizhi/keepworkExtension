@@ -15,7 +15,7 @@
 | 令牌 | `~/.keepwork-mcp/token`，24 字节 hex，0600 |
 | 单实例文件 | `~/.keepwork-mcp/instance.json` `{pid,port,startedAt,name}` |
 
-`/health` 只声明已经实现的能力：P0 只返回 `requireAuth`、`workspaceRoot`、`runtimeEngine`、`runtimeProduct`；`terminalApi`、`agentSessionApi`、`browserApi`、`messagingApi`、`personasApi` 等在对应阶段完成前不出现，AIChat 会按“能力缺失”降级。
+`/health` 只声明已经实现的能力：P1 返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`runtimeEngine`、`runtimeProduct`；`agentSessionApi`、`browserApi`、`messagingApi`、`personasApi` 等在对应阶段完成前不出现，AIChat 会按“能力缺失”降级。
 
 ## 2. 运行时清单 v2（新增，v1 不动）
 
@@ -51,8 +51,8 @@
 
 | 阶段 | 门槛 |
 | --- | --- |
-| P0 | `/health`、MCP 握手、CORS/401/403 与 Node 一致；`mcp_status` schema 逐字节相同；release 二进制 macOS ≤10MB、Windows ≤12MB |
-| P1 | 本机面路由差分全绿；PTY 游标（CJK/emoji/半截转义）与 Node 一致 |
+| P0 | `/health`、MCP 握手、CORS/401/403 与 Node 一致；`mcp_status` schema 逐字节相同；release 二进制 macOS ≤10MB、Windows ≤12MB —— **已完成** |
+| P1 | 本机面路由差分全绿；PTY 游标（CJK/emoji/半截转义）与 Node 一致 —— **已完成**：`scripts/contract/{fs,terminal,tools}.test.cjs` 双引擎对拍，游标按 UTF-16 码元计数 |
 | P2 | 5 个 SSE 端点帧序/重连一致；agent CLI 冒烟 mac+win |
 | P3 | 105 条路由与 13 个工具 schema 全部对齐 |
 | P4 | 三平台安装/首启/升级/降级/双引擎/owner kill/卸载通过 |
@@ -63,4 +63,4 @@
 - `scripts/contract/*.test.cjs` 用同一套断言分别打 Rust 二进制与 Node 守护进程（不同端口、隔离 HOME）。
 - `scripts/contract/harness.cjs` 是唯一启动入口；新增路由时两边必须同时加断言。
 - 任一阶段出现回归：宿主把 `KEEPWORK_MCP_ENGINE=node` 或回退到自带 Node 运行时即可，Rust 线可单独回滚版本，不影响 v1 feed。
-- 差异必须显式登记在测试里（例如 P0 的 `tools/list` 只列 `mcp_status`、`/admin/status` 无 `nodeVersion`），不允许“看起来一样”。
+- 差异必须显式登记在测试里（例如 P1 的 `tools/list` 只列 5 个可移植工具、`/admin/status` 无 `nodeVersion`、`fetch_url` 无 headless 渲染），不允许“看起来一样”。
