@@ -457,6 +457,10 @@ mod tests {
             external_url("https://keepwork.com/docs"),
             Some("https://keepwork.com/docs".to_string())
         );
+        assert_eq!(
+            external_url("http://127.0.0.1:8089/dashboard"),
+            Some("http://127.0.0.1:8089/dashboard".to_string())
+        );
         assert_eq!(external_url("javascript:alert(1)"), None);
         assert_eq!(external_url("file:///etc/passwd"), None);
         assert_eq!(external_url("https://token@keepwork.com/docs"), None);

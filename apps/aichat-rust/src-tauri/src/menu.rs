@@ -296,6 +296,11 @@ mod tests {
         assert!(is_allowed_host_command("help:check-updates"));
         assert!(is_allowed_host_command("view:toggle-pet"));
         assert!(is_allowed_host_command("help:open-keepwork"));
+        assert!(is_allowed_host_command("help:mcp-dashboard"));
+        assert_eq!(
+            canonical_host_command("help:mcp-dashboard"),
+            Some("mcp-dashboard")
+        );
         assert!(!is_allowed_host_command("evil:exec"));
         assert!(!is_allowed_host_command("file:new-window"));
 

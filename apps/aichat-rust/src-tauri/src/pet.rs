@@ -53,6 +53,71 @@ pub struct WorkArea {
     pub height: i32,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PetHitRegion {
+    pub id: String,
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl PetHitRegion {
+    fn clipped(mut self, area: WorkArea) -> Option<Self> {
+        if !matches!(
+            self.id.as_str(),
+            "pet" | "panel" | "bubble" | "compact-controls" | "exit-bubble" | "permission-bubble"
+        ) || ![self.left, self.top, self.width, self.height]
+            .iter()
+            .all(|n| n.is_finite())
+            || self.width <= 0.0
+            || self.height <= 0.0
+            || self.width > area.width as f64
+            || self.height > area.height as f64
+        {
+            return None;
+        }
+        let right = (self.left + self.width).min(area.width as f64);
+        let bottom = (self.top + self.height).min(area.height as f64);
+        self.left = self.left.max(0.0);
+        self.top = self.top.max(0.0);
+        self.width = right - self.left;
+        self.height = bottom - self.top;
+        (self.width > 0.0 && self.height > 0.0).then_some(self)
+    }
+
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.left && y >= self.top && x < self.left + self.width && y < self.top + self.height
+    }
+}
+
+#[derive(Default)]
+struct PetPointerState {
+    regions: Vec<PetHitRegion>,
+    epoch: u64,
+    held: bool,
+    applied: Option<bool>,
+}
+
+pub fn physical_pet_cursor(
+    cursor: (f64, f64),
+    origin: (f64, f64),
+    scale: f64,
+    area: WorkArea,
+) -> Option<(i32, i32)> {
+    if ![cursor.0, cursor.1, origin.0, origin.1, scale]
+        .iter()
+        .all(|n| n.is_finite())
+        || scale <= 0.0
+    {
+        return None;
+    }
+    Some((
+        ((cursor.0 - origin.0) / scale + area.x as f64).round() as i32,
+        ((cursor.1 - origin.1) / scale + area.y as f64).round() as i32,
+    ))
+}
+
 impl Default for WorkArea {
     fn default() -> Self {
         Self {
@@ -468,6 +533,7 @@ pub struct PetController {
     permission_prompt: Mutex<Option<PetPermissionPrompt>>,
     drag_origin: Mutex<Option<DragOrigin>>,
     canvas_synced: Mutex<Option<WorkArea>>,
+    pointer_state: Mutex<PetPointerState>,
 }
 
 impl PetController {
@@ -483,6 +549,7 @@ impl PetController {
             permission_prompt: Mutex::new(None),
             drag_origin: Mutex::new(None),
             canvas_synced: Mutex::new(None),
+            pointer_state: Mutex::new(PetPointerState::default()),
         }
     }
 
@@ -506,7 +573,114 @@ impl PetController {
 
     pub fn set_work_area(&self, area: WorkArea) {
         if let Ok(mut w) = self.work_area.lock() {
+            if *w != area {
+                self.clear_hit_regions();
+            }
             *w = area;
+        }
+    }
+
+    pub fn clear_hit_regions(&self) {
+        if let Ok(mut pointer) = self.pointer_state.lock() {
+            pointer.regions.clear();
+            pointer.epoch = pointer.epoch.wrapping_add(1);
+        }
+    }
+
+    pub fn hit_regions_epoch(&self) -> u64 {
+        self.pointer_state
+            .lock()
+            .map(|pointer| pointer.epoch)
+            .unwrap_or_default()
+    }
+
+    pub fn update_hit_regions(&self, raw: &Value, epoch: u64) {
+        let area = self.work_area();
+        let regions = raw
+            .as_array()
+            .map(|regions| {
+                regions
+                    .iter()
+                    .take(6)
+                    .filter_map(|region| {
+                        serde_json::from_value::<PetHitRegion>(region.clone()).ok()
+                    })
+                    .filter_map(|region| region.clipped(area))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Ok(mut pointer) = self.pointer_state.lock() {
+            if pointer.epoch == epoch {
+                pointer.regions = regions;
+            }
+        }
+    }
+
+    pub fn set_pointer_hold(&self, held: bool) {
+        if let Ok(mut pointer) = self.pointer_state.lock() {
+            pointer.held = held;
+        }
+    }
+
+    pub fn suspend_pointer_tracking(&self) {
+        if let Ok(mut drag) = self.drag_origin.lock() {
+            *drag = None;
+        }
+        if let Ok(mut pointer) = self.pointer_state.lock() {
+            pointer.held = false;
+            pointer.applied = None;
+        }
+    }
+
+    pub fn pointer_interactive(&self, cursor: Option<(i32, i32)>, primary_down: bool) -> bool {
+        let area = self.work_area();
+        let prefs = self.preferences();
+        let dragging = self.is_dragging();
+        let Ok(mut pointer) = self.pointer_state.lock() else {
+            return false;
+        };
+        if !primary_down {
+            pointer.held = false;
+        }
+        let Some((x, y)) = cursor else {
+            return false;
+        };
+        if primary_down && (dragging || pointer.held) {
+            return true;
+        }
+        let local_x = x as f64 - area.x as f64;
+        let local_y = y as f64 - area.y as f64;
+        if local_x < 0.0
+            || local_y < 0.0
+            || local_x >= area.width as f64
+            || local_y >= area.height as f64
+        {
+            return false;
+        }
+        // The native sprite bounds remain usable even before the first layout
+        // report, and immediately after a move onto another monitor.
+        let pixels = compute_pet_pixels(prefs.scale, area);
+        let (left, top) = clamp_pet_position(prefs.left, prefs.top, pixels, area);
+        (local_x >= left as f64
+            && local_x < (left + pixels) as f64
+            && local_y >= top as f64
+            && local_y < (top + pixels + 16) as f64)
+            || pointer
+                .regions
+                .iter()
+                .any(|region| region.id != "pet" && region.contains(local_x, local_y))
+    }
+
+    pub fn pointer_needs_update(&self, interactive: bool) -> bool {
+        self.pointer_state
+            .lock()
+            .map(|pointer| pointer.applied != Some(interactive))
+            .unwrap_or(false)
+    }
+
+    pub fn record_pointer_interactive(&self, interactive: bool) {
+        if let Ok(mut pointer) = self.pointer_state.lock() {
+            pointer.applied = Some(interactive);
         }
     }
 
@@ -553,13 +727,17 @@ impl PetController {
         let area = self.work_area();
         let exit = self.exit_prompt.lock().ok().and_then(|g| g.clone());
         let perm = self.permission_prompt.lock().ok().and_then(|g| g.clone());
-        sanitize_pet_state(&raw, expanded, &prefs, area, exit.as_ref(), perm.as_ref())
+        let mut snap =
+            sanitize_pet_state(&raw, expanded, &prefs, area, exit.as_ref(), perm.as_ref());
+        snap["hitRegionsEpoch"] = json!(self.hit_regions_epoch());
+        snap
     }
 
     pub fn update_raw_state(&self, next: Value) -> Value {
         if let Ok(mut page) = self.page_state.lock() {
             if pet_context(&page.raw) != pet_context(&next) {
                 page.cancel_pending();
+                self.clear_hit_regions();
             }
             page.raw = next;
         }
@@ -567,6 +745,8 @@ impl PetController {
     }
 
     pub fn reset_state(&self) -> Value {
+        self.clear_hit_regions();
+        self.suspend_pointer_tracking();
         if let Ok(mut page) = self.page_state.lock() {
             page.cancel_pending();
             page.raw = json!({});
@@ -657,6 +837,7 @@ impl PetController {
     }
 
     pub fn set_expanded(&self, value: bool) -> Value {
+        self.clear_hit_regions();
         if let Ok(mut exp) = self.expanded.lock() {
             *exp = value;
         }
@@ -664,6 +845,7 @@ impl PetController {
     }
 
     pub fn set_scale(&self, scale: f64) -> Value {
+        self.clear_hit_regions();
         if let Ok(mut prefs) = self.prefs.lock() {
             prefs.scale = normalize_scale(scale);
             let px = compute_pet_pixels(prefs.scale, self.work_area());
@@ -738,6 +920,7 @@ impl PetController {
         else {
             return None;
         };
+        self.clear_hit_regions();
         self.set_work_area(monitor);
         if let Ok(mut prefs) = self.prefs.lock() {
             prefs.left = Some(left);
@@ -759,6 +942,7 @@ impl PetController {
     }
 
     pub fn update_drag(&self, cursor_x: i32, cursor_y: i32) -> Value {
+        self.clear_hit_regions();
         let origin = self.drag_origin.lock().ok().and_then(|guard| *guard);
         if let Some(DragOrigin::Viewport {
             start_x,
@@ -798,6 +982,7 @@ impl PetController {
     }
 
     pub fn begin_exit_prompt(&self, shared_runtime: bool) -> (String, Value) {
+        self.clear_hit_regions();
         let id = Uuid::new_v4().to_string();
         if let Ok(mut exit) = self.exit_prompt.lock() {
             *exit = Some(PetExitPrompt {
@@ -836,6 +1021,7 @@ impl PetController {
     }
 
     pub fn cancel_exit_prompt(&self) -> Value {
+        self.clear_hit_regions();
         if let Ok(mut guard) = self.exit_prompt.lock() {
             *guard = None;
         }
@@ -860,6 +1046,7 @@ impl PetController {
     }
 
     pub fn set_permission_prompt(&self, prompt: Option<PetPermissionPrompt>) -> Value {
+        self.clear_hit_regions();
         if let Ok(mut guard) = self.permission_prompt.lock() {
             *guard = prompt;
         }
@@ -941,6 +1128,119 @@ mod tests {
         );
         controller.update_raw_state(json!({ "context": "alice", "ready": true }));
         controller
+    }
+
+    #[test]
+    fn native_pointer_hit_testing_recovers_without_renderer_mousemove() {
+        let controller = command_controller();
+        controller.set_work_area(WorkArea {
+            x: -1280,
+            y: -200,
+            width: 1280,
+            height: 800,
+        });
+        controller.update_hit_regions(
+            &json!([
+                {"id":"panel","left":700,"top":100,"width":348,"height":160},
+                {"id":"bubble","left":700,"top":300,"width":348,"height":80}
+            ]),
+            controller.hit_regions_epoch(),
+        );
+        assert!(!controller.pointer_interactive(Some((-1200, -100)), false));
+        controller.record_pointer_interactive(false);
+        // Another app can be foreground throughout: native cursor movement
+        // alone enables input when it re-enters a visible pet surface.
+        assert!(controller.pointer_interactive(Some((-500, -50)), false));
+        assert!(controller.pointer_needs_update(true));
+        controller.record_pointer_interactive(true);
+        assert!(!controller.pointer_needs_update(true));
+        assert!(!controller.pointer_interactive(Some((-500, 80)), false)); // gap
+        assert!(controller.pointer_interactive(Some((-500, 120)), false));
+        controller.update_hit_regions(&json!([]), controller.hit_regions_epoch());
+        assert!(!controller.pointer_interactive(Some((-500, 120)), false));
+        let snap = controller.snapshot();
+        let x = -1280 + snap["petLeft"].as_i64().unwrap() as i32 + 10;
+        let y = -200 + snap["petTop"].as_i64().unwrap() as i32 + 10;
+        assert!(controller.pointer_interactive(Some((x, y)), false));
+        assert!(!controller.pointer_interactive(None, false));
+    }
+
+    #[test]
+    fn pointer_hold_ends_on_release_or_hide_without_a_canvas_grace_period() {
+        let controller = command_controller();
+        let outside = Some((0, 0));
+        controller.set_pointer_hold(true);
+        assert!(controller.pointer_interactive(outside, true));
+        assert!(!controller.pointer_interactive(outside, false));
+        assert!(!controller.pointer_interactive(outside, true));
+        controller.set_pointer_hold(true);
+        controller.suspend_pointer_tracking();
+        assert!(!controller.pointer_interactive(outside, true));
+        controller.start_drag(100, 100);
+        assert!(controller.pointer_interactive(outside, true));
+        assert!(!controller.pointer_interactive(outside, false));
+        controller.end_drag();
+        assert!(!controller.pointer_interactive(outside, true));
+        controller.start_drag(100, 100);
+        controller.suspend_pointer_tracking();
+        assert!(!controller.pointer_interactive(outside, true));
+    }
+
+    #[test]
+    fn monitor_and_scale_changes_clear_old_surface_rectangles() {
+        let controller = command_controller();
+        let regions = json!([{"id":"panel","left":20,"top":20,"width":300,"height":100}]);
+        let old_epoch = controller.hit_regions_epoch();
+        controller.update_hit_regions(&regions, old_epoch);
+        assert!(controller.pointer_interactive(Some((30, 30)), false));
+        controller.set_work_area(WorkArea {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        });
+        assert!(!controller.pointer_interactive(Some((-1890, 30)), false));
+        controller.update_hit_regions(&regions, old_epoch);
+        assert!(!controller.pointer_interactive(Some((-1890, 30)), false));
+        controller.update_hit_regions(&regions, controller.hit_regions_epoch());
+        assert!(controller.pointer_interactive(Some((-1890, 30)), false));
+        controller.set_scale(2.0);
+        assert!(!controller.pointer_interactive(Some((-1890, 30)), false));
+        for scale in [1.0, 1.5, 2.0] {
+            assert_eq!(
+                physical_pet_cursor(
+                    (-1920.0 + 30.0 * scale, 40.0 * scale),
+                    (-1920.0, 0.0),
+                    scale,
+                    controller.work_area()
+                ),
+                Some((-1890, 40))
+            );
+        }
+        assert!(physical_pet_cursor((0.0, 0.0), (0.0, 0.0), 0.0, controller.work_area()).is_none());
+    }
+
+    #[test]
+    fn hit_region_validation_does_not_capture_transparent_or_unbounded_canvas() {
+        let controller = command_controller();
+        for regions in [
+            json!([{"id":"stack","left":0,"top":0,"width":1400,"height":800}]),
+            json!([{"id":"panel","left":0,"top":0,"width":999999,"height":999999}]),
+            json!([{"id":"panel","left":0,"top":0,"width":0,"height":100}]),
+            json!([{"id":"panel","left":0,"top":0,"width":100,"height":-1}]),
+            json!([{"id":"panel","left":2000,"top":2000,"width":100,"height":100}]),
+        ] {
+            controller.update_hit_regions(&regions, controller.hit_regions_epoch());
+            assert!(!controller.pointer_interactive(Some((10, 10)), false));
+        }
+        let invalid = PetHitRegion {
+            id: "panel".into(),
+            left: f64::NAN,
+            top: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        assert!(invalid.clipped(controller.work_area()).is_none());
     }
 
     #[tokio::test]

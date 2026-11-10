@@ -39,6 +39,7 @@ interface PetSnapshot {
   petLeft?: number;
   petTop?: number;
   petPixels?: number;
+  hitRegionsEpoch?: number;
   dragging?: boolean;
   preferences?: { appearance?: string; scale?: number };
   pet?: {
@@ -127,14 +128,38 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     ready: Promise<unknown>;
   } | null = null;
   let dragEpoch = 0;
-  let acceptClicksUntil = 0;
   let releasedTap = false;
   let firstTap = false;
   let renderedMessages = "";
   let choosing = false;
-  let interactive: boolean | null = null;
+  let hitRegionsQueued = false;
+  let hitRegionsSignature = "";
   let jelly: Animation | undefined;
   const artStyle: Record<string, string> = {};
+  const hitSurfaceIds = ["pet", "panel", "bubble", "compact-controls", "exit-bubble", "permission-bubble"];
+  const hitSurfaceSelector = hitSurfaceIds.map((id) => `#${id}`).join(", ");
+
+  function scheduleHitRegions(): void {
+    if (hitRegionsQueued) return;
+    hitRegionsQueued = true;
+    requestAnimationFrame(() => {
+      hitRegionsQueued = false;
+      const regions = hitSurfaceIds.flatMap((id) => {
+        const el = $(id);
+        if (!el.getClientRects().length) return [];
+        const { left, top, width, height } = el.getBoundingClientRect();
+        if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return [];
+        return [{ id, left, top, width, height }];
+      });
+      const epoch = state.hitRegionsEpoch;
+      const signature = JSON.stringify([epoch, regions]);
+      if (signature === hitRegionsSignature) return;
+      hitRegionsSignature = signature;
+      void api.action("hit-regions", { epoch, regions }).catch(() => {
+        if (hitRegionsSignature === signature) hitRegionsSignature = "";
+      });
+    });
+  }
 
   function setArtStyle(key: "backgroundImage" | "backgroundSize" | "backgroundPosition", value: string): void {
     if (artStyle[key] !== value) {
@@ -164,6 +189,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     stack.style.maxHeight = `${onTop ? above : below}px`;
     stack.style.bottom = onTop ? `${window.innerHeight - state.petTop + 8}px` : "auto";
     stack.style.top = onTop ? "auto" : `${state.petTop + petPixels + 24}px`;
+    scheduleHitRegions();
   }
 
   function render(raw: Record<string, unknown> | null): void {
@@ -180,7 +206,6 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       draftEl.value = next.draft || "";
     }
     state = next;
-    interactive = null;
     if (typeof next.expanded === "boolean") {
       expanded = next.expanded;
       $("panel").hidden = !expanded;
@@ -389,6 +414,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
         : recPhaseMap[rec?.phase || ""] || "");
 
     positionLayers();
+    scheduleHitRegions();
   }
 
   for (const el of Array.from(document.querySelectorAll<HTMLButtonElement>("[data-permission]"))) {
@@ -442,6 +468,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
     await api.action("expand", { expanded });
     $("panel").hidden = !expanded;
+    scheduleHitRegions();
     const draftEl = $<HTMLTextAreaElement>("draft");
     if (expanded && !draftEl.disabled) draftEl.focus();
   }
@@ -574,8 +601,6 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     pointer = null;
     releasedTap = false;
     firstTap = false;
-    interactive = true;
-    acceptClicksUntil = performance.now() + 400;
     const epoch = dragEpoch;
     // The native move is async. Keep the drop-shadow off until it lands,
     // or WKWebView stamps the old shadow as a ghost.
@@ -588,7 +613,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     requestAnimationFrame(() => {
       pet.style.pointerEvents = "";
     });
-    void api.action("hit-test", { interactive: true });
+    scheduleHitRegions();
   };
 
   $("pet").addEventListener("pointerdown", (event) => {
@@ -695,19 +720,26 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
   window.addEventListener("resize", () => {
     positionLayers();
+    scheduleHitRegions();
   });
 
-  document.addEventListener("mousemove", (event) => {
-    const target = event.target as HTMLElement | null;
-    const next =
-      !!pointer ||
-      !!target?.closest("#pet, #compact-controls, #panel, #bubble, #exit-bubble, #permission-bubble");
-    if (!next && performance.now() < acceptClicksUntil) return;
-    if (next !== interactive) {
-      interactive = next;
-      void api.action("hit-test", { interactive });
+  // Native cursor tracking keeps these regions clickable even when an inactive
+  // WebView receives no mousemove events. Never report the transparent #stack.
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(scheduleHitRegions);
+    for (const id of hitSurfaceIds) observer.observe($(id));
+  }
+  document.addEventListener("animationend", scheduleHitRegions, true);
+  document.addEventListener("transitionend", scheduleHitRegions, true);
+  document.addEventListener("pointerdown", (event) => {
+    if (event.button === 0 && (event.target as HTMLElement | null)?.closest(hitSurfaceSelector)) {
+      void api.action("pointer-hold", { active: true });
     }
-  });
+  }, true);
+  const releasePointerHold = () => void api.action("pointer-hold", { active: false });
+  document.addEventListener("pointerup", releasePointerHold, true);
+  document.addEventListener("pointercancel", releasePointerHold, true);
+  window.addEventListener("blur", releasePointerHold);
 
   api.subscribe(render);
   void api.action("state").then(render);

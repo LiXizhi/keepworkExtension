@@ -140,9 +140,10 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
 
   const mountChrome = () => {{
     if (document.getElementById("keepwork-desktop-titlebar")) return;
+    const isMac = bootstrap.platform === "darwin" || bootstrap.platform === "macos";
     const host = document.createElement("div");
     host.id = "keepwork-desktop-titlebar";
-    if (bootstrap.platform === "darwin" || bootstrap.platform === "macos") {{
+    if (isMac) {{
       host.setAttribute("data-platform", "darwin");
     }}
     const shadow = host.attachShadow({{ mode: "closed" }});
@@ -206,8 +207,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
 
     const left = document.createElement("div");
     left.className = "left";
-    left.setAttribute("data-tauri-drag-region", "");
-    if (bootstrap.platform !== "darwin" && bootstrap.platform !== "macos") {{
+    if (!isMac) {{
       if (bootstrap.iconDataUrl) {{
         const img = document.createElement("img");
         img.className = "icon";
@@ -238,7 +238,6 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
 
     const center = document.createElement("div");
     center.className = "center";
-    center.setAttribute("data-tauri-drag-region", "");
     const title = document.createElement("span");
     title.className = "title";
     title.textContent = "KeepWork 第二大脑";
@@ -265,45 +264,62 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
 
     const right = document.createElement("div");
     right.className = "right";
-    right.setAttribute("data-tauri-drag-region", "");
 
     center.append(title, address, refresh);
     shadow.append(style, left, center, right);
 
+    let pendingMaximize = null;
+    const isInteractive = (event) => {{
+      const target = event.target;
+      return !!target?.closest?.(
+        "button, a, input, select, textarea, [role='button'], [role='menuitem'], [data-no-drag]"
+      );
+    }};
+    const toggleMaximize = () => {{
+      void invoke("desktop_titlebar_action", {{ action: "toggle-maximize" }}).catch(() => {{}});
+    }};
     const handleDragMouseDown = (e) => {{
       if (e.button !== 0) return;
-      const target = e.target;
-      if (
-        target &&
-        typeof target.closest === "function" &&
-        target.closest(
-          "button, a, input, select, textarea, [role='button'], [role='menuitem'], [data-no-drag]"
-        )
-      ) {{
-        e.__keepworkInteractive = true;
-        return;
-      }}
+      // Keep the original target inside the closed shadow root. Bubbling would
+      // retarget it to host and execute the gesture again (including on buttons).
+      e.stopPropagation();
+      pendingMaximize = null;
+      if (isInteractive(e)) return;
       e.preventDefault();
       if (e.detail === 2) {{
-        void invoke("desktop_titlebar_action", {{ action: "toggle-maximize" }}).catch(() => {{}});
-        if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {{
-          void window.__TAURI_INTERNALS__.invoke("plugin:window|internal_toggle_maximize").catch(() => {{}});
+        // Match Tauri's macOS gesture: commit on release so dragging the second
+        // press can cancel maximization before the window changes size.
+        if (isMac) {{
+          pendingMaximize = {{ x: e.clientX, y: e.clientY }};
+        }} else {{
+          toggleMaximize();
         }}
-        return;
-      }}
-      if (e.detail === 1) {{
+      }} else if (e.detail === 1) {{
         void invoke("desktop_titlebar_action", {{ action: "drag" }}).catch(() => {{}});
-        if (window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === "function") {{
-          void window.__TAURI_INTERNALS__.invoke("plugin:window|start_dragging").catch(() => {{}});
-        }}
+      }}
+    }};
+    const handleDragMouseUp = (e) => {{
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      const pending = pendingMaximize;
+      pendingMaximize = null;
+      if (pending && e.detail === 2 && !isInteractive(e)
+          && e.clientX === pending.x && e.clientY === pending.y) {{
+        toggleMaximize();
       }}
     }};
 
     shadow.addEventListener("mousedown", handleDragMouseDown);
-    host.addEventListener("mousedown", (e) => {{
-      if (e.__keepworkInteractive) return;
-      handleDragMouseDown(e);
+    host.addEventListener("mousedown", handleDragMouseDown);
+    shadow.addEventListener("mouseup", handleDragMouseUp);
+    host.addEventListener("mouseup", handleDragMouseUp);
+    window.addEventListener("mousemove", (e) => {{
+      if (pendingMaximize && (e.clientX !== pendingMaximize.x || e.clientY !== pendingMaximize.y)) {{
+        pendingMaximize = null;
+      }}
     }});
+    window.addEventListener("mouseup", () => {{ pendingMaximize = null; }});
+    window.addEventListener("blur", () => {{ pendingMaximize = null; }});
 
     const offsetStyle = document.createElement("style");
     offsetStyle.id = "keepwork-desktop-offset";

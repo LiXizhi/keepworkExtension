@@ -25,28 +25,80 @@ const snapshot = (extra = {}) => ({
 
 async function renderer(initial = snapshot()) {
   const elements = new Map();
+  const documentListeners = new Map();
+  const windowListeners = new Map();
+  const frames = new Map();
+  const resizeObservers = [];
+  const surfaceIds = ["pet", "panel", "bubble", "compact-controls", "exit-bubble", "permission-bubble"];
+  const defaultRects = {
+    pet: { left: 800, top: 650, width: 112, height: 128 },
+    panel: { left: 560, top: 430, width: 348, height: 190 },
+    bubble: { left: 550, top: 200, width: 348, height: 100 },
+    "compact-controls": { left: 780, top: 620, width: 100, height: 40 },
+    "exit-bubble": { left: 550, top: 300, width: 348, height: 220 },
+    "permission-bubble": { left: 500, top: 250, width: 348, height: 210 },
+  };
+  let frameId = 0;
   let current = initial;
   let publish;
   let handler;
   const calls = [];
+  const regionCalls = [];
+  const pointerHolds = [];
+  function addListener(listeners, type, callback) {
+    if (!listeners.has(type)) listeners.set(type, new Set());
+    listeners.get(type).add(callback);
+  }
+  function dispatch(listeners, type, event = {}) {
+    for (const callback of listeners.get(type) || []) callback({ type, ...event });
+  }
+  function visible(element) {
+    for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+      if (ancestor.hidden) return false;
+    }
+    return true;
+  }
+  class ResizeObserver {
+    constructor(callback) { this.callback = callback; this.observed = new Set(); resizeObservers.push(this); }
+    observe(element) { this.observed.add(element); }
+    unobserve(element) { this.observed.delete(element); }
+    disconnect() { this.observed.clear(); }
+  }
   const document = {
     querySelectorAll: () => [],
-    addEventListener() {},
+    addEventListener(type, callback) { addListener(documentListeners, type, callback); },
     body: { style: { setProperty() {} }, classList: { add() {}, remove() {} } },
     getElementById(id) {
       if (!elements.has(id)) {
         const listeners = new Map();
         elements.set(id, {
-          style: {}, dataset: {}, children: [], value: "", textContent: "", disabled: false,
+          id, style: {}, dataset: {}, children: [], value: "", textContent: "", disabled: false,
+          hidden: surfaceIds.includes(id) && id !== "pet",
+          rect: { left: 0, top: 0, width: 0, height: 0, ...defaultRects[id] },
           scrollTop: 0, scrollHeight: 100, clientHeight: 100,
           classList: { toggle() {}, add() {}, remove() {} },
           setAttribute(key, value) { this[key] = value; },
-          addEventListener(type, callback) { listeners.set(type, callback); },
+          addEventListener(type, callback) { addListener(listeners, type, callback); },
           replaceChildren(...children) { this.children = children; },
           focus() { document.activeElement = this; },
           click() { if (!this.disabled) return this.onclick?.({}); },
-          fire(type, event = {}) { return listeners.get(type)?.(event); },
+          fire(type, event = {}) { return dispatch(listeners, type, { target: this, ...event }); },
+          getBoundingClientRect() {
+            return { ...this.rect, x: this.rect.left, y: this.rect.top,
+              right: this.rect.left + this.rect.width, bottom: this.rect.top + this.rect.height };
+          },
+          getClientRects() { return visible(this) ? [this.getBoundingClientRect()] : []; },
+          closest(selector) {
+            if (selector.split(",").some(part => part.trim() === `#${this.id}`)) return this;
+            return this.parentElement?.closest(selector) || null;
+          },
         });
+        if (surfaceIds.includes(id) && id !== "pet") {
+          elements.get(id).parentElement = document.getElementById("stack");
+        }
+        if (["draft", "send", "target", "dictation", "call"].includes(id)) {
+          elements.get(id).parentElement = document.getElementById("panel");
+        }
       }
       return elements.get(id);
     },
@@ -56,6 +108,8 @@ async function renderer(initial = snapshot()) {
     subscribe(callback) { publish = callback; },
     async action(name, args = {}) {
       if (name === "state") return current;
+      if (name === "hit-regions") { regionCalls.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
+      if (name === "pointer-hold") { pointerHolds.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
       calls.push({ name, args });
       if (handler) return handler(name, args);
       if (name === "input") current = { ...current, draft: args.text };
@@ -68,17 +122,40 @@ async function renderer(initial = snapshot()) {
     require: () => ({}),
     window: {
       desktopPet: api, innerWidth: 1000, innerHeight: 800,
-      addEventListener() {}, matchMedia: () => ({ matches: true }),
+      addEventListener(type, callback) { addListener(windowListeners, type, callback); },
+      matchMedia: () => ({ matches: true }),
       getSelection: () => null, setTimeout,
     },
     document,
     performance,
-    requestAnimationFrame() {},
+    ResizeObserver,
+    getComputedStyle: element => ({ display: visible(element) ? "block" : "none", visibility: "visible" }),
+    requestAnimationFrame(callback) { const id = ++frameId; frames.set(id, callback); return id; },
+    cancelAnimationFrame(id) { frames.delete(id); },
   });
   await settle();
+  async function flushLayout() {
+    for (let i = 0; frames.size && i < 10; i++) {
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const callback of pending) callback(performance.now());
+      await settle();
+    }
+  }
+  await flushLayout();
   return {
     element: id => document.getElementById(id),
     calls,
+    regionCalls,
+    pointerHolds,
+    flushLayout,
+    focusedId() { return document.activeElement?.id; },
+    documentEvent(type, event) { dispatch(documentListeners, type, event); },
+    windowEvent(type, event) { dispatch(windowListeners, type, event); },
+    resizeObserved() {
+      for (const observer of resizeObservers) observer.callback([...observer.observed].map(target => ({ target })));
+    },
+    setRect(id, rect) { Object.assign(document.getElementById(id).rect, rect); },
     publish(extra) { current = { ...current, ...extra }; publish(current); },
     handle(callback) { handler = callback; },
     input(text) {
@@ -245,4 +322,139 @@ test("IME composition and Shift+Enter never submit the draft", async () => {
   await settle();
   assert.equal(prevented, 0);
   assert.deepEqual(pet.calls, []);
+});
+
+function surfaceIds(pet) {
+  assert.ok(pet.regionCalls.length, "visible surfaces must be reported without mouse movement");
+  return pet.regionCalls.at(-1).regions.map(region => region.id).filter(id => id !== "pet").sort();
+}
+
+test("visible hit regions are published without mouse movement or focus changes", async () => {
+  const pet = await renderer();
+  assert.deepEqual(surfaceIds(pet), ["panel"]);
+  const panel = pet.regionCalls.at(-1).regions.find(region => region.id === "panel");
+  assert.deepEqual(panel, { id: "panel", left: 560, top: 430, width: 348, height: 190 });
+  pet.windowEvent("blur");
+  await pet.flushLayout();
+  assert.deepEqual(surfaceIds(pet), ["panel"], "blur must not discard regions needed by the native cursor probe");
+  assert.equal(pet.focusedId(), undefined, "geometry reporting must not focus the pet or its composer");
+  pet.documentEvent("mousemove", { target: pet.element("draft") });
+  pet.documentEvent("mousemove", { target: pet.element("stack") });
+  assert.deepEqual(pet.calls, [], "hit testing must not depend on forwarded DOM mousemove commands");
+});
+
+test("hit regions follow the visible UI surfaces and exclude transparent stack gaps", async () => {
+  const pet = await renderer();
+  const transitions = [
+    [{ expanded: false, reply: { text: "回复内容" } }, ["bubble"]],
+    [{ reply: null, compactVoice: true }, ["compact-controls"]],
+    [{ exitPrompt: { id: "exit-1", personas: [] } }, ["exit-bubble"]],
+    [{ permission: { id: "permission-1", client: "QA" } }, ["permission-bubble"]],
+    [{ exitPrompt: null, permission: null, expanded: true }, ["panel"]],
+    [{ expanded: false, compactVoice: false }, []],
+  ];
+  for (const [state, expected] of transitions) {
+    pet.publish(state);
+    await pet.flushLayout();
+    assert.deepEqual(surfaceIds(pet), expected);
+    assert.ok(pet.regionCalls.at(-1).regions.every(region => region.id !== "stack"));
+  }
+});
+
+test("layout reports are batched and deduplicated across resize, observations and animations", async () => {
+  const pet = await renderer(snapshot({ petLeft: 800, petTop: 650, petPixels: 112 }));
+  assert.deepEqual(surfaceIds(pet), ["panel"]);
+  const count = pet.regionCalls.length;
+  pet.setRect("panel", { left: 120, top: 55, width: 300, height: 190 });
+  pet.resizeObserved();
+  pet.resizeObserved();
+  pet.windowEvent("resize");
+  pet.documentEvent("animationend", { target: pet.element("panel") });
+  assert.equal(pet.regionCalls.length, count, "measurement should wait for the animation frame");
+  await pet.flushLayout();
+  assert.equal(pet.regionCalls.length, count + 1);
+  assert.deepEqual(pet.regionCalls.at(-1).regions.find(region => region.id === "panel"), {
+    id: "panel", left: 120, top: 55, width: 300, height: 190,
+  });
+  pet.publish({ attention: "状态变化但布局未变" });
+  pet.resizeObserved();
+  pet.windowEvent("resize");
+  pet.documentEvent("animationend", { target: pet.element("panel") });
+  await pet.flushLayout();
+  assert.equal(pet.regionCalls.length, count + 1, "unchanged geometry must not create repeated IPC reports");
+
+  pet.setRect("panel", { width: 320 });
+  pet.resizeObserved();
+  await pet.flushLayout();
+  assert.equal(pet.regionCalls.at(-1).regions.find(region => region.id === "panel").width, 320);
+  pet.setRect("panel", { top: 80 });
+  pet.documentEvent("animationend", { target: pet.element("panel") });
+  await pet.flushLayout();
+  assert.equal(pet.regionCalls.at(-1).regions.find(region => region.id === "panel").top, 80);
+
+  pet.setRect("panel", { left: 400, top: 180 });
+  pet.setRect("pet", { left: 600, top: 440, width: 224, height: 240 });
+  pet.publish({ petLeft: 600, petTop: 440, petPixels: 224 });
+  await pet.flushLayout();
+  assert.deepEqual(pet.regionCalls.at(-1).regions.find(region => region.id === "panel"), {
+    id: "panel", left: 400, top: 180, width: 320, height: 190,
+  }, "a native drag or scale snapshot must refresh the measured surfaces");
+});
+
+test("invalid and empty rectangles cannot become native hit targets", async () => {
+  const pet = await renderer();
+  assert.deepEqual(surfaceIds(pet), ["panel"]);
+  for (const rect of [
+    { left: 10, top: 20, width: 0, height: 100 },
+    { left: Number.NaN, top: 20, width: 100, height: 100 },
+    { left: 10, top: Number.POSITIVE_INFINITY, width: 100, height: 100 },
+    { left: 10, top: 20, width: 100, height: -1 },
+  ]) {
+    pet.setRect("panel", rect);
+    pet.resizeObserved();
+    await pet.flushLayout();
+    assert.deepEqual(surfaceIds(pet), []);
+  }
+});
+
+test("a new native hit-region epoch republishes unchanged geometry", async () => {
+  const pet = await renderer(snapshot({ hitRegionsEpoch: 1 }));
+  assert.deepEqual(surfaceIds(pet), ["panel"]);
+  const before = pet.regionCalls.at(-1);
+  const count = pet.regionCalls.length;
+  assert.equal(before.epoch, 1);
+
+  pet.publish({ hitRegionsEpoch: 2 });
+  await pet.flushLayout();
+  assert.equal(pet.regionCalls.length, count + 1,
+    "native invalidation must restore regions even when every rectangle stays unchanged");
+  assert.equal(pet.regionCalls.at(-1).epoch, 2);
+  assert.deepEqual(pet.regionCalls.at(-1).regions, before.regions);
+
+  pet.publish({ hitRegionsEpoch: 2, attention: "仅消息状态变化" });
+  pet.resizeObserved();
+  await pet.flushLayout();
+  assert.equal(pet.regionCalls.length, count + 1, "the same epoch and geometry should still deduplicate");
+});
+
+test("only a primary press beginning on visible UI holds interaction until release or cancel", async () => {
+  const pet = await renderer();
+  pet.documentEvent("pointerdown", { button: 0, pointerId: 1, target: pet.element("draft") });
+  pet.documentEvent("pointerup", { button: 0, pointerId: 1, target: pet.element("stack") });
+  assert.deepEqual(pet.pointerHolds, [{ active: true }, { active: false }]);
+
+  pet.documentEvent("pointerdown", { button: 0, pointerId: 2, target: pet.element("stack") });
+  pet.documentEvent("pointerup", { button: 0, pointerId: 2, target: pet.element("stack") });
+  pet.documentEvent("pointerdown", { button: 2, pointerId: 3, target: pet.element("draft") });
+  pet.documentEvent("pointerup", { button: 2, pointerId: 3, target: pet.element("draft") });
+  assert.ok(pet.pointerHolds.slice(2).every(hold => hold.active === false),
+    "background and secondary clicks must not retain the whole canvas");
+
+  pet.documentEvent("pointerdown", { button: 0, pointerId: 4, target: pet.element("draft") });
+  pet.documentEvent("pointercancel", { pointerId: 4, target: pet.element("stack") });
+  assert.deepEqual(pet.pointerHolds.slice(-2), [{ active: true }, { active: false }]);
+
+  pet.documentEvent("pointerdown", { button: 0, pointerId: 5, target: pet.element("draft") });
+  pet.windowEvent("blur");
+  assert.deepEqual(pet.pointerHolds.slice(-2), [{ active: true }, { active: false }]);
 });

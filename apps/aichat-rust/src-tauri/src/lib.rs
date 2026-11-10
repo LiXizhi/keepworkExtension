@@ -46,6 +46,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -181,10 +183,7 @@ pub fn open_in_system_browser(raw_url: &str) -> Result<(), String> {
     let valid = external_url(raw_url).ok_or_else(|| format!("Invalid external URL: {raw_url}"))?;
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
-            .arg(&valid)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        spawn_macos_open(&valid)
     }
     #[cfg(target_os = "windows")]
     {
@@ -192,6 +191,7 @@ pub fn open_in_system_browser(raw_url: &str) -> Result<(), String> {
             .args(["url.dll,FileProtocolHandler", &valid])
             .spawn()
             .map_err(|e| e.to_string())?;
+        Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -199,9 +199,111 @@ pub fn open_in_system_browser(raw_url: &str) -> Result<(), String> {
             .arg(&valid)
             .spawn()
             .map_err(|e| e.to_string())?;
+        Ok(())
     }
-    Ok(())
 }
+
+#[cfg(target_os = "macos")]
+fn spawn_macos_open(url: &str) -> Result<(), String> {
+    let url = url.to_string();
+    let url_for_err = url.clone();
+    std::thread::Builder::new()
+        .name("open-url".into())
+        .spawn(move || {
+            // The status-item menu is still tracking when this is requested.
+            // `open` and NSWorkspace only activate Chrome in that state and drop
+            // the URL (Chrome is often already running with --no-startup-window).
+            // AppleScript `open location` is what actually creates the tab.
+            std::thread::sleep(Duration::from_millis(200));
+            if let Some(bundle_id) = default_browser_bundle_id() {
+                // Do not fall back to `open` after this fails. That command
+                // brings Chrome forward and still does not load the URL.
+                if let Err(err) = browser_open_location(&bundle_id, &url) {
+                    eprintln!("mcp-dashboard: {err}");
+                }
+                return;
+            }
+            let _ = Command::new("/usr/bin/open")
+                .arg("--")
+                .arg(&url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        })
+        .map(|_| ())
+        .map_err(|e| format!("无法打开 {url_for_err}：{e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn browser_open_location(bundle_id: &str, url: &str) -> Result<(), String> {
+    if !bundle_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(format!("浏览器标识无效：{bundle_id}"));
+    }
+    let output = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(
+            "on run argv\ntell application id (item 1 of argv) to open location (item 2 of argv)\nend run",
+        )
+        .arg(bundle_id)
+        .arg(url)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "osascript {} {}",
+            output.status,
+            detail.trim()
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn default_browser_bundle_id() -> Option<String> {
+    let path = dirs::home_dir()?
+        .join("Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist");
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(&path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let handlers = value.get("LSHandlers")?.as_array()?;
+    let mut https_id = None;
+    let mut web_browser = None;
+    for handler in handlers {
+        let role = handler
+            .get("LSHandlerRoleAll")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let scheme = handler
+            .get("LSHandlerURLScheme")
+            .and_then(Value::as_str);
+        if scheme == Some("http") {
+            return role;
+        }
+        if scheme == Some("https") {
+            https_id = role.clone();
+        }
+        if handler.get("LSHandlerContentType").and_then(Value::as_str)
+            == Some("com.apple.default-app.web-browser")
+        {
+            web_browser = role;
+        }
+    }
+    https_id.or(web_browser)
+}
+
 
 pub fn reveal_path_in_os(target: &Path, mode: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -462,18 +564,96 @@ fn apply_pet_drag(
         pet.end_drag();
         if let Some(window) = app.get_webview_window("pet") {
             let _ = window.set_shadow(false);
-            // The drag held the full canvas. Accept clicks again so the sprite
-            // can be pressed; the page turns click-through back on after it moves off.
-            let _ = window.set_ignore_cursor_events(false);
         }
     }
     drag_snapshot(pet)
+}
+
+fn sync_pet_pointer(window: &WebviewWindow, pet: &PetController, app: &AppHandle) {
+    let buttons_available = cfg!(any(target_os = "macos", target_os = "windows"));
+    let primary_down = buttons_available && primary_button_down();
+    if buttons_available && !primary_down && pet.is_dragging() {
+        // A background renderer may miss the release. Finish the native drag
+        // before a later press in another app can inherit its input hold.
+        if pet.is_global_dragging() {
+            move_with_global_cursor(app, pet);
+        }
+        let snap = apply_pet_drag(app, pet, &json!({}), true);
+        let _ = app.emit("aichat-desktop:pet-state", &snap);
+    }
+    #[cfg(target_os = "macos")]
+    let cursor = logical_cursor(app);
+    #[cfg(not(target_os = "macos"))]
+    let cursor = (|| {
+        // Windows screen positions are physical pixels. Subtract this window's
+        // physical origin before applying its own DPI, not the primary DPI.
+        let point = app.cursor_position().ok()?;
+        let origin = window.inner_position().ok()?;
+        crate::pet::physical_pet_cursor(
+            (point.x, point.y),
+            (origin.x as f64, origin.y as f64),
+            window.scale_factor().ok()?,
+            pet.work_area(),
+        )
+    })();
+    let interactive = pet.pointer_interactive(cursor, primary_down);
+    if pet.pointer_needs_update(interactive)
+        && window.set_ignore_cursor_events(!interactive).is_ok()
+    {
+        pet.record_pointer_interactive(interactive);
+    }
+}
+
+/// Unlike Electron's forwarded mousemove, a click-through WKWebView cannot
+/// restore its own mouse input. Keep hit testing outside the inactive renderer.
+fn start_pet_pointer_tracker(app: &AppHandle, window: &WebviewWindow, pet: &Arc<PetController>) {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let destroyed = Arc::clone(&stopped);
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed) {
+            destroyed.store(true, Ordering::Relaxed);
+        }
+    });
+    let app = app.clone();
+    let window = window.clone();
+    let pet = Arc::clone(pet);
+    tauri::async_runtime::spawn(async move {
+        while !stopped.load(Ordering::Relaxed) {
+            let (done, completed) = tokio::sync::oneshot::channel();
+            let handle = app.clone();
+            let target = window.clone();
+            let controller = Arc::clone(&pet);
+            if app
+                .run_on_main_thread(move || {
+                    let visible = target.is_visible().ok();
+                    if visible == Some(true) {
+                        sync_pet_pointer(&target, &controller, &handle);
+                    } else {
+                        controller.suspend_pointer_tracking();
+                    }
+                    let _ = done.send(visible);
+                })
+                .is_err()
+            {
+                break;
+            }
+            // Wait for each main-thread pass, so a busy event loop cannot build
+            // an unbounded backlog. Hidden windows do not read the cursor.
+            match completed.await {
+                Ok(Some(visible)) => {
+                    tokio::time::sleep(Duration::from_millis(if visible { 16 } else { 200 })).await
+                }
+                _ => break,
+            }
+        }
+    });
 }
 
 pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
     if let Some(existing) = app.get_webview_window("pet") {
         if show_now {
             let _ = existing.show();
+            sync_pet_pointer(&existing, &core.pet, app);
         }
         broadcast_pet_state(app, core);
         return;
@@ -492,12 +672,22 @@ pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
         .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
+        .accept_first_mouse(true)
         .resizable(false)
         .visible(show_now)
         .build()
     {
         let _ = builder.set_shadow(false);
         let _ = builder.set_ignore_cursor_events(true);
+        core.pet.clear_hit_regions();
+        core.pet.suspend_pointer_tracking();
+        let controller = Arc::clone(&core.pet);
+        builder.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Focused(false) | WindowEvent::Destroyed) {
+                controller.set_pointer_hold(false);
+            }
+        });
+        start_pet_pointer_tracker(app, &builder, &core.pet);
         broadcast_pet_state(app, core);
     }
 }
@@ -916,11 +1106,22 @@ async fn desktop_pet_action(
             Ok(state.pet.snapshot())
         }
         "hit-test" => {
-            let interactive = args
-                .get("interactive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let _ = window.set_ignore_cursor_events(!interactive);
+            // Legacy bundled renderers may still send this hint. Native cursor
+            // geometry remains authoritative; never enable the entire canvas.
+            Ok(json!({ "ok": true }))
+        }
+        "hit-regions" => {
+            if let Some(epoch) = args["epoch"].as_u64() {
+                state.pet.update_hit_regions(&args["regions"], epoch);
+            }
+            Ok(json!({ "ok": true }))
+        }
+        "pointer-hold" => {
+            state.pet.set_pointer_hold(
+                args["active"].as_bool() == Some(true)
+                    && cfg!(any(target_os = "macos", target_os = "windows"))
+                    && primary_button_down(),
+            );
             Ok(json!({ "ok": true }))
         }
         "drag-start" => {
@@ -1647,15 +1848,38 @@ fn setup_native_menu_and_tray(app: &AppHandle, core: &Arc<AppCore>) -> tauri::Re
                 quit_desktop(app_handle, &core_for_menu);
                 return;
             }
+            if canonical_host_command(&id).unwrap_or(id.as_str()) == "mcp-dashboard" {
+                let app_clone = app_handle.clone();
+                let url = format!("http://127.0.0.1:{MCP_PORT}/dashboard");
+                if let Err(err) = open_in_system_browser(&url) {
+                    eprintln!("mcp-dashboard: {err}");
+                    show_host_error(&app_clone, &err);
+                }
+                return;
+            }
             let app_clone = app_handle.clone();
             let core_clone = Arc::clone(&core_for_menu);
             tauri::async_runtime::spawn(async move {
-                let _ = execute_host_command(&app_clone, &core_clone, &id).await;
+                if let Err(err) = execute_host_command(&app_clone, &core_clone, &id).await {
+                    if !err.starts_with("Unsupported menu command:") {
+                        eprintln!("menu command {id} failed: {err}");
+                        show_host_error(&app_clone, &err);
+                    }
+                }
             });
         })
         .build(app)?;
 
     Ok(())
+}
+
+fn show_host_error(app: &AppHandle, message: &str) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    app.dialog()
+        .message(message)
+        .title("Keepwork")
+        .kind(MessageDialogKind::Error)
+        .blocking_show();
 }
 
 /// Products this desktop can launch: the packaged Node runtime and the native
@@ -1951,7 +2175,9 @@ pub fn run() {
                     core_for_nav.pet.reset_state();
                     return true;
                 }
-                let _ = open_in_system_browser(url_str);
+                if let Err(err) = open_in_system_browser(url_str) {
+                    eprintln!("open external navigation failed: {err}");
+                }
                 false
             })
             .on_new_window(move |url, _features| {
@@ -1961,7 +2187,9 @@ pub fn run() {
                     // and the /sso callback to complete inside the app.
                     NewWindowResponse::Allow
                 } else {
-                    let _ = open_in_system_browser(url.as_str());
+                    if let Err(err) = open_in_system_browser(url.as_str()) {
+                        eprintln!("open external window failed: {err}");
+                    }
                     NewWindowResponse::Deny
                 }
             });
