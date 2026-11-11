@@ -102,13 +102,48 @@ async fn main() {
 
     let fake_exe = root.join("Keepwork");
     fs::write(&fake_exe, "exe").unwrap();
+    // Login startup is opt-in: a packaged first launch records "off" and must
+    // not register an OS login item behind the user's back.
     let startup = LoginStartup::new(
         root.join("settings.json"),
         root.join("LaunchAgents"),
         fake_exe.clone(),
         true,
     );
-    assert!(startup.ensure_default());
+    assert!(!startup.ensure_default());
+    assert!(!startup.is_enabled());
+    #[cfg(target_os = "macos")]
+    assert!(!startup.plist_path().exists());
+
+    // An explicit opt-in is persisted and honoured by later launches.
+    let opt_in = LoginStartup::new(
+        root.join("opt-in-settings.json"),
+        root.join("opt-in-LaunchAgents"),
+        fake_exe.clone(),
+        false,
+    );
+    assert!(opt_in.set_enabled(true).unwrap());
+    assert!(opt_in.ensure_default());
+    assert!(opt_in.is_enabled());
+
+    // A packaged build registers the login item on opt-in and removes it on
+    // opt-out. The macOS agent lives in a fixture directory, so no real
+    // LaunchAgent is installed; Windows would touch HKCU, so it stays out of
+    // this cross-platform smoke.
+    #[cfg(target_os = "macos")]
+    {
+        let packaged = LoginStartup::new(
+            root.join("packaged-settings.json"),
+            root.join("packaged-LaunchAgents"),
+            fake_exe.clone(),
+            true,
+        );
+        assert!(packaged.set_enabled(true).unwrap());
+        let plist = fs::read_to_string(packaged.plist_path()).unwrap();
+        assert!(plist.contains("--background"));
+        assert!(!packaged.set_enabled(false).unwrap());
+        assert!(!packaged.plist_path().exists());
+    }
 
     let mcp_home = root.join(".keepwork-mcp");
     remember_desktop_client(&mcp_home, "0.2.0", &fake_exe, true).unwrap();
