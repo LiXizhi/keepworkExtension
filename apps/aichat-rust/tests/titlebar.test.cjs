@@ -1,172 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const vm = require("node:vm");
-const ts = require("typescript");
-
-const appRoot = path.resolve(__dirname, "..");
-const titlebarSource = fs.readFileSync(path.join(appRoot, "src/titlebar.ts"), "utf8");
-const titlebarJs = ts.transpileModule(titlebarSource, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const bridgeSource = fs.readFileSync(path.join(appRoot, "src-tauri/src/bridge.rs"), "utf8");
-const rawBridge = bridgeSource.match(/r#"([\s\S]*?)"#/)[1];
-
-// Model composed event bubbling across a CLOSED shadow root: listeners inside
-// see the real target; host/document/window listeners see only the host. A
-// duplicate host handler must therefore fail the same way it would in a webview.
-function renderer(implementation, platform = "darwin", subframe = false) {
-  class Target {
-    constructor() { this.listeners = new Map(); this.parentNode = null; }
-    addEventListener(type, callback, options) {
-      const listeners = this.listeners.get(type) || [];
-      listeners.push({ callback, capture: options === true || !!options?.capture, once: !!options?.once });
-      this.listeners.set(type, listeners);
-    }
-    removeEventListener(type, callback) {
-      this.listeners.set(type, (this.listeners.get(type) || []).filter(item => item.callback !== callback));
-    }
-  }
-  class Element extends Target {
-    constructor(tag) {
-      super();
-      this.tagName = tag.toUpperCase();
-      this.children = [];
-      this.attributes = new Map();
-      this.dataset = {};
-      this.style = { setProperty() {} };
-      this.className = "";
-      this.classList = { contains: name => this.className.split(/\s+/).includes(name) };
-      this.shadowRoot = null;
-    }
-    get parentElement() { return this.parentNode instanceof Element ? this.parentNode : null; }
-    appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
-    append(...children) { children.forEach(child => this.appendChild(child)); }
-    attachShadow(options) {
-      const shadow = new Target();
-      shadow.host = this;
-      shadow.mode = options.mode;
-      shadow.parentNode = this;
-      shadow.children = [];
-      shadow.append = (...children) => children.forEach(child => {
-        child.parentNode = shadow;
-        shadow.children.push(child);
-      });
-      shadow.querySelectorAll = selector => descendants(shadow).filter(el => el.matches(selector));
-      this.testShadow = shadow;
-      if (options.mode !== "closed") this.shadowRoot = shadow;
-      return shadow;
-    }
-    setAttribute(name, value) { this.attributes.set(name, String(value)); }
-    getAttribute(name) { return this.attributes.get(name) ?? null; }
-    hasAttribute(name) { return this.attributes.has(name); }
-    matches(selector) {
-      return selector.split(",").some(part => {
-        const match = part.trim().match(/^(\w+)?(?:\.([\w-]+))?(?:\[([\w-]+)(?:=['"]?([^'"\]]+)['"]?)?\])?$/);
-        if (!match) return false;
-        const [, tag, className, attribute, value] = match;
-        return (!tag || tag.toUpperCase() === this.tagName)
-          && (!className || this.classList.contains(className))
-          && (!attribute || (this.hasAttribute(attribute)
-            && (value === undefined || this.getAttribute(attribute) === value)));
-      });
-    }
-    closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
-    querySelectorAll(selector) { return descendants(this).filter(el => el.matches(selector)); }
-    getBoundingClientRect() { return { left: 20, bottom: 34 }; }
-    getContext() { return null; }
-  }
-  function descendants(parent) {
-    return (parent.children || []).flatMap(child => [child, ...descendants(child)]);
-  }
-  const document = new Target();
-  document.readyState = "complete";
-  document.documentElement = new Element("html");
-  document.documentElement.parentNode = document;
-  document.head = document.documentElement.appendChild(new Element("head"));
-  document.body = document.documentElement.appendChild(new Element("body"));
-  document.createElement = tag => new Element(tag);
-  document.getElementById = id => [document.documentElement, ...descendants(document.documentElement)]
-    .find(el => el.id === id) || null;
-  const window = new Target();
-  document.parentNode = window;
-  window.top = subframe ? {} : window;
-  window.location = { host: "localhost:57175", pathname: "/", href: "http://localhost:57175/", origin: "http://localhost:57175" };
-  window.innerWidth = 1280;
-  const calls = [];
-  const messages = [];
-  let maximized = false;
-  const invoke = (command, args = {}) => {
-    calls.push(JSON.parse(JSON.stringify({ command, args })));
-    if (args.action === "toggle-maximize" || command.endsWith("toggle_maximize")) maximized = !maximized;
-    return Promise.resolve(true);
-  };
-  window.__TAURI_INTERNALS__ = { invoke };
-  window.postMessage = message => messages.push(message);
-  const context = {
-    window, document, Element, HTMLElement: Element,
-    exports: {}, require: () => ({ invoke }),
-    MutationObserver: class { observe() {} },
-    getComputedStyle: () => ({ colorScheme: "light", getPropertyValue: () => "" }),
-  };
-  const bootstrap = { platform, iconDataUrl: "", menus: [{ id: "file", label: "文件" }], hostCommands: [], pageCommands: [] };
-  if (implementation === "typescript") {
-    vm.runInNewContext(titlebarJs, context);
-    context.exports.mountDesktopTitlebar(bootstrap);
-  } else {
-    const javascript = rawBridge.replaceAll("{{", "{").replaceAll("}}", "}")
-      .replace("{bootstrap}", JSON.stringify(bootstrap));
-    vm.runInNewContext(javascript, context);
-  }
-  calls.length = 0; // Theme synchronization is unrelated to window gestures.
-  function fire(target, type, extra = {}) {
-    const eventPath = [];
-    for (let node = target; node; node = node.parentNode) eventPath.push(node);
-    const shadow = eventPath.find(node => node.mode === "closed");
-    let stopped = false;
-    let immediate = false;
-    const event = {
-      type, button: 0, detail: 1, clientX: 1000, clientY: 15, defaultPrevented: false,
-      preventDefault() { this.defaultPrevented = true; },
-      stopPropagation() { stopped = true; },
-      stopImmediatePropagation() { stopped = immediate = true; },
-      ...extra,
-    };
-    function visit(node, capture) {
-      const outside = shadow && eventPath.indexOf(node) > eventPath.indexOf(shadow);
-      event.target = outside ? shadow.host : target;
-      event.currentTarget = node;
-      event.composedPath = () => outside ? eventPath.slice(eventPath.indexOf(shadow.host)) : eventPath;
-      for (const listener of [...(node.listeners.get(type) || [])]) {
-        if (listener.capture !== capture) continue;
-        listener.callback(event);
-        if (listener.once) node.removeEventListener(type, listener.callback);
-        if (immediate) break;
-      }
-    }
-    for (const node of [...eventPath].reverse()) { visit(node, true); if (stopped) return event; }
-    for (const node of eventPath) { visit(node, false); if (stopped) break; }
-    return event;
-  }
-  const host = document.getElementById("keepwork-desktop-titlebar");
-  return {
-    host, window, document, calls, messages, fire,
-    element: selector => host.testShadow.querySelectorAll(selector)[0],
-    child(parent, tag) { return parent.appendChild(new Element(tag)); },
-    actions: () => calls.map(call => call.command === "desktop_titlebar_action" ? call.args.action : call.command),
-    maximized: () => maximized,
-    doubleClick(target, extra = {}) {
-      fire(target, "mousedown", { detail: 1, ...extra });
-      fire(target, "mouseup", { detail: 1, ...extra });
-      fire(target, "mousedown", { detail: 2, ...extra });
-      fire(target, "mouseup", { detail: 2, ...extra });
-    },
-  };
-}
+const { renderer } = require("./helpers/desktop-renderer.cjs");
 
 for (const implementation of ["typescript", "rust-init-script"]) {
-  for (const platform of ["darwin", "macos", "win32", "linux"]) {
+  for (const platform of ["darwin", "macos", "win32", "windows", "linux"]) {
     test(`${implementation} ${platform}: closed-shadow title, blank region and host padding toggle exactly once`, () => {
       for (const selector of [".right", ".title", null]) {
         const bar = renderer(implementation, platform);
@@ -184,8 +21,8 @@ for (const implementation of ["typescript", "rust-init-script"]) {
     });
   }
 
-  test(`${implementation}: macOS commits on second release while Windows commits on second press`, () => {
-    for (const platform of ["darwin", "win32"]) {
+  test(`${implementation}: macOS commits on second release while Linux commits on second press`, () => {
+    for (const platform of ["darwin", "linux"]) {
       const bar = renderer(implementation, platform);
       const target = bar.element(".right");
       bar.fire(target, "mousedown", { detail: 2 });
@@ -217,13 +54,13 @@ for (const implementation of ["typescript", "rust-init-script"]) {
   });
 
   test(`${implementation}: address, refresh SVG and menu buttons stay interactive without window gestures`, () => {
-    for (const platform of ["darwin", "win32"]) {
+    for (const platform of ["darwin", "linux"]) {
       const bar = renderer(implementation, platform);
       const address = bar.element(".address");
       const refresh = bar.element(".refresh");
       const svgPath = bar.child(bar.child(refresh, "svg"), "path");
       for (const target of [address, refresh, svgPath]) bar.doubleClick(target);
-      if (platform === "win32") bar.doubleClick(bar.element("button[data-menu-id]"));
+      if (platform === "linux") bar.doubleClick(bar.element("button[data-menu-id]"));
       assert.deepEqual(bar.actions(), []);
       assert.equal(bar.fire(address, "mousedown").defaultPrevented, false, "native button defaults remain usable");
       bar.fire(address, "click");
@@ -232,6 +69,39 @@ for (const implementation of ["typescript", "rust-init-script"]) {
       assert.equal(bar.calls[0].args.url, "http://localhost:57175/");
     }
   });
+
+  test(`${implementation}: Linux uses a fixed upright vector K even without a bitmap icon`, () => {
+    const bar = renderer(implementation, "linux");
+    const icon = bar.element(".icon");
+    assert.ok(icon, "K must remain visible when no bitmap is supplied");
+    assert.equal(icon.tagName, "SPAN");
+    assert.match(icon.innerHTML, /<svg[\s>]/);
+    assert.match(icon.innerHTML, /<path[\s>]/);
+    assert.doesNotMatch(icon.innerHTML, /<text[\s>]|<image[\s>]|transform=/);
+    assert.equal(bar.element("img.icon"), undefined);
+    const css = bar.elements("style").map(style => style.textContent).find(text => text.includes(".icon"));
+    assert.match(css, /\.icon\s*\{[^}]*width:\s*18px/);
+    assert.match(css, /\.icon\s*\{[^}]*height:\s*18px/);
+  });
+
+  for (const platform of ["win32", "windows"]) {
+    test(`${implementation} ${platform}: web chrome mounts once with its offset and keeps theme synchronization`, () => {
+      const bar = renderer(implementation, platform);
+      assert.ok(bar.host, "Windows uses the themed 34px web titlebar");
+      assert.equal(bar.elements("button[data-menu-id]").length, 4);
+      assert.ok(bar.document.getElementById("keepwork-desktop-offset"), "web titlebar reserves its 34px client area");
+      assert.ok(bar.initialCalls.some(call => call.command === "desktop_sync_theme"));
+      bar.document.body.className = "dark";
+      bar.fire(bar.window, "aichat:theme-changed");
+      assert.ok(bar.calls.some(call => call.command === "desktop_sync_theme" && call.args.dark === true));
+      if (implementation === "rust-init-script") {
+        assert.ok(Object.isFrozen(bar.window.aichatDesktop), "native chrome cannot remove the v1 bridge");
+        assert.equal(bar.fire(bar.document.body, "contextmenu").defaultPrevented, true, "chrome selection guard remains active");
+        const input = bar.child(bar.document.body, "input");
+        assert.equal(bar.fire(input, "contextmenu").defaultPrevented, false, "composer edit menu remains available");
+      }
+    });
+  }
 
   test(`${implementation}: single primary press drags once and secondary presses do nothing`, () => {
     const bar = renderer(implementation);

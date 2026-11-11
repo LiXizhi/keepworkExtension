@@ -5,7 +5,7 @@ const path = require("node:path");
 
 const appRoot = path.resolve(__dirname, "..");
 
-test("window.aichatDesktop v1 bridge and 34px closed-Shadow-DOM titlebar contracts are preserved", () => {
+test("window.aichatDesktop v1 bridge and shared custom titlebar contracts are preserved", () => {
   const bridgeTs = fs.readFileSync(path.join(appRoot, "src", "bridge.ts"), "utf8");
   const titlebarTs = fs.readFileSync(path.join(appRoot, "src", "titlebar.ts"), "utf8");
   const rustBridge = fs.readFileSync(
@@ -14,6 +14,7 @@ test("window.aichatDesktop v1 bridge and 34px closed-Shadow-DOM titlebar contrac
   );
 
   for (const src of [bridgeTs, rustBridge]) {
+    assert.ok(src.includes("aichat.desktop-menu.v1"));
     assert.match(src, /if \(window !== window\.top\) return/);
     assert.match(src, /Object\.freeze/);
     for (const cap of [
@@ -55,7 +56,6 @@ test("window.aichatDesktop v1 bridge and 34px closed-Shadow-DOM titlebar contrac
     assert.match(src, /attachShadow\(\{\{?\s*mode:\s*"closed"\s*\}\}?\)/);
     assert.ok(src.includes("height:34px") || src.includes("height: 34px"));
     assert.ok(src.includes("calc(100vh - 34px) !important"));
-    assert.ok(src.includes("aichat.desktop-menu.v1"));
   }
 });
 
@@ -118,6 +118,33 @@ test("desktop menu protocol matches aichat-desktop page/host command routing", (
 
   // 未知 id 不再兜底广播。
   assert.ok(libRs.includes('Err(format!("Unsupported menu command: {other}"))'));
+});
+
+test("shell-owned menus return the shared payload while omitted render mode preserves legacy callers", () => {
+  const lib = fs.readFileSync(path.join(appRoot, "src-tauri/src/lib.rs"), "utf8");
+  const openMenu = lib.slice(lib.indexOf("async fn desktop_open_menu"), lib.indexOf("fn desktop_titlebar_action"));
+  assert.ok(openMenu.includes("verify_main_sender(&window, &state)?"));
+  assert.ok(openMenu.includes("render_mode: Option<String>"));
+  assert.ok(openMenu.includes("Unsupported menu render mode"));
+  assert.ok(openMenu.includes("Unsupported menu:"));
+  assert.ok(openMenu.includes('payload["anchor"]'));
+  const shell = openMenu.indexOf('if render_mode.as_deref() == Some("shell")');
+  const legacy = openMenu.indexOf('broadcast_to_main(&app, "menu-message", &payload)');
+  assert.ok(shell >= 0 && legacy > shell);
+  assert.ok(openMenu.slice(shell, legacy).includes("return Ok(payload)"), "shell rendering cannot also broadcast a duplicate popup");
+  assert.ok(openMenu.slice(legacy).includes("Ok(json!(true))"), "legacy callers still receive their boolean result");
+  const titlebar = fs.readFileSync(path.join(appRoot, "src/titlebar.ts"), "utf8");
+  const bridge = fs.readFileSync(path.join(appRoot, "src-tauri/src/bridge.rs"), "utf8");
+  const renderer = fs.readFileSync(path.join(appRoot, "src/menuChrome.js"), "utf8");
+  assert.ok(titlebar.includes('from "./menuChrome.js"'));
+  assert.ok(bridge.includes('include_str!("../../src/menuChrome.js")'));
+  assert.ok(titlebar.includes("mountDesktopMenus("));
+  assert.ok(bridge.includes("mountDesktopMenus("));
+  assert.ok(renderer.includes('renderMode: "shell"'));
+  assert.ok(renderer.includes('invoke("desktop_run_menu_command", { id })'));
+  assert.ok(!renderer.includes("window.postMessage"), "rows use the host command gateway for exactly-once dispatch");
+  assert.ok(lib.includes("main_builder.decorations(false)"));
+  assert.ok(!lib.includes("main_win.set_menu("), "Windows no longer adds a second OS menu bar");
 });
 
 test("self-update and automatic update flows are preserved for both MCP and Desktop app", () => {
