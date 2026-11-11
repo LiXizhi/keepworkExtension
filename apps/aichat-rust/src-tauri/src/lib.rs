@@ -2076,8 +2076,23 @@ pub fn run() {
         .unwrap_or_else(|| profile_dir.clone())
         .join("Library")
         .join("LaunchAgents");
+    let login_exe = {
+        #[cfg(windows)]
+        {
+            let launcher = exe_path.with_file_name("Keepwork.exe");
+            if packaged && launcher.is_file() {
+                launcher
+            } else {
+                exe_path
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            exe_path
+        }
+    };
     let login_startup =
-        LoginStartup::new(settings_path.clone(), launch_agents_dir, exe_path, packaged);
+        LoginStartup::new(settings_path.clone(), launch_agents_dir, login_exe, packaged);
     let _ = login_startup.ensure_default();
 
     let mut initial_entry = std::env::var("AICHAT_DESKTOP_DEV_URL")
@@ -2139,8 +2154,10 @@ pub fn run() {
     let init_script = build_main_window_init_script(current_runtime_platform(), &icon_data_url);
 
     let core_for_setup = Arc::clone(&core);
+    let webview_failed = Arc::new(AtomicBool::new(false));
+    let webview_failed_in_setup = Arc::clone(&webview_failed);
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -2256,7 +2273,11 @@ pub fn run() {
                 main_builder = main_builder.decorations(false);
             }
 
-            let main_win = main_builder.build()?;
+            let main_win = main_builder.build().map_err(|error| {
+                webview_failed_in_setup.store(true, Ordering::Relaxed);
+                error
+            })?;
+            signal_launcher_webview_ready();
 
             let app_for_close = app_handle.clone();
             let core_for_close = Arc::clone(&core_for_setup);
@@ -2355,8 +2376,39 @@ pub fn run() {
             updates_window_apply_mcp,
             updates_window_apply_desktop,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running KeepWork 第二大脑 (aichat-rust)");
+        .run(tauri::generate_context!());
+    if let Err(error) = result {
+        eprintln!("error while running KeepWork 第二大脑 (aichat-rust): {error}");
+        // Only window initialization failure authorizes the native launcher's one-time CEF fallback.
+        // Page/network failures and arbitrary process crashes never use this exit code.
+        std::process::exit(if webview_failed.load(Ordering::Relaxed) { 86 } else { 2 });
+    }
+}
+
+fn signal_launcher_webview_ready() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+        let mut args = std::env::args_os();
+        let event = args
+            .find(|arg| arg == "--webview-ready-event")
+            .and_then(|_| args.next());
+        if let Some(event) = event {
+            if !event.to_string_lossy().starts_with("Local\\Keepwork.WebView.Ready.") {
+                return;
+            }
+            let name: Vec<u16> = event.encode_wide().chain(Some(0)).collect();
+            unsafe {
+                let handle = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+                if !handle.is_null() {
+                    SetEvent(handle);
+                    CloseHandle(handle);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]

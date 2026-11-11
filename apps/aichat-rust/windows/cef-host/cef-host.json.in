@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "product": "keepwork-cef-host",
+  "hostProtocol": 1,
+  "hostVersion": "@KEEPWORK_HOST_VERSION@",
+  "cefVersion": "@KEEPWORK_CEF_VERSION@",
+  "cefMajor": @KEEPWORK_CEF_MAJOR@,
+  "arch": "@KEEPWORK_HOST_ARCH@",
+  "sandbox": "@KEEPWORK_SANDBOX@",
+  "desktopBridge": false
+}

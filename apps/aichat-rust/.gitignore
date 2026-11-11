@@ -1,6 +1,8 @@
 node_modules/
 dist/
 releases/
+build/
+scripts/__pycache__/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/resources/mcp-runtime/*/*

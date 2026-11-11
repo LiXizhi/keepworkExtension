@@ -1,0 +1,2 @@
+#include <winres.h>
+1 RT_MANIFEST "@CMAKE_CURRENT_SOURCE_DIR@/keepwork-cef.exe.manifest"

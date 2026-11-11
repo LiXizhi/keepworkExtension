@@ -82,6 +82,18 @@ pub fn default_desktop_feed_url() -> String {
             return custom.trim().to_string();
         }
     }
+    #[cfg(windows)]
+    if std::env::current_exe()
+        .map(|exe| exe.with_file_name("Keepwork.exe").is_file())
+        .unwrap_or(false)
+    {
+        // A compatibility install must retain its Win7-capable outer launcher.
+        // Never replace it with the ordinary Tauri-only installer feed.
+        return format!(
+            "https://cdn.keepwork.com/keepwork/aichat-cef/v1/client/windows-{}/latest-client.json",
+            current_runtime_arch()
+        );
+    }
     let target = format!("{}-{}", current_runtime_platform(), current_runtime_arch());
     format!("{DEFAULT_DESKTOP_FEED_BASE}/{target}/latest-client.json")
 }

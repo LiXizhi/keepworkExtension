@@ -1,0 +1,106 @@
+name: AIChat Windows compatibility preview (CEF downloaded separately)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      AICHAT_MCP_ENGINE: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/aichat-rust/src-tauri -> target
+            apps/mcp-rust -> target
+      - name: Generate isolated preview signing key (never a production trust root)
+        shell: pwsh
+        run: |
+          $keyDir = Join-Path $env:RUNNER_TEMP 'cef-preview-key'
+          New-Item -ItemType Directory $keyDir | Out-Null
+          $env:CEF_KEY_DIR = $keyDir
+          node -e "const c=require('node:crypto'),f=require('node:fs'),p=require('node:path');const k=c.generateKeyPairSync('rsa',{modulusLength:2048});f.writeFileSync(p.join(process.env.CEF_KEY_DIR,'private.pem'),k.privateKey.export({type:'pkcs8',format:'pem'}));f.writeFileSync(p.join(process.env.CEF_KEY_DIR,'public.pem'),k.publicKey.export({type:'spki',format:'pem'}));"
+          "CEF_KEY_DIR=$keyDir" | Out-File $env:GITHUB_ENV -Append
+      - name: Check and build the existing Rust desktop and bundled MCP
+        shell: pwsh
+        run: |
+          pnpm --prefix apps/aichat-rust install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --prefix apps/aichat-rust check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --prefix apps/aichat-rust tauri build --target x86_64-pc-windows-msvc --no-bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory preview-desktop/resources -Force | Out-Null
+          Copy-Item apps/aichat-rust/src-tauri/target/x86_64-pc-windows-msvc/release/aichat-rust.exe preview-desktop/
+          Copy-Item apps/aichat-rust/src-tauri/resources/mcp-runtime preview-desktop/resources/ -Recurse
+      - name: Build installer without any CEF runtime
+        shell: pwsh
+        run: |
+          node apps/aichat-rust/scripts/build-windows-compat.cjs --payload preview-desktop --output preview-installer --key "$env:CEF_KEY_DIR/public.pem" --arch x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:KEEPWORK_CEF_TEST_PRIVATE_KEY = "$env:CEF_KEY_DIR/private.pem"
+          $env:KEEPWORK_CEF_VERIFY_EXE = "$pwd/preview-installer/bootstrap-build/Release/keepwork_native_verify.exe"
+          node --test apps/aichat-rust/tests/cef-package.test.cjs apps/aichat-rust/tests/cef-installer.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and verify separate legacy and modern CEF artifacts
+        shell: pwsh
+        run: |
+          foreach ($channel in @('legacy', 'modern')) {
+            python apps/aichat-rust/scripts/fetch-cef-sdk.py --channel $channel --arch x64 --output "cef-sdk-$channel"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $sdk = (Get-Content "cef-sdk-$channel/cef-root.txt").Trim()
+            cmake -S apps/aichat-rust/windows/cef-host -B "cef-build-$channel" -A x64 "-DCEF_ROOT=$sdk"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cmake --build "cef-build-$channel" --config Release
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ctest --test-dir "cef-build-$channel" -C Release --output-on-failure
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node apps/aichat-rust/scripts/cef-release.cjs package "cef-build-$channel/payload/Release" preview-cef "$env:CEF_KEY_DIR/private.pem"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $signed = Get-Content "preview-cef/$channel/windows-x64/stable.json" | ConvertFrom-Json
+            $manifest = $signed.payload | ConvertFrom-Json
+            $osVersion = if ($channel -eq 'legacy') { '6.1.7601' } else { '10.0.26100' }
+            & 'preview-installer/bootstrap-build/Release/keepwork_native_verify.exe' package "preview-cef/$channel/windows-x64/stable.json" "preview-cef/objects/$($manifest.sha256).zip" "verified-$channel" $channel x64 $osVersion
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Collect preview artifacts (no CDN publication)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory cef-preview-artifacts -Force | Out-Null
+          Copy-Item preview-installer/Keepwork-Compatible_*-setup.exe cef-preview-artifacts/
+          Copy-Item preview-installer/compatible-installer.json cef-preview-artifacts/
+          Copy-Item preview-cef cef-preview-artifacts/ -Recurse
+          Copy-Item cef-sdk-legacy/cef-sdk-lock.json cef-preview-artifacts/legacy-sdk-lock.json
+          Copy-Item cef-sdk-modern/cef-sdk-lock.json cef-preview-artifacts/modern-sdk-lock.json
+          Copy-Item "$env:CEF_KEY_DIR/public.pem" cef-preview-artifacts/preview-public.pem
+          'TEST PREVIEW ONLY. Ephemeral signing key. Not published to CDN. Windows 7 live validation required. Do not promote to production.' | Set-Content cef-preview-artifacts/README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aichat-windows-cef-preview-x64
+          path: cef-preview-artifacts/
+          if-no-files-found: error
+      - name: Remove preview private key
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:CEF_KEY_DIR) { Remove-Item $env:CEF_KEY_DIR -Recurse -Force -ErrorAction SilentlyContinue }
