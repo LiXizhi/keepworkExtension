@@ -15,7 +15,8 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
         "pageCommands": PAGE_COMMANDS,
     });
 
-    let menu_chrome = include_str!("../../src/menuChrome.js").replacen("export function", "function", 1);
+    let menu_chrome =
+        include_str!("../../src/menuChrome.js").replacen("export function", "function", 1);
 
     format!(
         r#"(() => {{

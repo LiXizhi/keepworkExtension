@@ -6,6 +6,7 @@ pub mod desktop_lock;
 pub mod dev_server;
 pub mod files;
 pub mod git_setup;
+pub mod installer_stop;
 pub mod login_startup;
 pub mod menu;
 pub mod permissions;
@@ -260,11 +261,7 @@ fn browser_open_location(bundle_id: &str, url: &str) -> Result<(), String> {
         Ok(())
     } else {
         let detail = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "osascript {} {}",
-            output.status,
-            detail.trim()
-        ))
+        Err(format!("osascript {} {}", output.status, detail.trim()))
     }
 }
 
@@ -289,9 +286,7 @@ fn default_browser_bundle_id() -> Option<String> {
             .get("LSHandlerRoleAll")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let scheme = handler
-            .get("LSHandlerURLScheme")
-            .and_then(Value::as_str);
+        let scheme = handler.get("LSHandlerURLScheme").and_then(Value::as_str);
         if scheme == Some("http") {
             return role;
         }
@@ -306,7 +301,6 @@ fn default_browser_bundle_id() -> Option<String> {
     }
     https_id.or(web_browser)
 }
-
 
 pub fn reveal_path_in_os(target: &Path, mode: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -945,6 +939,19 @@ async fn desktop_install_update(
         return Ok(json!(next_snap));
     }
     if snap.desktop.can_apply {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+        if !app
+            .dialog()
+            .message("退出并更新桌面应用？应用将关闭并打开新版本安装向导。")
+            .title("更新桌面应用")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "退出并更新".into(),
+                "取消".into(),
+            ))
+            .blocking_show()
+        {
+            return Ok(json!(snap));
+        }
         let pkg = state.updates.prepare_desktop_install()?;
         state.updates.launch_desktop_installer(&pkg)?;
         state.quitting.store(true, Ordering::Relaxed);
@@ -1027,8 +1034,8 @@ async fn desktop_open_menu(
         return Err("Unsupported menu render mode".to_string());
     }
     let ctx = menu_context(&state);
-    let mut payload = menu_payload(&menu_id, &ctx)
-        .ok_or_else(|| format!("Unsupported menu: {menu_id}"))?;
+    let mut payload =
+        menu_payload(&menu_id, &ctx).ok_or_else(|| format!("Unsupported menu: {menu_id}"))?;
     payload["anchor"] = json!({ "left": left, "bottom": bottom });
     payload["x"] = json!(left);
     payload["y"] = json!(bottom);
@@ -2162,8 +2169,10 @@ pub fn run() {
             }
 
             // Bring the MCP daemon up before the webview's first /health probe.
-            // A missing runtime fails fast; the update checker stages one for
-            // the next launch. Runs after the single-instance lock so a second
+            // One attempt here so startup stays short. A Rust MCP that fails is
+            // retried by the 60s heartbeat below, at most five times. A missing
+            // runtime still fails this call; the update checker stages one for
+            // a later launch. Runs after the single-instance lock so a second
             // launch does not start a daemon before exiting.
             let _ = tauri::async_runtime::block_on(
                 core_for_setup.mcp_supervisor.ensure_started(true),
@@ -2287,7 +2296,9 @@ pub fn run() {
                     }
                 });
 
-                // 60s heartbeat for runtimes & tray channel status
+                // 60s heartbeat for runtimes and tray channel status.
+                // This is also the Rust MCP retry timer: a failed launch waits
+                // one minute and stops after five attempts.
                 loop {
                     tokio::time::sleep(Duration::from_secs(60)).await;
                     let _ = core_bg.mcp_supervisor.ensure_started(false).await;

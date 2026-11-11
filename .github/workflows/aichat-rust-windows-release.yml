@@ -43,6 +43,41 @@ jobs:
           workspaces: |
             apps/mcp-rust -> target
             apps/aichat-rust/src-tauri -> target
+      - name: Import the code-signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_PFX_BASE64) {
+            Write-Output '::warning::No Windows signing certificate configured; this build will be unsigned.'
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'keepwork-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+            $secure = ConvertTo-SecureString $env:WINDOWS_CERT_PASSWORD -AsPlainText -Force
+            $certs = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure)
+            $signers = @($certs | Where-Object {
+              $_.HasPrivateKey -and ($_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3')
+            })
+            if ($signers.Count -ne 1) { throw 'Expected exactly one code-signing certificate with a private key' }
+            $cert = $signers[0]
+          } finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+          "WINDOWS_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $cert.Thumbprint
+                digestAlgorithm = 'sha256'
+                timestampUrl = 'http://timestamp.digicert.com'
+                tsp = $true
+              }
+            }
+          } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $env:RUNNER_TEMP 'tauri-signing.json')
+          Write-Output "Signing as $($cert.Subject)"
       - name: Install frontend dependencies and check types
         working-directory: apps/aichat-rust
         run: |
@@ -53,11 +88,31 @@ jobs:
         run: |
           cargo build --release --locked --manifest-path apps/mcp-rust/Cargo.toml --target ${{ matrix.target }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Sign the staged MCP runtime
+        if: env.WINDOWS_CERT_THUMBPRINT != ''
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe not found in the Windows SDK' }
+          $binary = "apps/mcp-rust/target/${{ matrix.target }}/release/keepwork-mcp.exe"
+          & $signtool.FullName sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd sha256 /tr http://timestamp.digicert.com /td sha256 $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $signtool.FullName verify /pa $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage the MCP runtime into resources
+        run: |
           node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target ${{ matrix.target }} --no-build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Windows installer
+        shell: pwsh
         working-directory: apps/aichat-rust
-        run: pnpm tauri build --ci --target ${{ matrix.target }} --bundles nsis
+        run: |
+          $arguments = @('tauri', 'build', '--ci', '--target', '${{ matrix.target }}', '--bundles', 'nsis')
+          $signing = Join-Path $env:RUNNER_TEMP 'tauri-signing.json'
+          if (Test-Path $signing) { $arguments += @('--config', $signing) }
+          & pnpm @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Extract and verify the installer payload
         run: |
           $version = (Get-Content apps/aichat-rust/package.json | ConvertFrom-Json).version
@@ -73,6 +128,26 @@ jobs:
           node apps/aichat-rust/scripts/verify-windows-release.cjs --directory $extract --arch ${{ matrix.arch }} --commit $env:GITHUB_SHA --binary "apps/mcp-rust/target/${{ matrix.target }}/release/keepwork-mcp.exe" --installer $installer --output "release-packages/release-manifest-${version}-${{ matrix.arch }}.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item $installer release-packages/
+      - name: Verify every shipped binary is signed
+        if: env.WINDOWS_CERT_THUMBPRINT != ''
+        shell: pwsh
+        run: |
+          $extract = Join-Path $env:RUNNER_TEMP 'keepwork-payload'
+          $version = (Get-Content apps/aichat-rust/package.json | ConvertFrom-Json).version
+          $files = @(Get-ChildItem $extract -Recurse -Include aichat-rust.exe, keepwork-mcp.exe, keepwork-installer-helper.exe, uninstall.exe)
+          $files += Get-Item "apps/aichat-rust/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/Keepwork_${version}_${{ matrix.arch }}-setup.exe"
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $env:WINDOWS_CERT_THUMBPRINT) {
+              throw "Unsigned release file: $($file.FullName) ($($signature.Status))"
+            }
+          }
+          Write-Output "Verified $($files.Count) signed release files"
+      - name: Remove signing certificate
+        if: always() && env.WINDOWS_CERT_THUMBPRINT != ''
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath "Cert:\CurrentUser\My\$env:WINDOWS_CERT_THUMBPRINT" -Force
       - name: Smoke test the packaged x64 daemon
         if: matrix.arch == 'x64'
         run: |

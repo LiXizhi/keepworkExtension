@@ -96,18 +96,19 @@ impl LoginStartup {
             .join(format!("{LAUNCH_AGENT_LABEL}.plist"))
     }
 
+    /// Startup at login is opt-in: a first launch records the preference as
+    /// disabled instead of registering a Run key behind the user's back.
     pub fn ensure_default(&self) -> bool {
         let mut settings = load_settings(&self.settings_path);
         let enabled = match settings.open_at_login {
             Some(val) => val,
             None => {
-                let default_val = self.packaged;
-                settings.open_at_login = Some(default_val);
+                settings.open_at_login = Some(false);
                 let _ = save_settings(&self.settings_path, &settings);
-                default_val
+                false
             }
         };
-        if self.packaged {
+        if self.packaged && enabled {
             let _ = self.apply_os_registration(enabled);
         }
         enabled
@@ -116,7 +117,7 @@ impl LoginStartup {
     pub fn is_enabled(&self) -> bool {
         load_settings(&self.settings_path)
             .open_at_login
-            .unwrap_or(self.packaged)
+            .unwrap_or(false)
     }
 
     pub fn set_enabled(&self, enabled: bool) -> Result<bool, String> {
@@ -147,8 +148,8 @@ impl LoginStartup {
 
         #[cfg(target_os = "windows")]
         {
-            use std::process::Command;
             use std::os::windows::process::CommandExt;
+            use std::process::Command;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             if enabled {
                 let value = build_windows_run_command(&self.executable_path);
@@ -197,26 +198,30 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn defaults_to_enabled_on_first_packaged_install_and_respects_saved_preference() {
+    fn first_packaged_install_stays_opt_in_and_respects_saved_preference() {
         let root = std::env::temp_dir().join(format!("aichat-rust-login-{}", Uuid::new_v4()));
         let settings_file = root.join("settings.json");
         let agents_dir = root.join("LaunchAgents");
         let exe = root.join("Keepwork.app/Contents/MacOS/aichat-rust");
 
-        let startup =
-            LoginStartup::new(settings_file.clone(), agents_dir.clone(), exe.clone(), true);
-        assert!(startup.ensure_default());
-        #[cfg(target_os = "macos")]
-        {
-            let plist = fs::read_to_string(startup.plist_path()).unwrap();
-            assert!(plist.contains("--background"));
-        }
-
-        startup.set_enabled(false).unwrap();
-        assert!(!startup.is_enabled());
-
-        // Subsequent ensure_default preserves false
+        let startup = LoginStartup::new(
+            settings_file.clone(),
+            agents_dir.clone(),
+            exe.clone(),
+            false,
+        );
         assert!(!startup.ensure_default());
+        assert!(!startup.is_enabled());
+        #[cfg(target_os = "macos")]
+        assert!(!startup.plist_path().exists());
+
+        startup.set_enabled(true).unwrap();
+        assert!(startup.is_enabled());
+        // This fixture persists preferences without touching the OS registry
+        // or registering a real login agent.
+
+        // Subsequent ensure_default preserves true
+        assert!(startup.ensure_default());
 
         let _ = fs::remove_dir_all(&root);
     }

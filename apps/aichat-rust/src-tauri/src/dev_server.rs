@@ -263,7 +263,7 @@ mod tests {
         fs::write(root.join("js/app.js"), "export const ok = true;").unwrap();
 
         let mut server = DevServer::start(&root, "AIChat.html").unwrap();
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let res = client.get(server.url()).send().await.unwrap();
         assert_eq!(res.status().as_u16(), 200);

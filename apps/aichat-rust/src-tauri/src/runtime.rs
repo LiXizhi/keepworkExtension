@@ -1,5 +1,4 @@
 use crate::files::{atomic_json_write, inside, validate_relative_path};
-use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use semver::Version;
@@ -10,12 +9,49 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const MCP_PORT: u16 = 8089;
 pub const LOCAL_MODEL_PORT: u16 = 18089;
 pub const DEFAULT_MCP_FEED_BASE: &str = "https://cdn.keepwork.com/keepwork/mcp-stable";
+
+/// Automatic restarts after a Rust MCP launch fails. The 60s runtime heartbeat
+/// is the timer; calls that arrive sooner do not consume an attempt.
+const RUST_MCP_MAX_START_ATTEMPTS: u32 = 5;
+const RUST_MCP_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const RUST_MCP_PRODUCT: &str = "keepwork-mcp-runtime";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RustStartRetry {
+    Allow,
+    Wait,
+    Stop,
+}
+
+/// `failures` is how many Rust launches have already failed.
+/// The next launch is allowed only after `RUST_MCP_RETRY_INTERVAL`, and never after the cap.
+fn rust_start_retry(failures: u32, since_last_failure: Option<Duration>) -> RustStartRetry {
+    if failures >= RUST_MCP_MAX_START_ATTEMPTS {
+        return RustStartRetry::Stop;
+    }
+    if failures == 0 {
+        return RustStartRetry::Allow;
+    }
+    match since_last_failure {
+        Some(elapsed) if elapsed >= RUST_MCP_RETRY_INTERVAL => RustStartRetry::Allow,
+        _ => RustStartRetry::Wait,
+    }
+}
+
+fn rust_start_retry_suffix(attempts: u32) -> String {
+    if attempts >= RUST_MCP_MAX_START_ATTEMPTS {
+        format!("（已尝试 {attempts} 次，停止自动重试）")
+    } else {
+        format!("（{attempts}/{RUST_MCP_MAX_START_ATTEMPTS}，1 分钟后重试）")
+    }
+}
 
 fn default_runtime_engine() -> String {
     "node".to_string()
@@ -272,143 +308,89 @@ pub fn validate_update_manifest(
     Ok(())
 }
 
-/// Pure-Rust ZIP extractor supporting Stored (0) and Deflate (8) entries with path traversal confinement,
-/// plus system `unzip` / `Expand-Archive` fallback.
+/// Pure-Rust ZIP extractor with path traversal confinement.
+///
+/// Zip64 and data descriptors are handled in-process without shell tools.
 pub fn extract_zip_archive(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Failed to create destination directory: {e}"))?;
     let bytes = fs::read(zip_path).map_err(|e| format!("Failed to read zip archive: {e}"))?;
-    if extract_zip_bytes(&bytes, dest_dir).is_ok() {
-        return Ok(());
-    }
-
-    // Fallback to OS tools if the archive uses Zip64 or data descriptors
-    #[cfg(target_os = "windows")]
-    {
-        let zip_escaped = zip_path.to_string_lossy().replace('\'', "''");
-        let dest_escaped = dest_dir.to_string_lossy().replace('\'', "''");
-        let mut cmd = Command::new("powershell.exe");
-        cmd.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
-                "Expand-Archive -LiteralPath '{zip_escaped}' -DestinationPath '{dest_escaped}' -Force"
-            ),
-        ]);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to run Expand-Archive: {e}"))?;
-        if !status.success() {
-            return Err("Expand-Archive failed to extract update ZIP".to_string());
-        }
-        return Ok(());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let status = Command::new("unzip")
-            .args([
-                "-oq",
-                &zip_path.to_string_lossy(),
-                "-d",
-                &dest_dir.to_string_lossy(),
-            ])
-            .status()
-            .map_err(|e| format!("Failed to run unzip: {e}"))?;
-        if !status.success() {
-            return Err("unzip failed to extract update ZIP".to_string());
-        }
-        Ok(())
-    }
+    extract_zip_central_directory(&bytes, dest_dir)
 }
 
-pub fn extract_zip_bytes(bytes: &[u8], dest_dir: &Path) -> Result<(), String> {
-    let mut pos = 0usize;
+/// Central-directory pass for Zip64 archives and entries carrying data
+/// descriptors, using the archive central directory.
+fn extract_zip_central_directory(bytes: &[u8], dest_dir: &Path) -> Result<(), String> {
+    let canonical_root = dunce::canonicalize(dest_dir).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e| format!("Failed to read ZIP central directory: {e}"))?;
     let mut extracted_any = false;
-    while pos + 4 <= bytes.len() {
-        let sig = &bytes[pos..pos + 4];
-        if sig == b"PK\x01\x02" || sig == b"PK\x05\x06" {
-            break;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Failed to read ZIP entry {index}: {e}"))?;
+        if entry
+            .unix_mode()
+            .map(|mode| mode & 0o170000 == 0o120000)
+            .unwrap_or(false)
+        {
+            return Err("ZIP symbolic links are not supported".into());
         }
-        if sig != b"PK\x03\x04" {
-            return Err("Invalid ZIP local file header signature".to_string());
+        let Some(enclosed) = entry.enclosed_name() else {
+            return Err("ZIP entry escapes destination directory".to_string());
+        };
+        let clean_rel = validate_relative_path(&enclosed.to_string_lossy())?;
+        if clean_rel.as_os_str().is_empty() {
+            continue;
         }
-        if pos + 30 > bytes.len() {
-            return Err("Truncated ZIP local file header".to_string());
+        let out_path = dest_dir.join(&clean_rel);
+        if !inside(dest_dir, &out_path) {
+            return Err("ZIP entry escapes destination directory".to_string());
         }
-        let flags = u16::from_le_bytes([bytes[pos + 6], bytes[pos + 7]]);
-        if (flags & 0x08) != 0 {
-            return Err("ZIP data descriptor requires fallback extractor".to_string());
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path)
+                .map_err(|e| format!("Failed to create directory: {e}"))?;
+            continue;
         }
-        let method = u16::from_le_bytes([bytes[pos + 8], bytes[pos + 9]]);
-        let comp_size = u32::from_le_bytes([
-            bytes[pos + 18],
-            bytes[pos + 19],
-            bytes[pos + 20],
-            bytes[pos + 21],
-        ]) as usize;
-        let name_len = u16::from_le_bytes([bytes[pos + 26], bytes[pos + 27]]) as usize;
-        let extra_len = u16::from_le_bytes([bytes[pos + 28], bytes[pos + 29]]) as usize;
-        let header_end = pos + 30 + name_len + extra_len;
-        let data_end = header_end + comp_size;
-        if data_end > bytes.len() {
-            return Err("Truncated ZIP entry payload".to_string());
-        }
-        let raw_name = std::str::from_utf8(&bytes[pos + 30..pos + 30 + name_len])
-            .map_err(|_| "Non-UTF8 ZIP entry name".to_string())?;
-        let is_dir = raw_name.ends_with('/') || raw_name.ends_with('\\');
-        let clean_rel = validate_relative_path(raw_name.trim_end_matches(['/', '\\']))?;
-        if !clean_rel.as_os_str().is_empty() {
-            let out_path = dest_dir.join(&clean_rel);
-            if !inside(dest_dir, &out_path) {
-                return Err("ZIP entry escapes destination directory".to_string());
-            }
-            if is_dir {
-                fs::create_dir_all(&out_path)
-                    .map_err(|e| format!("Failed to create directory: {e}"))?;
-            } else {
-                if let Some(parent) = out_path.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|e| format!("Failed to create parent dir: {e}"))?;
-                }
-                let comp_data = &bytes[header_end..data_end];
-                let decompressed = match method {
-                    0 => comp_data.to_vec(),
-                    8 => {
-                        let mut decoder = DeflateDecoder::new(Cursor::new(comp_data));
-                        let mut out = Vec::new();
-                        decoder
-                            .read_to_end(&mut out)
-                            .map_err(|e| format!("Deflate decompression failed: {e}"))?;
-                        out
-                    }
-                    _ => return Err(format!("Unsupported ZIP compression method: {method}")),
-                };
-                fs::write(&out_path, &decompressed)
-                    .map_err(|e| format!("Failed to write extracted file: {e}"))?;
-                #[cfg(unix)]
-                {
-                    if out_path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .map(|n| n == "node" || n.ends_with(".sh"))
-                        .unwrap_or(false)
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(0o755));
-                    }
-                }
-                extracted_any = true;
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {e}"))?;
+            let parent = dunce::canonicalize(parent).map_err(|e| e.to_string())?;
+            if !parent.starts_with(&canonical_root) {
+                return Err("ZIP entry parent escapes destination directory".into());
             }
         }
-        pos = data_end;
+        if fs::symlink_metadata(&out_path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err("ZIP output cannot replace a symbolic link".into());
+        }
+        let mut decompressed = Vec::new();
+        entry
+            .read_to_end(&mut decompressed)
+            .map_err(|e| format!("ZIP entry decompression failed: {e}"))?;
+        fs::write(&out_path, &decompressed)
+            .map_err(|e| format!("Failed to write extracted file: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = out_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|name| name == "node" || name == "keepwork-mcp" || name.ends_with(".sh"))
+                .unwrap_or(false);
+            let mut mode = entry
+                .unix_mode()
+                .unwrap_or(if executable { 0o755 } else { 0o644 })
+                & 0o777;
+            // DOS ZIPs can report synthesized non-executable Unix modes.
+            if executable {
+                mode |= 0o111;
+            }
+            fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("Failed to restore ZIP permissions: {e}"))?;
+        }
+        extracted_any = true;
     }
     if !extracted_any {
         return Err("ZIP archive contained no files".to_string());
@@ -416,6 +398,10 @@ pub fn extract_zip_bytes(bytes: &[u8], dest_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub fn extract_zip_bytes(bytes: &[u8], dest_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    extract_zip_central_directory(bytes, dest_dir)
+}
 /// Pure-Rust helper to build a valid ZIP archive from a directory (used in tests and smoke suites).
 pub fn create_zip_from_dir(src_dir: &Path, zip_file: &Path) -> Result<(), String> {
     let mut entries = Vec::new();
@@ -573,6 +559,10 @@ pub struct RuntimeSupervisor {
     config: RuntimeConfig,
     status: Arc<Mutex<RuntimeStatusSnapshot>>,
     child: Mutex<Option<Child>>,
+    lifecycle: tokio::sync::Mutex<()>,
+    /// Consecutive Rust MCP launch failures since the last healthy start or manual restart.
+    rust_start_failures: AtomicU32,
+    rust_start_failed_at: Mutex<Option<Instant>>,
 }
 
 impl RuntimeSupervisor {
@@ -602,6 +592,50 @@ impl RuntimeSupervisor {
             config,
             status: Arc::new(Mutex::new(snap)),
             child: Mutex::new(None),
+            lifecycle: tokio::sync::Mutex::new(()),
+            rust_start_failures: AtomicU32::new(0),
+            rust_start_failed_at: Mutex::new(None),
+        }
+    }
+
+    fn configured_rust_mcp(&self) -> bool {
+        self.config.id == "mcp"
+            && self
+                .config
+                .products
+                .iter()
+                .any(|product| product == RUST_MCP_PRODUCT)
+            && self
+                .config
+                .products
+                .iter()
+                .all(|product| !product.contains("node"))
+    }
+
+    fn rust_start_retry_state(&self) -> RustStartRetry {
+        let failures = self.rust_start_failures.load(Ordering::Relaxed);
+        let elapsed = self
+            .rust_start_failed_at
+            .lock()
+            .ok()
+            .and_then(|slot| slot.map(|at| at.elapsed()));
+        rust_start_retry(failures, elapsed)
+    }
+
+    fn record_rust_start_failure(&self, err: &str) -> String {
+        if let Ok(mut slot) = self.rust_start_failed_at.lock() {
+            *slot = Some(Instant::now());
+        }
+        let attempts = self.rust_start_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        let message = format!("{err}{}", rust_start_retry_suffix(attempts));
+        eprintln!("keepwork-mcp: {message}");
+        message
+    }
+
+    fn clear_rust_start_retries(&self) {
+        self.rust_start_failures.store(0, Ordering::Relaxed);
+        if let Ok(mut slot) = self.rust_start_failed_at.lock() {
+            *slot = None;
         }
     }
 
@@ -830,6 +864,11 @@ impl RuntimeSupervisor {
     }
 
     pub async fn ensure_started(&self, promote_pending: bool) -> RuntimeStatusSnapshot {
+        let _operation = self.lifecycle.lock().await;
+        self.ensure_started_inner(promote_pending).await
+    }
+
+    async fn ensure_started_inner(&self, promote_pending: bool) -> RuntimeStatusSnapshot {
         // 1. Probe existing listener on port
         if let Some(probe) = self.probe_health().await {
             if !probe.compatible {
@@ -860,8 +899,12 @@ impl RuntimeSupervisor {
                             && is_version_newer(&m.version, &probe.runtime_version)
                     })
                     .unwrap_or(false);
-            let should_takeover =
+            let retry = self.rust_start_retry_state();
+            let wants_takeover =
                 self.config.id == "mcp" && probe.pid > 0 && (engine_switch || version_upgrade);
+            // Do not kill a live daemon while a Rust replacement is backing off
+            // or has already used its five automatic attempts.
+            let should_takeover = wants_takeover && retry == RustStartRetry::Allow;
 
             if should_takeover {
                 // Re-verify identity & PID before killing
@@ -898,17 +941,31 @@ impl RuntimeSupervisor {
                     }
                     st.error.clear();
                 }
+                if !wants_takeover || retry == RustStartRetry::Allow {
+                    self.clear_rust_start_retries();
+                }
                 return self.snapshot();
             }
+        }
+
+        // Rust MCP launch failures are retried by the 60s heartbeat, at most 5 times.
+        // A call that arrives inside the minute must not burn another attempt.
+        if self.rust_start_retry_state() != RustStartRetry::Allow {
+            return self.snapshot();
         }
 
         // 2. Spawn our local runtime
         let Some((runtime_dir, manifest, staged_hash)) =
             self.select_best_local_runtime(promote_pending)
         else {
+            let base = format!("未找到可用的本地运行时（{}）", self.config.product());
             if let Ok(mut st) = self.status.lock() {
                 st.state = "error".to_string();
-                st.error = format!("未找到可用的本地运行时（{}）", self.config.product());
+                st.error = if self.configured_rust_mcp() {
+                    self.record_rust_start_failure(&base)
+                } else {
+                    base
+                };
             }
             return self.snapshot();
         };
@@ -930,10 +987,12 @@ impl RuntimeSupervisor {
                         }
                     }
                 }
+                self.clear_rust_start_retries();
                 self.snapshot()
             }
             Err(err) => {
                 // If a promoted staged runtime failed to start, mark it failed and roll back to bundled
+                let mut tried_rust = manifest.is_rust();
                 if let Some(failed_hash) = staged_hash {
                     let mut record = Self::load_active_record(&self.config.store_dir);
                     record.failed = Some(failed_hash);
@@ -948,6 +1007,7 @@ impl RuntimeSupervisor {
                             .map(String::as_str)
                             .collect::<Vec<_>>(),
                     ) {
+                        tried_rust = tried_rust || bundled_manifest.is_rust();
                         if let Ok(pid) = self
                             .spawn_and_verify(&self.config.bundled_dir, &bundled_manifest)
                             .await
@@ -961,13 +1021,18 @@ impl RuntimeSupervisor {
                                 st.built_at = bundled_manifest.built_at;
                                 st.update_error = format!("更新版本启动失败，已自动回退：{err}");
                             }
+                            self.clear_rust_start_retries();
                             return self.snapshot();
                         }
                     }
                 }
                 if let Ok(mut st) = self.status.lock() {
                     st.state = "error".to_string();
-                    st.error = err;
+                    st.error = if tried_rust {
+                        self.record_rust_start_failure(&err)
+                    } else {
+                        err
+                    };
                 }
                 self.snapshot()
             }
@@ -1071,32 +1136,89 @@ impl RuntimeSupervisor {
         }
     }
 
-    pub async fn restart(&self) -> Result<RuntimeStatusSnapshot, String> {
-        let snap = self.snapshot();
-        if snap.state == "attached" && snap.owner != "desktop" {
-            return Err(format!(
-                "当前本地服务由 {} 管理，桌面端不能直接重启它",
-                snap.owner
-            ));
+    async fn stop_for_restart(&self) -> Result<(), String> {
+        let before = self.probe_health().await;
+        if let Some(probe) = &before {
+            let owned_pid = self
+                .child
+                .lock()
+                .ok()
+                .and_then(|c| c.as_ref().map(Child::id));
+            if !probe.compatible
+                || (Self::classify_owner(&probe.host_kind) != "desktop"
+                    && owned_pid != Some(probe.pid))
+            {
+                return Err(format!(
+                    "当前本地服务由 {} 管理，请在该应用中重启",
+                    Self::classify_owner(&probe.host_kind)
+                ));
+            }
+            if probe.pid == 0 || probe.pid == std::process::id() {
+                return Err("本地服务未提供有效 PID，无法安全重启".to_string());
+            }
+            // An earlier desktop process may have left this listener running.
+            // In that case we have no Child handle; recheck the live identity
+            // before terminating it, rather than silently attaching again.
+            if owned_pid != Some(probe.pid) {
+                let current = self.probe_health().await;
+                match current {
+                    Some(current)
+                        if current.compatible
+                            && current.pid == probe.pid
+                            && Self::classify_owner(&current.host_kind) == "desktop" =>
+                    {
+                        Self::kill_pid(probe.pid);
+                    }
+                    None => {}
+                    _ => return Err("本地服务实例已改变，请重新尝试重启".to_string()),
+                }
+            }
         }
         self.stop_owned_process();
-        Ok(self.ensure_started(false).await)
+        for _ in 0..40 {
+            match self.probe_health().await {
+                None => return Ok(()),
+                Some(current) if before.as_ref().map(|p| p.pid) != Some(current.pid) => {
+                    return Err("本地服务实例已改变，请重新尝试重启".to_string());
+                }
+                _ => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        }
+        Err("本地服务未能停止，未执行重启".to_string())
+    }
+
+    pub async fn restart(&self) -> Result<RuntimeStatusSnapshot, String> {
+        let _operation = self.lifecycle.lock().await;
+        self.stop_for_restart().await?;
+        self.clear_rust_start_retries();
+        let status = self.ensure_started_inner(false).await;
+        if status.state != "running" && status.state != "attached" {
+            return Err(if status.error.is_empty() {
+                "本地服务启动失败".to_string()
+            } else {
+                status.error
+            });
+        }
+        Ok(status)
     }
 
     pub async fn apply_staged_update(&self) -> Result<RuntimeStatusSnapshot, String> {
-        let snap = self.snapshot();
-        if snap.state == "attached" && snap.owner != "desktop" {
-            return Err(format!(
-                "当前本地 MCP 服务由 {} 管理，请先关闭外部服务后再应用更新",
-                snap.owner
-            ));
-        }
+        let _operation = self.lifecycle.lock().await;
         let record = Self::load_active_record(&self.config.store_dir);
         if record.pending.is_none() {
             return Err("当前没有待应用的 MCP 更新".to_string());
         }
-        self.stop_owned_process();
-        Ok(self.ensure_started(true).await)
+        self.stop_for_restart().await?;
+        self.clear_rust_start_retries();
+        let status = self.ensure_started_inner(true).await;
+        if status.state != "running" && status.state != "attached" {
+            return Err(if status.error.is_empty() {
+                "本地服务启动失败".to_string()
+            } else {
+                status.error
+            });
+        }
+        Ok(status)
     }
 
     /// Checks remote MCP manifest, downloads & verifies ZIP if newer, stages it, and returns `(snapshot, newly_staged)`.
@@ -1376,6 +1498,141 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    fn restart_supervisor(root: &Path, port: u16) -> RuntimeSupervisor {
+        RuntimeSupervisor::new(RuntimeConfig {
+            id: "mcp".into(),
+            products: vec!["keepwork-mcp-runtime".into()],
+            port,
+            health_path: "/health".into(),
+            updates_enabled: false,
+            bundled_dir: root.join("bundle"),
+            store_dir: root.join("store"),
+            feed_url: String::new(),
+        })
+    }
+
+    #[test]
+    fn restart_reclaims_orphan_desktop_process_and_preserves_foreign_owners() {
+        const CHILD_ENV: &str = "AICHAT_TEST_RESTART_HEALTH_CHILD";
+        if let Some(ready_path) = std::env::var_os(CHILD_ENV) {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let host = std::env::var("AICHAT_TEST_RESTART_HEALTH_HOST").unwrap();
+            let ready_path = PathBuf::from(ready_path);
+            let ready_temp = ready_path.with_extension("tmp");
+            fs::write(
+                &ready_temp,
+                listener.local_addr().unwrap().port().to_string(),
+            )
+            .unwrap();
+            fs::rename(ready_temp, ready_path).unwrap();
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let mut body = serde_json::json!({
+                    "name": "keepwork-mcp", "pid": std::process::id(),
+                    "hostKind": host, "runtimeVersion": "0.1.0", "runtimeEngine": "rust"
+                });
+                if host == "legacy-owned" {
+                    body.as_object_mut().unwrap().remove("hostKind");
+                }
+                let body = body.to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                let _ = stream.write_all(response.as_bytes());
+            }
+            return;
+        }
+
+        struct FixtureChild(Option<Child>);
+        impl Drop for FixtureChild {
+            fn drop(&mut self) {
+                if let Some(child) = self.0.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for host in ["rust-node-runtime", "legacy-owned", "vscode-extension", "local-helper", "unknown-host"] {
+                let root = std::env::temp_dir().join(format!("aichat-restart-{}", Uuid::new_v4()));
+                fs::create_dir_all(&root).unwrap();
+                let ready_path = root.join("ready-port");
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command.args([
+                    "--exact",
+                    "runtime::tests::restart_reclaims_orphan_desktop_process_and_preserves_foreign_owners",
+                    "--nocapture",
+                ]).env(CHILD_ENV, &ready_path)
+                    .env("AICHAT_TEST_RESTART_HEALTH_HOST", host)
+                    .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    command.creation_flags(0x08000000);
+                }
+                let mut child = FixtureChild(Some(command.spawn().unwrap()));
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !ready_path.exists() {
+                    assert!(child.0.as_mut().unwrap().try_wait().unwrap().is_none(), "health fixture exited before readiness");
+                    assert!(Instant::now() < deadline, "health fixture did not become ready");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let port = fs::read_to_string(&ready_path).unwrap().parse::<u16>().unwrap();
+                let supervisor = restart_supervisor(&root, port);
+                assert!(supervisor.child.lock().unwrap().is_none());
+                let child_pid = child.0.as_ref().unwrap().id();
+                assert_eq!(supervisor.probe_health().await.unwrap().pid, child_pid);
+                if host == "legacy-owned" {
+                    assert!(supervisor.probe_health().await.unwrap().host_kind.is_empty());
+                    *supervisor.child.lock().unwrap() = child.0.take();
+                }
+                let stopped = supervisor.stop_for_restart().await;
+                if host == "rust-node-runtime" || host == "legacy-owned" {
+                    stopped.expect("a verified orphan desktop runtime must be stopped");
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    if let Some(child) = child.0.as_mut() {
+                        while child.try_wait().unwrap().is_none() {
+                            assert!(Instant::now() < deadline, "orphan runtime remains alive");
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }
+                    assert!(supervisor.child.lock().unwrap().is_none());
+                    assert!(supervisor.probe_health().await.is_none());
+                    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(), "restart must release the listening port");
+                } else {
+                    assert!(stopped.is_err(), "external ownership must reject restart: {host}");
+                    assert!(child.0.as_mut().unwrap().try_wait().unwrap().is_none(), "foreign runtime must stay alive: {host}");
+                    assert_eq!(supervisor.probe_health().await.unwrap().pid, child_pid);
+                }
+                drop(child);
+                fs::remove_dir_all(root).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn restart_reports_failed_start_instead_of_success_when_runtime_is_missing() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("aichat-restart-missing-{}", Uuid::new_v4()));
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            let supervisor = restart_supervisor(&root, port);
+            let error = supervisor
+                .restart()
+                .await
+                .expect_err("missing runtime must fail restart");
+            assert!(!error.is_empty());
+            assert_eq!(supervisor.snapshot().state, "error");
+        });
+    }
+
     #[test]
     fn loopback_health_ignores_proxy_environment() {
         const CHILD_ENV: &str = "AICHAT_TEST_HEALTH_PROXY_CHILD";
@@ -1432,7 +1689,18 @@ mod tests {
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
                         let mut request = [0u8; 4096];
-                        let _ = stream.read(&mut request);
+                        // Drain the complete request headers before closing;
+                        // unread TCP data can turn the fixture's 502 into a reset.
+                        let mut used = 0;
+                        while used < request.len() {
+                            match stream.read(&mut request[used..]) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => used += n,
+                            }
+                            if request[..used].windows(4).any(|v| v == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
                         let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1521,6 +1789,63 @@ mod tests {
         )
         .is_ok());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zip64_and_descriptor_archives_extract_without_shell_tools() {
+        for descriptor in [false, true] {
+            let root = std::env::temp_dir().join(format!("zip-contract-{}", Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o755)
+                .large_file(!descriptor);
+            writer.start_file("bin/keepwork-mcp", options).unwrap();
+            writer.write_all(b"runtime fixture").unwrap();
+            let mut bytes = writer.finish().unwrap().into_inner();
+            if descriptor {
+                let cd = bytes.windows(4).position(|v| v == b"PK\x01\x02").unwrap();
+                let mut data_descriptor = b"PK\x07\x08".to_vec();
+                data_descriptor.extend_from_slice(&bytes[14..26]);
+                bytes[6] |= 8;
+                bytes[14..26].fill(0);
+                bytes[cd + 8] |= 8;
+                bytes.splice(cd..cd, data_descriptor);
+                let end = bytes.len() - 22;
+                bytes[end + 16..end + 20].copy_from_slice(&((cd + 16) as u32).to_le_bytes());
+            }
+            let archive = root.join("runtime.zip");
+            fs::write(&archive, bytes).unwrap();
+            extract_zip_archive(&archive, &root.join("out")).unwrap();
+            let binary = root.join("out/bin/keepwork-mcp");
+            assert_eq!(fs::read(&binary).unwrap(), b"runtime fixture");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
+                    0o755
+                );
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn zip_paths_cannot_escape_extraction_root() {
+        let root = std::env::temp_dir().join(format!("zip-paths-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("../escape.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"outside").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        fs::write(root.join("bad.zip"), bytes).unwrap();
+        assert!(extract_zip_archive(&root.join("bad.zip"), &root.join("out")).is_err());
+        assert!(!root.join("escape.txt").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1635,5 +1960,102 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn rust_mcp_start_waits_one_minute_and_stops_after_five_attempts() {
+        assert_eq!(rust_start_retry(0, None), RustStartRetry::Allow);
+        assert_eq!(
+            rust_start_retry(1, Some(Duration::from_secs(59))),
+            RustStartRetry::Wait
+        );
+        assert_eq!(
+            rust_start_retry(1, Some(Duration::from_secs(60))),
+            RustStartRetry::Allow
+        );
+        assert_eq!(
+            rust_start_retry(4, Some(Duration::from_secs(60))),
+            RustStartRetry::Allow
+        );
+        assert_eq!(
+            rust_start_retry(5, Some(Duration::from_secs(60))),
+            RustStartRetry::Stop
+        );
+        assert_eq!(rust_start_retry(5, None), RustStartRetry::Stop);
+        assert!(rust_start_retry_suffix(1).contains("1/5"));
+        assert!(rust_start_retry_suffix(4).contains("4/5"));
+        assert!(rust_start_retry_suffix(5).contains("停止自动重试"));
+
+        let root = std::env::temp_dir().join(format!("aichat-rust-mcp-retry-{}", Uuid::new_v4()));
+        // A port that was just released refuses the health probe immediately.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let supervisor = RuntimeSupervisor::new(RuntimeConfig {
+            id: "mcp".into(),
+            products: vec!["keepwork-mcp-runtime".into()],
+            port,
+            health_path: "/health".into(),
+            updates_enabled: false,
+            bundled_dir: root.join("missing"),
+            store_dir: root.join("store"),
+            feed_url: String::new(),
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let first = supervisor.ensure_started(false).await;
+            assert_eq!(first.state, "error");
+            assert!(
+                first.error.contains("1/5"),
+                "first rust start failure should schedule one retry: {}",
+                first.error
+            );
+            let second = supervisor.ensure_started(false).await;
+            assert_eq!(
+                second.error, first.error,
+                "a second call inside the same minute must not consume another attempt"
+            );
+            assert_eq!(supervisor.rust_start_failures.load(Ordering::Relaxed), 1);
+
+            supervisor
+                .rust_start_failures
+                .store(RUST_MCP_MAX_START_ATTEMPTS, Ordering::Relaxed);
+            let stopped = supervisor.ensure_started(false).await;
+            assert_eq!(stopped.error, first.error);
+            assert_eq!(
+                supervisor.rust_start_failures.load(Ordering::Relaxed),
+                RUST_MCP_MAX_START_ATTEMPTS
+            );
+
+            supervisor.clear_rust_start_retries();
+            let restarted = supervisor.ensure_started(false).await;
+            assert!(
+                restarted.error.contains("1/5"),
+                "a manual retry clears the cap: {}",
+                restarted.error
+            );
+        });
+
+        let node = RuntimeSupervisor::new(RuntimeConfig {
+            id: "mcp".into(),
+            products: vec!["keepwork-mcp-node-runtime".into()],
+            port,
+            health_path: "/health".into(),
+            updates_enabled: false,
+            bundled_dir: root.join("missing-node"),
+            store_dir: root.join("store-node"),
+            feed_url: String::new(),
+        });
+        runtime.block_on(async {
+            let failed = node.ensure_started(false).await;
+            assert_eq!(failed.state, "error");
+            assert!(
+                !failed.error.contains("1/5"),
+                "node runtime keeps the existing restart policy: {}",
+                failed.error
+            );
+            assert_eq!(node.rust_start_failures.load(Ordering::Relaxed), 0);
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

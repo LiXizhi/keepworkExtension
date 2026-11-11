@@ -8,7 +8,6 @@ const { once } = require('node:events');
 
 const tauriRoot = path.resolve(__dirname, '../src-tauri');
 const hooks = path.join(tauriRoot, 'windows/installer-hooks.nsh');
-const cleanupScript = path.join(tauriRoot, 'windows/stop-mcp.ps1');
 
 test('Windows install and uninstall stop the desktop supervisor before cleaning MCP', () => {
   const config = JSON.parse(fs.readFileSync(path.join(tauriRoot, 'tauri.windows.conf.json'), 'utf8'));
@@ -19,11 +18,12 @@ test('Windows install and uninstall stop the desktop supervisor before cleaning 
     assert.ok(body, `${name} must be defined`);
     assert.match(body[1], /!insertmacro CheckIfAppIsRunning "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"\s+!insertmacro KEEPWORK_STOP_BUNDLED_MCP/);
   }
-  assert.match(source, /-InstallDir[^\r\n]*\$INSTDIR/);
+  assert.match(source, /--stop-mcp "\$INSTDIR"/);
+  assert.doesNotMatch(source, /powershell|taskkill|ExecutionPolicy/i);
 });
 
 test('Windows installer stops bundled MCP executables while preserving another installation', {
-  skip: process.platform !== 'win32', timeout: 60000,
+  skip: process.platform !== 'win32', timeout: 180000,
 }, async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-mcp-installer-'));
   const install = path.join(temp, 'Keepwork 安装目录');
@@ -52,10 +52,10 @@ test('Windows installer stops bundled MCP executables while preserving another i
   const legacy = await launch('Keepwork 安装目录/resources/mcp-runtime/keepworkmcp.exe');
   const unrelated = await launch('Keepwork 安装目录-other/keepwork-mcp.exe');
   function cleanup() {
-    const result = spawnSync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-      '-File', cleanupScript, '-InstallDir', install,
-    ], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+    const result = spawnSync('cargo', [
+      'run', '--quiet', '--manifest-path', path.join(tauriRoot, 'Cargo.toml'),
+      '--bin', 'aichat-rust', '--', '--stop-mcp', install,
+    ], { encoding: 'utf8', windowsHide: true, timeout: 150000 });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stdout + result.stderr);
   }
@@ -81,6 +81,7 @@ OutFile "Setup.exe"
 InstallDir "$TEMP\\Keepwork-hook-fixture"
 !include "LogicLib.nsh"
 !define MAINBINARYNAME "Keepwork"
+!define MAINBINARYSRCPATH "${process.execPath}"
 !define PRODUCTNAME "Keepwork"
 !macro CheckIfAppIsRunning executable productName
  DetailPrint "Fixture desktop process check"

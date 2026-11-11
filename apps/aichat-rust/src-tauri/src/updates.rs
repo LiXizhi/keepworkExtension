@@ -5,9 +5,12 @@ use crate::runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(not(target_os = "windows"))]
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+#[cfg(not(target_os = "windows"))]
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -88,6 +91,7 @@ pub struct UpdateManager {
     metadata_file: PathBuf,
     downloads_dir: PathBuf,
     feed_url: String,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     launcher_exe: Option<PathBuf>,
     desktop_state: Arc<Mutex<DesktopUpdateRuntimeState>>,
 }
@@ -279,10 +283,10 @@ impl UpdateManager {
     }
 
     async fn fetch_and_stage_desktop_update(&self) -> Result<(), String> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| e.to_string())?;
+        let builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+        #[cfg(test)]
+        let builder = builder.no_proxy();
+        let client = builder.build().map_err(|e| e.to_string())?;
 
         let resp = client
             .get(&self.feed_url)
@@ -479,48 +483,89 @@ impl UpdateManager {
     }
 
     pub fn launch_desktop_installer(&self, package_path: &Path) -> Result<(), String> {
+        // Execute only what this app downloaded: the metadata on disk can be
+        // edited, and a path outside the download directory would turn the
+        // updater into a "run arbitrary file" primitive.
+        let package = package_path
+            .canonicalize()
+            .map_err(|e| format!("更新包路径无效：{e}"))?;
+        let downloads = self
+            .downloads_dir
+            .canonicalize()
+            .map_err(|e| format!("更新下载目录无效：{e}"))?;
+        if !crate::files::inside(&downloads, &package) {
+            return Err("更新包不在下载目录内，已拒绝执行".to_string());
+        }
+        let ext = package
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        #[cfg(not(target_os = "windows"))]
         if let Some(launcher) = &self.launcher_exe {
             if launcher.is_file() {
-                Command::new(launcher)
-                    .args(["--apply-update", &package_path.to_string_lossy()])
-                    .spawn()
-                    .map_err(|e| format!("启动更新器失败：{e}"))?;
-                return Ok(());
+                return spawn_installer(
+                    launcher,
+                    &[OsStr::new("--apply-update"), package.as_os_str()],
+                );
             }
         }
 
         #[cfg(target_os = "macos")]
         {
-            Command::new("open")
-                .arg(package_path)
-                .spawn()
-                .map_err(|e| format!("打开更新包失败：{e}"))?;
-            return Ok(());
+            if ext == "dmg" || ext == "pkg" {
+                return spawn_installer(Path::new("open"), &[package.as_os_str()]);
+            }
+            return Err(format!("不支持的更新包类型：{ext}"));
         }
 
         #[cfg(target_os = "windows")]
         {
-            let ext = package_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
             if ext == "exe" {
-                Command::new(package_path)
-                    .spawn()
-                    .map_err(|e| format!("启动安装包失败：{e}"))?;
-            } else {
-                Command::new("explorer.exe")
-                    .arg(package_path)
-                    .spawn()
-                    .map_err(|e| format!("打开更新包失败：{e}"))?;
+                // Open the visible installer through the Windows shell, allowing
+                // normal elevation/association handling. Never pass silent flags.
+                use std::os::windows::ffi::OsStrExt;
+                let file: Vec<u16> = package.as_os_str().encode_wide().chain(Some(0)).collect();
+                let verb: Vec<u16> = "open\0".encode_utf16().collect();
+                let result = unsafe {
+                    windows_sys::Win32::UI::Shell::ShellExecuteW(
+                        std::ptr::null_mut(),
+                        verb.as_ptr(),
+                        file.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                    )
+                } as isize;
+                return if result > 32 {
+                    Ok(())
+                } else {
+                    Err(format!("启动安装器失败（Windows {result}）"))
+                };
             }
-            return Ok(());
+            return Err(format!("不支持的更新包类型：{ext}"));
         }
 
-        #[allow(unreachable_code)]
-        Ok(())
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = ext;
+            Err("当前平台不支持自动安装更新".to_string())
+        }
     }
+}
+
+/// Start an interactive platform installer without inheriting terminal handles.
+#[cfg(not(target_os = "windows"))]
+fn spawn_installer(program: &Path, args: &[&OsStr]) -> Result<(), String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("启动更新器失败：{e}"))
 }
 
 #[cfg(test)]
@@ -541,6 +586,7 @@ mod tests {
         let pkg_size = pkg_bytes.len() as u64;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let pkg_url = format!("http://127.0.0.1:{port}/KeepWork-SecondBrain.zip");
         let feed_url = format!("http://127.0.0.1:{port}/latest-client.json");
@@ -557,8 +603,14 @@ mod tests {
         .to_string();
 
         let srv = thread::spawn(move || {
-            for _ in 0..2 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut requests = 0;
+            while requests < 2 && std::time::Instant::now() < deadline {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    requests += 1;
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
                     let mut buf = [0u8; 2048];
                     let n = stream.read(&mut buf).unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]);
@@ -577,6 +629,8 @@ mod tests {
                         let _ = stream.write_all(resp.as_bytes());
                         let _ = stream.write_all(&pkg_bytes);
                     }
+                } else {
+                    thread::sleep(Duration::from_millis(5));
                 }
             }
         });
@@ -600,6 +654,12 @@ mod tests {
 
         let verified_pkg = manager.prepare_desktop_install().unwrap();
         assert!(verified_pkg.is_file());
+        let outside = root.join("outside.exe");
+        fs::write(&outside, b"never execute").unwrap();
+        assert!(manager
+            .launch_desktop_installer(&outside)
+            .unwrap_err()
+            .contains("下载目录"));
 
         // Now test offline fallback with cached metadata (`stale: true`)
         let offline_manager = UpdateManager::new(
@@ -614,6 +674,12 @@ mod tests {
         assert!(stale_snap.desktop.stale);
         assert_eq!(stale_snap.desktop.latest_version, "0.3.0");
         assert!(stale_snap.desktop.can_apply);
+
+        fs::write(&verified_pkg, b"tampered").unwrap();
+        assert!(manager
+            .prepare_desktop_install()
+            .unwrap_err()
+            .contains("完整性"));
 
         let _ = fs::remove_dir_all(&root);
     }
