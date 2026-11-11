@@ -40,11 +40,11 @@ const SOURCE_PATHS = [
 ];
 
 const TARGETS = {
-  'aarch64-apple-darwin': [{ arch: 'arm64', platform: 'darwin', stage: 'macos-arm64' }],
-  'x86_64-apple-darwin': [{ arch: 'x64', platform: 'darwin', stage: 'macos-x64' }],
+  'aarch64-apple-darwin': [{ arch: 'arm64', platform: 'macos', stage: 'macos-arm64' }],
+  'x86_64-apple-darwin': [{ arch: 'x64', platform: 'macos', stage: 'macos-x64' }],
   'universal-apple-darwin': [
-    { arch: 'arm64', platform: 'darwin', stage: 'macos-arm64' },
-    { arch: 'x64', platform: 'darwin', stage: 'macos-x64' },
+    { arch: 'arm64', platform: 'macos', stage: 'macos-arm64' },
+    { arch: 'x64', platform: 'macos', stage: 'macos-x64' },
   ],
   'x86_64-pc-windows-msvc': [{ arch: 'x64', platform: 'windows', stage: 'windows-x64' }],
   // apps/mcp-runtime never stages a win-arm64 slice, so that installer keeps
@@ -91,7 +91,7 @@ function validateRuntime(dir, expected) {
   if (!fs.existsSync(manifestPath)) throw new Error(`Missing runtime.json in ${dir}`);
   const manifest = readJson(manifestPath);
   if (manifest.product !== PRODUCT) throw new Error(`Runtime product mismatch: expected ${PRODUCT}, got ${manifest.product}`);
-  const runtimePlatform = expected.platform === 'windows' ? 'windows' : 'darwin';
+  const runtimePlatform = expected.platform;
   if (manifest.platform !== runtimePlatform || manifest.arch !== expected.arch) {
     throw new Error(`Runtime target mismatch: got ${manifest.platform}-${manifest.arch}, expected ${runtimePlatform}-${expected.arch}`);
   }

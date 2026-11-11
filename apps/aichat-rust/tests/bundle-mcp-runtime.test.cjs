@@ -13,6 +13,13 @@ const tauriConf = JSON.parse(
 );
 const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: appRoot, encoding: "utf8" }).trim();
 
+test("uses the published macOS platform name for staged Node runtimes", () => {
+  assert.deepEqual(
+    bundler.TARGETS["universal-apple-darwin"].map((runtime) => runtime.platform),
+    ["macos", "macos"]
+  );
+});
+
 function fixture(runtime) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aichat-rust-mcp-"));
   const stage = path.join(dir, "staging", runtime.stage);
@@ -99,7 +106,7 @@ test("a runtime built for another target is rejected", () => {
   );
   assert.throws(
     () => bundler.bundle({ root, out, target: "universal-apple-darwin", require: true, sourceChanged: () => false }),
-    /No staged Keepwork MCP runtime for darwin-x64/
+    /No staged Keepwork MCP runtime for macos-x64/
   );
 });
 
