@@ -15,7 +15,7 @@ flowchart LR
     Sessions --> Adapter[HarnessAdapter / CodexHarness / AcpHarness / ClaudeHarness / AntigravityHarness]
     Adapter -->|hidden stdio| Codex[Codex App Server]
     Adapter -->|Claude stream-json| Claude[Claude Code native CLI]
-    Adapter -->|ACP stdio| CLIs[Cursor / Trae / Qwen / Kimi / OpenCode / CodeBuddy / Copilot]
+    Adapter -->|ACP stdio| CLIs[Cursor / Trae / Qwen / Kimi / OpenCode / CodeBuddy / Copilot / DeepSeek]
     Adapter -->|native NDJSON| Antigravity[Antigravity CLI: agy]
     Adapter --> CopilotRouter[CopilotHarness: native + optional editor models]
     CopilotRouter -->|isolated BYOK ACP process| EditorCLI[Copilot CLI tools and sessions]
@@ -98,6 +98,22 @@ this does not bind the browser draft's workspace. Before any local root is selec
 a daemon-owned empty `model-discovery` directory supplies the metadata session cwd.
 Model discovery failure is
 reported as `modelsError`, independently of executable/handshake availability.
+
+Installation discovery, protocol connection, authentication and successful turns
+are separate observations. An inventory-only response uses `probe: "executable"`
+and cannot confirm a login. ACP providers without a native account query keep
+`authenticated: null` / `authState: "unknown"`; a successful handshake does not
+change that into a verified account. Explicit signed-out results use
+`authenticated: false` / `authState: "required"`. The account name may remain
+unavailable even when authentication is confirmed.
+
+Picker inventory errors must identify a connection, access or unsupported-service
+problem instead of presenting every CLI as missing. An older peer without the
+optional inventory capability remains usable through targeted backend queries.
+After a completed native login, providers that cannot report account identity
+need a bounded "connected; confirm the account in the native terminal" outcome,
+not endless automated account checks or a claim that an account switch succeeded.
+Opening a picker must not start all providers or install missing CLIs.
 
 Each daemon owns one persistent ACP/Codex CLI process per backend. Status requests
 reuse successful account and model capabilities rather than rerunning discovery.
@@ -242,6 +258,40 @@ installed daemon. Reports under `out/agent-cli-verify/` distinguish passed, fail
 unavailable and not_tested; missing backends never count as passed. A probe-only
 or targeted run cannot establish all-provider acceptance.
 
+## Native connector verification (2026-11-11)
+
+This run used isolated services and temporary workspaces on macOS arm64. It did
+not install missing providers, change logins, or restart the user's daemon.
+"Passed" below means real native tools worked in two roots, including Unicode,
+two turns, prompt-ID idempotency, snapshot reconnect and session recovery. It is
+evidence for the listed local CLI versions and accounts, not all operating systems
+or provider releases.
+
+| Backend | CLI version | Local result | Remaining action |
+| --- | --- | --- | --- |
+| Codex | 0.167.0 | Passed real execution | Reverify after adapter/provider changes |
+| WorkBuddy | CodeBuddy 2.183.0 | Passed real execution | Reverify after adapter/provider changes |
+| CodeBuddy | 2.183.0 | Passed its own backend smoke | Reverify after adapter/provider changes |
+| Kimi | 2.5.2 | Passed real execution | Reverify after adapter/provider changes |
+| OpenCode | 2.2.5 | Passed real execution | Reverify after adapter/provider changes |
+| DeepSeek Harness | 0.1.5-rc.2 | Real turn failed: provider rejected API credentials | Correct credentials through native setup, then rerun |
+| Antigravity (`gemini`) | 1.5.5 | Real turn failed: provider API unavailable in this region | Resolve provider availability, then rerun |
+| Claude Code | 2.1.89 | Native account status explicitly signed out; real turn not attempted | Complete native login, then rerun |
+| Cursor | Not found | Unrelated Grok `agent` was incorrectly selected before the fix; now skipped | Install/configure the actual Cursor CLI, then rerun |
+| Copilot | Not found | Unavailable | Install/configure its CLI, then rerun |
+| Trae | Not found | Unavailable | Install/configure its CLI, then rerun |
+| Qwen Code | Not found | Unavailable | Install/configure its CLI, then rerun |
+
+Real execution was run separately with
+`node scripts/agent-cli-smoke.cjs --backend <id> --report <file>`.
+Reports from this diagnostic are in `/tmp/keepwork-cli-real-<id>-qa.json`;
+`/tmp/keepwork-agent-cli-probe-qa-final.json` covers every registered backend.
+Those local reports are not release artifacts and may be removed by OS cleanup.
+Raw provider failures, account identities and credentials are not copied here.
+All-provider acceptance is **incomplete**. Windows and a published browser/daemon
+pair were not exercised in this run; deterministic regressions are separate
+evidence and do not turn unavailable or untested rows into passes.
+
 ## Automatic CLI discovery
 
 `src/core/agentCliProcess.ts` resolves all registered backends without executing shell
@@ -249,6 +299,10 @@ profiles or installer scripts. Explicit `KEEPWORK_CODEX_PATH`,
 `KEEPWORK_WORKBUDDY_PATH`, `KEEPWORK_COPILOT_PATH` settings take priority. An invalid
 explicit path fails clearly instead of silently selecting another installation.
 Then Keepwork searches PATH, common CLI/package locations and desktop bundles.
+Cursor's generic `agent` alias must resolve to its official `cursor-agent` entry;
+an unrelated executable named `agent` (for example another vendor's CLI) is not
+evidence that Cursor is installed. An explicit `KEEPWORK_CURSOR_PATH` remains an
+operator-selected override.
 Paths with spaces are passed as arguments, never concatenated into a shell command.
 
 - Windows: user npm prefix, `.local/bin`, Scoop shims, WinGet Links,
@@ -270,6 +324,10 @@ bundle can support ACP but lack interactive login modules; use the official
 [CodeBuddy CLI installation](https://www.codebuddy.cn/docs/cli/installation) in that
 case. Discovery does not read credentials, log in, install, or change PATH.
 A successful handshake does not establish authentication or real tool execution.
+ACP startup failures report the selected CLI path, exit code or signal, and
+whether initialization completed, with the registered native launch/login commands
+for diagnosis. Raw stderr is not included because provider output may contain
+credentials. A failed startup never causes an automatic prompt replay.
 
 Copilot CLI and Cursor reuse their daemon-lifetime ACP process and model cache.
 WorkBuddy and CodeBuddy share a prompt-free discovery process and cached models,
@@ -333,10 +391,11 @@ CodeBuddy use the same engine but have separate backend identities and host cach
 | cursor | `agent acp` (also discovers `cursor-agent`) | [Cursor ACP](https://cursor.com/docs/cli/acp) |
 | trae | `traecli acp serve` | [TraeCode ACP](https://docs.trae.cn/cli_agent-client-protocol) |
 | qwen | `qwen --acp` | [Official CLI source](https://github.com/QwenLM/qwen-code/blob/main/packages/cli/src/config/config.ts) |
-| gemini | `gemini --experimental-acp` (legacy alias retained in current versions) | [Official CLI source](https://github.com/google-gemini/gemini-cli/blob/main/packages/cli/src/config/config.ts) |
+| gemini | `agy --input-format stream-json --output-format stream-json` (stable backend key; legacy Gemini histories stay readable) | [Antigravity installation](https://antigravity.google/docs/cli/install/) |
 | kimi | `kimi acp` | [Kimi commands](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html) |
 | codebuddy | `codebuddy --acp` | [CodeBuddy ACP](https://www.codebuddy.cn/docs/cli/acp) |
 | opencode | `opencode acp` | [OpenCode ACP](https://opencode.ai/v2/docs/cli/acp/) |
+| deepseek | `dsh --profile acp` | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) |
 
 Claude uses one child per native session, `--session-id` for new sessions and
 `--resume` on recovery. Selected reference roots are forwarded with `--add-dir`.
@@ -357,9 +416,11 @@ using `session/set_model`. Missing native `loadSession` support is still an erro
 The packaged verification backend catalogue is checked against the runtime registry.
 All-provider runs include every expected provider plus any newly advertised IDs;
 older daemons cannot silently omit the new backends. Targeted runs remain targeted.
-Deterministic fixtures and AIChat browser fixtures cover all 11 providers. Real
-acceptance still requires the corresponding native CLI, compatible version and
-provider login. Platform directory fixtures are not a real macOS acceptance.
+The registry currently contains 12 backend IDs; WorkBuddy and CodeBuddy share one
+native engine. Protocol and browser fixtures do not establish native availability.
+Real acceptance requires the corresponding native CLI, compatible version and
+provider login on each tested system. Directory fixtures are not real macOS or
+Windows acceptance.
 
 
 ## Scoped AIChat context and MCP
@@ -495,7 +556,7 @@ Regression: AIChat `AICHAT-PERSONA-AUTO-APPROVAL-001` uses real persona UI/HTTP/
 
 ## Dashboard CLI 账号页（2026-10-21）
 
-Dashboard 的“CLI 账号”分类页展示全部 11 个后端，支持全部、已安装、已登录、未登录、待确认筛选。
+Dashboard 的“CLI 账号”分类页按注册表展示全部后端，支持全部、已安装、已登录、未登录、待确认筛选。
 首次只发现安装路径，不自动启动全部 CLI；“检测账号”和“检测全部账号”调用现有原生状态查询，显示可确认的用户名、名称或邮箱。
 未提供身份字段时明确标注，不能将 CLI 可执行文件存在当作已登录；不读取凭据文件。Antigravity 当前没有已核实的独立用户名查询命令。
 

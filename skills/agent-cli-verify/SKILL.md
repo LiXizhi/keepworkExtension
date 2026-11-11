@@ -64,7 +64,8 @@ runtime test verifies it matches `src/core/agentCliBackends.ts`. An older daemon
 missing one of these IDs must report that provider unavailable. Include unexpected
 advertised IDs in full verification; do not silently narrow a full run.
 
-Codex uses App Server; Claude uses native bidirectional stream-json; the remaining
+Codex uses App Server; Claude uses native bidirectional stream-json; Antigravity
+uses native agy NDJSON under the persisted `gemini` backend key. The remaining
 providers use native ACP. Claude probe-only checks its executable/version, not a
 protocol handshake or login. An actual session initializes its control protocol.
 Cursor user questions and plans must wait for explicit answers. Native model and

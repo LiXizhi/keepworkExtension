@@ -34,6 +34,32 @@ function fixture(t, platform) {
     const put = (rel, content = '') => { const target = path.join(home, rel); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content, { mode: 0o755 }); return target; };
     return { home, options, put };
 }
+test('Cursor discovery rejects another provider named agent, including aliases in common directories', t => {
+    const { home, options, put } = fixture(t, 'darwin');
+    const other = put('.grok/downloads/grok-macos', '#!/bin/sh\nexit 0\n');
+    fs.mkdirSync(path.join(home, '.grok/bin'), { recursive: true });
+    fs.symlinkSync(other, path.join(home, '.grok/bin/agent'));
+    fs.mkdirSync(path.join(home, '.local/bin'), { recursive: true });
+    fs.symlinkSync(path.join(home, '.grok/bin/agent'), path.join(home, '.local/bin/agent'));
+    options.pathDirs = [path.join(home, '.grok/bin'), path.join(home, '.local/bin')];
+    assert.throws(() => resolveAgentCli('cursor', ['acp'], undefined, options), /CLI not found/);
+    const cursor = put('later/cursor-agent');
+    options.pathDirs.push(path.dirname(cursor));
+    assert.equal(resolveAgentCli('cursor', ['acp'], undefined, options).path, cursor);
+});
+test('Cursor official alias-only install is discovered without PATH and explicit custom aliases remain supported', t => {
+    const { home, options, put } = fixture(t, 'darwin');
+    const official = put('.local/share/cursor-agent/versions/2026.11.1-abc/cursor-agent');
+    fs.mkdirSync(path.join(home, '.local/bin'), { recursive: true });
+    const alias = path.join(home, '.local/bin/agent');
+    fs.symlinkSync(official, alias);
+    assert.equal(resolveAgentCli('cursor', ['acp'], undefined, options).path, alias);
+    const custom = put('custom/agent');
+    assert.equal(resolveAgentCli('cursor', ['acp'], custom, options).path, custom);
+    options.pathDirs = [path.dirname(custom)];
+    options.env.KEEPWORK_CURSOR_PATH = 'agent';
+    assert.equal(resolveAgentCli('cursor', ['acp'], undefined, options).path, custom);
+});
 for (const platform of ['win32', 'darwin']) {
     for (const backend of AGENT_BACKENDS) test(`${platform}: ${backend} discovery preserves PATH priority and explicit configuration`, t => {
         const { home, options, put } = fixture(t, platform);
@@ -134,4 +160,22 @@ test('a missing CLI can be discovered on a later connection without caching fail
     put('installed-later.cjs', `require(${JSON.stringify(path.join(__dirname, 'fixtures/fake-acp.cjs'))});`);
     const account = await adapter.call('account/read'); assert.equal(account.authUnknown, true);
     assert.deepEqual(adapter.cliInfo(), { path: target, source: 'configured' });
+});
+
+test('ACP startup failure identifies the CLI and exit code without leaking stderr or relaunching', async t => {
+    const { home, put } = fixture(t, process.platform);
+    const { AcpHarness } = require('../src/core/acpHarness.ts');
+    const launches = path.join(home, 'launches');
+    const entry = put('broken-cli.cjs', `require('node:fs').appendFileSync(${JSON.stringify(launches)}, 'launch\\n');process.stderr.write('token=fixture-private-token\\n');process.exit(17);`);
+    const adapter = new AcpHarness('workbuddy', path.join(home, 'cache'), entry); t.after(() => adapter.close());
+    await assert.rejects(adapter.call('account/read'), error => {
+        assert.match(error.message, /workbuddy/i);
+        assert.ok(error.message.includes(entry));
+        assert.match(error.message, /17/);
+        assert.match(error.message, /before ACP initialization/);
+        assert.ok(!error.message.includes('fixture-private-token'));
+        return true;
+    });
+    await new Promise(resolve => setTimeout(resolve, 75));
+    assert.equal(fs.readFileSync(launches, 'utf8'), 'launch\n');
 });

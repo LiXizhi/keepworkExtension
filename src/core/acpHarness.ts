@@ -78,7 +78,8 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             try { command = resolveAgentCli(this.backend, launchArgs, this.executable); this.launch = command; } catch (e) { reject(e); return; }
             const child = spawn(command.executable, command.args, { cwd: this.launchCwd, env, windowsHide: true, shell: false, stdio: 'pipe', detached: process.platform !== 'win32' });
             this.child = child;
-            let buffer = '', failed = false;
+            let buffer = '', failed = false, initialized = false;
+            const diagnostic = (reason: string) => new Error(`${AGENT_CLI[this.backend].name} CLI ${reason} ${initialized ? 'after' : 'before'} ACP initialization (${command.path}). Check that this CLI supports ${this.args.join(' ')}; run ${AGENT_CLI[this.backend].login} in a terminal to check login, then reconnect. Prompts were not rerun.`);
             const fail = (error: Error) => {
                 if (failed) return; failed = true;
                 if (this.child !== child) return;
@@ -102,12 +103,12 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
                 }
             });
             child.stderr.resume();
-            child.on('error', () => fail(new Error(`${this.backend} unavailable. Install its CLI or configure KEEPWORK_${this.backend.toUpperCase()}_PATH and restart Keepwork MCP.`)));
-            child.on('exit', () => fail(new Error(`${this.backend} process stopped; prompts were not rerun.`)));
+            child.on('error', (error: NodeJS.ErrnoException) => fail(diagnostic(`could not start${error.code && /^[A-Z0-9_]+$/.test(error.code) ? ' (' + error.code + ')' : ''}`)));
+            child.on('exit', (code, signal) => fail(diagnostic(`exited (${signal ? 'signal ' + signal : 'code ' + code})`)));
             child.stdin.on('error', () => fail(new Error('ACP input disconnected; reconcile before retrying')));
             child.on('spawn', () => void this.rpc('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'keepwork-aichat', version: '1.0.0' } }).then(result => {
                 if (result.protocolVersion !== 1) { fail(new Error('Unsupported ACP protocol version')); return; }
-                this.capabilities = result.agentCapabilities || {}; resolve(result);
+                initialized = true; this.capabilities = result.agentCapabilities || {}; resolve(result);
             }, fail));
         });
         })();

@@ -31,6 +31,18 @@ export function resolveAgentCli(backend: AgentCliBackend, args: string[], overri
         const script = nodeScript(target);
         if (file(target, platform, script)) return { executable: script ? process.execPath : target, args: script ? [target, ...args] : args, path: target, source };
     };
+    let skippedCursorAlias = false;
+    const isCursorAlias = (target: string): boolean => {
+        // `agent` is also installed by other products. Cursor's official Unix
+        // installer points it at a cursor-agent entry; Windows uses the reviewed
+        // bundled package below. Do not execute an unknown program to identify it.
+        try {
+            const real = fs.realpathSync(target);
+            if (/^cursor-agent(?:\.exe)?$/i.test(path.basename(real))) return true;
+            const sibling = path.join(path.dirname(target), 'cursor-agent' + (platform === 'win32' ? '.exe' : ''));
+            return file(sibling, platform) && fs.realpathSync(sibling) === real;
+        } catch { return false; }
+    };
     const cursorPackage = (dir: string, source: string): CliLaunch | undefined => {
         if (platform !== 'win32' || backend !== 'cursor' || !file(path.join(dir, 'cursor-agent.ps1'), platform)) return;
         // Resolve the official fixed layout and bundled Node without evaluating shell text.
@@ -45,7 +57,12 @@ export function resolveAgentCli(backend: AgentCliBackend, args: string[], overri
     };
     const tryDir = (dir: string, source: string): CliLaunch | undefined => {
         for (const name of names) {
-            const native = tryPath(path.join(dir, name + (platform === 'win32' ? '.exe' : '')), source);
+            const target = path.join(dir, name + (platform === 'win32' ? '.exe' : ''));
+            if (backend === 'cursor' && name === 'agent' && !isCursorAlias(target)) {
+                if (file(target, platform, nodeScript(target))) skippedCursorAlias = true;
+                continue;
+            }
+            const native = tryPath(target, source);
             if (native) return native;
             if (platform === 'win32' && file(path.join(dir, name + '.cmd'), platform)) {
                 try { const command = cliCommand(path.join(dir, name + '.cmd'), args, platform, env); return { ...command, path: command.executable === process.execPath ? command.args[0] : command.executable, source }; } catch { /* unsupported shim */ }
@@ -128,7 +145,7 @@ export function resolveAgentCli(backend: AgentCliBackend, args: string[], overri
             const launch = tryPath(path.join(resources, 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'), 'desktop'); if (launch) return launch;
         }
     }
-    throw new Error(`${backend} CLI not found in PATH or common installation locations. Install its CLI or set KEEPWORK_${backend.toUpperCase()}_PATH.`);
+    throw new Error(`${backend} CLI not found in PATH or common installation locations.${skippedCursorAlias ? ' An unverified "agent" command was skipped because it may belong to another product.' : ''} Install its CLI or set KEEPWORK_${backend.toUpperCase()}_PATH.`);
 }
 
 /** Resolve npm launchers without invoking a shell or interpreting user text. */

@@ -248,7 +248,8 @@ export class AgentSessions {
             catch (error) { modelsError = (error as Error).message; }
             modelsError ||= result.modelsError;
             const loginRequired = !!modelsError && /^Authentication required[.!]?$/i.test(modelsError.trim());
-            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, probe: account.probe || 'protocol', account: loginRequired ? undefined : agentAccountDisplay(account.account), available: true, cli: adapter.cliInfo?.(), authenticated: loginRequired ? false : account.authUnknown ? null : !!account.account || account.requiresOpenaiAuth === false, authState: loginRequired ? 'required' : account.authUnknown ? 'unknown' : 'verified', models: bounded(result.data || []), ...(modelsError ? { modelsError } : {}) };
+            const authenticated = loginRequired ? false : account.authUnknown ? null : !!account.account || account.requiresOpenaiAuth === false;
+            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, probe: account.probe || 'protocol', account: loginRequired ? undefined : agentAccountDisplay(account.account), available: true, cli: adapter.cliInfo?.(), authenticated, authState: authenticated === null ? 'unknown' : authenticated ? 'verified' : 'required', models: bounded(result.data || []), ...(modelsError ? { modelsError } : {}) };
         } catch (error) { return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, available: false, cli: adapter?.cliInfo?.(), authenticated: false, models: [], error: (error as Error).message }; }
     }
     async login(backend: string = 'codex') {

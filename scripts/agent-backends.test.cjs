@@ -60,7 +60,7 @@ for (const backend of ['workbuddy', 'codebuddy']) test(`${backend}: process cwd 
    await m.turn(s.id,owner,{requestId,text:'Report native working directory'});
    const snapshot=await done(m,s.id,owner);
    const reply=JSON.parse(snapshot.items.filter(item=>item.type==='agentMessage').at(-1).text);
-   const canonical=value=>process.platform==='win32'?value.toLowerCase():value;
+   const canonical=value=>{const real=fs.realpathSync(value);return process.platform==='win32'?real.toLowerCase():real;};
    assert.equal(canonical(reply.cwd),canonical(roots[index]),'CLI startup cwd must be the selected local workspace');
    assert.equal(canonical(reply.sessionCwd),canonical(roots[index]));assert.equal(reply.marker,path.basename(roots[index]));
    return reply.pid;
@@ -179,6 +179,23 @@ test('native model discovery requiring authentication marks the connected CLI as
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cli-auth-status-')),adapter=new Adapter();
  const manager=new AgentSessions(path.join(dir,'registry'),adapter,{cursor:adapter});t.after(()=>{manager.close();fs.rmSync(dir,{recursive:true,force:true});});
  const result=await manager.status('cursor');assert.equal(result.available,true);assert.equal(result.authenticated,false);assert.equal(result.authState,'required');assert.equal(result.modelsError,'Authentication required');
+});
+
+test('account status distinguishes a confirmed missing login, unknown auth and verified credentials', async t => {
+ const {EventEmitter}=require('node:events');
+ const cases=[
+  [{account:null,probe:'native-auth'},false,'required'],
+  [{account:{type:'cli'},probe:'native-auth'},true,'verified'],
+  [{account:null,authUnknown:true},null,'unknown'],
+  [{account:null,requiresOpenaiAuth:false},true,'verified'],
+ ];
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cli-auth-contract-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ for(const [account,authenticated,authState] of cases){
+  class Adapter extends EventEmitter {async call(method){return method==='account/read'?account:{data:[]};}close(){}}
+  const adapter=new Adapter(),manager=new AgentSessions(path.join(dir,authState+'.json'),adapter,{claude:adapter});
+  try{const result=await manager.status('claude');assert.equal(result.available,true);assert.equal(result.authenticated,authenticated);assert.equal(result.authState,authState);assert.deepEqual(result.models,[]);}finally{manager.close();}
+ }
 });
 
 test('installation inventory discovers executable paths without calling any native adapter', async t => {
