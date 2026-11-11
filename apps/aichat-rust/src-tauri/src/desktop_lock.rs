@@ -86,9 +86,22 @@ impl DesktopLock {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                        let mut buf = [0u8; 128];
-                        let n = stream.read(&mut buf).unwrap_or(0);
-                        let cmd = String::from_utf8_lossy(&buf[..n]);
+                        let mut command = Vec::with_capacity(16);
+                        let mut byte = [0u8; 1];
+                        while command.len() < 128 {
+                            match stream.read(&mut byte) {
+                                Ok(0) => break,
+                                Ok(1) => {
+                                    command.push(byte[0]);
+                                    if byte[0] == b'\n' {
+                                        break;
+                                    }
+                                }
+                                Ok(_) => unreachable!(),
+                                Err(_) => break,
+                            }
+                        }
+                        let cmd = String::from_utf8_lossy(&command);
                         let _ = stream.write_all(b"OK\n");
                         let _ = stream.flush();
                         if cmd.starts_with("REPLACE") {
@@ -190,6 +203,44 @@ mod tests {
         // Simulate a second process by reading lock and pinging
         let record = DesktopLock::read_existing(&lock_file).unwrap();
         assert!(DesktopLock::ping_existing(&record, true, false));
+        let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+        while wakes.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+        primary.release();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fragmented_wake_command_is_handled_as_one_message() {
+        let root = std::env::temp_dir().join(format!("aichat-rust-lock-fragmented-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let lock_file = root.join("desktop.lock.json");
+
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_clone = Arc::clone(&wakes);
+        let mut primary = DesktopLock::acquire(lock_file.clone(), false, false, move |_replace| {
+            wakes_clone.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap()
+        .expect("primary instance should acquire lock");
+
+        let record = DesktopLock::read_existing(&lock_file).unwrap();
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], record.wake_port));
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        stream.write_all(b"WA").unwrap();
+        thread::sleep(Duration::from_millis(5));
+        stream.write_all(b"KE\n").unwrap();
+
+        let mut response = [0u8; 16];
+        let n = stream.read(&mut response).unwrap();
+        assert_eq!(&response[..n], b"OK\n");
+
         let deadline = std::time::Instant::now() + Duration::from_millis(1500);
         while wakes.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
