@@ -158,15 +158,17 @@ test('expired credentials and unsafe API origins do not leak or retry',async()=>
 });
 test('workspace aliases, skills and custom teams use daemon providers with bounded grants',async t=>{
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'team-runtime-'));t.after(()=>fs.rmSync(home,{recursive:true,force:true}));fs.mkdirSync(path.join(home,'.github/skills/review'),{recursive:true});fs.writeFileSync(path.join(home,'AGENTS.md'),'workspace rule');fs.writeFileSync(path.join(home,'.github/skills/review/SKILL.md'),'Review carefully');
-    let root=0,child=0;const snapshots=[];const files=new AichatWorkspaceFiles(path.join(home,'drafts'));
-    const runtime=createMcpAgentRuntime({token:'fixture',baseURL:''},async()=>{throw Error('unexpected external tool');},{workspaceFiles:files,persist:s=>snapshots.push(s),fetch:async(_url,init)=>{
+    let root=0,child=0;const snapshots=[],events=[];const files=new AichatWorkspaceFiles(path.join(home,'drafts'));
+    const runtime=createMcpAgentRuntime({token:'fixture',baseURL:''},async()=>{throw Error('unexpected external tool');},{workspaceFiles:files,persist:s=>snapshots.push(s),emit:e=>events.push(e),fetch:async(_url,init)=>{
         const body=JSON.parse(init.body),system=body.messages[0].content;
         assert.match(system,/workspace rule/);
         if(system.includes('reviewer')){assert.match(system,/Review carefully/);if(child++===0)return response({tool_calls:[call('read','workspace_file',{operation:'read',path:'//.brain/AGENTS.md'})]});return response({result:'review done'});}
         return root++===0?response({tool_calls:[call('delegate','runSubAgent',{member:'reviewer',prompt:'review'})]}):response({result:'team done'});
     }});runtime.registerWorkspaces('owner','team',{username:'fixture',primaryId:'brain',spaces:[{id:'brain',type:'local',root:home,aliases:['.brain']}]});
     const answer=await runtime.answer({id:'team-run',owner:'owner',workspaceId:'team',root:home,prompt:'leader',question:'go',history:[],tools:[],members:{reviewer:{prompt:'reviewer',skills:['review']}}},new AbortController().signal);
-    assert.equal(answer,'team done');assert.ok(snapshots.some(s=>s.parentId==='team-run'));runtime.close();
+    assert.equal(answer,'team done');assert.ok(snapshots.some(s=>s.parentId==='team-run'));
+    assert.deepEqual(events.filter(e=>e.type==='output'&&e.runId==='team-run'&&e.text).map(e=>e.text),['team done']);
+    assert.ok(events.some(e=>e.type==='output'&&e.runId!=='team-run'&&e.text==='review done'));runtime.close();
 });
 
 test('persona prompt and current second brain reach interactive, scheduled and fallback runs; clearing drops the old grant',async t=>{

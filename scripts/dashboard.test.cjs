@@ -17,6 +17,7 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
         require.extensions['.ts'] = (mod, file) => mod._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText, file);
         const { startHttpServer } = require('../src/mcp/http.ts');
         const { runtimeBuildInfo } = require('../src/core/runtimeBuildInfo.ts');
+        const { AGENT_BACKENDS } = require('../src/core/agentCliBackends.ts');
         const originalBuildInfo = { ...runtimeBuildInfo };
         t.after(() => Object.assign(runtimeBuildInfo, originalBuildInfo));
         Object.assign(runtimeBuildInfo, { version: '9.8.7', commit: 'a'.repeat(40), builtAt: '2026-10-19T12:34:56.000Z' });
@@ -42,7 +43,7 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
             const dashboardHeaders = { 'X-Agent-Owner': 'dashboard-test-owner-12345678901234567890', Authorization: `Bearer ${server.token}`, 'Sec-Fetch-Site': 'same-origin', Referer: base + '/dashboard' };
             const accounts = await fetch(base + '/agents/accounts', { headers: dashboardHeaders });
             assert.equal(accounts.status, 200);
-            assert.equal(Object.keys(await accounts.json()).length, 11);
+            assert.deepEqual(Object.keys(await accounts.json()).sort(), [...AGENT_BACKENDS].sort());
             const terminalResponse = await fetch(base + '/terminal/sessions', { method: 'POST', headers: { ...dashboardHeaders, Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: home }) });
             assert.equal(terminalResponse.status, 201);
             const terminal = await terminalResponse.json();

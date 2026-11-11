@@ -49,9 +49,11 @@ export async function readKeepworkModelStream(response:Response, signal?:AbortSi
 
 /** DSML is an internal tool envelope, including when its opening tag spans frames. */
 export function visibleModelText(text:string) {
-    const marker='<｜｜DSML｜｜',start=text.indexOf(marker);
-    if(start>=0)return text.slice(0,start);
-    for(let size=Math.min(marker.length-1,text.length);size>0;size--)
-        if(text.endsWith(marker.slice(0,size)))return text.slice(0,-size);
-    return text;
+    let end=text.length;
+    for(const marker of ['<｜｜DSML｜｜','</｜｜DSML｜｜']){
+        const start=text.indexOf(marker);if(start>=0)end=Math.min(end,start);
+        for(let size=Math.min(marker.length-1,text.length);size>0;size--)
+            if(text.endsWith(marker.slice(0,size))){end=Math.min(end,text.length-size);break;}
+    }
+    return text.slice(0,end);
 }

@@ -142,9 +142,15 @@ async fn read_model_body(
     mut response: reqwest::Response,
     mut output: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> Result<(String, String), String> {
-    let content_type = response.headers().get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
-    let streaming = content_type.to_ascii_lowercase().contains("text/event-stream");
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let streaming = content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream");
     let mut preview = StreamPreview::default();
     let mut bytes = Vec::new();
     let mut published = String::new();
@@ -166,7 +172,9 @@ async fn read_model_body(
                 continue;
             }
         };
-        let Some(chunk) = chunk else { break; };
+        let Some(chunk) = chunk else {
+            break;
+        };
         if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
             return Err("Keepwork model stream exceeds limit".into());
         }
@@ -191,7 +199,9 @@ async fn read_model_body(
     if streaming {
         let text = preview.text();
         if text != published {
-            if let Some(output) = output.as_mut() { output(&text); }
+            if let Some(output) = output.as_mut() {
+                output(&text);
+            }
         }
     }
     Ok((content_type, String::from_utf8_lossy(&bytes).into_owned()))
@@ -578,6 +588,58 @@ pub(crate) fn consume_turn_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_stream_publishes_trailing_text_while_upstream_is_idle() {
+        use http_body_util::BodyExt;
+        use tokio_stream::StreamExt;
+        let (frames, incoming) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(incoming)
+            .then(|bytes| async move { http_body_util::Full::new(bytes).frame().await.unwrap() });
+        let body = reqwest::Body::wrap(http_body_util::StreamBody::new(stream));
+        let response = reqwest::Response::from(
+            axum::http::Response::builder()
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(body)
+                .unwrap(),
+        );
+        let (updates, mut output) = tokio::sync::mpsc::unbounded_channel();
+        let consumer = tokio::spawn(async move {
+            let mut publish = move |text: &str| {
+                let _ = updates.send(text.to_string());
+            };
+            read_model_body(response, Some(&mut publish)).await.unwrap()
+        });
+        frames
+            .send(Bytes::from_static(b"data: {\"result\":\"hello\"}\n\n"))
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, "hello");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        frames
+            .send(Bytes::from_static(b"data: {\"result\":\" world\"}\n\n"))
+            .unwrap();
+        // Leave the connection open and idle: the update must not depend on a
+        // further network chunk or EOF to leave the throttle buffer.
+        let second = tokio::time::timeout(Duration::from_millis(500), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, "hello world");
+        assert!(!consumer.is_finished());
+        frames
+            .send(Bytes::from_static(b"data: [DONE]\n\n"))
+            .unwrap();
+        drop(frames);
+        let (content_type, body) = consumer.await.unwrap();
+        assert_eq!(
+            parse_model_turn(&content_type, &body).unwrap().content,
+            "hello world"
+        );
+    }
 
     #[test]
     fn preview_arrives_before_completion_across_utf8_and_crlf_chunks() {
