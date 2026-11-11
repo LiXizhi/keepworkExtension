@@ -2089,11 +2089,20 @@ pub fn run() {
 
     if std::env::var("AICHAT_DESKTOP_LOCAL_SOURCE").ok().as_deref() == Some("1") {
         if let Some(src_dir) = resolve_local_aichat_source_dir() {
-            if let Ok(srv) = DevServer::start(&src_dir, "AIChat.html") {
-                initial_entry = srv.url();
-                initial_dev_srv = Some(srv);
-                initial_local_source = true;
+            match DevServer::start(&src_dir, "AIChat.html") {
+                Ok(srv) => {
+                    initial_entry = srv.url();
+                    eprintln!("[desktop] Local AIChat source: {} -> {initial_entry}", src_dir.display());
+                    initial_dev_srv = Some(srv);
+                    initial_local_source = true;
+                }
+                Err(error) => eprintln!(
+                    "[desktop] Cannot start local AIChat source at {}: {error}. Falling back to {initial_entry}",
+                    src_dir.display()
+                ),
             }
+        } else {
+            eprintln!("[desktop] Local AIChat source not found. Set AICHAT_DESKTOP_SOURCE_DIR (or AICHAT_SOURCE_DIR) to a directory containing AIChat.html. Falling back to {initial_entry}");
         }
     } else if let Ok((dep_url, dep_srv)) = open_deployment(&profile_dir.join("deployment.json")) {
         if dep_url != ENTRY {

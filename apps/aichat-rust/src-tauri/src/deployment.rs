@@ -59,17 +59,29 @@ pub fn open_deployment(deployment_file: &Path) -> Result<(String, Option<DevServ
 }
 
 pub fn resolve_local_aichat_source_dir() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var("AICHAT_DESKTOP_SOURCE_DIR") {
-        let p = PathBuf::from(custom);
-        if p.join("AIChat.html").is_file() {
-            return Some(p);
-        }
-    }
-    let candidates = [
+    resolve_local_aichat_source_dir_from(
+        std::env::var_os("AICHAT_DESKTOP_SOURCE_DIR").map(PathBuf::from),
+        std::env::var_os("AICHAT_SOURCE_DIR").map(PathBuf::from),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    )
+}
+
+fn resolve_local_aichat_source_dir_from(
+    custom: Option<PathBuf>,
+    electron_custom: Option<PathBuf>,
+    manifest_dir: &Path,
+) -> Option<PathBuf> {
+    // src-tauri lives at <checkout>/apps/aichat-rust/src-tauri. Match
+    // Electron's sibling apps checkout without assuming a drive or username.
+    let sibling_source = manifest_dir
+        .join("../../../..")
+        .join("apps/official/apps/tools/AIChat");
+    let candidates = custom.into_iter().chain(electron_custom).chain([
+        sibling_source,
         PathBuf::from("/Users/chenliao/CODE/apps/official/apps/tools/AIChat"),
         PathBuf::from("c:/lxzsrc/maisi/maisi/maisi/webgames/tools/AIChat"),
         PathBuf::from("c:/lxzsrc/apps/official/apps/tools/AIChat"),
-    ];
+    ]);
     for c in candidates {
         if c.join("AIChat.html").is_file() {
             return Some(c);
@@ -82,6 +94,46 @@ pub fn resolve_local_aichat_source_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn discovers_sibling_checkout_and_honors_explicit_source_priority() {
+        let root = std::env::temp_dir().join(format!("aichat-source-{}", Uuid::new_v4()));
+        let manifest = root.join("extension/apps/aichat-rust/src-tauri");
+        let sibling = root.join("apps/official/apps/tools/AIChat");
+        let custom = root.join("custom");
+        let electron = root.join("electron");
+        for dir in [&manifest, &sibling, &custom, &electron] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        for dir in [&sibling, &custom, &electron] {
+            fs::write(dir.join("AIChat.html"), "<html>local</html>").unwrap();
+        }
+        let found = resolve_local_aichat_source_dir_from(None, None, &manifest).unwrap();
+        assert_eq!(
+            fs::canonicalize(&found).unwrap(),
+            fs::canonicalize(&sibling).unwrap()
+        );
+        assert_eq!(
+            resolve_local_aichat_source_dir_from(
+                Some(custom.clone()),
+                Some(electron.clone()),
+                &manifest
+            ),
+            Some(custom)
+        );
+        assert_eq!(
+            resolve_local_aichat_source_dir_from(
+                Some(root.join("missing")),
+                Some(electron.clone()),
+                &manifest
+            ),
+            Some(electron)
+        );
+        let server = DevServer::start(&found, "AIChat.html").unwrap();
+        assert!(server.url().starts_with("http://127.0.0.1:"));
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn validates_deployment_entries_and_serves_local_bundle() {

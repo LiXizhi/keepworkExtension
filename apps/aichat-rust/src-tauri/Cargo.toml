@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.36"
+version = "0.2.38"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
@@ -42,6 +42,10 @@ required-features = ["dev-bins"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[target.'cfg(windows)'.build-dependencies]
+dunce = "1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "unstable", "macos-private-api"] }
