@@ -46,9 +46,10 @@ pub struct PersonaStore {
     pub(crate) messaging: OnceLock<Arc<MessagingService>>,
     /// Attached by the host so persona runs can execute local tools in-process.
     pub(crate) tools_env: OnceLock<Arc<LocalToolEnv>>,
-    /// Bumped on every notify so the MCP event stream can emit
-    /// `notifications/keepwork/personas_changed` without per-owner fan-out.
-    pub(crate) revision: AtomicU64,
+    /// Wakes every MCP event stream on each change. Capacity one is enough
+    /// because the streams only forward "something changed" and coalesce the
+    /// rest; a lagging receiver still learns that more changes happened.
+    pub(crate) changed: tokio::sync::broadcast::Sender<()>,
 }
 
 impl PersonaStore {
@@ -68,7 +69,7 @@ impl PersonaStore {
             }),
             messaging: OnceLock::new(),
             tools_env: OnceLock::new(),
-            revision: AtomicU64::new(0),
+            changed: tokio::sync::broadcast::channel(1).0,
         });
         store.load();
         store
@@ -238,7 +239,9 @@ impl PersonaStore {
     }
 
     pub(crate) fn notify(&self, owner: &str) {
-        self.revision.fetch_add(1, Ordering::SeqCst);
+        // Every push path reaches the MCP stream here, so one wake-up per
+        // change keeps streaming previews in step with the daemon.
+        let _ = self.changed.send(());
         let mut inner = self.lock();
         let frame = Bytes::from_static(b"event: changed\ndata: {}\n\n");
         for slot in &mut inner.watchers {

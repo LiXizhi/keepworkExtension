@@ -37,10 +37,7 @@ pub(crate) use serde_json::{json, Map, Value};
 pub(crate) use sha2::{Digest, Sha256};
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex, MutexGuard, OnceLock,
-};
+pub(crate) use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 pub(crate) use std::time::Duration;
 
 pub(crate) const MAX_BODY: usize = 131_072;

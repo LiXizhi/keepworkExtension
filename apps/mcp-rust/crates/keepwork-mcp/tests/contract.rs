@@ -327,6 +327,104 @@ async fn duplicate_get_stream_is_rejected_and_delete_closes() {
     );
 }
 
+/// Reads one SSE frame and reports how long it took, or `None` on timeout.
+async fn next_stream_frame(
+    body: &mut Body,
+    wait: std::time::Duration,
+) -> Option<(String, std::time::Duration)> {
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(wait, body.frame()).await {
+        Ok(Some(Ok(frame))) => {
+            let data = frame.into_data().expect("sse data");
+            Some((
+                String::from_utf8_lossy(&data).to_string(),
+                started.elapsed(),
+            ))
+        }
+        Ok(None) => panic!("stream ended before a push"),
+        Ok(Some(Err(error))) => panic!("stream failed: {error}"),
+        Err(_) => None,
+    }
+}
+
+#[tokio::test]
+async fn persona_changes_are_pushed_to_the_mcp_stream_without_a_poll() {
+    let state = test_state(false);
+    let init = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#,
+        ))
+        .unwrap();
+    let (_, headers, _) = send(&state, init).await;
+    let session = headers["mcp-session-id"].to_str().unwrap().to_string();
+
+    let stream = Request::builder()
+        .uri("/mcp")
+        .header("mcp-session-id", &session)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, mut body) = send_headers(&state, stream).await;
+    assert_eq!(status, StatusCode::OK);
+    // The spawned stream task subscribes when it first runs.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (status, _, _) = send(
+        &state,
+        persona(
+            "POST",
+            "/agents/personas",
+            Some(
+                r#"{"id":"default-persona","name":"我的分身","avatar":"🧠","prompt":"hi","executor":"auto","model":"","pinned":true,"order":0,"root":""}"#,
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (first, first_latency) = next_stream_frame(&mut body, std::time::Duration::from_secs(2))
+        .await
+        .expect("creating a persona must reach the stream");
+    assert!(
+        first.contains("personas_changed"),
+        "unexpected frame: {first}"
+    );
+    assert!(
+        first_latency < std::time::Duration::from_millis(400),
+        "first push took {first_latency:?}"
+    );
+
+    // Drain whatever the same edit coalesced, so the next frame can only come
+    // from the change below.
+    while next_stream_frame(&mut body, std::time::Duration::from_millis(300))
+        .await
+        .is_some()
+    {}
+
+    let (status, _, _) = send(
+        &state,
+        persona("POST", "/agents/personas/default-persona/read", Some("{}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Streaming previews ride on this push. Under the old revision poll a reply
+    // arrived in one-second chunks instead of flowing.
+    let (second, latency) = next_stream_frame(&mut body, std::time::Duration::from_secs(2))
+        .await
+        .expect("marking read must reach the stream");
+    assert!(
+        second.contains("personas_changed"),
+        "unexpected frame: {second}"
+    );
+    assert!(
+        latency < std::time::Duration::from_millis(400),
+        "push took {latency:?}, which matches the old one-second poll"
+    );
+}
+
 #[tokio::test]
 async fn auth_guards_admin_but_not_health() {
     let state = test_state(true);
