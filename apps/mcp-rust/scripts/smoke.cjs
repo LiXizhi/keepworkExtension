@@ -11,7 +11,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const appRoot = path.resolve(__dirname, '..');
-const binary = path.resolve(process.argv[2] || path.join(appRoot, 'target', 'release', 'keepwork-mcp'));
+const binaryName = process.platform === 'win32' ? 'keepwork-mcp.exe' : 'keepwork-mcp';
+const binary = path.resolve(process.argv[2] || path.join(appRoot, 'target', 'release', binaryName));
 
 function freePort() {
   return new Promise((resolve, reject) => {

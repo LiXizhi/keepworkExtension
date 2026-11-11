@@ -1,0 +1,42 @@
+//! Native fake DWS/Lark CLI for the wire tests, including Windows CreateProcess.
+use std::{env, ffi::OsStr, io::Write, thread, time::Duration};
+
+fn main() {
+    let executable = env::current_exe().expect("fixture executable path");
+    if executable.file_stem() == Some(OsStr::new("lark-cli")) {
+        eprintln!("未登录: run lark auth login first");
+        std::process::exit(1);
+    }
+
+    let args: Vec<String> = env::args().skip(1).collect();
+    let command = args.first().map(String::as_str).unwrap_or_default();
+    let subcommand = args.get(1).map(String::as_str).unwrap_or_default();
+    let response = match (command, subcommand) {
+        ("profile", "list") => {
+            r#"{"currentProfile":"corp1:user1","profiles":[{"corpId":"corp1","userId":"user1","corpName":"Acme","userName":"Tester","isCurrent":true}]}"#
+        }
+        ("event", "status") => {
+            r#"{"identity":{"corpId":"corp1","userId":"user1","openDingTalkId":"oid-1"},"bus":{"live":{"consumers":[]}},"subscriptions":[]}"#
+        }
+        ("chat", "+chat-list" | "+chat-search") => {
+            r#"[{"openConversationId":"cidG1","name":"研发群"},{"openConversationId":"cidG2","name":"客服群"}]"#
+        }
+        ("event", "consume") => {
+            eprintln!("[event] ready");
+            // Blank lines are ignored by the daemon. A closed stdout pipe lets
+            // us exit even when Windows kills the daemon without running Drop.
+            let mut stdout = std::io::stdout().lock();
+            while stdout
+                .write_all(b"\n")
+                .and_then(|()| stdout.flush())
+                .is_ok()
+            {
+                thread::sleep(Duration::from_millis(100));
+            }
+            return;
+        }
+        ("auth", "login") => return,
+        _ => "{}",
+    };
+    println!("{response}");
+}

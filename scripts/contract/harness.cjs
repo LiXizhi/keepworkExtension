@@ -15,7 +15,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
-const defaultRustBin = path.join(repoRoot, 'apps', 'mcp-rust', 'target', 'release', 'keepwork-mcp');
+const binaryName = process.platform === 'win32' ? 'keepwork-mcp.exe' : 'keepwork-mcp';
+const defaultRustBin = path.join(repoRoot, 'apps', 'mcp-rust', 'target', 'release', binaryName);
 const nodeEntry = path.join(repoRoot, 'apps', 'mcp-runtime', 'dist', 'cli.cjs');
 
 function rustBinary() {
