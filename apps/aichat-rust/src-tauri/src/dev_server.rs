@@ -1,11 +1,188 @@
-use crate::files::{inside, validate_relative_path};
+use crate::files::{atomic_json_write, inside, validate_relative_path};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+
+const FIRST_SOURCE_PORT: u16 = 3001;
+const SOURCE_PORT_COUNT: u16 = 100;
+static SOURCE_PORT_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Deserialize, Serialize)]
+struct SourcePortBinding {
+    root: PathBuf,
+    entry: String,
+    port: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+struct SourcePortBindings {
+    version: u8,
+    entries: Vec<SourcePortBinding>,
+}
+
+struct SourcePortRegistryLock {
+    _file: fs::File,
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for SourcePortRegistryLock {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self._file.as_raw_fd()
+    }
+}
+
+impl Drop for SourcePortRegistryLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // fork/dup may retain the open-file description after this owner
+            // closes it. End our transaction explicitly before closing the file.
+            unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn lock_source_port_registry(bindings_path: &Path) -> Result<SourcePortRegistryLock, String> {
+    if let Some(parent) = bindings_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot prepare source port registry: {e}"))?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // A zero share mode excludes other opens until this handle is dropped.
+        options.share_mode(0);
+    }
+    let lock = options
+        .open(bindings_path.with_extension("lock"))
+        .map_err(|e| format!("Cannot lock source port registry: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // The stable lock file is separate from the atomically replaced JSON.
+        // The guard explicitly unlocks at the end of the transaction.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(format!(
+                "Cannot lock source port registry: {}. Retry when the other launch finishes.",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(SourcePortRegistryLock { _file: lock })
+}
+
+fn source_identity(source_dir: &Path, entry_file: &str) -> Result<(PathBuf, String), String> {
+    let root = dunce::canonicalize(source_dir).map_err(|e| {
+        format!(
+            "Cannot resolve AIChat source directory {}: {e}",
+            source_dir.display()
+        )
+    })?;
+    let entry = validate_relative_path(entry_file)?;
+    let target = dunce::canonicalize(root.join(&entry))
+        .map_err(|e| format!("Cannot resolve AIChat entry file: {e}"))?;
+    if !inside(&root, &target) || !target.is_file() {
+        return Err("AIChat entry file must remain inside its source directory".to_string());
+    }
+    Ok((root, entry.to_string_lossy().into_owned()))
+}
+
+fn bind_source_origin(
+    root: &Path,
+    entry: &str,
+    bindings_path: &Path,
+    first_port: u16,
+    port_count: u16,
+) -> Result<TcpListener, String> {
+    let end = first_port
+        .checked_add(port_count.saturating_sub(1))
+        .filter(|_| first_port != 0 && port_count != 0)
+        .ok_or_else(|| "Invalid source server port range".to_string())?;
+    // Source startup precedes the desktop's single-instance check, so both
+    // threads and processes must serialize the read/reserve/commit transaction.
+    let _guard = SOURCE_PORT_LOCK
+        .lock()
+        .map_err(|_| "Source port registry lock poisoned")?;
+    let _file_lock = lock_source_port_registry(bindings_path)?;
+    let mut bindings = match fs::read(bindings_path) {
+        Ok(bytes) => serde_json::from_slice::<SourcePortBindings>(&bytes).map_err(|e| {
+            format!(
+                "Invalid source port registry {}: {e}",
+                bindings_path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SourcePortBindings {
+            version: 1,
+            entries: Vec::new(),
+        },
+        Err(e) => {
+            return Err(format!(
+                "Cannot read source port registry {}: {e}",
+                bindings_path.display()
+            ))
+        }
+    };
+    let mut ports = HashSet::new();
+    let mut identities = HashSet::new();
+    if bindings.version != 1
+        || bindings.entries.iter().any(|binding| {
+            !binding.root.is_absolute()
+                || validate_relative_path(&binding.entry).is_err()
+                || !(first_port..=end).contains(&binding.port)
+                || !ports.insert(binding.port)
+                || !identities.insert((binding.root.clone(), binding.entry.clone()))
+        })
+    {
+        return Err(
+            "Invalid source port registry: unsupported version or conflicting bindings".to_string(),
+        );
+    }
+    if let Some(binding) = bindings
+        .entries
+        .iter()
+        .find(|b| b.root == root && b.entry == entry)
+    {
+        return TcpListener::bind(("127.0.0.1", binding.port)).map_err(|e| {
+            format!("Cannot reuse saved local source address 127.0.0.1:{}: {e}. The saved origin was not changed; close the program using that port and retry.", binding.port)
+        });
+    }
+    for port in first_port..=end {
+        if ports.contains(&port) {
+            continue;
+        }
+        let listener = match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to bind local source address 127.0.0.1:{port}: {e}"
+                ))
+            }
+        };
+        bindings.entries.push(SourcePortBinding {
+            root: root.to_path_buf(),
+            entry: entry.to_string(),
+            port,
+        });
+        // Commit while the socket reserves the port, before serving or
+        // replacing any current page. A failed save drops only this listener.
+        atomic_json_write(bindings_path, &bindings)
+            .map_err(|e| format!("Cannot save source port registry: {e}"))?;
+        return Ok(listener);
+    }
+    Err(format!(
+        "No unreserved local source port available in {first_port}..={end}"
+    ))
+}
 
 pub struct DevServer {
     port: u16,
@@ -167,23 +344,35 @@ fn handle_client(mut stream: TcpStream, root_dir: &Path, entry_file: &str) {
 }
 
 impl DevServer {
-    pub fn start(source_dir: &Path, entry_file: &str) -> Result<Self, String> {
-        let root_dir = dunce::canonicalize(source_dir).map_err(|e| {
-            format!(
-                "Cannot resolve AIChat source directory {}: {e}",
-                source_dir.display()
-            )
-        })?;
-        let entry_path = root_dir.join(entry_file);
-        if !entry_path.is_file() {
-            return Err(format!(
-                "Missing AIChat entry file: {}",
-                entry_path.display()
-            ));
-        }
+    pub fn start(
+        source_dir: &Path,
+        entry_file: &str,
+        bindings_path: &Path,
+    ) -> Result<Self, String> {
+        Self::start_in_port_range(
+            source_dir,
+            entry_file,
+            bindings_path,
+            FIRST_SOURCE_PORT,
+            SOURCE_PORT_COUNT,
+        )
+    }
 
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| format!("Failed to bind loopback development server: {e}"))?;
+    fn start_in_port_range(
+        source_dir: &Path,
+        entry_file: &str,
+        bindings_path: &Path,
+        first_port: u16,
+        port_count: u16,
+    ) -> Result<Self, String> {
+        let (root_dir, entry_file) = source_identity(source_dir, entry_file)?;
+        let listener = bind_source_origin(
+            &root_dir,
+            &entry_file,
+            bindings_path,
+            first_port,
+            port_count,
+        )?;
         let port = listener
             .local_addr()
             .map_err(|e| format!("Failed to query local server address: {e}"))?
@@ -231,10 +420,49 @@ impl DevServer {
         &self.root_dir
     }
 
+    /// Reuse an already-running source, or prepare its replacement completely
+    /// before dropping the previous listener. Failure preserves the old page.
+    pub fn select_source(
+        current: &mut Option<Self>,
+        source_dir: &Path,
+        entry_file: &str,
+        bindings_path: &Path,
+    ) -> Result<String, String> {
+        Self::select_source_in_port_range(
+            current,
+            source_dir,
+            entry_file,
+            bindings_path,
+            FIRST_SOURCE_PORT,
+            SOURCE_PORT_COUNT,
+        )
+    }
+
+    fn select_source_in_port_range(
+        current: &mut Option<Self>,
+        source_dir: &Path,
+        entry_file: &str,
+        bindings_path: &Path,
+        first_port: u16,
+        port_count: u16,
+    ) -> Result<String, String> {
+        let (root, entry) = source_identity(source_dir, entry_file)?;
+        if let Some(server) = current.as_ref() {
+            if server.root_dir == root && server.entry_file == entry && server.handle.is_some() {
+                return Ok(server.url());
+            }
+        }
+        let server =
+            Self::start_in_port_range(&root, &entry, bindings_path, first_port, port_count)?;
+        let url = server.url();
+        *current = Some(server);
+        Ok(url)
+    }
+
     pub fn stop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        let _ = TcpStream::connect(("127.0.0.1", self.port));
         if let Some(h) = self.handle.take() {
+            self.stop_flag.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
             let _ = h.join();
         }
     }
@@ -251,9 +479,387 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    static TEST_PORT_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_owner_releases_lock_while_an_inherited_descriptor_remains_open() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let root = std::env::temp_dir().join(format!("aichat-registry-fd-{}", Uuid::new_v4()));
+        let registry = root.join("source-ports.json");
+        let owner = lock_source_port_registry(&registry).unwrap();
+        let duplicate = unsafe { libc::dup(owner.as_raw_fd()) };
+        assert!(duplicate >= 0);
+        // dup shares the same open-file description, just like fork before exec.
+        let inherited = unsafe { fs::File::from_raw_fd(duplicate) };
+        assert!(
+            lock_source_port_registry(&registry).is_err(),
+            "a live owner must exclude another launch"
+        );
+        drop(owner);
+        let replacement = lock_source_port_registry(&registry)
+            .expect("dropping the transaction owner must release the lock before inherited descriptors close");
+        assert!(
+            lock_source_port_registry(&registry).is_err(),
+            "the replacement still owns an exclusive lock"
+        );
+        drop(inherited);
+        assert!(
+            lock_source_port_registry(&registry).is_err(),
+            "closing an old descriptor must not unlock the replacement"
+        );
+        drop(replacement);
+        drop(lock_source_port_registry(&registry).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn fixture() -> (PathBuf, PathBuf, u16) {
+        let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::write(
+            root.join("source/AIChat.html"),
+            "<!doctype html><title>Origin</title>",
+        )
+        .unwrap();
+        // Keep fixtures outside both the user's 3001 range and the OS's
+        // ephemeral client range: parallel HTTP tests may consume an ephemeral
+        // port between our availability probe and the assertion that rebinds it.
+        let first = (0..1000)
+            .find_map(|_| {
+                let port = 20000 + (Uuid::new_v4().as_u128() % 9000) as u16;
+                let mut probes = Vec::new();
+                for next in port..port + 8 {
+                    if let Ok(probe) = TcpListener::bind(("127.0.0.1", next)) {
+                        probes.push(probe);
+                    } else {
+                        break;
+                    }
+                }
+                if probes.len() == 8 {
+                    Some(port)
+                } else {
+                    None
+                }
+            })
+            .expect("isolated test port range unavailable");
+        let registry = root.join("profile/source-ports.json");
+        (root, registry, first)
+    }
+
+    #[test]
+    fn restarting_same_source_preserves_origin() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
+        let mut first =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .unwrap();
+        let original = first.url();
+        first.stop();
+        let mut second =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .unwrap();
+        assert_eq!(
+            second.url(),
+            original,
+            "restarting must preserve the browser storage origin"
+        );
+        second.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_os_lock_preserves_current_source_and_releases_after_failure() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
+        let source = root.join("source");
+        let mut current = Some(
+            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
+        );
+        let original = current.as_ref().unwrap().url();
+        let before = fs::read(&registry).unwrap();
+        fs::write(source.join("other.html"), "other entry").unwrap();
+        // A separate file handle exercises the OS lock used across processes.
+        let competing_launch = lock_source_port_registry(&registry).unwrap();
+        let error = DevServer::select_source_in_port_range(
+            &mut current,
+            &source,
+            "other.html",
+            &registry,
+            port,
+            8,
+        )
+        .unwrap_err();
+        assert!(error.contains("Cannot lock source port registry"));
+        assert_eq!(current.as_ref().unwrap().url(), original);
+        assert_eq!(fs::read(&registry).unwrap(), before);
+        drop(competing_launch);
+        let next = DevServer::select_source_in_port_range(
+            &mut current,
+            &source,
+            "other.html",
+            &registry,
+            port,
+            8,
+        )
+        .unwrap();
+        assert_ne!(next, original);
+        drop(current);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skips_busy_ports_once_then_keeps_the_saved_fallback() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
+        let stranger = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let mut server =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .unwrap();
+        assert_eq!(server.port, port + 1);
+        server.stop();
+        stranger.set_nonblocking(true).unwrap();
+        assert_eq!(
+            stranger.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(stranger);
+        let mut restarted =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .unwrap();
+        assert_eq!(
+            restarted.port,
+            port + 1,
+            "an earlier port becoming free must not change the saved origin"
+        );
+        restarted.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn occupied_saved_origin_fails_without_touching_the_other_service_or_registry() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
+        let mut server =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .unwrap();
+        let saved_port = server.port;
+        server.stop();
+        let before = fs::read(&registry).unwrap();
+        let stranger = TcpListener::bind(("127.0.0.1", saved_port)).unwrap();
+        let error =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .err()
+                .unwrap();
+        assert!(error.contains("saved origin was not changed"));
+        assert_eq!(fs::read(&registry).unwrap(), before);
+        // Dropping an already stopped server must not connect to its old port.
+        drop(server);
+        stranger.set_nonblocking(true).unwrap();
+        assert_eq!(
+            stranger.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(stranger);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selection_reuses_canonical_source_and_isolates_other_sources_and_entries() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
+        let source = root.join("source");
+        fs::create_dir_all(root.join("other")).unwrap();
+        fs::write(root.join("other/AIChat.html"), "other source").unwrap();
+        fs::write(source.join("other.html"), "other entry").unwrap();
+        let mut current = None;
+        let first = DevServer::select_source_in_port_range(
+            &mut current,
+            &source,
+            "AIChat.html",
+            &registry,
+            port,
+            8,
+        )
+        .unwrap();
+        let repeated = DevServer::select_source_in_port_range(
+            &mut current,
+            &source.join("."),
+            "AIChat.html",
+            &registry,
+            port,
+            8,
+        )
+        .unwrap();
+        assert_eq!(repeated, first);
+        assert_eq!(current.as_ref().unwrap().port, port);
+        DevServer::select_source_in_port_range(
+            &mut current,
+            &root.join("other"),
+            "AIChat.html",
+            &registry,
+            port,
+            8,
+        )
+        .unwrap();
+        assert_eq!(current.as_ref().unwrap().port, port + 1);
+        DevServer::select_source_in_port_range(
+            &mut current,
+            &source,
+            "other.html",
+            &registry,
+            port,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            current.as_ref().unwrap().port,
+            port + 2,
+            "released reserved ports belong to their original source"
+        );
+        assert_eq!(
+            DevServer::select_source_in_port_range(
+                &mut current,
+                &source,
+                "AIChat.html",
+                &registry,
+                port,
+                8
+            )
+            .unwrap(),
+            first
+        );
+        drop(current);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_registry_and_invalid_source_preserve_current_server() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
+        let source = root.join("source");
+        let mut current = Some(
+            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
+        );
+        let url = current.as_ref().unwrap().url();
+        fs::write(source.join("other.html"), "other entry").unwrap();
+        fs::write(&registry, "broken JSON").unwrap();
+        let error = DevServer::select_source_in_port_range(
+            &mut current,
+            &source,
+            "other.html",
+            &registry,
+            port,
+            8,
+        )
+        .unwrap_err();
+        assert!(error.contains("Invalid source port registry"));
+        assert_eq!(current.as_ref().unwrap().url(), url);
+        assert!(current.as_ref().unwrap().handle.is_some());
+        assert!(DevServer::select_source_in_port_range(
+            &mut current,
+            &source,
+            "../source/AIChat.html",
+            &registry,
+            port,
+            8
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&registry).unwrap(), "broken JSON");
+        drop(current);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exhausted_range_and_conflicting_registry_fail_closed() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
+        let source = root.join("source");
+        let busy = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let error = DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 1)
+            .err()
+            .unwrap();
+        assert!(error.contains("No unreserved"));
+        assert!(!registry.exists());
+        drop(busy);
+        let binding = serde_json::json!({"root": dunce::canonicalize(&source).unwrap(), "entry":"AIChat.html", "port":port});
+        atomic_json_write(
+            &registry,
+            &serde_json::json!({"version":1,"entries":[binding.clone(),binding]}),
+        )
+        .unwrap();
+        assert!(
+            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8)
+                .err()
+                .unwrap()
+                .contains("conflicting bindings")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_save_failure_preserves_current_server_and_releases_candidate_port() {
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        use std::os::unix::fs::PermissionsExt;
+        let (root, registry, port) = fixture();
+        let source = root.join("source");
+        let mut current = Some(
+            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
+        );
+        let url = current.as_ref().unwrap().url();
+        let before = fs::read(&registry).unwrap();
+        fs::write(source.join("other.html"), "other entry").unwrap();
+        fs::set_permissions(
+            registry.parent().unwrap(),
+            fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        let result = DevServer::select_source_in_port_range(
+            &mut current,
+            &source,
+            "other.html",
+            &registry,
+            port,
+            8,
+        );
+        fs::set_permissions(
+            registry.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert!(result
+            .unwrap_err()
+            .contains("Cannot save source port registry"));
+        assert_eq!(current.as_ref().unwrap().url(), url);
+        assert_eq!(fs::read(&registry).unwrap(), before);
+        let candidate = TcpListener::bind(("127.0.0.1", port + 1)).unwrap();
+        drop(candidate);
+        drop(current);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn serves_local_aichat_source_on_loopback_and_blocks_traversal() {
-        let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (root, registry, port) = fixture();
         fs::create_dir_all(root.join("js")).unwrap();
         fs::write(
             root.join("AIChat.html"),
@@ -262,7 +868,8 @@ mod tests {
         .unwrap();
         fs::write(root.join("js/app.js"), "export const ok = true;").unwrap();
 
-        let mut server = DevServer::start(&root, "AIChat.html").unwrap();
+        let mut server =
+            DevServer::start_in_port_range(&root, "AIChat.html", &registry, port, 8).unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let res = client.get(server.url()).send().await.unwrap();
@@ -279,11 +886,24 @@ mod tests {
         assert!(text.contains("<title>AIChat</title>"));
 
         let traversal = client
-            .get(format!("http://127.0.0.1:{}/../secret.txt", server.port))
+            .get(format!(
+                "http://127.0.0.1:{}/%2e%2e%2fsecret.txt",
+                server.port
+            ))
             .send()
             .await
             .unwrap();
-        assert!(traversal.status().as_u16() >= 400);
+        assert_eq!(traversal.status().as_u16(), 403);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(std::env::temp_dir(), root.join("escape")).unwrap();
+            let response = client
+                .get(format!("http://127.0.0.1:{}/escape", server.port))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 403);
+        }
 
         server.stop();
         let _ = fs::remove_dir_all(&root);

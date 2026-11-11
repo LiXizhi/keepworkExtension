@@ -35,6 +35,21 @@ def archive(extra=None, version="109.1.18"):
 
 
 class SdkTests(unittest.TestCase):
+    def test_missing_safe_extraction_support_fails_before_network_or_output(self):
+        extractall = tarfile.TarFile.extractall
+        cases = [(None, extractall), (False, extractall), (getattr(tarfile, "data_filter", None), lambda self, path: None)]
+        for capability, extractor in cases:
+            with self.subTest(capability=capability, extractor=extractor), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                output = root / "new-parent" / "output"
+                args = [str(script), "--channel", "legacy", "--output", str(output)]
+                with patch.object(sys, "argv", args), patch.object(sdk.tarfile, "data_filter", capability, create=True), patch.object(sdk.tarfile.TarFile, "extractall", extractor), patch.object(sdk.urllib.request, "urlopen") as network:
+                    with self.assertRaisesRegex(RuntimeError, r"Python 3\.12\+.*PYTHON") as error:
+                        sdk.main()
+                self.assertIn(sys.executable, str(error.exception))
+                network.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [])
+
     def test_selects_latest_stable_per_compatible_generation(self):
         versions = [record("109.1.9"), record("143.2.1"), record("144.0.1", "beta"), record("109.1.18"), record("143.1.10"), record("108.9.99")]
         index = {"windows64": {"versions": versions}}

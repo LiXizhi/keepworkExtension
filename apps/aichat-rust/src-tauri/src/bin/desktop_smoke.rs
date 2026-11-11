@@ -16,10 +16,59 @@ use aichat_rust_lib::{
 };
 use serde_json::json;
 use std::fs;
+use std::io::{BufRead, Write};
 use uuid::Uuid;
+
+// A controlled real-server fixture for browser storage tests. Only this
+// process's listener and temporary source/profile are created and removed.
+fn source_origin_probe() -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!("aichat-source-origin-probe-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root)?;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let source = root.join("source");
+        fs::create_dir_all(&source)?;
+        fs::write(
+            source.join("AIChat.html"),
+            "<!doctype html><title>Source origin probe</title><p>Source origin probe</p>",
+        )?;
+        let bindings = root.join("source-ports.json");
+        let start =
+            || DevServer::start(&source, "AIChat.html", &bindings).map_err(std::io::Error::other);
+        let report = |server: &DevServer| -> std::io::Result<()> {
+            println!(
+                "{}",
+                json!({ "url": server.url(), "sourceDir": source, "bindingsPath": bindings })
+            );
+            std::io::stdout().flush()
+        };
+        let mut server = start()?;
+        report(&server)?;
+        for command in std::io::stdin().lock().lines() {
+            match command?.trim() {
+                "restart" => {
+                    server.stop();
+                    server = start()?;
+                    report(&server)?;
+                }
+                "quit" => break,
+                _ => return Err("Expected restart or quit".into()),
+            }
+        }
+        server.stop();
+        Ok(())
+    })();
+    let cleanup = fs::remove_dir_all(&root);
+    result?;
+    cleanup?;
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--source-origin-probe") {
+        source_origin_probe().expect("source origin probe failed");
+        return;
+    }
     let root = std::env::temp_dir().join(format!("aichat-rust-desktop-smoke-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
 
@@ -153,7 +202,8 @@ async fn main() {
     let aichat_src = root.join("aichat_src");
     fs::create_dir_all(&aichat_src).unwrap();
     fs::write(aichat_src.join("AIChat.html"), "<html>AIChat</html>").unwrap();
-    let mut dev_srv = DevServer::start(&aichat_src, "AIChat.html").unwrap();
+    let mut dev_srv =
+        DevServer::start(&aichat_src, "AIChat.html", &root.join("source-ports.json")).unwrap();
     let resp = reqwest::get(dev_srv.url()).await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     dev_srv.stop();

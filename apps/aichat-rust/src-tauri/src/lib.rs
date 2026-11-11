@@ -19,7 +19,7 @@ pub mod updates;
 
 use crate::brain_folder::{default_brain_folder, BrainFolderInfo};
 use crate::bridge::build_main_window_init_script;
-use crate::deployment::{open_deployment, resolve_local_aichat_source_dir};
+use crate::deployment::{resolve_local_aichat_source_dir, startup_deployment};
 use crate::desktop_identity::{default_mcp_home, remember_desktop_client};
 use crate::desktop_lock::DesktopLock;
 use crate::dev_server::DevServer;
@@ -1399,14 +1399,18 @@ fn start_local_source(app: &AppHandle, core: &Arc<AppCore>) -> Result<(), String
             src_dir.join("AIChat.html").display()
         ));
     }
-    let srv = DevServer::start(&src_dir, "AIChat.html")?;
-    let url = srv.url();
-    if let Ok(mut guard) = core.dev_server.lock() {
-        if let Some(mut previous) = guard.take() {
-            previous.stop();
-        }
-        *guard = Some(srv);
-    }
+    let url = {
+        let mut guard = core
+            .dev_server
+            .lock()
+            .map_err(|_| "Local source server lock poisoned")?;
+        DevServer::select_source(
+            &mut guard,
+            &src_dir,
+            "AIChat.html",
+            &core.profile_dir.join("source-ports.json"),
+        )?
+    };
     if let Ok(mut entry) = core.entry_url.lock() {
         *entry = url.clone();
     }
@@ -1930,6 +1934,15 @@ fn show_host_error(app: &AppHandle, message: &str) {
         .blocking_show();
 }
 
+fn local_source_startup_warning(error: &str, fallback_entry: &str) -> String {
+    let origin = url::Url::parse(fallback_entry)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "配置的备用页面".to_string());
+    format!(
+        "本地源码服务未启动，已打开配置的备用页面（{origin}）。此页面与本地页面地址不同，原本地记录未搬迁。\n\n原因：{error}\n\n请检查源码目录或处理端口冲突后，通过“使用本地源码服务器…”重试。"
+    )
+}
+
 /// Products this desktop can launch: the packaged Node runtime and the native
 /// Rust daemon (v2 manifest, `engine: "rust"`).
 const MCP_PRODUCT_NODE: &str = "keepwork-mcp-node-runtime";
@@ -2114,29 +2127,36 @@ pub fn run() {
         .unwrap_or_else(|| ENTRY.to_string());
     let mut initial_dev_srv: Option<DevServer> = None;
     let mut initial_local_source = false;
+    let mut initial_local_source_error = None;
 
     if std::env::var("AICHAT_DESKTOP_LOCAL_SOURCE").ok().as_deref() == Some("1") {
         if let Some(src_dir) = resolve_local_aichat_source_dir() {
-            match DevServer::start(&src_dir, "AIChat.html") {
+            match DevServer::start(&src_dir, "AIChat.html", &profile_dir.join("source-ports.json")) {
                 Ok(srv) => {
                     initial_entry = srv.url();
                     eprintln!("[desktop] Local AIChat source: {} -> {initial_entry}", src_dir.display());
                     initial_dev_srv = Some(srv);
                     initial_local_source = true;
                 }
-                Err(error) => eprintln!(
-                    "[desktop] Cannot start local AIChat source at {}: {error}. Falling back to {initial_entry}",
-                    src_dir.display()
-                ),
+                Err(error) => {
+                    initial_local_source_error = Some(format!(
+                        "Cannot start local AIChat source at {}: {error}",
+                        src_dir.display()
+                    ));
+                }
             }
         } else {
-            eprintln!("[desktop] Local AIChat source not found. Set AICHAT_DESKTOP_SOURCE_DIR (or AICHAT_SOURCE_DIR) to a directory containing AIChat.html. Falling back to {initial_entry}");
+            initial_local_source_error = Some("找不到包含 AIChat.html 的本地源码目录。请设置 AICHAT_DESKTOP_SOURCE_DIR（或 AICHAT_SOURCE_DIR）。".to_string());
         }
-    } else if let Ok((dep_url, dep_srv)) = open_deployment(&profile_dir.join("deployment.json")) {
-        if dep_url != ENTRY {
-            initial_entry = dep_url;
-            initial_dev_srv = dep_srv;
-        }
+    } else {
+        (initial_entry, initial_dev_srv) = startup_deployment(
+            &profile_dir.join("deployment.json"),
+            &initial_entry,
+            |error| eprintln!("[desktop] {error}"),
+        );
+    }
+    if let Some(error) = initial_local_source_error.as_deref() {
+        eprintln!("[desktop] {}", local_source_startup_warning(error, &initial_entry));
     }
 
     let core = Arc::new(AppCore {
@@ -2308,6 +2328,15 @@ pub fn run() {
             let main_win = main_win?;
             #[cfg(windows)]
             signal_launcher_webview_ready();
+
+            if let Some(error) = initial_local_source_error.take() {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                app_handle.dialog()
+                    .message(local_source_startup_warning(&error, &entry_target))
+                    .title("本地源码服务未启动")
+                    .kind(MessageDialogKind::Error)
+                    .show(|_| {});
+            }
 
             let app_for_close = app_handle.clone();
             let core_for_close = Arc::clone(&core_for_setup);
@@ -2483,6 +2512,26 @@ mod native_startup_tests {
         let message = panic.downcast_ref::<String>().expect("panic message");
         assert!(message.starts_with("error while running KeepWork 第二大脑 (aichat-rust)"));
         assert!(message.contains("controlled-startup-failure"));
+    }
+}
+
+#[cfg(test)]
+mod local_source_startup_tests {
+    #[test]
+    fn fallback_notice_keeps_failure_details_without_exposing_url_credentials() {
+        let error = "Cannot reuse saved local source address 127.0.0.1:3001: Address in use";
+        let notice = super::local_source_startup_warning(
+            error,
+            "https://user:secret@keepwork.com/chat?token=private-token#private-fragment",
+        );
+        assert!(notice.contains(error));
+        assert!(notice.contains("https://keepwork.com"));
+        assert!(notice.contains("地址不同"));
+        assert!(notice.contains("原本地记录未搬迁"));
+        assert!(notice.contains("重试"));
+        for secret in ["user", "secret", "private-token", "private-fragment"] {
+            assert!(!notice.contains(secret));
+        }
     }
 }
 

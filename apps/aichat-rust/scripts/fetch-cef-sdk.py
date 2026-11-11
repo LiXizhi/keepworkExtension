@@ -1,9 +1,11 @@
 """Fetch a CEF SDK for building, not for end-user installation. No CDN writes."""
 import argparse
 import hashlib
+import inspect
 import json
 from pathlib import Path, PurePosixPath
 import re
+import sys
 import tarfile
 import urllib.parse
 import urllib.request
@@ -37,6 +39,12 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--lock", type=Path, help="Reuse a previously recorded SDK version and SHA-256")
     args = parser.parse_args()
+    if not callable(getattr(tarfile, "data_filter", None)) or "filter" not in inspect.signature(tarfile.TarFile.extractall).parameters:
+        raise RuntimeError(
+            "CEF SDK extraction requires safe tarfile data filtering; use Python 3.12+. "
+            f"Selected interpreter: {sys.executable} (Python {sys.version.split()[0]}). "
+            "Set PYTHON to a supported interpreter when running the Node tests."
+        )
     if args.output.exists():
         raise ValueError("Use a new SDK output directory")
     if args.lock:

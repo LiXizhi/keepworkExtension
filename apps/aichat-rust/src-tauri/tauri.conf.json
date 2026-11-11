@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Keepwork",
-  "version": "0.2.47",
+  "version": "0.2.50",
   "identifier": "com.keepwork.aichat-desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -19,8 +19,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "resources": ["resources/mcp-runtime"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "resources": [
+      "resources/mcp-runtime"
+    ],
     "macOS": {
       "minimumSystemVersion": "11.0",
       "entitlements": "entitlements.mac.plist",

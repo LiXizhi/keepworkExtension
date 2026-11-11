@@ -84,6 +84,8 @@ WebView2 检测会实际创建控制器。启动现代 Rust 程序时，启动�
 
 以下命令从 `apps/aichat-rust` 目录执行。宿主需要匹配目标架构的 Windows CEF binary distribution。构建用下载器从 CEF Automated Builds 的 HTTPS 索引选择匹配通道的最新稳定 standard SDK：legacy 只选 109，modern 只选 138 及以上。下载时验证索引中的大小与 SHA-1，并额外记录 SHA-256 供重复构建锁定；这是构建工具，最终用户仍从 Keepwork CDN 下载已经构建、验签的宿主包。
 
+使用 Python 3.12 或更新版本。下载器会在网络请求和创建输出目录之前检查 `tarfile` 的安全 `data` 过滤能力；缺失时报告实际解释器路径与版本，不降级为无过滤解压。Node 测试默认使用 Windows 的 `python` 或其他平台的 `python3`；安装了多个 Python 时，可先设置 `PYTHON` 为受支持解释器的完整路径再运行测试。直接执行下载器时，应直接使用该解释器运行下列脚本。
+
 ```powershell
 # Python 3.12；每次使用新的输出目录
 python scripts/fetch-cef-sdk.py --channel legacy --arch x64 --output build/sdk-legacy

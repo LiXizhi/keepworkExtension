@@ -19,7 +19,27 @@ pub fn validate_entry_url(raw: &str) -> Result<String, String> {
     if trusted_page(trimmed, None) {
         return Ok(trimmed.to_string());
     }
-    Err(format!("Untrusted deployment entry URL: {trimmed}"))
+    Err("Untrusted deployment entry URL".to_string())
+}
+
+pub fn startup_deployment(
+    deployment_file: &Path,
+    fallback_entry: &str,
+    report: impl FnOnce(&str),
+) -> (String, Option<DevServer>) {
+    match open_deployment(deployment_file) {
+        Ok((entry, server)) if entry != ENTRY => (entry, server),
+        Ok(_) => (fallback_entry.to_string(), None),
+        Err(error) => {
+            let origin = url::Url::parse(fallback_entry)
+                .map(|url| url.origin().ascii_serialization())
+                .unwrap_or_else(|_| "configured desktop entry".to_string());
+            report(&format!(
+                "Cannot open saved deployment: {error}. Falling back to {origin}"
+            ));
+            (fallback_entry.to_string(), None)
+        }
+    }
 }
 
 pub fn open_deployment(deployment_file: &Path) -> Result<(String, Option<DevServer>), String> {
@@ -44,7 +64,7 @@ pub fn open_deployment(deployment_file: &Path) -> Result<(String, Option<DevServ
             let entry_file = record.entry_file.as_deref().unwrap_or("AIChat.html");
             let clean_entry = validate_relative_path(entry_file)?;
             let entry_str = clean_entry.to_string_lossy().into_owned();
-            let srv = DevServer::start(&web_dir, &entry_str)?;
+            let srv = DevServer::start(&web_dir, &entry_str, &base_dir.join("source-ports.json"))?;
             let url = srv.url();
             return Ok((url, Some(srv)));
         }
@@ -96,6 +116,95 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn deployment_diagnostics_omit_url_credentials_and_preserve_fallback() {
+        let root = std::env::temp_dir().join(format!("aichat-deployment-error-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("deployment.json");
+        let invalid = "https://private-user:private-password@evil.example/chat?token=private-token#private-fragment";
+        fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({"entry":invalid})).unwrap(),
+        )
+        .unwrap();
+        let fallback = "https://keepwork.com/chat?token=fallback-token#fallback-fragment";
+        let mut message = String::new();
+        let (entry, server) =
+            startup_deployment(&file, fallback, |error| message = error.to_string());
+        assert_eq!(entry, fallback);
+        assert!(server.is_none());
+        assert!(message.contains("Untrusted deployment entry URL"));
+        assert!(message.contains("Falling back to https://keepwork.com"));
+        for private in [
+            "private-user",
+            "private-password",
+            "private-token",
+            "private-fragment",
+            "fallback-token",
+            "fallback-fragment",
+            "/chat",
+        ] {
+            assert!(
+                !message.contains(private),
+                "diagnostics must omit URL credentials and path"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn occupied_deployment_origin_reports_failure_without_changing_saved_state_or_occupant() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        let root = std::env::temp_dir().join(format!("aichat-deployment-port-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("web")).unwrap();
+        fs::write(root.join("web/AIChat.html"), "local page").unwrap();
+        let deployment = root.join("deployment.json");
+        fs::write(&deployment, r#"{"webDir":"web"}"#).unwrap();
+        let (url, server) = open_deployment(&deployment).unwrap();
+        let port = url::Url::parse(&url).unwrap().port().unwrap();
+        drop(server);
+        let registry = root.join("source-ports.json");
+        let before = fs::read(&registry).unwrap();
+        let occupied = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let mut message = String::new();
+        let (entry, server) =
+            startup_deployment(&deployment, ENTRY, |error| message = error.to_string());
+        assert_eq!(entry, ENTRY);
+        assert!(server.is_none());
+        assert!(message.contains(&format!("127.0.0.1:{port}")));
+        assert!(message.contains("Falling back to https://keepwork.com"));
+        assert_eq!(fs::read(&registry).unwrap(), before);
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = occupied.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0u8; 1024];
+            stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\noccupant",
+                )
+                .unwrap();
+        });
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(
+            response.ends_with("occupant"),
+            "the unrelated service remains usable"
+        );
+        responder.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn discovers_sibling_checkout_and_honors_explicit_source_priority() {
         let root = std::env::temp_dir().join(format!("aichat-source-{}", Uuid::new_v4()));
         let manifest = root.join("extension/apps/aichat-rust/src-tauri");
@@ -129,7 +238,8 @@ mod tests {
             ),
             Some(electron)
         );
-        let server = DevServer::start(&found, "AIChat.html").unwrap();
+        let server =
+            DevServer::start(&found, "AIChat.html", &root.join("source-ports.json")).unwrap();
         assert!(server.url().starts_with("http://127.0.0.1:"));
         drop(server);
         fs::remove_dir_all(root).unwrap();
