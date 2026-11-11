@@ -2154,7 +2154,9 @@ pub fn run() {
     let init_script = build_main_window_init_script(current_runtime_platform(), &icon_data_url);
 
     let core_for_setup = Arc::clone(&core);
+    #[cfg(windows)]
     let webview_failed = Arc::new(AtomicBool::new(false));
+    #[cfg(windows)]
     let webview_failed_in_setup = Arc::clone(&webview_failed);
 
     let result = tauri::Builder::default()
@@ -2273,10 +2275,14 @@ pub fn run() {
                 main_builder = main_builder.decorations(false);
             }
 
-            let main_win = main_builder.build().map_err(|error| {
+            let main_win = main_builder.build();
+            #[cfg(windows)]
+            let main_win = main_win.map_err(|error| {
                 webview_failed_in_setup.store(true, Ordering::Relaxed);
                 error
-            })?;
+            });
+            let main_win = main_win?;
+            #[cfg(windows)]
             signal_launcher_webview_ready();
 
             let app_for_close = app_handle.clone();
@@ -2377,14 +2383,25 @@ pub fn run() {
             updates_window_apply_desktop,
         ])
         .run(tauri::generate_context!());
+    #[cfg(windows)]
     if let Err(error) = result {
         eprintln!("error while running KeepWork 第二大脑 (aichat-rust): {error}");
         // Only window initialization failure authorizes the native launcher's one-time CEF fallback.
         // Page/network failures and arbitrary process crashes never use this exit code.
         std::process::exit(if webview_failed.load(Ordering::Relaxed) { 86 } else { 2 });
     }
+    #[cfg(not(windows))]
+    finish_tauri_run(result);
 }
 
+#[cfg(not(windows))]
+fn finish_tauri_run(result: tauri::Result<()>) {
+    // The CEF launcher exit protocol applies only to Windows. Preserve the
+    // original failure message and panic unwinding on native WebView platforms.
+    result.expect("error while running KeepWork 第二大脑 (aichat-rust)");
+}
+
+#[cfg(windows)]
 fn signal_launcher_webview_ready() {
     #[cfg(windows)]
     {
@@ -2408,6 +2425,40 @@ fn signal_launcher_webview_ready() {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod native_startup_tests {
+    #[test]
+    fn successful_event_loop_returns_normally() {
+        super::finish_tauri_run(Ok(()));
+    }
+
+    #[test]
+    fn startup_failure_preserves_panic_and_unwinds_local_resources() {
+        use std::cell::Cell;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        struct Cleanup<'a>(&'a Cell<bool>);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let cleaned_up = Cell::new(false);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _cleanup = Cleanup(&cleaned_up);
+            super::finish_tauri_run(Err(tauri::Error::AssetNotFound(
+                "controlled-startup-failure".to_string(),
+            )));
+        }))
+        .expect_err("native startup errors must unwind rather than exit the process");
+        assert!(cleaned_up.get());
+        let message = panic.downcast_ref::<String>().expect("panic message");
+        assert!(message.starts_with("error while running KeepWork 第二大脑 (aichat-rust)"));
+        assert!(message.contains("controlled-startup-failure"));
     }
 }
 
