@@ -13,7 +13,7 @@ CLI-native credential storage; AIChat login stays in process memory. Restart nev
 
 ## Rust runtime scope
 
-The Rust daemon (`apps/mcp-rust`, 0.2.5) hosts the same DingTalk listener and Feishu
+The Rust daemon (`apps/mcp-rust`, 0.2.6) hosts the same DingTalk listener and Feishu
 polling core with the `/messaging/*` management surface and advertises
 `messagingApi: "messaging-v1"`. Node-only for now: headless worker pages, agent CLI
 executors, multi-computer coordination, group nicknames, DingTalk history backfill,

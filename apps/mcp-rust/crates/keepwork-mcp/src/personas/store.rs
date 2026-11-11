@@ -852,6 +852,31 @@ impl PersonaStore {
         self.notify(&spec.owner);
     }
 
+    /// Provisional text is separate from successful messages and model history.
+    /// Keep it in memory while streaming; ordinary terminal saves persist it.
+    pub(crate) fn update_output(&self, spec: &RunSpec, text: &str) {
+        let mut inner = self.lock();
+        let Some(row) = inner.rows.get_mut(&spec.key) else {
+            return;
+        };
+        if row["job"]["id"].as_str() != Some(spec.request_id.as_str())
+            || !matches!(row["job"]["state"].as_str(), Some("running" | "waiting"))
+        {
+            return;
+        }
+        let text = chars_take(text, 60_000);
+        if row["job"]["output"]["text"].as_str().unwrap_or("") == text {
+            return;
+        }
+        if text.is_empty() {
+            row["job"].as_object_mut().unwrap().remove("output");
+        } else {
+            row["job"]["output"] = json!({"text": text});
+        }
+        drop(inner);
+        self.notify(&spec.owner);
+    }
+
     /// Model loop for one persona run. Without a tool env this is the plain
     /// text-only `call_model`; with one, each model turn may request tool
     /// calls, which run in-process and feed back as `role: "tool"` messages
@@ -864,7 +889,28 @@ impl PersonaStore {
         cancel: &mut tokio::sync::watch::Receiver<bool>,
     ) -> (Result<String, String>, u32, u32) {
         let Some(env) = self.tools_env.get().map(Arc::clone) else {
-            let outcome = call_model(client, prepared, cancel).await;
+            let mut messages = vec![json!({ "role": "system", "content": prepared.system })];
+            for (role, content) in prepared.history {
+                messages.push(json!({ "role": role, "content": content }));
+            }
+            messages.push(json!({ "role": "user", "content": prepared.text }));
+            let mut output = |text: &str| self.update_output(spec, text);
+            let outcome = call_model_turn(
+                client,
+                prepared.model,
+                messages,
+                None,
+                cancel,
+                Some(&mut output),
+            )
+            .await
+            .and_then(|turn| {
+                if !turn.tool_calls.is_empty() || turn.tool_stop {
+                    Err("本机 Rust 分身尚不支持工具调用，操作未执行。".into())
+                } else {
+                    Ok(turn.content)
+                }
+            });
             return (outcome, 0, 0);
         };
         let tools = local_tools::LocalToolEnv::defs();
@@ -880,12 +926,15 @@ impl PersonaStore {
             if *cancel.borrow() {
                 return (Err("已取消".into()), requested, returned);
             }
+            self.update_output(spec, "");
+            let mut output = |text: &str| self.update_output(spec, text);
             let turn = match call_model_turn(
                 client.clone(),
                 prepared.model.clone(),
                 messages.clone(),
                 Some(tools.clone()),
                 cancel,
+                Some(&mut output),
             )
             .await
             {
@@ -899,23 +948,23 @@ impl PersonaStore {
             if !turn.content.trim().is_empty() {
                 assistant["content"] = json!(turn.content);
             }
-            assistant["tool_calls"] = json!(
-                turn.tool_calls.iter()
-                    .map(|call| json!({
-                        "id": call.id,
-                        "type": "function",
-                        "function": { "name": call.name, "arguments": call.arguments },
-                    }))
-                    .collect::<Vec<_>>()
-            );
+            assistant["tool_calls"] = json!(turn
+                .tool_calls
+                .iter()
+                .map(|call| json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": { "name": call.name, "arguments": call.arguments },
+                }))
+                .collect::<Vec<_>>());
             messages.push(assistant);
             for call in &turn.tool_calls {
                 if *cancel.borrow() {
                     return (Err("已取消".into()), requested, returned);
                 }
                 requested += 1;
-                let args: Value = serde_json::from_str(call.arguments.trim())
-                    .unwrap_or_else(|_| json!({}));
+                let args: Value =
+                    serde_json::from_str(call.arguments.trim()).unwrap_or_else(|_| json!({}));
                 let output = env.execute(&call.name, &args, &session).await;
                 returned += 1;
                 messages.push(json!({
@@ -1066,6 +1115,9 @@ impl PersonaStore {
             };
             row["job"]["state"] = json!(state);
             row["job"]["pending"] = json!([]);
+            if state == "done" {
+                row["job"].as_object_mut().unwrap().remove("output");
+            }
             if let Some(error) = error {
                 row["job"]["error"] = json!(error);
             } else if let Some(job) = row["job"].as_object_mut() {

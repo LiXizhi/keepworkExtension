@@ -1,7 +1,7 @@
 import { roleApprovalProperties, roleNeedsApproval } from './agentRolePolicy';
 import { AichatClient } from './aichatPresence';
 import { AichatWorkspaceFiles, WORKSPACE_FILE_TOOL } from './aichatWorkspaceFiles';
-import { readKeepworkModelStream } from './keepworkModelStream';
+import { readKeepworkModelStream, visibleModelText } from './keepworkModelStream';
 // Generated from the canonical AIChat ES modules; bundled statically into each daemon.
 const { COMPACT_PROMPT } = require('./vendor/aichat-runtime/context.cjs');
 const { createAgentRuntime } = require('./vendor/aichat-runtime/agent.cjs');
@@ -31,9 +31,10 @@ export async function keepworkRuntimeRequest(login: AichatClient | null, options
     const response = await fetchImpl(`${base.href.replace(/\/$/,'')}/gpt/chat`, { method:'POST', redirect:'error', headers:{'Content-Type':'application/json',Authorization:`Bearer ${login.token}`}, body:JSON.stringify(body), signal:options.abortController?.signal });
     if ([401,403].includes(response.status)) throw Error('需要重新登录 AIChat');
     if (!response.ok) throw Error(`Keepwork model request failed (${response.status}); not retried`);
-    if(response.headers.get('content-type')?.toLowerCase().includes('text/event-stream'))return readKeepworkModelStream(response,options.abortController?.signal,summary=>observe?.({format:'sse',advertisedTools:options.tools?.length||0,...summary}));
+    if(response.headers.get('content-type')?.toLowerCase().includes('text/event-stream'))return readKeepworkModelStream(response,options.abortController?.signal,summary=>observe?.({format:'sse',advertisedTools:options.tools?.length||0,...summary}),options.onText);
     const result:any = await response.json();
     if (!result || typeof result !== 'object' || result.error) throw Error('Keepwork model returned an invalid response');
+    if(typeof result.result==='string')options.onText?.(visibleModelText(result.result));
     observe?.({format:'json',advertisedTools:options.tools?.length||0,finalizedToolCalls:Array.isArray(result.tool_calls)?result.tool_calls.length:0});
     return result;
 }
@@ -51,7 +52,13 @@ export function createMcpAgentRuntime(login:AichatClient|null, executeTool:(name
         return String(await executeTool('read_file',{path:file},spec.signal));
     };
     const runtime = createAgentRuntime({
-        request:(request:any)=>keepworkRuntimeRequest(login,request,options.fetch,summary=>options.emit?.({type:'model-response',...summary})),
+        request:(request:any,spec:any)=>{
+            // Each model/tool iteration replaces its preview. Compaction has a
+            // separate request path, and child runs retain their own runId.
+            const onText=(text:string)=>options.emit?.({type:'output',runId:spec.id,text});
+            onText('');
+            return keepworkRuntimeRequest(login,{...request,onText},options.fetch,summary=>options.emit?.({type:'model-response',...summary}));
+        },
         summarize:async(history:any[],spec:any)=>{
             const result=await keepworkRuntimeRequest(login,{model:spec.model,messages:[{role:'system',content:COMPACT_PROMPT},{role:'user',content:JSON.stringify(history)}],abortController:{signal:spec.signal}},options.fetch);
             if(typeof result.result!=='string'||!result.result.trim())throw Error('Context compaction returned no summary');

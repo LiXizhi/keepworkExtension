@@ -14,6 +14,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 
+use crate::messaging::shell_child_path;
 use crate::paths;
 use crate::terminal::{assert_allowed_command, GLOBAL_TERMINAL_CAP, OUTPUT_CHAR_CAP};
 
@@ -167,6 +168,10 @@ async fn run_spawn(command: &str, cwd: &Path, timeout_ms: u64) -> TerminalResult
         builder
     };
     builder
+        .env(
+            if cfg!(windows) { "Path" } else { "PATH" },
+            shell_child_path(),
+        )
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

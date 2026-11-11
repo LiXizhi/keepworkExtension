@@ -5,6 +5,20 @@ const {readKeepworkModelStream}=require('../src/core/keepworkModelStream.ts');
 const event=value=>'data: '+JSON.stringify(value)+'\r\n\r\n';
 function stream(text,size=3){const bytes=new TextEncoder().encode(text);let offset=0;return new Response(new ReadableStream({pull(controller){if(offset>=bytes.length)return controller.close();controller.enqueue(bytes.slice(offset,offset+size));offset+=size;}}),{headers:{'content-type':'text/event-stream; charset=utf-8'}});}
 const tool={id:'crm-read',type:'function',function:{name:'crm_read',arguments:'{"query":"试玩"}'}};
+test('text is observable before the response closes, with split UTF-8 and DSML kept private',async()=>{
+ let source,settled=false;const previews=[];
+ const response=new Response(new ReadableStream({start(controller){source=controller;}}),{headers:{'content-type':'text/event-stream'}});
+ const pending=readKeepworkModelStream(response,undefined,undefined,text=>previews.push(text)).then(result=>{settled=true;return result;});
+ const bytes=new TextEncoder().encode(event({result:'中文答复'}));
+ for(const byte of bytes)source.enqueue(Uint8Array.of(byte));
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(previews.at(-1),'中文答复');assert.equal(settled,false);
+ for(const result of ['<｜','｜DSML｜｜ invoke name="run_terminal">','private arguments'])source.enqueue(new TextEncoder().encode(event({result})));
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.ok(previews.every(text=>text==='中文答复'),'Tool envelopes and incomplete opening markers stay private');
+ source.enqueue(new TextEncoder().encode(event({stop_reason:'stop'})));source.close();
+ assert.match((await pending).result,/private arguments/,'The private full response remains available for validated parsing');
+});
 test('real service shape: non-stream loses tools; SSE preserves one finalized call and completes the model loop',async()=>{
  let requests=0,executions=0;
  const runtime=createMcpAgentRuntime({token:'fixture'},async(name,args)=>{executions++;assert.equal(name,'crm_read');assert.equal(args.query,'试玩');return '待认领任务';},{fetch:async(_url,init)=>{

@@ -29,6 +29,7 @@ mod service;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use cli::shell_child_path;
 pub use http::handle_messaging_http;
 pub use service::MessagingService;
 

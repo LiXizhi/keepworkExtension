@@ -35,6 +35,14 @@ Rust 运行时 0.2.5 起托管钉钉/飞书消息渠道，`/health` 声明 `mess
 - **仍为 Node 独有**（Rust 侧保持 `UNSUPPORTED_FEATURE`）：无头 worker 页（`/messaging/worker` 返回 422）、agent CLI 执行器、多电脑协调、群昵称同步、Circles、钉钉历史补收、多分身群路由、微信。
 - **登记的差异**（断言落在 `scripts/contract/messaging-channels.test.cjs`）：knowledge 目录缺失统一报 `Knowledge directory missing`（Node 报原始 ENOENT 文案）；executor 校验放宽（接受 `keepwork`，缺省 `auto`）；`defaults` 与 `config.json` 解析失败时保留默认值；钉钉绑定始终输出 `channel` 字段；profiles 输出去重。回复执行器固定走 Keepwork 客户端路径。
 
+### 分身本地工具与 CLI PATH（Rust 运行时 0.2.6）
+
+Rust 运行时 0.2.5 给分身模型接入了本地工具，0.2.6 修复由此引入的两处协议回归，并要求 GUI 启动的守护进程能找到 `dws`：
+
+- **工具定义字段**：Keepwork `/gpt/chat` 用 `localTools` 接收工具定义（同 `src/core/aichatRuntime.ts`）。0.2.5 误发 `tools`，模型收不到 `run_terminal`，执行元数据固定为工具请求 `0`、工具返回 `0`。
+- **工具调用快照**：服务端先流式发送 `delta.tool_calls` 片段，再在 `data: {...,"tool_calls":[...]}` 中给出完整参数。Rust 只在完整快照上执行工具；只有增量片段而没有快照时按失败处理，不执行拼接不完整的命令。
+- **CLI PATH**：桌面/`launchd` 启动的守护进程继承最小 `PATH`，而 `dws` 是 `#!/usr/bin/env node` 脚本，需要 Node 在 `PATH` 上。`dws`/`lark-cli` 一次性调用、`auth login`、事件监听子进程和 `run_terminal` 现在都注入 Node/CLI 安装前缀；`run_terminal` 仍让调用方 `PATH` 优先，Windows 使用 `Path`。
+
 ## 2. 运行时清单 v2（新增，v1 不动）
 
 ```json

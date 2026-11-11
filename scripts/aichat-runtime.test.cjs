@@ -19,6 +19,53 @@ function fixture(t,fetchImpl){
     service.upsert(owner,{id:'persona',name:'test',root:home,executor:'keepwork'});
     return {service,owner,home,sessions};
 }
+test('persona streams one root draft before completion, replaces tool turns and commits only a validated final answer',async t=>{
+    const sources=[];
+    const f=fixture(t,async()=>new Response(new ReadableStream({start(controller){sources.push(controller);}}),{headers:{'content-type':'text/event-stream'}}));
+    const send=(index,value)=>sources[index].enqueue(new TextEncoder().encode('data: '+JSON.stringify(value)+'\n\n'));
+    f.service.submit(f.owner,'persona',{requestId:'streamed',text:'list files'});
+    await until(()=>sources.length===1);
+    let own=0,other=0;const stop=f.service.watch(f.owner,()=>own++,()=>{}),stopOther=f.service.watch('other',()=>other++,()=>{});t.after(stop);t.after(stopOther);
+    send(0,{result:'正在核对'});
+    await until(()=>f.service.read(f.owner,'persona').job.output?.text==='正在核对');
+    const partial=f.service.read(f.owner,'persona');
+    assert.equal(partial.job.state,'running');assert.equal(partial.messages.length,1);assert.equal(partial.unread,0);assert.ok(own>0);assert.equal(other,0);
+    assert.throws(()=>f.service.read('other','persona'),/不存在/);
+    // Neither streamed arguments nor a claimed receipt can execute a partial call.
+    send(0,{tool_calls_delta:[{index:0,function:{name:'list_dir',arguments:'{"path":'}}]});
+    await next();assert.equal(f.service.read(f.owner,'persona').messages.length,1);assert.equal(sources.length,1);
+    send(0,{tool_calls:[call('list','list_dir',{path:'.'})],stop_reason:'tool_calls'});sources[0].close();
+    await until(()=>sources.length===2);
+    assert.equal(f.service.read(f.owner,'persona').job.output?.text,'','A new model iteration replaces its draft');
+    send(1,{result:'目录已核对'});
+    await until(()=>f.service.read(f.owner,'persona').job.output?.text==='目录已核对');
+    assert.equal(f.service.read(f.owner,'persona').messages.length,1);
+    send(1,{stop_reason:'stop'});sources[1].close();
+    await until(()=>f.service.read(f.owner,'persona').job.state==='done');
+    const final=f.service.read(f.owner,'persona');
+    assert.equal(final.job.output,undefined);assert.equal(final.messages.length,2);assert.equal(final.messages.at(-1).id,'streamed-answer');
+    assert.equal(final.messages.at(-1).text,'目录已核对');assert.deepEqual(final.messages.at(-1).execution,{source:'keepwork-runtime',requested:1,returned:1});
+    f.service.submit(f.owner,'persona',{requestId:'streamed',text:'list files'});assert.equal(sources.length,2,'Legacy retry keeps request identity');
+});
+test('cancelled and failed previews stay incomplete, never enter history, and late tokens cannot overwrite a new task',async t=>{
+    const sources=[];let requests=[];
+    const f=fixture(t,async(_url,init)=>{requests.push(JSON.parse(init.body));return new Response(new ReadableStream({start(controller){sources.push(controller);}}),{headers:{'content-type':'text/event-stream'}});});
+    const send=(index,value)=>sources[index].enqueue(new TextEncoder().encode('data: '+JSON.stringify(value)+'\n\n'));
+    f.service.submit(f.owner,'persona',{requestId:'cancelled',text:'first'});await until(()=>sources.length===1);
+    send(0,{result:'未完成的私有草稿'});await until(()=>!!f.service.read(f.owner,'persona').job.output);
+    await f.service.cancel(f.owner,'persona');await next();
+    let state=f.service.read(f.owner,'persona');assert.equal(state.job.state,'cancelled');assert.equal(state.job.output.text,'未完成的私有草稿');assert.equal(state.messages.length,1);
+    f.service.submit(f.owner,'persona',{requestId:'failed',text:'second'});await until(()=>sources.length===2);
+    assert.doesNotMatch(JSON.stringify(requests[1]),/未完成的私有草稿/);
+    assert.equal(f.service.read(f.owner,'persona').job.output,undefined);
+    try{send(0,{result:'late old text',stop_reason:'stop'});}catch{/* Cancel closes the old reader. */}
+    send(1,{result:'失败前的部分正文'});await until(()=>!!f.service.read(f.owner,'persona').job.output);
+    sources[1].close();await until(()=>f.service.read(f.owner,'persona').job.state==='error');
+    state=f.service.read(f.owner,'persona');assert.equal(state.job.output.text,'失败前的部分正文');assert.equal(state.messages.length,2);assert.equal(state.unread,0);assert.equal(requests.length,2);
+    const restarted=new Personas(f.home,f.sessions,{setAgentRootResolver(){},watch:()=>()=>{},setAgentPrompt(){},agentBindings:()=>[]});t.after(()=>restarted.close());
+    assert.equal(restarted.read(f.owner,'persona').job.output.text,'失败前的部分正文');
+    assert.equal(restarted.read(f.owner,'persona').messages.some(m=>m.id.endsWith('-answer')),false);
+});
 test('closed-page persona executes tool loop with approvals and persists no login',async t=>{
     let requests=0;
     const f=fixture(t,async(url,init)=>{assert.equal(url,'https://api.keepwork.com/core/v0/gpt/chat');assert.equal(init.headers.Authorization,'Bearer fixture-secret');const body=JSON.parse(init.body);assert.equal(body.stream,true);

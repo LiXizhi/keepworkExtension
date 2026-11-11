@@ -1,5 +1,5 @@
 /** Consume one Keepwork SSE response. Never execute tools or retry a request here. */
-export async function readKeepworkModelStream(response:Response, signal?:AbortSignal, observe?:(summary:{frames:number;toolDeltaFrames:number;finalizedToolCalls:number;completed:boolean})=>void) {
+export async function readKeepworkModelStream(response:Response, signal?:AbortSignal, observe?:(summary:{frames:number;toolDeltaFrames:number;finalizedToolCalls:number;completed:boolean})=>void, onText?:(text:string)=>void) {
     if (!response.body) throw Error('Keepwork model stream has no body');
     const reader=response.body.getReader(),decoder=new TextDecoder();
     let buffer='',text='',bytes=0,finished=false,toolFinish=false;
@@ -19,7 +19,7 @@ export async function readKeepworkModelStream(response:Response, signal?:AbortSi
         if ([event.tool_calls_delta,choice?.delta?.tool_calls,choice?.message?.tool_calls].some(value=>Array.isArray(value)&&value.length>0)) toolDeltaFrames++;
         if(reason==='length'||reason==='content_filter')throw Error('Keepwork model stream incomplete; execution skipped');
         const content=event.result??choice?.delta?.content??'';
-        if(typeof content==='string')text+=content;
+        if(typeof content==='string' && content){text+=content;onText?.(visibleModelText(text));}
         // The service sends argument deltas for progress, then a complete tool_calls snapshot.
         // Only that final snapshot may leave this transport; partial arguments are never executed.
         if(event.tool_calls!==undefined){if(!Array.isArray(event.tool_calls))throw Error('Invalid finalized tool calls');calls=event.tool_calls;}
@@ -45,4 +45,13 @@ export async function readKeepworkModelStream(response:Response, signal?:AbortSi
         if((toolFinish||toolDeltaFrames>0)&&!calls.length)throw Error('Keepwork model omitted finalized tool calls; execution skipped');
         return {result:text,tool_calls:calls};
     } finally {signal?.removeEventListener('abort',cancel);await reader.cancel().catch(()=>{});reader.releaseLock();observe?.({frames,toolDeltaFrames,finalizedToolCalls:calls.length,completed:finished});}
+}
+
+/** DSML is an internal tool envelope, including when its opening tag spans frames. */
+export function visibleModelText(text:string) {
+    const marker='<｜｜DSML｜｜',start=text.indexOf(marker);
+    if(start>=0)return text.slice(0,start);
+    for(let size=Math.min(marker.length-1,text.length);size>0;size--)
+        if(text.endsWith(marker.slice(0,size)))return text.slice(0,-size);
+    return text;
 }

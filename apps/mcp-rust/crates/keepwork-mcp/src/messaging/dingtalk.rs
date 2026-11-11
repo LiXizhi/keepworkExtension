@@ -15,6 +15,7 @@ pub(crate) async fn login_dws(root: &str, profile: Option<&str>) -> Result<(), M
     command
         .args(&args)
         .current_dir(if root.is_empty() { "." } else { root })
+        .env(path_env_key(), cli_child_path(Some(&program)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -167,6 +168,7 @@ pub(crate) fn spawn_listener_child(
         .arg("--profile")
         .arg(profile)
         .current_dir(if root.is_empty() { "." } else { root })
+        .env(path_env_key(), cli_child_path(Some(program)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

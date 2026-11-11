@@ -79,6 +79,74 @@ pub(crate) fn cli_search_dirs() -> Vec<PathBuf> {
     dirs.into_iter().filter(|dir| is_directory(dir)).collect()
 }
 
+/// Environment key for PATH; Windows spells it `Path`.
+pub(crate) fn path_env_key() -> &'static str {
+    if cfg!(windows) {
+        "Path"
+    } else {
+        "PATH"
+    }
+}
+
+fn inherited_path() -> std::ffi::OsString {
+    std::env::var_os(path_env_key())
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default()
+}
+
+/// `first` followed by the inherited PATH, keeping existing directories and
+/// dropping duplicates. Falls back to the inherited value when nothing is left.
+fn merged_path(first: Vec<PathBuf>, inherited: &std::ffi::OsStr) -> String {
+    let mut dirs = first;
+    dirs.extend(std::env::split_paths(inherited));
+    let mut unique = Vec::<PathBuf>::new();
+    for dir in dirs {
+        if !dir.as_os_str().is_empty() && is_directory(&dir) && !unique.contains(&dir) {
+            unique.push(dir);
+        }
+    }
+    match std::env::join_paths(unique) {
+        Ok(path) if !path.is_empty() => path.to_string_lossy().into_owned(),
+        _ => inherited.to_string_lossy().into_owned(),
+    }
+}
+
+/// PATH for DWS/Lark children. npm installs CLIs as `#!/usr/bin/env node`
+/// shims, and a GUI-launched daemon inherits a minimal PATH, so the install
+/// prefixes must come first even when the caller's PATH lacks Node.
+pub(crate) fn cli_child_path(program: Option<&Path>) -> String {
+    let mut first: Vec<PathBuf> = Vec::new();
+    if let Some(program) = program.and_then(Path::parent) {
+        first.push(program.to_path_buf());
+    }
+    for variable in ["KEEPWORK_DWS_PATH", "KEEPWORK_LARK_PATH"] {
+        if let Some(parent) = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+        {
+            first.push(parent);
+        }
+    }
+    if let Some(parent) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        first.push(parent);
+    }
+    first.extend(cli_search_dirs());
+    merged_path(first, &inherited_path())
+}
+
+/// PATH for `run_terminal` children. The caller's own PATH keeps precedence so
+/// existing commands resolve as before; the install prefixes are appended as a
+/// fallback for `dws` / `lark-cli` when the daemon has only a minimal PATH.
+pub(crate) fn shell_child_path() -> String {
+    let inherited = inherited_path();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&inherited).collect();
+    dirs.extend(cli_search_dirs());
+    merged_path(dirs, &inherited)
+}
+
 pub(crate) fn global_module_dirs() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let mut dirs = vec![
@@ -108,6 +176,11 @@ pub(crate) fn resolve_cli(
         }
     }
     let mut candidates = Vec::new();
+    // The caller's PATH wins over install prefixes, matching `resolveDws` in
+    // `src/core/messagingDingtalk.ts`.
+    for dir in std::env::split_paths(&inherited_path()) {
+        candidates.push(dir.join(binary));
+    }
     for dir in cli_search_dirs() {
         candidates.push(dir.join(binary));
     }
@@ -247,6 +320,7 @@ pub(crate) async fn cli_call(
     command
         .args(args)
         .current_dir(if cwd.is_empty() { "." } else { cwd })
+        .env(path_env_key(), cli_child_path(Some(program)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -299,4 +373,41 @@ pub(crate) async fn dws_call(args: &[String], cwd: &str) -> Result<Value, DwsErr
 pub(crate) async fn lark_call(args: &[String], cwd: &str) -> Result<Value, DwsError> {
     let program = resolve_lark()?;
     cli_call(&program, args, cwd, true).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kp-cli-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn merged_path_keeps_first_wins_and_drops_missing_dirs() {
+        let first = scratch("first");
+        let second = scratch("second");
+        let inherited = std::env::join_paths([
+            second.clone(),
+            first.clone(),
+            PathBuf::from("/definitely/missing/kp-cli"),
+        ])
+        .unwrap();
+        let merged = merged_path(vec![first.clone()], &inherited);
+        assert_eq!(
+            std::env::split_paths(&merged).collect::<Vec<_>>(),
+            vec![first.clone(), second.clone()]
+        );
+        std::fs::remove_dir_all(first).ok();
+        std::fs::remove_dir_all(second).ok();
+    }
+
+    #[test]
+    fn merged_path_falls_back_to_the_inherited_value() {
+        let inherited = std::ffi::OsString::from("/definitely/missing/kp-cli");
+        let merged = merged_path(vec![PathBuf::from("/also/missing")], &inherited);
+        assert_eq!(merged, "/definitely/missing/kp-cli");
+    }
 }

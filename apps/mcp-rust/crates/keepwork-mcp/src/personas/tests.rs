@@ -4,6 +4,95 @@ use super::*;
 use super::{model::*, naming::*, store::*, util::*, view::*};
 
 #[test]
+fn streamed_output_never_becomes_history_or_a_success_receipt_until_finished() {
+    let dir = std::env::temp_dir().join(format!("kp-persona-output-{}", uuid::Uuid::new_v4()));
+    let store = PersonaStore::open(dir.clone());
+    let owner = "ab".repeat(32);
+    let spec = RunSpec {
+        key: file_key(&owner, "default-persona"),
+        owner: owner.clone(),
+        id: "default-persona".into(),
+        request_id: "request".into(),
+        text: "question".into(),
+        context_mode: "conversation".into(),
+    };
+    store.lock().rows.insert(
+        spec.key.clone(),
+        json!({
+            "owner": owner, "id":"default-persona", "name":"我的分身", "readAt":0,
+            "messages":[{"id":"request","role":"user","text":"question","time":1}],
+            "job":{"id":"request","state":"running"}, "requests":{"request":"accepted"},
+        }),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    store.lock().watchers.push(Some((owner.clone(), tx)));
+    store.update_output(&spec, "partial answer");
+    assert!(rx.try_recv().is_ok());
+    let view = store.read(&owner, "default-persona", i64::MAX).unwrap();
+    assert_eq!(view["job"]["output"]["text"], "partial answer");
+    assert_eq!(view["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(view["unread"], 0);
+    assert!(history_of(view["messages"].as_array().unwrap()).is_empty());
+    store.finish(&spec, Err("connection lost".into()), false, 0, 0);
+    store.update_output(&spec, "late answer");
+    let failed = store.read(&owner, "default-persona", i64::MAX).unwrap();
+    assert_eq!(failed["job"]["state"], "error");
+    assert_eq!(failed["job"]["output"]["text"], "partial answer");
+    assert_eq!(failed["messages"].as_array().unwrap().len(), 1);
+
+    store.lock().rows.get_mut(&spec.key).unwrap()["job"] = json!({"id":"next","state":"running"});
+    store.update_output(&spec, "stale answer");
+    assert!(
+        store.read(&owner, "default-persona", i64::MAX).unwrap()["job"]
+            .get("output")
+            .is_none()
+    );
+    let next = RunSpec {
+        request_id: "next".into(),
+        ..spec
+    };
+    store.update_output(&next, "fresh partial");
+    store.finish(&next, Ok("complete answer".into()), false, 1, 1);
+    let done = store.read(&owner, "default-persona", i64::MAX).unwrap();
+    assert!(done["job"].get("output").is_none());
+    assert_eq!(done["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(done["messages"][1]["text"], "complete answer");
+    assert_eq!(done["messages"][1]["execution"]["requested"], 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cancellation_retains_visible_partial_but_ignores_late_stream_updates() {
+    let dir = std::env::temp_dir().join(format!("kp-persona-stop-output-{}", uuid::Uuid::new_v4()));
+    let store = PersonaStore::open(dir.clone());
+    let owner = "cd".repeat(32);
+    let spec = RunSpec {
+        key: file_key(&owner, "default-persona"),
+        owner: owner.clone(),
+        id: "default-persona".into(),
+        request_id: "stop".into(),
+        text: "question".into(),
+        context_mode: "conversation".into(),
+    };
+    store.lock().rows.insert(
+        spec.key.clone(),
+        json!({
+            "owner":owner,"id":"default-persona","messages":[],"requests":{},
+            "job":{"id":"stop","state":"running"},
+        }),
+    );
+    store.update_output(&spec, "visible partial");
+    store.cancel(&owner, "default-persona").unwrap();
+    store.update_output(&spec, "late");
+    store.finish(&spec, Ok("late complete".into()), true, 0, 0);
+    let stopped = store.read(&owner, "default-persona", i64::MAX).unwrap();
+    assert_eq!(stopped["job"]["state"], "cancelled");
+    assert_eq!(stopped["job"]["output"]["text"], "visible partial");
+    assert!(stopped["messages"].as_array().unwrap().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn native_cli_model_preferences_never_reach_keepwork() {
     assert_eq!(
         resolve_model(

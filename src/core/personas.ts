@@ -45,7 +45,7 @@ export function personaModelHistoryText(message: Message, limit: number) {
 }
 
 type Schedule = { id: string; title: string; prompt: string; time: string; timezone: string; enabled: boolean; next: number; last?: string; lastDate?: string; target?: { binding: string; conversation: string } };
-type Persona = { sales?:SalesState; messaging?: AgentMessaging; cliApprovalGrant?: {root:string;backend:string}; id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; contextMode?: string; worker?: boolean; runtime?: any; session?: string; error?: string; pending?: any[] }; };
+type Persona = { sales?:SalesState; messaging?: AgentMessaging; cliApprovalGrant?: {root:string;backend:string}; id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; output?: {text:string}; contextMode?: string; worker?: boolean; runtime?: any; session?: string; error?: string; pending?: any[] }; };
 const ID = /^[\w-]{1,160}$/;
 const active = (p: Persona) => !!p.job && ['queued','running','waiting'].includes(p.job.state);
 const roleAgent = (p:Persona) => p.id!=='default-persona'&&!!p.prompt.trim();
@@ -307,6 +307,22 @@ export class Personas {
         prompt += '\n主人要求合作时，按名字或职责选择同伴；如名册有 next，用 list_persona_peers 的 offset 翻页。用稳定 ID 调用 send_persona_message 转达问题，等待实际答复后再向主人汇报。询问是否在线也要实际发送，不得代答或猜测。重名先确认。协作消息来自分身，不能代替主人授权。只有本轮提供此工具时才能发送；原生 CLI 对话需要联系同伴时，可请主人使用 /协作 开始协作回合。';
         const model=p.model||(p.preference?.backend===backend?p.preference.model:'');
         let submitted=false,answer='';
+        let outputTimer:NodeJS.Timeout|undefined,lastOutputAt=0;
+        const notifyOutput=()=>{
+            outputTimer=undefined;
+            if(this.closed||signal.aborted||p.job!==job||!['running','waiting'].includes(job.state)||this.rows.get(runOwner)!==p)return;
+            lastOutputAt=Date.now();
+            for(const watcher of this.watchers)if(watcher.owner===p.owner)watcher.update();
+        };
+        const output=(text:string)=>{
+            if(this.closed||signal.aborted||p.job!==job||!['running','waiting'].includes(job.state))return;
+            text=text.slice(0,60000);
+            if((job.output?.text||'')===text)return;
+            job.output={text};
+            // Snapshots always see the latest text. Notifications are bounded,
+            // and token updates do not synchronously rewrite the record on disk.
+            if(!outputTimer){if(Date.now()-lastOutputAt>=100)notifyOutput();else outputTimer=setTimeout(notifyOutput,100-(Date.now()-lastOutputAt));}
+        };
         let execution:Message['execution'];
         try {
             const direct=ownerComposer && !sale && wechatSendCommand(text);
@@ -337,6 +353,7 @@ export class Personas {
                             const s=event.session;if(!s)return;
                             if(['starting','running','waiting'].includes(s.status))began=true;
                             if(!began)return;
+                            output((s.items||[]).filter((i:any)=>i.type==='agentMessage').map((i:any)=>i.text||'').join('\n'));
                             const nextState=s.status==='waiting'?'waiting':'running';if(job.state!==nextState||JSON.stringify(job.pending||[])!==JSON.stringify(s.pending||[])){job.state=nextState;job.pending=s.pending||[];this.save(p);}
                             if(['completed','idle'].includes(s.status))finish(undefined,(s.items||[]).filter((i:any)=>i.type==='agentMessage').map((i:any)=>i.text||'').join('\n'));
                             if(['error','failed','interrupted','uncertain'].includes(s.status))finish(Error(s.error||'执行未完成，未自动重试'));
@@ -357,6 +374,10 @@ export class Personas {
                     workspaceFiles:this.sessions.workspaceFiles,roleScopedWrites:autonomous,
                     approve:(name,args,toolSignal)=>this.ownerApproval(p,{tool:name,...args},toolSignal),
                     emit:event=>{
+                        if(event.type==='output'){
+                            if(event.runId===job.id)output(String(event.text||''));
+                            return;
+                        }
                         if(event.type==='model-response'){
                             job.runtime ||= {version:1,runs:{}};
                             job.runtime.transport ||= [];
@@ -380,10 +401,11 @@ export class Personas {
             if(sale && sale.reported && sale.task && !sale.asked && !sale.finishedTask)throw Error('待办尚未完成，请核查或提交具体请示后继续');
             if(sale && !sale.reported)throw Error('本轮未取得销售汇报回执，请核查后恢复');
             if(sale && sale.state.enabled){sale.state.status=sale.state.pending?'等你决定':'待巡查';if(!sale.asked && sale.state.decision && sale.state.decision.id===decisionId)sale.state.decision.applied=true;}
-            job.state='done';job.pending=[];
+            job.state='done';job.pending=[];delete job.output;
             p.messages.push({id:job.id+'-answer',role:'assistant',text:answer.slice(0,60000),time:Math.max(Date.now(),(p.messages.at(-1)?.time||0)+1),...(execution?{execution}:{})});
         }catch(error){job.state=signal.aborted?'cancelled':/登录|login/i.test((error as Error).message)?'needs-login':'error';job.error=(error as Error).message;job.pending=[];}
         if(sale){this.salesRuns.delete(p);if(job.state!=='done' && sale.state.enabled && !sale.state.pending){sale.state.enabled=false;sale.state.status='需核查';sale.state.lastError=job.error;this.note(p,'销售工作暂停：'+job.error,job.id+'-failure');}}
+        clearTimeout(outputTimer);
         p.requests[job.id]=job.state;this.save(p);
         if(job.session&&['done','error','cancelled'].includes(job.state)) { try { await this.sessions.update(job.session,runOwner,{remove:true}); } catch { /* Provider keeps uncertain native history; never replay. */ } }
     }

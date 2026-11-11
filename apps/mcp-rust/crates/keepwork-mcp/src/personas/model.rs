@@ -26,6 +26,12 @@ pub(crate) struct ModelTurn {
     pub(crate) tool_calls: Vec<ToolCall>,
     /// Stream ended with `finish_reason: "tool_calls"`.
     pub(crate) tool_stop: bool,
+    /// The service's complete, validated tool-call snapshot was received.
+    finalized_tool_calls: bool,
+    /// Streamed tool-call deltas were seen; only a snapshot may finish them.
+    delta_tool_calls: bool,
+    /// Legacy `delta.function_call` frames carried one call in full.
+    legacy_function_call: bool,
 }
 
 /// Keepwork single-shot answer used by the messaging pump; the run machinery
@@ -61,7 +67,7 @@ pub(crate) async fn call_model(
     }
     messages.push(json!({ "role": "user", "content": prepared.text }));
     let (content_type, body) =
-        post_model(client, prepared.model, messages, None, cancel).await?;
+        post_model(client, prepared.model, messages, None, cancel, None).await?;
     // The messaging pump has no executor loop; tool calls stay rejected there.
     parse_model_output(&content_type, &body)
 }
@@ -74,11 +80,12 @@ pub(crate) async fn call_model_turn(
     messages: Vec<Value>,
     tools: Option<Vec<Value>>,
     cancel: &mut tokio::sync::watch::Receiver<bool>,
+    output: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> Result<ModelTurn, String> {
     if *cancel.borrow() {
         return Err("已取消".into());
     }
-    let (content_type, body) = post_model(client, model, messages, tools, cancel).await?;
+    let (content_type, body) = post_model(client, model, messages, tools, cancel, output).await?;
     parse_model_turn(&content_type, &body)
 }
 
@@ -90,21 +97,13 @@ async fn post_model(
     messages: Vec<Value>,
     tools: Option<Vec<Value>>,
     cancel: &mut tokio::sync::watch::Receiver<bool>,
+    output: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> Result<(String, String), String> {
     let url = keepwork_chat_url(&client.base_url)?;
     let token = client.token;
-    let mut payload = json!({
-        "model": model,
-        "messages": messages,
-        "stream": true,
-        "reasoning": false,
-        "max_tokens": 4000,
-    });
-    if let Some(tools) = tools {
-        payload["tools"] = json!(tools);
-    }
+    let payload = model_payload(model, messages, tools);
     let payload = payload.to_string();
-    let mut request = tokio::spawn(async move {
+    let request = async move {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
@@ -119,12 +118,6 @@ async fn post_model(
             .await
             .map_err(|error| error.to_string())?;
         let status = response.status();
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-            .to_string();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err("需要重新登录 AIChat".into());
         }
@@ -134,23 +127,156 @@ async fn post_model(
                 status.as_u16()
             ));
         }
-        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
-        if bytes.len() > 8 * 1024 * 1024 {
-            return Err("Keepwork model stream exceeds limit".into());
-        }
-        let body = String::from_utf8_lossy(&bytes).into_owned();
-        Ok((content_type, body))
-    });
+        read_model_body(response, output).await
+    };
+    tokio::pin!(request);
     tokio::select! {
         _ = cancel.changed() => {
-            request.abort();
             Err("已取消".into())
         }
-        result = &mut request => match result {
-            Ok(inner) => inner,
-            Err(_) => Err("已取消".into()),
+        result = &mut request => result,
+    }
+}
+
+async fn read_model_body(
+    mut response: reqwest::Response,
+    mut output: Option<&mut (dyn FnMut(&str) + Send)>,
+) -> Result<(String, String), String> {
+    let content_type = response.headers().get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+    let streaming = content_type.to_ascii_lowercase().contains("text/event-stream");
+    let mut preview = StreamPreview::default();
+    let mut bytes = Vec::new();
+    let mut published = String::new();
+    let mut emitted = false;
+    let mut ticks = tokio::time::interval(Duration::from_millis(100));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let chunk = tokio::select! {
+            result = response.chunk() => result.map_err(|error| error.to_string())?,
+            _ = ticks.tick(), if streaming && output.is_some() => {
+                let text = preview.text();
+                if text != published {
+                    if let Some(output) = output.as_mut() {
+                        output(&text);
+                        published = text;
+                        emitted = true;
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(chunk) = chunk else { break; };
+        if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
+            return Err("Keepwork model stream exceeds limit".into());
+        }
+        bytes.extend_from_slice(&chunk);
+        if streaming {
+            preview.push(&chunk)?;
+            // Publish the first prose immediately; ticks flush subsequent text
+            // even when the upstream pauses without sending another chunk.
+            if !emitted {
+                if let Some(output) = output.as_mut() {
+                    let text = preview.text();
+                    if text != published {
+                        output(&text);
+                        published = text;
+                        emitted = true;
+                        ticks.reset();
+                    }
+                }
+            }
         }
     }
+    if streaming {
+        let text = preview.text();
+        if text != published {
+            if let Some(output) = output.as_mut() { output(&text); }
+        }
+    }
+    Ok((content_type, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// Parses only complete SSE frames, so UTF-8 and CRLF delimiters may span
+/// arbitrary HTTP chunks. Preview text is provisional and never executes tools.
+#[derive(Default)]
+struct StreamPreview {
+    buffer: Vec<u8>,
+    turn: ModelTurn,
+    pending: HashMap<usize, ToolCall>,
+    finished: bool,
+}
+
+impl StreamPreview {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.buffer.extend_from_slice(bytes);
+        loop {
+            let boundary = self.buffer.iter().enumerate().find_map(|(index, byte)| {
+                if *byte != b'\n' {
+                    return None;
+                }
+                if self.buffer.get(index + 1) == Some(&b'\n') {
+                    Some((index, index + 2))
+                } else if self.buffer.get(index + 1..index + 3) == Some(b"\r\n".as_slice()) {
+                    Some((index, index + 3))
+                } else {
+                    None
+                }
+            });
+            let Some((end, consumed)) = boundary else {
+                break;
+            };
+            if end > 2 * 1024 * 1024 {
+                return Err("Keepwork model stream frame exceeds limit".into());
+            }
+            let frame = String::from_utf8_lossy(&self.buffer[..end]);
+            consume_turn_frame(
+                &frame,
+                &mut self.turn,
+                &mut self.pending,
+                &mut self.finished,
+            )?;
+            self.buffer.drain(..consumed);
+        }
+        if self.buffer.len() > 2 * 1024 * 1024 {
+            return Err("Keepwork model stream frame exceeds limit".into());
+        }
+        Ok(())
+    }
+
+    fn text(&self) -> String {
+        // DSML embeds tool arguments in content. Hide everything from its first
+        // marker and hold a split marker suffix until it is known to be prose.
+        let mut end = self.turn.content.len();
+        for marker in ["<｜｜DSML｜｜", "</｜｜DSML｜｜"] {
+            if let Some(index) = self.turn.content.find(marker) {
+                end = end.min(index);
+            }
+            for (index, _) in marker.char_indices().skip(1) {
+                if self.turn.content.ends_with(&marker[..index]) {
+                    end = end.min(self.turn.content.len() - index);
+                }
+            }
+        }
+        self.turn.content[..end].chars().take(60_000).collect()
+    }
+}
+
+/// Build the Keepwork chat payload. `localTools` is the public contract used
+/// by AIChat's shared runtime; `tools` is an OpenAI-shaped field but is not
+/// consumed by this endpoint.
+fn model_payload(model: String, messages: Vec<Value>, tools: Option<Vec<Value>>) -> Value {
+    let mut payload = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+        "reasoning": false,
+        "max_tokens": 4000,
+    });
+    if let Some(tools) = tools {
+        payload["localTools"] = json!(tools);
+    }
+    payload
 }
 
 /// Legacy text-only parse kept for the messaging pump path: tool calls are an
@@ -167,6 +293,10 @@ pub(crate) fn parse_model_output(content_type: &str, body: &str) -> Result<Strin
 /// plain content instead of `tool_calls` deltas. Extracts those blocks into
 /// real tool calls so the persona executor can run them.
 fn extract_dsml_tool_calls(turn: &mut ModelTurn) {
+    // A validated snapshot is authoritative; DSML is only the fallback shape.
+    if !turn.tool_calls.is_empty() {
+        return;
+    }
     let content = turn.content.clone();
     if !content.contains("<｜｜DSML｜｜") {
         return;
@@ -182,7 +312,11 @@ fn extract_dsml_tool_calls(turn: &mut ModelTurn) {
     let mut calls: Vec<ToolCall> = Vec::new();
     for (index, cap) in invoke_re.captures_iter(&content).enumerate() {
         let name = cap.get(1).map_or("", |m| m.as_str()).to_string();
-        let body = cap.get(2).map(|m| m.as_str()).unwrap_or_default().to_string();
+        let body = cap
+            .get(2)
+            .map(|m| m.as_str())
+            .unwrap_or_default()
+            .to_string();
         let mut arguments = serde_json::Map::new();
         for param in param_re.captures_iter(&body) {
             let pname = param.get(1).map_or("", |p| p.as_str());
@@ -202,7 +336,10 @@ fn extract_dsml_tool_calls(turn: &mut ModelTurn) {
     turn.content = invoke_re.replace_all(&content, "").to_string();
     let tag_re = regex::Regex::new(r#"<｜｜DSML｜｜ [^<>]*>|</｜｜DSML｜｜ [^<>]*>"#)
         .expect("static dsml regex");
-    turn.content = tag_re.replace_all(turn.content.as_str(), "").trim().to_string();
+    turn.content = tag_re
+        .replace_all(turn.content.as_str(), "")
+        .trim()
+        .to_string();
 }
 
 pub(crate) fn parse_model_turn(content_type: &str, body: &str) -> Result<ModelTurn, String> {
@@ -264,6 +401,9 @@ pub(crate) fn parse_sse_turn(body: &str) -> Result<ModelTurn, String> {
     let mut pending: HashMap<usize, ToolCall> = HashMap::new();
     let mut finished = false;
     while let Some(boundary) = normalized.find("\n\n") {
+        if boundary > 2 * 1024 * 1024 {
+            return Err("Keepwork model stream frame exceeds limit".into());
+        }
         let frame = normalized[..boundary].to_string();
         normalized = normalized[boundary + 2..].to_string();
         consume_turn_frame(&frame, &mut turn, &mut pending, &mut finished)?;
@@ -274,10 +414,16 @@ pub(crate) fn parse_sse_turn(body: &str) -> Result<ModelTurn, String> {
     if !finished {
         return Err("Keepwork model stream ended without completion; execution skipped".into());
     }
-    let mut indexes: Vec<usize> = pending.keys().copied().collect();
-    indexes.sort_unstable();
-    for index in indexes {
-        turn.tool_calls.push(pending.remove(&index).expect("checked"));
+    if turn.finalized_tool_calls {
+        if turn.tool_stop && turn.tool_calls.is_empty() {
+            return Err("Keepwork model omitted finalized tool calls; execution skipped".into());
+        }
+    } else if turn.delta_tool_calls || (turn.tool_stop && !turn.legacy_function_call) {
+        return Err("Keepwork model omitted finalized tool calls; execution skipped".into());
+    } else if let Some(call) = pending.remove(&usize::MAX) {
+        // Only the legacy single `function_call` shape may execute without a
+        // snapshot; its arguments arrived in full before the stream finished.
+        turn.tool_calls.push(call);
     }
     Ok(turn)
 }
@@ -317,6 +463,50 @@ pub(crate) fn consume_turn_frame(
     if reason == Some("length") || reason == Some("content_filter") {
         return Err("Keepwork model stream incomplete; execution skipped".into());
     }
+    // Delta tool frames carry partial arguments; the snapshot is the only
+    // place a complete call may come from.
+    if [
+        event.get("tool_calls_delta"),
+        event.pointer("/choices/0/delta/tool_calls"),
+        event.pointer("/choices/0/message/tool_calls"),
+    ]
+    .iter()
+    .any(|value| {
+        value
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
+    }) {
+        turn.delta_tool_calls = true;
+    }
+    if let Some(value) = event.get("tool_calls").filter(|value| !value.is_null()) {
+        let calls = value
+            .as_array()
+            .ok_or_else(|| "Invalid finalized tool calls; execution skipped".to_string())?;
+        let mut finalized = Vec::with_capacity(calls.len());
+        for (index, call) in calls.iter().enumerate() {
+            let function = &call["function"];
+            let name = function["name"].as_str().unwrap_or("");
+            if name.is_empty() {
+                return Err("Invalid finalized tool calls; execution skipped".into());
+            }
+            let id = call["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_{index}"));
+            let arguments = match &function["arguments"] {
+                Value::String(arguments) if !arguments.trim().is_empty() => arguments.clone(),
+                _ => "{}".to_string(),
+            };
+            finalized.push(ToolCall {
+                id,
+                name: name.to_string(),
+                arguments,
+            });
+        }
+        turn.tool_calls = finalized;
+        turn.finalized_tool_calls = true;
+    }
     if let Some(calls) = event
         .pointer("/choices/0/delta/tool_calls")
         .and_then(Value::as_array)
@@ -348,6 +538,7 @@ pub(crate) fn consume_turn_frame(
     }
     // Legacy single `function_call` delta: one call accumulated across frames.
     if let Some(function) = event.pointer("/choices/0/delta/function_call") {
+        turn.legacy_function_call = true;
         let slot = pending.entry(usize::MAX).or_insert_with(|| ToolCall {
             id: String::from("call_0"),
             name: String::new(),
@@ -375,7 +566,8 @@ pub(crate) fn consume_turn_frame(
         || reason == Some("function_call")
         || event.get("is_end") == Some(&json!(true))
     {
-        if reason != Some("stop") {
+        // `is_end` alone only ends the stream; it never promises tool calls.
+        if reason == Some("tool_calls") || reason == Some("function_call") {
             turn.tool_stop = true;
         }
         *finished = true;
@@ -388,11 +580,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preview_arrives_before_completion_across_utf8_and_crlf_chunks() {
+        let body = "data: {\"result\":\"你好\"}\r\n\r\n";
+        let mut preview = StreamPreview::default();
+        for byte in body.as_bytes() {
+            preview.push(&[*byte]).unwrap();
+        }
+        assert_eq!(preview.text(), "你好");
+        assert!(!preview.finished);
+        assert!(parse_model_turn("text/event-stream", body).is_err());
+        preview.push(b"data: [DONE]\r\n\r\n").unwrap();
+        assert!(preview.finished);
+        assert_eq!(preview.text(), "你好");
+    }
+
+    #[test]
+    fn preview_hides_tool_arguments_and_split_dsml_markers() {
+        let mut preview = StreamPreview::default();
+        for text in [
+            "正在检查",
+            "<",
+            "｜｜DS",
+            "ML｜｜ invoke name=\"run_terminal\">",
+            "private-argument",
+        ] {
+            let frame = format!("data: {}\n\n", json!({"result": text}));
+            preview.push(frame.as_bytes()).unwrap();
+            assert_eq!(preview.text(), "正在检查");
+        }
+        let mut tools = StreamPreview::default();
+        tools
+            .push(b"data: {\"tool_calls_delta\":[{\"function\":{\"arguments\":\"secret\"}}]}\n\n")
+            .unwrap();
+        assert_eq!(tools.text(), "");
+        assert!(parse_sse_turn("data: {\"tool_calls_delta\":[{\"function\":{\"arguments\":\"secret\"}}]}\n\ndata: [DONE]\n\n").is_err());
+    }
+
+    #[test]
+    fn preview_rejects_oversized_frames_before_completion() {
+        let mut preview = StreamPreview::default();
+        assert!(preview
+            .push(&vec![b'x'; 2 * 1024 * 1024 + 1])
+            .unwrap_err()
+            .contains("frame exceeds"));
+    }
+
+    #[test]
     fn streamed_tool_calls_accumulate_by_index() {
         let body = concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"run_terminal\",\"arguments\":\"{\\\"command\\\":\\\"dws\"}}]}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" auth status\\\"}\"}}]}}]}\n\n",
-            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"tool_calls\":[{\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"run_terminal\",\"arguments\":\"{\\\"command\\\":\\\"dws auth status\\\"}\"}}],\"stop_reason\":\"tool_calls\"}\n\n",
             "data: [DONE]\n\n"
         );
         let turn = parse_sse_turn(body).unwrap();
@@ -402,6 +640,97 @@ mod tests {
         assert_eq!(call.id, "call_a");
         assert_eq!(call.name, "run_terminal");
         assert_eq!(call.arguments, "{\"command\":\"dws auth status\"}");
+    }
+
+    #[test]
+    fn delta_only_tool_calls_fail_closed() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"run_terminal\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let error = parse_sse_turn(body).unwrap_err();
+        assert!(error.contains("finalized tool calls"));
+    }
+
+    #[test]
+    fn tool_calls_delta_without_snapshot_fails_closed() {
+        let body = concat!(
+            "data: {\"tool_calls_delta\":[{\"index\":0,\"function\":{\"name\":\"run_terminal\",\"arguments\":\"{}\"}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let error = parse_sse_turn(body).unwrap_err();
+        assert!(error.contains("finalized tool calls"));
+    }
+
+    #[test]
+    fn legacy_function_call_stream_executes_without_snapshot() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"run_terminal\",\"arguments\":\"{\\\"command\\\":\\\"dws\"}}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"function_call\":{\"arguments\":\" auth status\\\"}\"}}}]}\n\n",
+            "data: {\"choices\":[{\"finish_reason\":\"function_call\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let turn = parse_sse_turn(body).unwrap();
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "run_terminal");
+        assert_eq!(
+            turn.tool_calls[0].arguments,
+            "{\"command\":\"dws auth status\"}"
+        );
+    }
+
+    #[test]
+    fn is_end_without_a_tool_reason_is_a_plain_answer() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",
+            "data: {\"is_end\":true}\n\n"
+        );
+        let turn = parse_sse_turn(body).unwrap();
+        assert_eq!(turn.content, "你好");
+        assert!(turn.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn finalized_snapshot_supplies_id_and_empty_arguments() {
+        let body = concat!(
+            "data: {\"tool_calls\":[{\"function\":{\"name\":\"run_terminal\",\"arguments\":\"\"}}],\"stop_reason\":\"tool_calls\"}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let turn = parse_sse_turn(body).unwrap();
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "call_0");
+        assert_eq!(turn.tool_calls[0].arguments, "{}");
+        assert_eq!(turn.tool_calls[0].name, "run_terminal");
+    }
+
+    #[test]
+    fn model_payload_uses_keepwork_local_tools_contract() {
+        let tools = vec![json!({"type":"function","function":{"name":"run_terminal"}})];
+        let payload = model_payload(
+            "keepwork-pro".into(),
+            vec![json!({"role":"user","content":"hi"})],
+            Some(tools),
+        );
+        assert!(payload.get("localTools").is_some());
+        assert!(payload.get("tools").is_none());
+    }
+
+    #[test]
+    fn finalized_snapshot_wins_over_dsml_markup() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"<｜｜DSML｜｜ invoke name=\\\"run_terminal\\\"><｜｜DSML｜｜ parameter name=\\\"command\\\" string=\\\"true\\\">rm -rf /tmp/x</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>\"}}]}\n\n",
+            "data: {\"tool_calls\":[{\"id\":\"call_a\",\"function\":{\"name\":\"run_terminal\",\"arguments\":\"{\\\"command\\\":\\\"dws auth status\\\"}\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let turn = parse_model_turn("text/event-stream", body).unwrap();
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "run_terminal");
+        assert_eq!(
+            turn.tool_calls[0].arguments,
+            "{\"command\":\"dws auth status\"}"
+        );
     }
 
     #[test]
@@ -467,14 +796,17 @@ mod tests {
         })
         .to_string();
         assert!(parse_model_output("application/json", &body).is_err());
-        assert!(
-            parse_model_output("text/event-stream", "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n").is_err()
-        );
+        assert!(parse_model_output(
+            "text/event-stream",
+            "data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\n"
+        )
+        .is_err());
     }
 
     #[test]
     fn plain_turns_keep_stream_semantics() {
-        let success = "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\ndata: [DONE]\n\n";
+        let success =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\ndata: [DONE]\n\n";
         assert_eq!(parse_sse_turn(success).unwrap().content, "你好");
         assert!(parse_sse_turn("data: {\"result\":\"partial\"}\n\n").is_err());
         assert!(

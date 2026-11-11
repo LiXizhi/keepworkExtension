@@ -165,8 +165,11 @@ test('selected CLI uses isolated internal owner and exposes approvals but not to
     const f=fixture(t,'workbuddy');f.service.submit('owner','first',{requestId:'cli-run',text:'read'});await tick();
     assert.equal(f.calls[0].input.backend,'workbuddy');assert.equal(f.calls[0].input.model,'preferred');assert.equal(f.calls[0].input.mode,'ask');assert.notEqual(f.calls[0].owner,'owner');
     f.callbacks.get('native')({session:{status:'waiting',pending:[{id:1,method:'approval'}]}});assert.equal(f.service.read('owner','first').job.state,'waiting');
+    f.callbacks.get('native')({session:{status:'running',items:[{type:'reasoning',text:'private thought'},{type:'commandExecution',text:'private command'},{type:'agentMessage',text:'partial answer'}]}});
+    assert.equal(f.service.read('owner','first').job.output.text,'partial answer');assert.equal(f.service.read('owner','first').messages.length,1);
     f.callbacks.get('native')({session:{status:'completed',items:[{type:'reasoning',text:'secret thought'},{type:'commandExecution',text:'hidden command'},{type:'agentMessage',text:'answer'}]}});await tick();
     assert.deepEqual(f.service.read('owner','first').messages.map(m=>m.text),['read','answer']);assert.equal(f.pending.length,0);
+    assert.equal(f.service.read('owner','first').job.output,undefined);
 });
 test('owner fallback writes require approval; cancellation and path escape fail closed',async t=>{
     const f=fixture(t);f.service.submit('owner','first',{requestId:'write',text:'write'});const worker=f.pending[0];

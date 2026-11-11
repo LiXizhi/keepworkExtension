@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "keepwork-mcp"
-version = "0.2.5"
+version = "0.2.7"
 dependencies = [
  "axum",
  "chrono",
