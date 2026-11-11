@@ -60,6 +60,34 @@ test("bundles the staged MCP runtime into the Tauri resource layout", () => {
   assert.deepEqual(tauriConf.bundle.resources, ["resources/mcp-runtime"]);
 });
 
+for (const target of ['aarch64-apple-darwin', 'x86_64-pc-windows-msvc']) test(`legacy Node stage produces a self-contained Rust-readable manifest for ${target}`, t => {
+  const runtime = bundler.TARGETS[target][0];
+  const { root, out, stage } = fixture(runtime);
+  t.after(() => fs.rmSync(path.dirname(root), { recursive: true, force: true }));
+  const sourcePath = path.join(stage, 'runtime.json');
+  const legacy = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+  delete legacy.commit; delete legacy.node; delete legacy.engine;
+  fs.writeFileSync(sourcePath, JSON.stringify(legacy));
+  fs.writeFileSync(path.join(stage, 'app/package.json'), JSON.stringify({ version: legacy.version, commit: head }));
+  const outputPath = path.join(out, runtime.arch, 'runtime.json');
+  const verify = () => {
+    const output = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    assert.equal(output.commit, head, 'Rust cannot read a commit that only exists in app/package.json');
+    assert.equal(output.node, runtime.platform === 'windows' ? 'node.exe' : 'bin/node');
+    assert.equal(output.engine, 'node');
+    assert.equal(output.schemaVersion, 1);
+    assert.ok(fs.statSync(path.join(out, runtime.arch, output.node)).isFile());
+    assert.ok(fs.statSync(path.join(out, runtime.arch, output.entry)).isFile());
+  };
+  bundler.bundle({ root, out, target, require: true, sourceChanged: () => false });
+  verify();
+  // A previous copy may contain the same version but lack normalized fields.
+  fs.writeFileSync(outputPath, JSON.stringify(legacy));
+  bundler.bundle({ root, out, target, require: true, sourceChanged: () => false });
+  verify();
+  assert.equal(JSON.parse(fs.readFileSync(sourcePath, 'utf8')).commit, undefined, 'bundling does not mutate its legacy input');
+});
+
 test("a universal build carries both macOS slices and drops foreign ones", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aichat-rust-mcp-"));
   const root = path.join(dir, "staging");

@@ -10,6 +10,13 @@ function packageRuntime(stageDir, releaseDir, identity, prefix = 'keepwork/mcp-r
   const runtime = JSON.parse(fs.readFileSync(path.join(stageDir, 'runtime.json'), 'utf8'));
   const { platform, arch, nodeVersion } = runtime;
   const fileName = archiveName(platform, arch);
+  const expectedNode = platform === 'windows' ? 'node.exe' : 'bin/node';
+  if (runtime.schemaVersion !== 1 || runtime.engine !== 'node' || runtime.node !== expectedNode || runtime.commit !== identity.commit
+    || typeof runtime.builtAt !== 'string' || !Number.isFinite(Date.parse(runtime.builtAt)) || new Date(runtime.builtAt).toISOString() !== runtime.builtAt) {
+    throw new Error('Staged runtime manifest is incomplete or does not match release identity. Re-run npm run stage before packaging.');
+  }
+  const runtimePackage = JSON.parse(fs.readFileSync(path.join(stageDir, 'app/package.json'), 'utf8'));
+  if (runtimePackage.version !== runtime.version || runtimePackage.commit !== runtime.commit) throw new Error('Staged package identity does not match runtime.json; re-stage the runtime');
   if (runtime.product !== PRODUCT || runtime.version !== identity.version || runtime.entry !== 'app/cli.cjs') {
     throw new Error('Staged runtime does not match release');
   }
@@ -37,7 +44,7 @@ function packageRuntime(stageDir, releaseDir, identity, prefix = 'keepwork/mcp-r
   }
   const metadata = {
     schemaVersion: 1, product: PRODUCT, ...identity, nodeVersion, platform, arch,
-    builtAt: new Date().toISOString(),
+    builtAt: runtime.builtAt,
     url: `${qiniu.normalizeHttpsUrl(domain, 'domain')}/${qiniu.normalizePrefix(prefix)}${fileName}`,
     fileName, size: fs.statSync(output).size, sha256: qiniu.sha256(output),
   };

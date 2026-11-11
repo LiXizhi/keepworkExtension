@@ -90,6 +90,8 @@ function validateRuntime(dir, expected) {
   const manifestPath = path.join(dir, 'runtime.json');
   if (!fs.existsSync(manifestPath)) throw new Error(`Missing runtime.json in ${dir}`);
   const manifest = readJson(manifestPath);
+  if (manifest.schemaVersion !== undefined && manifest.schemaVersion !== 1) throw new Error('Unsupported runtime manifest schema');
+  if (manifest.engine !== undefined && manifest.engine !== 'node') throw new Error('Expected Node runtime engine');
   if (manifest.product !== PRODUCT) throw new Error(`Runtime product mismatch: expected ${PRODUCT}, got ${manifest.product}`);
   const runtimePlatform = expected.platform;
   if (manifest.platform !== runtimePlatform || manifest.arch !== expected.arch) {
@@ -106,22 +108,25 @@ function validateRuntime(dir, expected) {
   }
   const commit = manifest.commit || readJson(path.join(dir, 'app', 'package.json')).commit;
   if (!/^[a-f0-9]{40}$/.test(String(commit || ''))) throw new Error('Runtime source commit is missing');
-  return { ...manifest, node, entry, commit };
+  return { ...manifest, schemaVersion: 1, engine: 'node', node, entry, commit };
 }
 
-function copyRuntime(source, destination) {
+function copyRuntime(source, destination, manifest) {
   fs.rmSync(destination, { recursive: true, force: true });
   fs.mkdirSync(destination, { recursive: true });
   fs.cpSync(source, destination, { recursive: true, verbatimSymlinks: true });
+  // Legacy staging kept the source commit only in app/package.json. Persist
+  // the validated defaults too; Rust consumes runtime.json without that fallback.
+  fs.writeFileSync(path.join(destination, 'runtime.json'), JSON.stringify(manifest, null, 2) + '\n');
   // Tauri needs the resource path to exist even when nothing was staged.
   fs.writeFileSync(path.join(destination, KEEP_FILE), 'Keepwork MCP runtime is copied here by scripts/bundle-mcp-runtime.cjs.\n');
 }
 
-function sameRuntime(source, destination) {
+function sameRuntime(manifest, destination) {
   try {
-    const a = readJson(path.join(source, 'runtime.json'));
     const b = readJson(path.join(destination, 'runtime.json'));
-    return a.version === b.version && (a.commit || '') === (b.commit || '') && a.arch === b.arch;
+    return ['schemaVersion', 'product', 'version', 'commit', 'engine', 'node', 'entry', 'platform', 'arch', 'builtAt']
+      .every(key => manifest[key] === b[key]);
   } catch {
     return false;
   }
@@ -179,10 +184,10 @@ function bundle(options = {}) {
       }
       process.stderr.write(`[bundle-mcp-runtime] warning: AICHAT_MCP_RUNTIME_DIR is older than the MCP runtime source (${manifest.commit})\n`);
     }
-    if (sameRuntime(source, destination)) {
+    if (sameRuntime(manifest, destination)) {
       fs.writeFileSync(path.join(destination, KEEP_FILE), 'Keepwork MCP runtime is copied here by scripts/bundle-mcp-runtime.cjs.\n');
     } else {
-      copyRuntime(source, destination);
+      copyRuntime(source, destination, manifest);
     }
     bundled.push(`${runtime.arch} ${manifest.version} (${manifest.commit.slice(0, 10)})`);
   }

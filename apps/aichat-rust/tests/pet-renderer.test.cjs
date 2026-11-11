@@ -110,7 +110,7 @@ async function renderer(initial = snapshot()) {
       if (name === "state") return current;
       if (name === "hit-regions") { regionCalls.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
       if (name === "pointer-hold") { pointerHolds.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
-      calls.push({ name, args });
+      calls.push({ name, args: JSON.parse(JSON.stringify(args)) });
       if (handler) return handler(name, args);
       if (name === "input") current = { ...current, draft: args.text };
       if (name === "send") current = { ...current, draft: "" };
@@ -178,6 +178,95 @@ test("offline and legacy pet snapshots allow typing while remote actions stay un
     assert.equal(pet.element("draft").value, "离线记录，稍后发送");
     assert.deepEqual(pet.calls, [], "offline edits must stay local");
   }
+});
+
+test("ready pet voice buttons forward the current persona or session context", async () => {
+  for (const [context, target] of [["persona:alice", "persona"], ["session:legacy", "session"]]) {
+    const pet = await renderer(snapshot({ context, target, ready: true, canCall: true, attention: "" }));
+    assert.equal(pet.element("dictation").disabled, false);
+    assert.equal(pet.element("call").disabled, false);
+    assert.equal(pet.element("dictation").textContent, "语音输入");
+    assert.equal(pet.element("call").textContent, "通话");
+    pet.element("dictation").click();
+    await settle();
+    pet.element("call").click();
+    await settle();
+    assert.deepEqual(pet.calls, [
+      { name: "dictation", args: { context } },
+      { name: "call", args: { context } },
+    ]);
+  }
+});
+
+test("recovering pet readiness enables voice without starting capture automatically", async () => {
+  const pet = await renderer(snapshot({ canCall: true }));
+  pet.element("dictation").click();
+  pet.element("call").click();
+  await settle();
+  assert.deepEqual(pet.calls, []);
+  pet.publish({ ready: true, attention: "" });
+  await settle();
+  assert.equal(pet.element("dictation").disabled, false);
+  assert.equal(pet.element("call").disabled, false);
+  assert.deepEqual(pet.calls, [], "a restored page snapshot must not replay media actions");
+  pet.element("dictation").click();
+  await settle();
+  assert.deepEqual(pet.calls, [{ name: "dictation", args: { context: "persona:alice" } }]);
+});
+
+test("dictation excludes calls and rich drafts while remaining stoppable", async () => {
+  const pet = await renderer(snapshot({ ready: true, canCall: true, dictating: true, attention: "" }));
+  assert.equal(pet.element("dictation").textContent, "停止输入");
+  assert.equal(pet.element("dictation").disabled, false);
+  assert.equal(pet.element("call").disabled, true);
+  pet.element("call").click();
+  pet.element("dictation").click();
+  await settle();
+  assert.deepEqual(pet.calls, [{ name: "dictation", args: { context: "persona:alice" } }]);
+  pet.publish({ dictating: false, richDraft: true });
+  assert.equal(pet.element("dictation").disabled, true);
+  pet.element("dictation").click();
+  await settle();
+  assert.equal(pet.calls.length, 1);
+});
+
+test("missing call capability permits dictation and still allows an active call to stop", async () => {
+  for (const canCall of [false, undefined]) {
+    const pet = await renderer(snapshot({ ready: true, canCall, attention: "" }));
+    assert.equal(pet.element("dictation").disabled, false);
+    assert.equal(pet.element("call").disabled, true);
+    pet.element("call").click();
+    await settle();
+    assert.deepEqual(pet.calls, []);
+
+    pet.publish({ voice: { active: true, muted: false, state: "listening" } });
+    assert.equal(pet.element("dictation").disabled, true);
+    assert.equal(pet.element("call").disabled, false);
+    assert.equal(pet.element("call").textContent, "结束通话");
+    assert.equal(pet.element("mute").hidden, false);
+    pet.element("dictation").click();
+    pet.element("mute").click();
+    await settle();
+    pet.element("call").click();
+    await settle();
+    assert.deepEqual(pet.calls, [
+      { name: "mute", args: { context: "persona:alice" } },
+      { name: "call", args: { context: "persona:alice" } },
+    ]);
+  }
+});
+
+test("microphone permission failures stay visible without replaying the request", async () => {
+  const pet = await renderer(snapshot({ ready: true, canCall: true, attention: "" }));
+  pet.handle(async () => { throw new Error("麦克风权限被拒绝，请在系统设置中允许访问"); });
+  pet.element("dictation").click();
+  await settle();
+  assert.equal(pet.calls.length, 1);
+  assert.match(pet.element("error").textContent, /麦克风权限被拒绝/);
+  pet.publish({ ready: true });
+  await settle();
+  assert.equal(pet.calls.length, 1);
+  assert.match(pet.element("error").textContent, /麦克风权限被拒绝/);
 });
 
 test("reconnect retains the offline draft and only explicit send synchronizes then sends it", async () => {

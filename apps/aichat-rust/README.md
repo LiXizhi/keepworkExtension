@@ -34,6 +34,20 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 
 ## 开发与验证命令
 
+### 日常启动与 Rust MCP 预览
+
+在 `apps/aichat-rust` 目录执行 `pnpm tauri dev` 启动桌面；日常开发使用完整的 **Node MCP**，以保留 WorkBuddy、Codex 等原生 CLI 会话能力。VS Code 任务 `keepwork Rust Desktop: Start` 使用同一默认入口；这里的 Rust 指桌面客户端，不表示选择 Rust MCP。`pnpm dev` 只启动桌面页面的 Vite 服务，不启动桌面或 MCP。
+
+常规启动需要 Node.js 22 或更新版本，并已安装仓库、`apps/mcp-runtime` 与本桌面的依赖。启动器从当前源码生成独立的开发运行时，使用当前 Node 和已安装依赖，不依赖之前的 staging，不自动安装或下载依赖；准备失败时停止启动并保留错误。缺依赖时，在仓库根目录执行 `npm ci`、`npm ci --include=dev --prefix apps/mcp-runtime`，并在本桌面目录执行 `pnpm install` 后重试。
+
+如显式设置 `AICHAT_MCP_BUNDLED_DIR`（优先）或 `AICHAT_MCP_RUNTIME_DIR`，常规入口会校验并使用指定的 Node 运行时，不覆盖该目录。默认 Node 开发目录也不会被旧的 Rust 打包资源覆盖。
+
+需要验证 **Rust MCP 预览** 时显式执行 `pnpm dev:rust`，或为开发启动器设置 `AICHAT_MCP_ENGINE=rust`；这个选项不会切换运行中的 MCP。Rust MCP 当前尚未提供原生 CLI 会话接口，不能用该入口验收 CLI 连接器；版本号较大也不代表支持这些能力。详细边界见 [运行时迁移契约](../../docs/rust-runtime-migration.md#当前可用的桌面运行时选择)。
+
+开发页面固定使用 `http://127.0.0.1:1430`。重复启动会先检查开发服务的身份协议和真实项目目录，只复用同一 checkout 的服务。另一个项目、没有身份端点的旧 Vite 服务、无法确认身份的监听者会产生明确的端口占用错误；请在拥有该服务的终端中处理后重试。启动器不结束未知进程，也不自动换端口。关闭复用者不会关闭先前终端拥有的 Vite 服务；关闭原服务的终端后，需要重新启动开发服务。
+
+默认运行时选择决定本次桌面启动使用的候选，不能证明已存在的共享 MCP 已切换。外部 VS Code / Local Helper 的服务仍受所有权与接管规则保护；CLI 验收必须检查实际 `127.0.0.1:8089/health` 的 `agentSessionApi` 和目标平台接口，不能仅检查打包目录。若仍连接到不支持 CLI 的 Rust 预览服务，先确认其所有者和活跃任务，再按实际启动方式恢复完整运行时。
+
 ### Windows 签名与交互安装
 
 Windows 发布工作流支持仓库 Secrets `WINDOWS_CERT_PFX_BASE64`（含代码签名私钥的 PFX，Base64 编码）和 `WINDOWS_CERT_PASSWORD`。配置后先对 Rust MCP 签名，再生成资源清单；Tauri 对桌面程序和 NSIS 安装包签名，最后验证安装包及解包后的程序签名和证书指纹。未配置证书时工作流明确告警，生成的仍是未签名测试包。证书须支持 CI 签名；依赖硬件或云签名服务的证书需要对应签名提供程序。

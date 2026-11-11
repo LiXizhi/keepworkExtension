@@ -14,9 +14,13 @@ async function verify(baseUrl,{backends,probeOnly=false,reportFile=path.resolve(
    const response=await fetch(new URL('/agents/'+route,base),{method,headers,body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(40000)});
    const data=await response.json();if(!response.ok)throw new Error(data.error||'HTTP '+response.status);return data;
  };
- const report={version:1,startedAt:new Date().toISOString(),environment:{platform:process.platform,arch:process.arch},mode:probeOnly?'probe-only':'real',results:[]};
+ const report={version:1,startedAt:new Date().toISOString(),environment:{platform:process.platform,arch:process.arch},mode:probeOnly?'probe-only':'real',
+   checkDefinitions:{'snapshot-reconnect':'Repeated snapshot GET in the same running service; no network disconnect or process restart.',
+     'history-resume':'Archive, unarchive and read existing history; no new turn after restoration.',
+     'request-id-idempotency':'Repeated request ID returns the same turn ID; native side effects are not independently counted.'},
+   limitations:['No daemon restart or cross-platform validation in a single run.', 'No negative auth/CORS/PNA/owner-isolation cases; source smoke uses an isolated HTTP wrapper.', 'Browser UI validation is a separate test.'],results:[]};
  let statuses;
- try { statuses=await request('backends'); }
+ try { statuses=backends?.length ? Object.assign({}, ...await Promise.all(backends.map(backend => request('backends?backend='+encodeURIComponent(backend)).catch(()=>({}))))) : await request('backends'); }
  catch { statuses={}; }
  // Include newly discovered implementations so all-provider acceptance cannot silently omit one.
  if(!backends)backends=[...new Set([...SUPPORTED_BACKENDS,...Object.keys(statuses)])];
@@ -25,7 +29,11 @@ async function verify(baseUrl,{backends,probeOnly=false,reportFile=path.resolve(
    let temp,session;
    try {
      if(!statuses[backend]?.available){row.status='unavailable';row.reason=statuses[backend]?.error||'Backend not advertised or daemon not reachable';continue;}
-     row.checks.push(statuses[backend].probe==='executable'?'cli-executable':'handshake');
+     const info=statuses[backend];
+     row.probe=info.probe || 'unknown';
+     row.checks.push(info.probe==='executable'?'cli-executable':info.probe==='native-auth'?'native-account-status':
+       info.protocol==='antigravity'?'native-model-catalog':
+       info.probe==='protocol'&&['codex','acp'].includes(info.protocol)?'handshake':'backend-availability');
      if(probeOnly){row.status='not_tested';row.reason='Probe only; real authenticated execution not tested';continue;}
      temp=fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-cli-verify-'));
      const roots=['primary','reference'].map(name=>{const dir=path.join(temp,name);fs.mkdirSync(dir);return dir;});
@@ -51,10 +59,9 @@ async function verify(baseUrl,{backends,probeOnly=false,reportFile=path.resolve(
      };
      session=await request('sessions',{backend,conversationId:crypto.randomUUID(),roots});
      assert.equal(session.backend,backend);row.checks.push('provider-routing');
-     if(statuses[backend].probe==='executable')row.checks.push('handshake');
      const first=await turn('write',`Acceptance test. Operate only in these two temporary workspace folders. Write a UTF-8 file smoke.txt in EACH selected root containing exactly ${marker}. Use your native file or terminal tools. Remember this marker for the next turn and include it verbatim in your reply. Do not install anything, create agents or touch any other directory.`);
      for(const root of roots)assert.equal(fs.readFileSync(path.join(root,'smoke.txt'),'utf8').trim(),marker);
-     assert.ok(first.items.some(i=>i.type==='agentMessage'&&i.text?.includes(marker)),'Unicode reply missing');row.checks.push('native-tools-two-roots','unicode-output','request-id-idempotency');
+     assert.ok(first.items.some(i=>i.type==='agentMessage'&&i.text?.includes(marker)),'Unicode reply missing');row.checks.push('native-turn-completed','native-tools-two-roots','unicode-output','request-id-idempotency');
      const second=await turn('continue','Read both smoke.txt files. Use the marker you remembered from the previous turn to write continued.txt in each selected root with exactly that same marker. Reply with the marker. Operate only in the selected temporary folders.');
      for(const root of roots)assert.equal(fs.readFileSync(path.join(root,'continued.txt'),'utf8').trim(),marker);
      row.checks.push('multi-turn-continuation');

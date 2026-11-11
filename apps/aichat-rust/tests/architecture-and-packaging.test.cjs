@@ -95,6 +95,30 @@ test("main window navigation accepts same-origin tool iframes", () => {
   );
 });
 
+test("iframe navigation cannot clear pet voice readiness or close workspace terminals", () => {
+  const lib = fs.readFileSync(
+    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    "utf8"
+  );
+  const navigation = lib.match(/\.on_navigation\(move\s+\|[^|]*\|\s*\{([\s\S]*?)\n\s*\}\)/)?.[1];
+  assert.ok(navigation, "main window must retain its navigation policy");
+  assert.doesNotMatch(
+    navigation,
+    /reset_state\s*\(|close_all\s*\(/,
+    "the navigation policy also receives iframe URLs and must preserve the owning page's state"
+  );
+
+  const pageLoad = lib.match(/\.on_page_load\(move\s+\|[^|]*\|\s*\{([\s\S]*?)\n\s*\}\)/)?.[1];
+  assert.ok(pageLoad, "main document loads must own lifecycle cleanup");
+  assert.match(pageLoad, /if\s+handle_main_page_load\s*\(/);
+  assert.match(pageLoad, /\.event\s*\(\s*\)/);
+  assert.match(
+    pageLoad,
+    /broadcast_pet_state\s*\(/,
+    "pets must receive the unavailable state after a main document load clears its owner"
+  );
+});
+
 test("main window opens login providers as in-app popups and external links in browser", () => {
   const lib = fs.readFileSync(
     path.join(appRoot, "src-tauri", "src", "lib.rs"),

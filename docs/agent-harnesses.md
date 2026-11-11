@@ -258,13 +258,30 @@ installed daemon. Reports under `out/agent-cli-verify/` distinguish passed, fail
 unavailable and not_tested; missing backends never count as passed. A probe-only
 or targeted run cannot establish all-provider acceptance.
 
+Probe checks distinguish executable discovery, native account-status queries,
+Antigravity model-catalog queries, and confirmed ACP/Codex protocol handshakes.
+None establishes a completed real turn. Targeted `--backend <id>` verification
+requests only that backend's status; full verification retains every advertised
+and expected backend. Missing optional protocol metadata is reported conservatively.
+
+Report `checkDefinitions` and `limitations` are additive. The existing
+`snapshot-reconnect` and `history-resume` check IDs remain for report-consumer
+compatibility, but mean repeated snapshot GETs and archive/unarchive history
+reads respectively. They do not test a network disconnect, daemon restart, or a
+new turn after restoration. `request-id-idempotency` checks the returned turn ID;
+it does not independently count native side effects. Older reports without these
+definitions do not establish stronger guarantees. Browser, authentication-denial,
+owner-isolation and production CORS/PNA tests remain separate coverage.
+
 ## Native connector verification (2026-11-11)
 
-This run used isolated services and temporary workspaces on macOS arm64. It did
+The first per-backend run used the **Node source runtime**, isolated services and
+temporary workspaces on macOS arm64. It did
 not install missing providers, change logins, or restart the user's daemon.
 "Passed" below means real native tools worked in two roots, including Unicode,
-two turns, prompt-ID idempotency, snapshot reconnect and session recovery. It is
-evidence for the listed local CLI versions and accounts, not all operating systems
+two turns, identical turn IDs for repeated requests, repeated snapshot reads and
+archive/unarchive history reads. This did not test a daemon restart or a new turn
+after restoration. It is evidence for the listed local CLI versions and accounts, not all operating systems
 or provider releases.
 
 | Backend | CLI version | Local result | Remaining action |
@@ -291,6 +308,59 @@ Raw provider failures, account identities and credentials are not copied here.
 All-provider acceptance is **incomplete**. Windows and a published browser/daemon
 pair were not exercised in this run; deterministic regressions are separate
 evidence and do not turn unavailable or untested rows into passes.
+
+### Full-registry rerun and the active desktop service
+
+A second, full-registry Node-source run on the same macOS arm64 machine ran from
+14:15 to 14:37 UTC on 2026-11-11. Its report is
+`out/agent-cli-verify/automation-rerun-20261111/native-smoke.json`.
+It recorded five passes: Codex, WorkBuddy, CodeBuddy, Kimi and Antigravity.
+OpenCode timed out in this run despite passing the earlier targeted run.
+Antigravity completed both real turns despite the earlier provider-region error.
+These differing observations do not establish a permanent platform failure or
+universal availability; preserve both runs when diagnosing provider/model and
+environment variability.
+
+DeepSeek again failed because the provider rejected its API credentials. Claude
+was attempted by this full run and failed; the separate native-account check
+reported signed out. Copilot, Cursor, Trae and Qwen remained unavailable because
+their CLIs were not found. All-provider acceptance therefore remained incomplete.
+This report predates the probe-label corrections described above: its `handshake`
+labels for native account/model queries are not evidence of execution-protocol
+initialization. Only completed real turns establish execution in this report.
+
+The user's active desktop service was a different process: Rust MCP `0.2.11`,
+hosted by desktop `0.2.44` on port 8089. Its health response omitted
+`agentSessionApi`, and `GET /agents/backends?backend=workbuddy` returned 404.
+Rust currently has no native agent-session implementation, so the isolated Node
+passes do not make CLI connectors work through that active Rust service.
+Reinstalling WorkBuddy cannot add the missing HTTP interface.
+
+After the user confirmed continuation, the desktop was switched to the prepared
+Node runtime `0.1.52`. This exposed a packaging defect: staged `runtime.json`
+omitted `commit`; JavaScript validation recovered it from `app/package.json` in
+memory, while the Rust host required it in the manifest on disk. The generated
+manifest was repaired using the verified commit from that same staged package.
+Port 8089 then resumed service and advertised `agentSessionApi: "v1"`.
+
+Verification against that actual listener passed for both WorkBuddy and Codex,
+including two real turns and the file/history checks defined above. Reports are
+`out/agent-cli-verify/automation-rerun-20261111/actual-8089-workbuddy.json` and
+`actual-8089-codex.json` in the same directory. A managed real browser also opened
+the desktop's source server on port 57660, selected WorkBuddy, loaded its model
+options, sent a request for `KEEPWORK_REAL_UI_OK` and received that actual reply.
+This browser check used neither SDK nor MCP mocks; a screenshot captured the
+result. It exercised the same source and port-8089 service as the desktop, but did
+not drive the native Tauri window itself.
+
+The permanent stage/bundle/package metadata fix passed 30 Node tests and 12 Rust
+tests, including cross-host manifest validation. Final source versions are
+MCP/extension `0.1.53` and Rust desktop `0.2.45`. The running service stays on the
+verified `0.1.52` artifact to avoid another interruption; these source version
+bumps do not mean the running process was upgraded. Other providers retain the
+individual limitations recorded above. Unsupported-service settings now offer
+MCP connection settings and AI diagnosis, without treating a missing server
+interface as a reason to reinstall or log into a CLI.
 
 ## Automatic CLI discovery
 

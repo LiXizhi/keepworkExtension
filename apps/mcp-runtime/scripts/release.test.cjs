@@ -192,8 +192,10 @@ test('archives preserve root layout, dependencies, hidden files and executable m
   fs.chmodSync(path.join(stage, executable), 0o755);
   fs.chmodSync(path.join(stage, 'app/node_modules/node-pty/prebuilds/spawn-helper'), 0o755);
   fs.writeFileSync(path.join(stage, 'runtime.json'), JSON.stringify({
-    product: PRODUCT, version: identity.version, platform, arch, nodeVersion: '22.23.2', entry: 'app/cli.cjs',
+    schemaVersion: 1, product: PRODUCT, engine: 'node', version: identity.version, commit: identity.commit,
+    platform, arch, node: executable, nodeVersion: '22.23.2', entry: 'app/cli.cjs', builtAt: '2026-11-11T12:00:00.000Z',
   }));
+  fs.writeFileSync(path.join(stage, 'app/package.json'), JSON.stringify({ name: 'keepwork-mcp-runtime', ...identity }));
   const output = packageRuntime(stage, path.join(dir, 'out'), identity);
   const extracted = path.join(dir, 'extracted');
   fs.mkdirSync(extracted);
@@ -215,9 +217,24 @@ test('archives preserve root layout, dependencies, hidden files and executable m
   assert.equal(metadata.url, `${domain}/${prefix}${platform}-${arch}.zip`);
   assert.ok(Number.isFinite(Date.parse(metadata.builtAt)));
   assert.ok(fs.existsSync(path.join(extracted, 'runtime.json')));
+  const packagedManifest = JSON.parse(fs.readFileSync(path.join(extracted, 'runtime.json'), 'utf8'));
+  assert.equal(packagedManifest.commit, metadata.commit);
+  assert.equal(packagedManifest.builtAt, metadata.builtAt);
+  assert.equal(packagedManifest.engine, 'node');
+  assert.equal(packagedManifest.node, executable);
+  assert.ok(fs.statSync(path.join(extracted, packagedManifest.node)).isFile());
+  assert.equal(JSON.parse(fs.readFileSync(path.join(extracted, 'app/package.json'), 'utf8')).commit, packagedManifest.commit);
   assert.equal(fs.readFileSync(path.join(extracted, 'app/node_modules/.hidden'), 'utf8'), 'app/node_modules/.hidden');
   if (platform === 'macos') {
     assert.equal(fs.statSync(path.join(extracted, executable)).mode & 0o777, 0o755);
     assert.equal(fs.statSync(path.join(extracted, 'app/node_modules/node-pty/prebuilds/spawn-helper')).mode & 0o777, 0o755);
   }
+  fs.writeFileSync(path.join(stage, 'runtime.json'), JSON.stringify({ ...packagedManifest, commit: 'b'.repeat(40) }));
+  assert.throws(() => packageRuntime(stage, path.join(dir, 'mismatched'), identity), /commit|metadata|match release|source/i);
+  for (const field of ['commit', 'node', 'engine']) {
+    const legacy = { ...packagedManifest }; delete legacy[field];
+    fs.writeFileSync(path.join(stage, 'runtime.json'), JSON.stringify(legacy));
+    assert.throws(() => packageRuntime(stage, path.join(dir, 'legacy'), identity), /Re-run npm run stage/);
+  }
+  assert.equal(fs.existsSync(path.join(dir, 'legacy')), false, 'invalid stages are rejected before creating a release');
 });

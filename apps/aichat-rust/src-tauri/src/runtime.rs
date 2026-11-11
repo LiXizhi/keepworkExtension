@@ -1756,6 +1756,69 @@ mod tests {
     }
 
     #[test]
+    fn staged_node_bundle_is_readable_by_rust_on_macos_and_windows() {
+        let root = std::env::temp_dir().join(format!("node-stage-contract-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let bundler =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/bundle-mcp-runtime.cjs");
+        // Consume the actual JS bundler's artifact, rather than duplicating its
+        // normalized manifest in a Rust-only fixture. No runtime is launched.
+        let output = Command::new("node")
+            .args(["-e", r#"
+const fs=require('node:fs'),path=require('node:path');
+const bundler=require(process.argv[1]),base=process.argv[2];
+const {createRuntimeManifest}=require(path.resolve(path.dirname(process.argv[1]),'../../mcp-runtime/scripts/stage-runtime.cjs'));
+for(const [target,platform,arch,node] of [
+ ['aarch64-apple-darwin','macos','arm64','bin/node'],
+ ['x86_64-pc-windows-msvc','windows','x64','node.exe']
+]){
+ const root=path.join(base,platform),stage=path.join(root,'staging',platform+'-'+arch);
+ for(const file of [node,'app/cli.cjs']){fs.mkdirSync(path.dirname(path.join(stage,file)),{recursive:true});fs.writeFileSync(path.join(stage,file),'fixture');}
+ fs.writeFileSync(path.join(stage,'app/package.json'),JSON.stringify({version:'0.1.52',commit:'a'.repeat(40)}));
+ const canonical=path.join(root,'canonical');fs.cpSync(stage,canonical,{recursive:true});
+ fs.writeFileSync(path.join(canonical,'runtime.json'),JSON.stringify(createRuntimeManifest({runtimePackage:{version:'0.1.52',commit:'a'.repeat(40)},nodeVersion:'22.23.2',target:{platform,arch}})));
+ fs.writeFileSync(path.join(stage,'runtime.json'),JSON.stringify({schemaVersion:1,product:'keepwork-mcp-node-runtime',version:'0.1.52',platform,arch,entry:'app/cli.cjs'}));
+ bundler.bundle({root:path.join(root,'staging'),out:path.join(root,'out'),target,require:true,sourceChanged:()=>false});
+}
+"#])
+            .arg(&bundler)
+            .arg(&root)
+            .env_remove("AICHAT_MCP_RUNTIME_DIR")
+            .output()
+            .expect("Node is required for the staged-runtime artifact regression");
+        assert!(
+            output.status.success(),
+            "JS artifact generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for (platform, arch, node) in [
+            ("macos", "arm64", "bin/node"),
+            ("windows", "x64", "node.exe"),
+        ] {
+            let staged = root.join(platform).join("canonical");
+            let fresh = validate_runtime_dir(&staged, "keepwork-mcp-node-runtime").unwrap();
+            assert_eq!(fresh.commit, "a".repeat(40));
+            assert_eq!(fresh.node, node);
+            assert_eq!(fresh.engine, "node");
+            let bundled = root.join(platform).join("out").join(arch);
+            let parsed = validate_runtime_dir(&bundled, "keepwork-mcp-node-runtime").unwrap();
+            assert_eq!(parsed.commit, "a".repeat(40));
+            assert_eq!(parsed.engine, "node");
+            assert_eq!(parsed.node, node);
+            assert!(!parsed.is_rust());
+            let manifest_file = bundled.join("runtime.json");
+            let mut missing: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&manifest_file).unwrap()).unwrap();
+            missing.as_object_mut().unwrap().remove("commit");
+            fs::write(&manifest_file, serde_json::to_vec(&missing).unwrap()).unwrap();
+            assert!(validate_runtime_dir(&bundled, "keepwork-mcp-node-runtime")
+                .unwrap_err()
+                .contains("commit"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn accepts_a_rust_runtime_manifest_without_a_node_binary() {
         let root = std::env::temp_dir().join(format!("aichat-rust-rt-rust-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("bin")).unwrap();

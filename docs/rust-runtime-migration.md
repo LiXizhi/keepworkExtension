@@ -67,11 +67,47 @@ Rust 运行时 0.2.5 给分身模型接入了本地工具，0.2.6 修复由此�
 
 ## 3. 宿主选择与接管
 
-所有宿主统一顺序：**自带 Rust → 下载 Rust → 自带 Node → 下载 Node**。
+迁移的目标顺序是：**自带 Rust → 下载 Rust → 自带 Node → 下载 Node**，
+不代表当前所有宿主已经实现该选择链。当前 `aichat-rust` 的标准 `make:mac`
+打包 Node 运行时，`make:mcp-rust:*` 打包 Rust 预览运行时。启动时按实际捆绑
+目录的清单选择；捆绑 Rust 时关闭 Node feed 热更新，不能据此假定会自动回退
+到完整的 Node 能力。
 
 - 只有当候选 `runtimeVersion` 严格更新时才接管（`SIGKILL` 旧 PID 后 40×250ms 等待），版本相同不换引擎，避免 Node/Rust 互相踢进程。
-- `KEEPWORK_MCP_HOST_KIND` 取值不变（`standalone` / `vscode-extension` / `local-helper` / `electron-node-runtime` / `rust-node-runtime`）；新增 `KEEPWORK_MCP_ENGINE` 与 `/health.runtimeEngine` 供面板与排障使用。
+- `KEEPWORK_MCP_HOST_KIND` 取值不变（`standalone` / `vscode-extension` / `local-helper` / `electron-node-runtime` / `rust-node-runtime`）；`/health.runtimeEngine` 表示实际引擎。当前宿主没有实现 `KEEPWORK_MCP_ENGINE` 环境变量选择，不能把设置该变量作为修复方法。
 - 迁移顺序：`aichat-rust` → `aichat-desktop` → `vscode-extension` → `local-helper`。
+
+### 当前可用的桌面运行时选择
+
+日常开发入口 `pnpm tauri dev` 与 VS Code 的 `keepwork Rust Desktop: Start` 使用完整 Node MCP；桌面客户端使用 Rust 不意味着其 MCP 守护进程也必须使用 Rust。Rust MCP 保留 `pnpm dev:rust` 显式预览入口，当前仍缺少原生 CLI 会话接口。开发入口选择不改变既有共享服务的所有权、接管和能力协商规则；运行中的 8089 服务仍须单独核验。
+
+常规开发入口使用 Node.js 22 或更新版本，从当前源码和本机已安装依赖生成独立的开发运行时；缺依赖或编译失败会中止，不自动安装依赖。显式 `AICHAT_MCP_BUNDLED_DIR` / `AICHAT_MCP_RUNTIME_DIR` 优先，但必须通过 Node 运行时校验。`AICHAT_MCP_ENGINE=rust` 是新增开发启动器的显式预览选择，等同该入口的 `dev:rust` 选择，不是此前未实现的 `KEEPWORK_MCP_ENGINE`，也不会动态切换当前监听服务。
+
+桌面开发页面固定绑定 `127.0.0.1:1430`。重复启动只复用身份协议、真实 checkout 目录均匹配的 Vite 服务；未知服务占用时明确失败，不终止该进程或自动更换端口。关闭复用启动不关闭原终端拥有的服务。这解决开发服务重复启动冲突，不会补齐 Rust MCP 的功能。
+
+`aichat-rust` 已实现 `AICHAT_MCP_BUNDLED_DIR`：它指向包含 `runtime.json` 的
+单架构运行时目录，**仅在下一次桌面进程启动时读取**，不会修改当前监听服务。
+选择前必须验证清单 product、版本、平台/架构和 entry，以及 Node 二进制与
+`app/cli.cjs`（Node runtime）或原生 entry（Rust runtime）的完整性；不能仅改
+目录名或凭版本号判断引擎能力。Node 可复用
+`apps/mcp-runtime/staging/<platform>-<arch>` 与
+`apps/aichat-rust/scripts/bundle-mcp-runtime.cjs` 的验证/打包流程。
+
+2026-11-11 排查确认：Rust `0.2.11` 不声明 `agentSessionApi`，原生 CLI
+连接器的 `/agents/backends` 返回 404；Node 源码运行时的隔离实测结果不适用
+于仍在运行的 Rust listener。使用 CLI 时需选择已验证提供该能力的运行时，
+保留 Rust 预览的显式选择。切换前检查共享服务的所有者、活跃客户端和任务，
+完成受控重启后重新读取实际端口的 `/health` 与目标 `/agents/backends`；
+不得把重装 CLI 或反复重连当作补齐服务端实现。
+
+本次经用户确认后已切换到 Node `0.1.52`。切换中发现 stage 清单缺少 `commit`，
+JS 打包验证能从同目录 `app/package.json` 读取，Rust 宿主却要求清单本身包含
+该字段；使用同份产物的真实 commit 补全生成清单后，8089 恢复并声明
+`agentSessionApi: "v1"`。stage/bundle/package 的永久修复已完成，跨宿主相关
+Node 30 项、Rust 12 项测试通过。实际 8089 上 WorkBuddy、Codex 两轮实测均
+通过；真实浏览器使用桌面相同源码服务与 8089 完成 WorkBuddy 选模型、发送和
+接收回复，未驱动原生 Tauri 窗口。源码版本为 MCP/扩展 `0.1.53`、Rust 桌面
+`0.2.45`，当前运行的 `0.1.52` 保持不变，避免再次中断用户会话。
 
 ## 4. 阶段门槛
 
@@ -88,5 +124,5 @@ Rust 运行时 0.2.5 给分身模型接入了本地工具，0.2.6 修复由此�
 
 - `scripts/contract/*.test.cjs` 用同一套断言分别打 Rust 二进制与 Node 守护进程（不同端口、隔离 HOME）。
 - `scripts/contract/harness.cjs` 是唯一启动入口；新增路由时两边必须同时加断言。
-- 任一阶段出现回归：宿主把 `KEEPWORK_MCP_ENGINE=node` 或回退到自带 Node 运行时即可，Rust 线可单独回滚版本，不影响 v1 feed。
+- 任一阶段出现回归：先准备并验证需要回退的运行时。`aichat-rust` 可在下一次启动时使用上述 `AICHAT_MCP_BUNDLED_DIR`，其他宿主按各自已实现的打包/启动流程处理；当前没有通用的 `KEEPWORK_MCP_ENGINE=node` 开关。Rust 线可单独回滚版本，不影响 v1 feed。切换共享进程不应自动发生在只读诊断期间。
 - 差异必须显式登记在测试里（例如 P1 的 `tools/list` 只列 5 个可移植工具、`/admin/status` 无 `nodeVersion`、`fetch_url` 无 headless 渲染），不允许“看起来一样”。

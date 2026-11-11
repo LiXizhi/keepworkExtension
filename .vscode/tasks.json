@@ -173,7 +173,7 @@
     },
     {
       "label": "keepwork Rust Desktop: Start",
-      "detail": "Rebuild Rust MCP runtime, then launch the Rust/Tauri desktop with local AIChat source and automatic Rust rebuilds.",
+      "detail": "Prepare the complete Node MCP runtime, then launch the Rust/Tauri desktop with local AIChat source. For the limited Rust MCP preview use pnpm dev:rust.",
       "type": "shell",
       "command": "pnpm",
       "args": ["tauri", "dev"],
@@ -185,7 +185,6 @@
           "RUST_BACKTRACE": "1"
         }
       },
-      "dependsOn": "Keepwork MCP (Rust): Build & Bundle",
       "runOptions": { "instanceLimit": 1, "instancePolicy": "terminateOldest" },
       "problemMatcher": [],
       "presentation": {

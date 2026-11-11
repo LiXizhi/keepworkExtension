@@ -158,6 +158,43 @@ function validateTargetRuntime(stageDir, target) {
   }
 }
 
+/** Canonical on-disk contract consumed by both desktop hosts and release archives. */
+function createRuntimeManifest({ runtimePackage, nodeVersion, target, builtAt = new Date().toISOString() }) {
+  target = resolveTarget(target);
+  require('./release.cjs').releaseIdentity(runtimePackage.version, runtimePackage.commit);
+  nodeVersion = normalizeNodeVersion(nodeVersion);
+  if (typeof builtAt !== 'string' || !Number.isFinite(Date.parse(builtAt)) || new Date(builtAt).toISOString() !== builtAt) {
+    throw new Error('Invalid runtime packaging timestamp');
+  }
+  return {
+    schemaVersion: 1,
+    id: 'keepwork-mcp',
+    name: 'Keepwork MCP',
+    product: 'keepwork-mcp-node-runtime',
+    version: runtimePackage.version,
+    commit: runtimePackage.commit,
+    engine: 'node',
+    node: target.isWindows ? 'node.exe' : 'bin/node',
+    builtAt,
+    nodeVersion,
+    platform: target.runtimePlatform,
+    arch: target.arch,
+    entry: 'app/cli.cjs',
+    args: ['--port', '8089'],
+    env: {
+      KEEPWORK_MCP_HOST_KIND: 'electron-node-runtime',
+    },
+    health: {
+      url: 'http://127.0.0.1:8089/health',
+      match: {
+        name: 'keepwork-mcp',
+      },
+      timeoutMs: 10000,
+    },
+    logFile: 'keepwork-mcp.log',
+  };
+}
+
 async function stageRuntime(nodeVersion, target) {
   const archiveName = target.isWindows
     ? `node-v${nodeVersion}-${target.nodePlatform}-${target.arch}.zip`
@@ -210,29 +247,7 @@ async function stageRuntime(nodeVersion, target) {
     const helper = path.join(stageApp, 'node_modules', 'node-pty', 'prebuilds', `darwin-${target.arch}`, 'spawn-helper');
     fs.chmodSync(helper, 0o755);
   }
-  fs.writeFileSync(path.join(stageDir, 'runtime.json'), `${JSON.stringify({
-    schemaVersion: 1,
-    id: 'keepwork-mcp',
-    name: 'Keepwork MCP',
-    product: 'keepwork-mcp-node-runtime',
-    version: packageJson.version,
-    nodeVersion,
-    platform: target.runtimePlatform,
-    arch: target.arch,
-    entry: 'app/cli.cjs',
-    args: ['--port', '8089'],
-    env: {
-      KEEPWORK_MCP_HOST_KIND: 'electron-node-runtime',
-    },
-    health: {
-      url: 'http://127.0.0.1:8089/health',
-      match: {
-        name: 'keepwork-mcp',
-      },
-      timeoutMs: 10000,
-    },
-    logFile: 'keepwork-mcp.log',
-  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(stageDir, 'runtime.json'), `${JSON.stringify(createRuntimeManifest({ runtimePackage, nodeVersion, target }), null, 2)}\n`);
   process.stdout.write(`${stageDir}\n`);
 }
 
@@ -250,4 +265,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { pruneNodePty, validateTargetRuntime };
+module.exports = { createRuntimeManifest, pruneNodePty, validateTargetRuntime };

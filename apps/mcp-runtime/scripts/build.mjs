@@ -9,9 +9,17 @@ import { runtimeBuildInfoPlugin } from '../../../scripts/runtime-build-info.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const runtimeRoot = path.resolve(here, '..');
-const outdir = path.join(runtimeRoot, 'dist');
-
 const development = process.argv.includes('--development');
+const outdirIndex = process.argv.indexOf('--outdir');
+if (outdirIndex >= 0 && (!development || !process.argv[outdirIndex + 1] || process.argv[outdirIndex + 1].startsWith('--'))) {
+  throw new Error('--outdir requires --development and an explicit output directory');
+}
+const outdir = outdirIndex >= 0 ? path.resolve(process.argv[outdirIndex + 1]) : path.join(runtimeRoot, 'dist');
+// Custom output is only for a newly allocated development generation. Never
+// recursively clean a caller-selected existing directory.
+if (outdirIndex >= 0 && await fs.stat(outdir).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) {
+  throw new Error('--outdir must name a new directory');
+}
 try {
   await fs.rm(outdir, { recursive: true, force: true });
 } catch (error) {

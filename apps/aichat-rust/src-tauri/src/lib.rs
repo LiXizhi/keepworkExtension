@@ -56,7 +56,7 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    webview::NewWindowResponse,
+    webview::{NewWindowResponse, PageLoadEvent},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
@@ -390,6 +390,19 @@ fn broadcast_to_main(app: &AppHandle, event_name: &str, payload: &Value) {
 fn broadcast_pet_state(app: &AppHandle, core: &AppCore) {
     let snap = core.pet.snapshot();
     let _ = app.emit("aichat-desktop:pet-state", &snap);
+}
+
+fn handle_main_page_load(
+    event: PageLoadEvent,
+    terminals: &TerminalSessionManager,
+    pet: &PetController,
+) -> bool {
+    if event != PageLoadEvent::Started {
+        return false;
+    }
+    terminals.close_all();
+    pet.reset_state();
+    true
 }
 
 fn broadcast_update_status(app: &AppHandle, core: &AppCore) {
@@ -2216,6 +2229,7 @@ pub fn run() {
                 .unwrap_or_else(|_| ENTRY.to_string());
 
             let core_for_nav = Arc::clone(&core_for_setup);
+            let core_for_page_load = Arc::clone(&core_for_setup);
             let core_for_popup = Arc::clone(&core_for_setup);
             let parsed_entry: tauri::Url = entry_target
                 .parse()
@@ -2235,15 +2249,25 @@ pub fn run() {
                 let dev_url = core_for_nav.current_dev_url();
                 let url_str = nav_url.as_str();
                 if allowed_navigation(url_str, dev_url.as_deref()) {
-                    // Close active PTY sessions & reset pet state on cross-page top navigation
-                    core_for_nav.terminals.close_all();
-                    core_for_nav.pet.reset_state();
                     return true;
                 }
                 if let Err(err) = open_in_system_browser(url_str) {
                     eprintln!("open external navigation failed: {err}");
                 }
                 false
+            })
+            .on_page_load(move |window, payload| {
+                // on_navigation also sees iframe navigations. Only a committed
+                // main document replaces the owner of pet commands and PTYs.
+                // Finished can arrive after the new page has published its pet
+                // snapshot, so it must leave that state intact.
+                if handle_main_page_load(
+                    payload.event(),
+                    &core_for_page_load.terminals,
+                    &core_for_page_load.pet,
+                ) {
+                    broadcast_pet_state(window.app_handle(), &core_for_page_load);
+                }
             })
             .on_new_window(move |url, _features| {
                 let dev_url = core_for_popup.current_dev_url();
@@ -2470,6 +2494,111 @@ mod pet_drag_host_tests {
             !super::primary_button_down(),
             "idle primary button must read as up, or every drag frame will end immediately"
         );
+    }
+}
+
+#[cfg(test)]
+mod main_page_lifecycle_tests {
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn only_replacing_the_main_document_invalidates_pet_commands_and_terminals() {
+        let root = std::env::temp_dir().join(format!("aichat-page-load-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let files = NativeFiles::new(root.join("grants.json"));
+        let terminals = TerminalSessionManager::new(root.join("workspaces"));
+        let pet = PetController::new(root.join("pet-prefs.json"));
+        let online = json!({
+            "version": 1, "context": "old-page", "target": "chat",
+            "title": "语音会话", "ready": true, "canCall": true,
+            "draft": "保留草稿", "voice": { "active": true, "state": "listening" }
+        });
+        pet.update_raw_state(online);
+        let before = pet.snapshot();
+        let session = terminals
+            .handle(
+                "desktop:main",
+                &files,
+                "create",
+                &json!({ "workspace": "voice-test" }),
+            )
+            .unwrap();
+        let id = session["id"].as_str().unwrap();
+        let (command, receiver) = pet
+            .begin_command("mute", &json!({ "context": "old-page" }))
+            .unwrap();
+
+        // Page completion may follow a valid snapshot/command from the new
+        // document; it must not disconnect voice or destroy a live terminal.
+        assert!(!handle_main_page_load(
+            PageLoadEvent::Finished,
+            &terminals,
+            &pet
+        ));
+        assert_eq!(pet.snapshot(), before);
+        assert!(terminals
+            .handle("desktop:main", &files, "output", &json!({ "id": id }))
+            .is_ok());
+        assert!(pet.resolve_command(&json!({ "requestId": command["requestId"], "ok": true })));
+        pet.wait_for_command(
+            command["requestId"].as_str().unwrap(),
+            receiver,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        let (old_command, old_receiver) = pet
+            .begin_command("mute", &json!({ "context": "old-page" }))
+            .unwrap();
+        assert!(handle_main_page_load(
+            PageLoadEvent::Started,
+            &terminals,
+            &pet
+        ));
+        let offline = pet.snapshot();
+        assert_eq!(offline["ready"], false);
+        assert_ne!(offline["context"], before["context"]);
+        assert_eq!(offline["draft"], "");
+        assert_ne!(offline["voice"]["active"], true);
+        assert!(terminals
+            .handle("desktop:main", &files, "output", &json!({ "id": id }))
+            .is_err());
+        assert!(pet
+            .wait_for_command(
+                old_command["requestId"].as_str().unwrap(),
+                old_receiver,
+                Duration::from_secs(1)
+            )
+            .await
+            .is_err());
+        assert!(!pet.resolve_command(&json!({ "requestId": old_command["requestId"], "ok": true })));
+        assert!(pet
+            .begin_command("call", &json!({ "context": "old-page" }))
+            .is_err());
+
+        // Existing Bridge v1 pages restore the pet without any new handshake
+        // or server capability. A subsequent Finished must preserve that state.
+        pet.update_raw_state(
+            json!({ "version": 1, "context": "new-page", "ready": true, "canCall": true }),
+        );
+        assert!(!handle_main_page_load(
+            PageLoadEvent::Finished,
+            &terminals,
+            &pet
+        ));
+        assert_eq!(pet.snapshot()["ready"], true);
+        assert!(pet
+            .begin_command("dictation", &json!({ "context": "new-page" }))
+            .is_ok());
+        assert!(pet
+            .begin_command("call", &json!({ "context": "new-page" }))
+            .is_ok());
+
+        terminals.close_all();
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
