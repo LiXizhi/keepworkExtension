@@ -27,7 +27,7 @@ pub struct AppState {
     pub identity: Identity,
     pub sessions: Mutex<SessionStore>,
     pub terminals: TerminalManager,
-    pub shell: ShellRunner,
+    pub shell: Arc<ShellRunner>,
     pub presence: Arc<crate::presence::PresenceState>,
     pub personas: Arc<crate::personas::PersonaStore>,
     pub messaging: Arc<crate::messaging::MessagingService>,
@@ -73,16 +73,25 @@ impl AppState {
             Arc::clone(&presence),
         );
         personas.attach_messaging(Arc::clone(&messaging));
+        let started_at = now_iso();
+        let shell = Arc::new(ShellRunner::default());
+        personas.attach_tools(Arc::new(crate::personas::LocalToolEnv {
+            port,
+            root: root.clone(),
+            started_at: started_at.clone(),
+            require_auth,
+            shell: Arc::clone(&shell),
+        }));
         Self {
             port,
             root,
             require_auth,
             token,
-            started_at: now_iso(),
+            started_at,
             identity,
             sessions: Mutex::new(SessionStore::default()),
             terminals: TerminalManager::default(),
-            shell: ShellRunner::default(),
+            shell,
             presence: Arc::clone(&presence),
             messaging,
             personas,

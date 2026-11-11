@@ -1018,7 +1018,20 @@ impl RuntimeSupervisor {
         if let Ok(mut guard) = self.child.lock() {
             if let Some(mut child) = guard.take() {
                 let _ = child.kill();
-                let _ = child.wait();
+                // A wedged child can stay in an uninterruptible state, so
+                // child.wait() may never return. Poll try_wait briefly; if the
+                // process is still alive, hand it to a detached thread so the
+                // caller never blocks.
+                for _ in 0..20 {
+                    match child.try_wait() {
+                        Ok(Some(_)) => return,
+                        Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                        Err(_) => return,
+                    }
+                }
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
             }
         }
     }

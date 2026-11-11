@@ -44,6 +44,11 @@ pub struct PersonaStore {
     /// bare; every consumer treats this as optional and projects Node-empty
     /// views when absent.
     pub(crate) messaging: OnceLock<Arc<MessagingService>>,
+    /// Attached by the host so persona runs can execute local tools in-process.
+    pub(crate) tools_env: OnceLock<Arc<LocalToolEnv>>,
+    /// Bumped on every notify so the MCP event stream can emit
+    /// `notifications/keepwork/personas_changed` without per-owner fan-out.
+    pub(crate) revision: AtomicU64,
 }
 
 impl PersonaStore {
@@ -62,6 +67,8 @@ impl PersonaStore {
                 cancels: HashMap::new(),
             }),
             messaging: OnceLock::new(),
+            tools_env: OnceLock::new(),
+            revision: AtomicU64::new(0),
         });
         store.load();
         store
@@ -71,6 +78,12 @@ impl PersonaStore {
     /// ordering, so this runs before any HTTP route is served.
     pub fn attach_messaging(&self, service: Arc<MessagingService>) {
         let _ = self.messaging.set(service);
+    }
+
+    /// Wires the local tool environment; persona runs then loop model turns
+    /// with tool calls instead of answering text-only.
+    pub(crate) fn attach_tools(&self, env: Arc<LocalToolEnv>) {
+        let _ = self.tools_env.set(env);
     }
 
     pub(crate) fn messaging_service(&self) -> Option<&Arc<MessagingService>> {
@@ -225,6 +238,7 @@ impl PersonaStore {
     }
 
     pub(crate) fn notify(&self, owner: &str) {
+        self.revision.fetch_add(1, Ordering::SeqCst);
         let mut inner = self.lock();
         let frame = Bytes::from_static(b"event: changed\ndata: {}\n\n");
         for slot in &mut inner.watchers {
@@ -811,7 +825,7 @@ impl PersonaStore {
         mut cancel: tokio::sync::watch::Receiver<bool>,
     ) {
         if *cancel.borrow() {
-            self.finish(&spec, Err("已取消".into()), true);
+            self.finish(&spec, Err("已取消".into()), true, 0, 0);
             self.notify(&spec.owner);
             return;
         }
@@ -822,19 +836,100 @@ impl PersonaStore {
             return;
         };
         self.notify(&spec.owner);
-        let outcome = if *cancel.borrow() {
-            Err("已取消".into())
+        let (outcome, requested, returned) = if *cancel.borrow() {
+            (Err("已取消".into()), 0, 0)
         } else {
             match presence.owner_client(&spec.owner) {
                 Some(client) if !client.token.is_empty() => {
-                    call_model(client, prepared, &mut cancel).await
+                    self.run_with_tools(client, prepared, &spec, &mut cancel)
+                        .await
                 }
-                _ => Err("需要登录 AIChat".into()),
+                _ => (Err("需要登录 AIChat".into()), 0, 0),
             }
         };
         let cancelled = *cancel.borrow();
-        self.finish(&spec, outcome, cancelled);
+        self.finish(&spec, outcome, cancelled, requested, returned);
         self.notify(&spec.owner);
+    }
+
+    /// Model loop for one persona run. Without a tool env this is the plain
+    /// text-only `call_model`; with one, each model turn may request tool
+    /// calls, which run in-process and feed back as `role: "tool"` messages
+    /// until the model answers in plain text or the round budget runs out.
+    async fn run_with_tools(
+        &self,
+        client: AichatClient,
+        prepared: ModelRequest,
+        spec: &RunSpec,
+        cancel: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> (Result<String, String>, u32, u32) {
+        let Some(env) = self.tools_env.get().map(Arc::clone) else {
+            let outcome = call_model(client, prepared, cancel).await;
+            return (outcome, 0, 0);
+        };
+        let tools = local_tools::LocalToolEnv::defs();
+        let mut messages = vec![json!({ "role": "system", "content": prepared.system })];
+        for (role, content) in &prepared.history {
+            messages.push(json!({ "role": role, "content": content }));
+        }
+        messages.push(json!({ "role": "user", "content": prepared.text }));
+        let session = format!("persona:{}:{}", spec.key, spec.request_id);
+        let mut requested: u32 = 0;
+        let mut returned: u32 = 0;
+        for _round in 0..local_tools::MAX_TOOL_ROUNDS {
+            if *cancel.borrow() {
+                return (Err("已取消".into()), requested, returned);
+            }
+            let turn = match call_model_turn(
+                client.clone(),
+                prepared.model.clone(),
+                messages.clone(),
+                Some(tools.clone()),
+                cancel,
+            )
+            .await
+            {
+                Ok(turn) => turn,
+                Err(error) => return (Err(error), requested, returned),
+            };
+            if turn.tool_calls.is_empty() {
+                return (Ok(turn.content), requested, returned);
+            }
+            let mut assistant = json!({ "role": "assistant" });
+            if !turn.content.trim().is_empty() {
+                assistant["content"] = json!(turn.content);
+            }
+            assistant["tool_calls"] = json!(
+                turn.tool_calls.iter()
+                    .map(|call| json!({
+                        "id": call.id,
+                        "type": "function",
+                        "function": { "name": call.name, "arguments": call.arguments },
+                    }))
+                    .collect::<Vec<_>>()
+            );
+            messages.push(assistant);
+            for call in &turn.tool_calls {
+                if *cancel.borrow() {
+                    return (Err("已取消".into()), requested, returned);
+                }
+                requested += 1;
+                let args: Value = serde_json::from_str(call.arguments.trim())
+                    .unwrap_or_else(|_| json!({}));
+                let output = env.execute(&call.name, &args, &session).await;
+                returned += 1;
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": output,
+                }));
+            }
+        }
+        (
+            Err("工具调用轮次已达上限，请缩小任务范围后重试。".into()),
+            requested,
+            returned,
+        )
     }
 
     /// Node gates the channel digest on the question text only
@@ -903,8 +998,13 @@ impl PersonaStore {
         self.save(&inner, &spec.key);
         drop(inner);
         let knowledge = agents_md(&root);
+        let tool_rules = if self.tools_env.get().is_some() {
+            "本机可用工具：run_terminal（仅允许单条 dws 或 lark-cli 命令）、grep_files、web_search、fetch_url。需要执行操作时调用工具，以工具返回结果为准。未实际执行时必须说明未执行，不得编造已发送、已修改或已完成。"
+        } else {
+            "本运行时没有工具，不能发消息、不能改文件、不能操作钉钉、飞书或微信。未实际执行时必须说明未执行，不得编造已发送、已修改或已完成。"
+        };
         let mut system = format!(
-            "{IDENTITY_RULES}\n当前分身 ID：{persona_id}\n本运行时没有工具，不能发消息、不能改文件、不能操作钉钉、飞书或微信。未实际执行时必须说明未执行，不得编造已发送、已修改或已完成。\n{prompt}\n较早对话摘要：\n{summary}\n同账号其他分身：{peers}"
+            "{IDENTITY_RULES}\n当前分身 ID：{persona_id}\n{tool_rules}\n{prompt}\n较早对话摘要：\n{summary}\n同账号其他分身：{peers}"
         );
         if !knowledge.is_empty() {
             system.push_str("\n# AGENTS.md\n");
@@ -922,7 +1022,14 @@ impl PersonaStore {
         })
     }
 
-    pub(crate) fn finish(&self, spec: &RunSpec, outcome: Result<String, String>, cancelled: bool) {
+    pub(crate) fn finish(
+        &self,
+        spec: &RunSpec,
+        outcome: Result<String, String>,
+        cancelled: bool,
+        requested: u32,
+        returned: u32,
+    ) {
         let mut inner = self.lock();
         let applied = {
             let Some(row) = inner.rows.get_mut(&spec.key) else {
@@ -945,7 +1052,11 @@ impl PersonaStore {
                             "role": "assistant",
                             "text": chars_take(&answer, 60_000),
                             "time": time,
-                            "execution": { "source": "keepwork-runtime", "requested": 0, "returned": 0 },
+                            "execution": {
+                                "source": "keepwork-runtime",
+                                "requested": requested,
+                                "returned": returned,
+                            },
                         }));
                         ("done".into(), None)
                     }

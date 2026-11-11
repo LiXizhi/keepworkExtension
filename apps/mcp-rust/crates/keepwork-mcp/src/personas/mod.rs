@@ -8,6 +8,7 @@
 //! out of scope.
 
 mod http;
+mod local_tools;
 mod model;
 mod naming;
 mod store;
@@ -20,6 +21,7 @@ pub use http::handle;
 pub use store::PersonaStore;
 pub use util::next_persona_run;
 
+pub(crate) use local_tools::LocalToolEnv;
 pub(crate) use model::keepwork_answer;
 
 pub(crate) use crate::http::{json_response, AppState};
@@ -35,7 +37,10 @@ pub(crate) use serde_json::{json, Map, Value};
 pub(crate) use sha2::{Digest, Sha256};
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+pub(crate) use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, MutexGuard, OnceLock,
+};
 pub(crate) use std::time::Duration;
 
 pub(crate) const MAX_BODY: usize = 131_072;

@@ -305,10 +305,17 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let state_clone = Arc::clone(state);
     let session_for_task = session_id.clone();
+    let personas = Arc::clone(&state.personas);
     tokio::spawn(async move {
+        // Persona data changes are pushed as `personas_changed`; the browser
+        // client filters them by owner, so a global revision counter is enough.
+        let alive_frame = format!("event: message\ndata: {frame}\n\n");
+        let changed_frame = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/keepwork/personas_changed\"}\n\n";
+        let mut last_revision = personas.revision.load(Ordering::SeqCst);
         let mut first = true;
+        let mut ticks_since_alive: u32 = 0;
         loop {
-            let delay = if first { 100 } else { 25_000 };
+            let delay = if first { 100 } else { 1_000 };
             first = false;
             tokio::select! {
                 _ = sender.closed() => break,
@@ -317,9 +324,24 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
             if closed.load(Ordering::SeqCst) {
                 break;
             }
-            let payload = format!("event: message\ndata: {frame}\n\n");
-            if sender.send(Ok(Bytes::from(payload))).await.is_err() {
-                break;
+            let revision = personas.revision.load(Ordering::SeqCst);
+            if revision != last_revision {
+                last_revision = revision;
+                if sender
+                    .send(Ok(Bytes::from(changed_frame.to_string())))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            ticks_since_alive += 1;
+            if ticks_since_alive >= 25 {
+                ticks_since_alive = 0;
+                if sender.send(Ok(Bytes::from(alive_frame.clone()))).await.is_err() {
+                    break;
+                }
             }
         }
         if let Ok(mut store) = state_clone.sessions.lock() {
