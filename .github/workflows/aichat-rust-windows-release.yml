@@ -1,0 +1,87 @@
+name: AIChat Rust Windows release packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aichat-rust-windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Windows Rust (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    env:
+      AICHAT_MCP_ENGINE: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/aichat-rust/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release-${{ matrix.arch }}
+          workspaces: |
+            apps/mcp-rust -> target
+            apps/aichat-rust/src-tauri -> target
+      - name: Install frontend dependencies and check types
+        working-directory: apps/aichat-rust
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm typecheck
+      - name: Build and stage the matching Rust MCP runtime
+        run: |
+          cargo build --release --locked --manifest-path apps/mcp-rust/Cargo.toml --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target ${{ matrix.target }} --no-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build Windows installer
+        working-directory: apps/aichat-rust
+        run: pnpm tauri build --ci --target ${{ matrix.target }} --bundles nsis
+      - name: Extract and verify the installer payload
+        run: |
+          $version = (Get-Content apps/aichat-rust/package.json | ConvertFrom-Json).version
+          $installer = "apps/aichat-rust/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/Keepwork_${version}_${{ matrix.arch }}-setup.exe"
+          $extract = Join-Path $env:RUNNER_TEMP 'keepwork-payload'
+          & 'C:\Program Files\7-Zip\7z.exe' x $installer "-o$extract" -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $application = @(Get-ChildItem $extract -Filter aichat-rust.exe -Recurse)
+          if ($application.Count -ne 1) { throw 'Expected one desktop executable' }
+          $productVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($application[0].FullName).ProductVersion
+          if ($productVersion -ne $version) { throw "Desktop version mismatch: $productVersion" }
+          New-Item -ItemType Directory -Force release-packages | Out-Null
+          node apps/aichat-rust/scripts/verify-windows-release.cjs --directory $extract --arch ${{ matrix.arch }} --commit $env:GITHUB_SHA --binary "apps/mcp-rust/target/${{ matrix.target }}/release/keepwork-mcp.exe" --installer $installer --output "release-packages/release-manifest-${version}-${{ matrix.arch }}.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item $installer release-packages/
+      - name: Smoke test the packaged x64 daemon
+        if: matrix.arch == 'x64'
+        run: |
+          $runtime = @(Get-ChildItem (Join-Path $env:RUNNER_TEMP 'keepwork-payload') -Filter keepwork-mcp.exe -Recurse)
+          if ($runtime.Count -ne 1) { throw 'Expected one daemon executable' }
+          node apps/mcp-rust/scripts/smoke.cjs $runtime[0].FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aichat-rust-windows-${{ matrix.arch }}-rust
+          path: release-packages/*
+          if-no-files-found: error

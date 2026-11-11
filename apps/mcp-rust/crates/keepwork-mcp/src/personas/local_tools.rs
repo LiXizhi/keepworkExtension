@@ -105,7 +105,10 @@ impl LocalToolEnv {
     /// Executes one tool call and returns the text the model should see.
     /// Failures come back as text so the model can react within the loop.
     pub(crate) async fn execute(&self, name: &str, args: &Value, session: &str) -> String {
-        let allowed = matches!(name, "run_terminal" | "grep_files" | "web_search" | "fetch_url");
+        let allowed = matches!(
+            name,
+            "run_terminal" | "grep_files" | "web_search" | "fetch_url"
+        );
         if !allowed {
             return format!("分身不可用工具 {name}");
         }

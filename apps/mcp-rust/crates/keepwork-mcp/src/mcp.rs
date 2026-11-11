@@ -339,7 +339,11 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
             ticks_since_alive += 1;
             if ticks_since_alive >= 25 {
                 ticks_since_alive = 0;
-                if sender.send(Ok(Bytes::from(alive_frame.clone()))).await.is_err() {
+                if sender
+                    .send(Ok(Bytes::from(alive_frame.clone())))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }

@@ -28,6 +28,7 @@ const TARGETS = {
     { arch: 'x64', platform: 'macos', triple: 'x86_64-apple-darwin' },
   ],
   'x86_64-pc-windows-msvc': [{ arch: 'x64', platform: 'windows', triple: 'x86_64-pc-windows-msvc' }],
+  'aarch64-pc-windows-msvc': [{ arch: 'arm64', platform: 'windows', triple: 'aarch64-pc-windows-msvc' }],
 };
 
 function hostTriple() {
