@@ -746,6 +746,9 @@ impl RuntimeSupervisor {
 
     pub async fn probe_health(&self) -> Option<HealthProbeResult> {
         let client = reqwest::Client::builder()
+            // This URL is always loopback. A system proxy can return a gateway
+            // error for a healthy local daemon and cause a false startup timeout.
+            .no_proxy()
             .timeout(Duration::from_millis(1200))
             .build()
             .ok()?;
@@ -1372,6 +1375,117 @@ impl Drop for RuntimeSupervisor {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn loopback_health_ignores_proxy_environment() {
+        const CHILD_ENV: &str = "AICHAT_TEST_HEALTH_PROXY_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let health = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 4096];
+                    stream.read(&mut request).await.unwrap();
+                    let body = r#"{"name":"keepwork-mcp","pid":123,"runtimeVersion":"fixture","hostKind":"vscode-extension"}"#;
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+                // Prove this process really has a proxy that would reject health checks.
+                if std::env::var(CHILD_ENV).unwrap() == "proxy" {
+                    let ordinary = reqwest::Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+                    let rejected = ordinary.get(format!("http://127.0.0.1:{port}/health")).send().await.unwrap();
+                    assert_eq!(rejected.status(), reqwest::StatusCode::BAD_GATEWAY);
+                }
+                let root = std::env::temp_dir().join(format!("aichat-health-{}", Uuid::new_v4()));
+                let supervisor = RuntimeSupervisor::new(RuntimeConfig {
+                    id: "mcp".into(), products: vec!["keepwork-mcp-runtime".into()],
+                    port, health_path: "/health".into(), updates_enabled: false,
+                    bundled_dir: root.join("bundle"), store_dir: root.join("store"), feed_url: String::new(),
+                });
+                let probe = supervisor.probe_health().await.expect("loopback health must bypass the rejecting proxy");
+                assert!(probe.compatible, "legacy health without optional fsApi remains supported");
+                assert_eq!(probe.pid, 123);
+                assert_eq!(probe.runtime_version, "fixture");
+                assert_eq!(probe.host_kind, "vscode-extension");
+                health.await.unwrap();
+                assert!(supervisor.probe_health().await.is_none(), "a stopped daemon remains offline even with a proxy configured");
+            });
+            return;
+        }
+
+        // Give only the child process hostile proxy settings; parallel tests keep
+        // their original environment and never share process-global mutations.
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        proxy.set_nonblocking(true).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let proxy_done = Arc::clone(&done);
+        let proxy_thread = std::thread::spawn(move || {
+            while !proxy_done.load(Ordering::Relaxed) {
+                match proxy.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = [0u8; 4096];
+                        let _ = stream.read(&mut request);
+                        let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("proxy fixture failed: {e}"),
+                }
+            }
+        });
+        let mut results = Vec::new();
+        for mode in ["proxy", "direct"] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "runtime::tests::loopback_health_ignores_proxy_environment",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, mode)
+                .env("NO_PROXY", if mode == "direct" { "*" } else { "" })
+                .env("no_proxy", if mode == "direct" { "*" } else { "" });
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                if mode == "proxy" {
+                    child.env(key, &proxy_url);
+                } else {
+                    child.env_remove(key);
+                }
+            }
+            results.push((mode, child.output()));
+        }
+        done.store(true, Ordering::Relaxed);
+        proxy_thread.join().unwrap();
+        for (mode, output) in results {
+            let output = output.unwrap();
+            assert!(
+                output.status.success(),
+                "isolated {mode} health check failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "the child must actually execute the regression test"
+            );
+        }
+    }
 
     #[test]
     fn accepts_a_rust_runtime_manifest_without_a_node_binary() {

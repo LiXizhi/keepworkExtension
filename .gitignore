@@ -16,6 +16,7 @@ apps/local-model-runtime/reports/
 apps/local-model-runtime/.keys/
 release-manifest.json
 .idea
+.tmp/
 .test-runtime/
 temp/
 

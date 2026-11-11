@@ -185,7 +185,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
       .left {{ gap: 2px; }}
       .right {{ flex: 1; height: 100%; }}
       .center {{ position: absolute; left: 50%; transform: translateX(-50%); gap: 8px; max-width: calc(100% - 360px); }}
-      .icon {{ width: 18px; height: 18px; margin-left: 6px; margin-right: 2px; flex: none; pointer-events: none; display: block; line-height: 0; transform: none; object-fit: contain; }}
+      .icon {{ width: 18px; height: 18px; margin-left: 12px; margin-right: 2px; flex: none; pointer-events: none; display: block; line-height: 0; transform: none; object-fit: contain; }}
       button {{
         all: unset;
         box-sizing: border-box;
@@ -206,6 +206,32 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
       .address {{ padding: 5px 10px; height: 24px; border-radius: 4px; color: var(--chrome-address, #4a4a5a); background: var(--chrome-pill, #e2e6ef); white-space: nowrap; }}
       .refresh {{ width: 28px; height: 28px; padding: 0; }}
       .refresh svg {{ width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }}
+.window-controls{{
+  position:absolute;
+  top:0;
+  right:0;
+  display:flex;
+  height:34px;
+  -webkit-app-region:no-drag;
+}}
+.window-controls button{{
+  width:46px;
+  height:34px;
+  padding:0;
+  border-radius:0;
+}}
+.window-controls button[data-window-action="close"]:hover{{
+  color:#fff;
+  background:#c42b1c;
+}}
+.window-controls svg{{
+  width:12px;
+  height:12px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.2;
+  pointer-events:none;
+}}
     `;
 
     const left = document.createElement("div");
@@ -215,7 +241,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
         const img = document.createElement("span");
         img.className = "icon";
         img.setAttribute("aria-hidden", "true");
-        img.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><rect width="18" height="18" rx="2" fill="rgb(0,133,178)"/><path d="M3.5 3h3v4.5L11 3h3.5L8.5 9l6 6H11L6.5 10.5V15H3.5z" fill="white"/></svg>`;
+        img.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3.5 3h3v4.5L11 3h3.5L8.5 9l6 6H11L6.5 10.5V15H3.5z" fill="currentColor" opacity="0.72"/></svg>`;
         left.appendChild(img);
       }}
       mountDesktopMenus({{ host, shadow, left, invoke, menus: bootstrap.menus || [] }});
@@ -252,6 +278,29 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
 
     center.append(title, address, refresh);
     shadow.append(style, left, center, right);
+  // Frameless Windows/Linux windows have no native caption buttons.
+  if (!isMac) {{
+    const controls = document.createElement("div");
+    controls.className = "window-controls";
+    for (const [action, label, path] of [
+      ["minimize", "最小化", "M1 6h10"],
+      ["toggle-maximize", "最大化或还原", "M1.5 1.5h9v9h-9z"],
+      ["close", "关闭", "M1 1l10 10M11 1L1 11"],
+    ]) {{
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("data-window-action", action);
+      button.setAttribute("aria-label", label);
+      button.title = label;
+      button.innerHTML = `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="${{path}}"/></svg>`;
+      button.addEventListener("click", () => {{
+        void invoke("desktop_titlebar_action", {{ action }}).catch(() => {{}});
+      }});
+      controls.appendChild(button);
+    }}
+    shadow.append(controls);
+  }}
+
 
     let pendingMaximize = null;
     const isInteractive = (event) => {{

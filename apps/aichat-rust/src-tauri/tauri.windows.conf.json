@@ -8,6 +8,7 @@
     "targets": ["nsis"],
     "windows": {
       "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh",
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"],
         "displayLanguageSelector": false

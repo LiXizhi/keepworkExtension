@@ -1067,6 +1067,13 @@ fn desktop_titlebar_action(
         "drag" => {
             let _ = window.start_dragging();
         }
+        "minimize" => {
+            window.minimize().map_err(|e| e.to_string())?;
+        }
+        "close" => {
+            // Preserve CloseRequested handling: hide the window and show the pet.
+            window.close().map_err(|e| e.to_string())?;
+        }
         "toggle-maximize" => {
             if let Ok(is_max) = window.is_maximized() {
                 if is_max {

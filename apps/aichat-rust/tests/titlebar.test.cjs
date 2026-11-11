@@ -3,6 +3,35 @@ const assert = require("node:assert/strict");
 const { renderer } = require("./helpers/desktop-renderer.cjs");
 
 for (const implementation of ["typescript", "rust-init-script"]) {
+  for (const platform of ["win32", "windows", "linux"]) {
+    test(`${implementation} ${platform}: frameless window buttons remain visible and dispatch only their own action`, () => {
+      const bar = renderer(implementation, platform);
+      const actions = ["minimize", "toggle-maximize", "close"];
+      assert.equal(bar.elements("button[data-window-action]").length, actions.length);
+      for (const action of actions) {
+        const button = bar.element(`button[data-window-action="${action}"]`);
+        assert.ok(button, `${action} must be present in the frameless titlebar`);
+        assert.equal(button.type, "button");
+        assert.ok(button.getAttribute("aria-label"), `${action} needs an accessible label`);
+        assert.match(button.innerHTML, /<svg[\s>]/, `${action} needs a visible icon`);
+        const iconPath = bar.child(bar.child(button, "svg"), "path");
+        bar.doubleClick(iconPath);
+        assert.deepEqual(bar.actions(), [], `${action} must never start dragging or maximize on mousedown`);
+        assert.equal(bar.fire(button, "mousedown").defaultPrevented, false);
+        bar.fire(iconPath, "click");
+        assert.deepEqual(bar.actions(), [action], `${action} must dispatch exactly once from an icon click`);
+        bar.calls.length = 0;
+      }
+    });
+  }
+
+  for (const platform of ["darwin", "macos"]) {
+    test(`${implementation} ${platform}: native macOS window buttons are not duplicated`, () => {
+      const bar = renderer(implementation, platform);
+      assert.equal(bar.elements("button[data-window-action]").length, 0);
+    });
+  }
+
   for (const platform of ["darwin", "macos", "win32", "windows", "linux"]) {
     test(`${implementation} ${platform}: closed-shadow title, blank region and host padding toggle exactly once`, () => {
       for (const selector of [".right", ".title", null]) {
