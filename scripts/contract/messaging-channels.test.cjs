@@ -41,7 +41,8 @@ after(async () => {
   // Allow native listeners to notice the closed pipe and release their cwd/exe
   // handles on Windows before removing any fixture directory.
   for (const dir of [...roots, cliDir].filter(Boolean)) {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    // Async rm also retries an initial rmdir EBUSY; rmSync can throw it immediately.
+    await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
