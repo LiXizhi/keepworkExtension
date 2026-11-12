@@ -151,10 +151,29 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Occupies the port a stopped server just released. Parallel tests open
+    /// loopback connections whose local ports come from the same ephemeral
+    /// pool, so the freed port can stay busy for a moment on macOS.
+    fn occupy_released_port(port: u16) -> std::net::TcpListener {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => return listener,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrInUse
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("cannot occupy 127.0.0.1:{port}: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn occupied_deployment_origin_reports_failure_without_changing_saved_state_or_occupant() {
         use std::io::{Read, Write};
-        use std::net::{TcpListener, TcpStream};
+        use std::net::TcpStream;
         let root = std::env::temp_dir().join(format!("aichat-deployment-port-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("web")).unwrap();
         fs::write(root.join("web/AIChat.html"), "local page").unwrap();
@@ -165,7 +184,7 @@ mod tests {
         drop(server);
         let registry = root.join("source-ports.json");
         let before = fs::read(&registry).unwrap();
-        let occupied = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let occupied = occupy_released_port(port);
         let mut message = String::new();
         let (entry, server) =
             startup_deployment(&deployment, ENTRY, |error| message = error.to_string());

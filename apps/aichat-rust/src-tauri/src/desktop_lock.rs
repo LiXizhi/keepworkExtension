@@ -85,6 +85,10 @@ impl DesktopLock {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // BSD-derived platforms hand back an accepted socket that
+                        // inherits O_NONBLOCK, which makes the command read fail
+                        // with EAGAIN and silently drop the wake request.
+                        let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
                         let mut command = Vec::with_capacity(16);
                         let mut byte = [0u8; 1];

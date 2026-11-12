@@ -188,6 +188,9 @@ fn loopback_health_ignores_proxy_environment() {
         while !proxy_done.load(Ordering::Relaxed) {
             match proxy.accept() {
                 Ok((mut stream, _)) => {
+                    // Accepted sockets inherit O_NONBLOCK on BSD, so the
+                    // request would be dropped before the 502 is written.
+                    let _ = stream.set_nonblocking(false);
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
