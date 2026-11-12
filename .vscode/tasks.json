@@ -173,7 +173,7 @@
     },
     {
       "label": "keepwork Rust Desktop: Start",
-      "detail": "Prepare the complete Node MCP runtime, then launch the Rust/Tauri desktop with local AIChat source. For the limited Rust MCP preview use pnpm dev:rust.",
+      "detail": "Build apps/mcp-rust, then launch the Rust/Tauri desktop with local AIChat source. Select pnpm dev:node explicitly to use Node MCP.",
       "type": "shell",
       "command": "pnpm",
       "args": ["tauri", "dev"],

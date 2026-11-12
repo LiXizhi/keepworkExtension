@@ -62,27 +62,21 @@ function buildTarget(arch) {
   });
 }
 
-function binaryFor(arch, shouldBuild = true) {
+function binaryFor(arch, shouldBuild = true, options = {}) {
   if (shouldBuild) {
-    buildTarget(arch);
+    (options.buildTarget || buildTarget)(arch);
   }
   const name = binName(arch.platform);
-  const candidates = [
-    path.join(rustRoot, 'target', arch.triple, 'release', name),
-    path.join(rustRoot, 'target', 'release', name),
-  ];
-  // Several release profiles can exist side by side; package the newest so a
-  // stale per-target build can never ship over a fresh daemon.
-  const found = candidates
-    .filter((candidate) => fs.existsSync(candidate))
-    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
-  if (!found) {
+  // A generic host build can have a newer mtime but the wrong architecture.
+  // buildTarget always requests this triple, including each universal slice.
+  const binary = path.join(options.rustRoot || rustRoot, 'target', arch.triple, 'release', name);
+  if (!fs.existsSync(binary) || !fs.statSync(binary).isFile()) {
     throw new Error(
-      `missing Rust daemon binary for ${arch.arch} (looked in ${candidates.join(', ')}).\n` +
+      `missing Rust daemon binary for ${arch.arch} (looked in ${binary}).\n` +
         `Build it with: cargo build --release --manifest-path apps/mcp-rust/Cargo.toml --target ${arch.triple}`,
     );
   }
-  return found;
+  return binary;
 }
 
 function pruneOtherArches(keep) {
@@ -140,9 +134,13 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`[bundle-mcp-rust] ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`[bundle-mcp-rust] ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
 }
+
+module.exports = { binaryFor };

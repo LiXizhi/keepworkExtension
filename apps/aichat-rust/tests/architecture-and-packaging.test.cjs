@@ -156,6 +156,15 @@ test("MCP runtime bootstraps from bundle or launcher and follows published feed 
 });
 
 test("packaging scripts target macOS universal and Windows x64 + ARM64", () => {
+  for (const [script, target] of [
+    ["make:mac", "universal-apple-darwin"],
+    ["make:win:x64", "x86_64-pc-windows-msvc"],
+    ["make:win:arm64", "aarch64-pc-windows-msvc"],
+  ]) {
+    assert.match(pkg.scripts[script], /bundle-mcp-rust\.cjs/, `${script} must package apps/mcp-rust`);
+    assert.ok(pkg.scripts[script].includes(`--target ${target}`), `${script} must stage its matching Rust target`);
+    assert.doesNotMatch(pkg.scripts[script], /bundle-mcp-runtime\.cjs/, `${script} cannot silently package Node`);
+  }
   assert.match(
     pkg.scripts["make:mac"],
     /--target universal-apple-darwin/,
@@ -172,6 +181,28 @@ test("packaging scripts target macOS universal and Windows x64 + ARM64", () => {
     "Windows ARM64 packaging must target aarch64-pc-windows-msvc NSIS"
   );
   assert.deepEqual(tauriWinConf.bundle.targets, ["nsis"]);
+});
+
+test("default runtime commands choose Rust and preserve explicit Node compatibility entry points", () => {
+  assert.match(pkg.scripts["bundle:mcp"], /bundle-mcp-rust\.cjs/);
+  assert.match(pkg.scripts["bundle:mcp-node"], /bundle-mcp-runtime\.cjs/);
+  assert.match(pkg.scripts["dev:node"], /tauri\.cjs --mcp-node dev/);
+  assert.match(pkg.scripts["dev:rust"], /tauri\.cjs --mcp-rust dev/);
+  assert.match(pkg.scripts.tauri, /tauri\.cjs/);
+
+  const taskSource = fs.readFileSync(path.join(appRoot, "..", "..", ".vscode", "tasks.json"), "utf8");
+  const task = taskSource.match(/\{\s*"label":\s*"keepwork Rust Desktop: Start"[\s\S]*?"runOptions"/)?.[0];
+  assert.ok(task, "VS Code must retain the Rust desktop start task");
+  assert.match(task, /"command":\s*"pnpm"/);
+  assert.match(task, /"args":\s*\["tauri",\s*"dev"\]/);
+  assert.doesNotMatch(task, /--mcp-node|"AICHAT_MCP_ENGINE":\s*"node"/);
+  assert.match(task, /apps\/mcp-rust/);
+});
+
+test("frontend checks never stage a Node runtime as an implicit fallback", () => {
+  const buildSource = fs.readFileSync(path.join(appRoot, "scripts", "build.mjs"), "utf8");
+  assert.doesNotMatch(buildSource, /require\(["']\.\/bundle-mcp-runtime\.cjs["']\)\.bundle/);
+  assert.doesNotMatch(buildSource, /bundle-mcp-runtime\.cjs/);
 });
 
 test("macOS Info.plist and entitlements include microphone permission for voice/call", () => {

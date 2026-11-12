@@ -1,6 +1,6 @@
 # Keepwork MCP: Node → Rust 迁移契约
 
-本文件是 `apps/mcp-rust`（Rust 守护进程）与现有 Node 守护进程（`apps/mcp-runtime`）之间的迁移契约。四宿主（`aichat-rust`、`aichat-desktop`、`vscode-extension`、`local-helper`）在 P4 之前继续可以只发 Node 运行时。
+本文件是 `apps/mcp-rust`（Rust 守护进程）与现有 Node 守护进程（`apps/mcp-runtime`）之间的迁移契约。`aichat-rust` 默认选择 Rust MCP；`aichat-desktop`、`vscode-extension`、`local-helper` 在 P4 之前继续可以只发 Node 运行时。两条发行线路独立，缺少可选能力不能触发隐式引擎切换。
 
 ## 1. 不变的外部契约
 
@@ -67,21 +67,27 @@ Rust 运行时 0.2.5 给分身模型接入了本地工具，0.2.6 修复由此�
 
 ## 3. 宿主选择与接管
 
-迁移的目标顺序是：**自带 Rust → 下载 Rust → 自带 Node → 下载 Node**，
-不代表当前所有宿主已经实现该选择链。当前 `aichat-rust` 的标准 `make:mac`
-打包 Node 运行时，`make:mcp-rust:*` 打包 Rust 预览运行时。启动时按实际捆绑
-目录的清单选择；捆绑 Rust 时关闭 Node feed 热更新，不能据此假定会自动回退
-到完整的 Node 能力。
+迁移的历史目标顺序是：**自带 Rust → 下载 Rust → 自带 Node → 下载 Node**，
+不代表当前所有宿主已经实现该选择链。`aichat-rust` 的标准开发和打包入口
+默认选择 `apps/mcp-rust`：`bundle:mcp` 与 `make:mac` / `make:win:x64` /
+`make:win:arm64` 均使用 Rust。Node 仅保留显式 `bundle:mcp-node`、
+`make:mcp-node:mac` / `make:mcp-node:win:x64`。`pnpm build` 只构建前端，
+不隐式准备 Node 运行时。启动时校验实际捆绑
+目录的引擎与清单；捆绑 Rust 时关闭 Node feed 热更新。Rust 准备失败或缺少
+可选能力时明确报错或在功能边界降级，不自动改用 Node。
 
-- 只有当候选 `runtimeVersion` 严格更新时才接管（`SIGKILL` 旧 PID 后 40×250ms 等待），版本相同不换引擎，避免 Node/Rust 互相踢进程。
+- 接管分两种情况：已识别为桌面管理的 MCP 服务（`rust-node-runtime` / `tauri-node-runtime` / `electron-node-runtime` / `desktop`）可按本次候选切换引擎，不跨引擎比较版本；同引擎则只有候选 `runtimeVersion` 严格更新时才接管。外部 VS Code / Local Helper 或其他宿主管理的服务不会仅因引擎不同被替换，同引擎的较新版本接管规则保持不变。
+- 接管须满足 MCP 身份、有效 PID 和 Rust 启动重试状态检查；停止前重新探测并核对 PID。Unix 使用 `SIGTERM`，Windows 使用定向 `taskkill /PID <pid> /T /F`，随后最多执行 25 轮健康探测、每轮间隔 80ms，等待原服务退出。
 - `KEEPWORK_MCP_HOST_KIND` 取值不变（`standalone` / `vscode-extension` / `local-helper` / `electron-node-runtime` / `rust-node-runtime`）；`/health.runtimeEngine` 表示实际引擎。当前宿主没有实现 `KEEPWORK_MCP_ENGINE` 环境变量选择，不能把设置该变量作为修复方法。
 - 迁移顺序：`aichat-rust` → `aichat-desktop` → `vscode-extension` → `local-helper`。
 
 ### 当前可用的桌面运行时选择
 
-日常开发入口 `pnpm tauri dev` 与 VS Code 的 `keepwork Rust Desktop: Start` 使用完整 Node MCP；桌面客户端使用 Rust 不意味着其 MCP 守护进程也必须使用 Rust。Rust MCP 保留 `pnpm dev:rust` 显式预览入口，当前仍缺少原生 CLI 会话接口。开发入口选择不改变既有共享服务的所有权、接管和能力协商规则；运行中的 8089 服务仍须单独核验。
+日常开发入口 `pnpm tauri dev` 与 VS Code 的 `keepwork Rust Desktop: Start` 默认构建并使用 `apps/mcp-rust`，`pnpm dev:rust` 保留为同一 Rust 选择的显式别名。默认入口需要 Rust/Cargo 与桌面开发依赖；Rust 构建或校验失败时中止，不静默回退 Node。
 
-常规开发入口使用 Node.js 22 或更新版本，从当前源码和本机已安装依赖生成独立的开发运行时；缺依赖或编译失败会中止，不自动安装依赖。显式 `AICHAT_MCP_BUNDLED_DIR` / `AICHAT_MCP_RUNTIME_DIR` 优先，但必须通过 Node 运行时校验。`AICHAT_MCP_ENGINE=rust` 是新增开发启动器的显式预览选择，等同该入口的 `dev:rust` 选择，不是此前未实现的 `KEEPWORK_MCP_ENGINE`，也不会动态切换当前监听服务。
+`pnpm dev:node`、启动器 `--mcp-node` 或 `AICHAT_MCP_ENGINE=node` 才显式选择 `apps/mcp-runtime`。Node 路线使用 Node.js 22 或更新版本，从当前源码和本机已安装依赖生成独立开发运行时；缺依赖或编译失败会中止，不自动安装依赖。`AICHAT_MCP_ENGINE=rust` 继续接受。显式 `AICHAT_MCP_BUNDLED_DIR` / `AICHAT_MCP_RUNTIME_DIR` 优先，但必须通过所选引擎的清单与入口校验，不能在默认 Rust 入口中混入 Node。`AICHAT_MCP_ENGINE` 属于开发启动器，不是此前未实现的 `KEEPWORK_MCP_ENGINE`，也不会动态切换当前监听服务。
+
+Rust MCP 当前仍缺少原生 CLI 会话接口；用户选择 Rust 后，CLI 连接器应按能力缺失明确提示，不自动改用 Node 或改变请求执行语义。修改默认配置不会停止当前监听服务，新选择在下次桌面进程启动时读取。开发入口选择不改变既有共享服务的所有权、接管和能力协商规则；运行中的 8089 服务仍须单独核验。
 
 桌面开发页面固定绑定 `127.0.0.1:1430`。重复启动只复用身份协议、真实 checkout 目录均匹配的 Vite 服务；未知服务占用时明确失败，不终止该进程或自动更换端口。关闭复用启动不关闭原终端拥有的服务。这解决开发服务重复启动冲突，不会补齐 Rust MCP 的功能。
 
@@ -95,19 +101,19 @@ Rust 运行时 0.2.5 给分身模型接入了本地工具，0.2.6 修复由此�
 
 2026-11-11 排查确认：Rust `0.2.11` 不声明 `agentSessionApi`，原生 CLI
 连接器的 `/agents/backends` 返回 404；Node 源码运行时的隔离实测结果不适用
-于仍在运行的 Rust listener。使用 CLI 时需选择已验证提供该能力的运行时，
-保留 Rust 预览的显式选择。切换前检查共享服务的所有者、活跃客户端和任务，
+于仍在运行的 Rust listener。使用 CLI 时需显式选择已验证提供该能力的 Node 兼容运行时，
+不能把这一例外改成 `aichat-rust` 的默认引擎。切换前检查共享服务的所有者、活跃客户端和任务，
 完成受控重启后重新读取实际端口的 `/health` 与目标 `/agents/backends`；
 不得把重装 CLI 或反复重连当作补齐服务端实现。
 
-本次经用户确认后已切换到 Node `0.1.52`。切换中发现 stage 清单缺少 `commit`，
+以下为 2026-11-11 CLI 排查的历史记录，不是当前默认选择：当次经用户确认后切换到 Node `0.1.52`。切换中发现 stage 清单缺少 `commit`，
 JS 打包验证能从同目录 `app/package.json` 读取，Rust 宿主却要求清单本身包含
 该字段；使用同份产物的真实 commit 补全生成清单后，8089 恢复并声明
 `agentSessionApi: "v1"`。stage/bundle/package 的永久修复已完成，跨宿主相关
 Node 30 项、Rust 12 项测试通过。实际 8089 上 WorkBuddy、Codex 两轮实测均
 通过；真实浏览器使用桌面相同源码服务与 8089 完成 WorkBuddy 选模型、发送和
 接收回复，未驱动原生 Tauri 窗口。源码版本为 MCP/扩展 `0.1.53`、Rust 桌面
-`0.2.45`，当前运行的 `0.1.52` 保持不变，避免再次中断用户会话。
+`0.2.45`；当次保留运行中的 `0.1.52`，避免再次中断用户会话。2026-11-12 用户重新明确要求 `aichat-rust` 默认运行 `apps/mcp-rust`，该要求覆盖此前把 Node 设为日常默认入口的选择。
 
 ## 4. 阶段门槛
 

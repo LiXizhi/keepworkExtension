@@ -171,16 +171,14 @@ test("AICHAT_MCP_RUNTIME_DIR cannot feed a universal build", () => {
   }
 });
 
-test("release scripts require a runtime for the build target", () => {
+test("Node compatibility release scripts explicitly require a runtime for the build target", () => {
   for (const [script, target] of [
-    ["make:mac", "universal-apple-darwin"],
-    ["make:win:x64", "x86_64-pc-windows-msvc"],
+    ["make:mcp-node:mac", "universal-apple-darwin"],
+    ["make:mcp-node:win:x64", "x86_64-pc-windows-msvc"],
   ]) {
     assert.match(pkg.scripts[script], /bundle-mcp-runtime\.cjs --require/);
     assert.ok(pkg.scripts[script].includes(`--target ${target}`));
   }
-  // apps/mcp-runtime does not publish a win-arm64 slice, so that installer
-  // keeps downloading its runtime instead of failing the release.
+  // Node's published slices remain independent of the default Rust installer.
   assert.deepEqual(bundler.TARGETS["aarch64-pc-windows-msvc"], []);
-  assert.doesNotMatch(pkg.scripts["make:win:arm64"], /--require/);
 });

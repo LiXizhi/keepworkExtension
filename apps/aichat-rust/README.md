@@ -16,15 +16,15 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - **页面命令**（`new-chat`、`toggle-sidebar`、`toggle-files`、`open-settings`、`experience-simple`、`experience-professional`、`theme-light`、`theme-dark`）只投递给 AIChat 页面；**主机命令**（`open-folder`、`reload`、`check-updates`、`toggle-login`、`quit`、编辑/缩放/全屏/开发者工具、`mcp-status`/`mcp-dashboard`/`mcp-restart`、`open-browser`、`local-source`、`published-site` 等）由桌面进程原生执行，未知 id 一律拒绝。
   - 旧 id（`file:open-folder`、`view:reload`、`view:reset-zoom`、`help:check-updates` …）由 `canonical_host_command` 规范化，客户端 Web 菜单、原生托盘、macOS 系统菜单与历史页面调用方继续可用；页面命令沿用 `aichat.desktop-menu.v1` 投递，主机命令通过白名单校验的 IPC 执行。
 - **自我更新与自动更新（Self-Update / Auto-Update）**：
-  - **Keepwork MCP Runtime 热更新（`:8089`）**：后台从 `https://cdn.keepwork.com/keepwork/mcp-stable/<platform>-<arch>.json` 检查更新，流式下载 `.zip`，校验文件大小、SHA-256、40 位源码 Commit 与 `runtime.json` 启动配置，暂存至 `mcp-runtimes/<sha256>`，支持在「检查更新」窗口一键应用或在下次重启时自动激活，启动失败自动回滚。
+  - **Keepwork MCP Runtime 更新（`:8089`）**：默认随客户端携带 Rust MCP；捆绑清单为 `engine: rust` 时关闭 Node feed 热更新，避免被 Node 运行时覆盖。显式选择 Node 兼容构建时，沿用 `https://cdn.keepwork.com/keepwork/mcp-stable/<platform>-<arch>.json`、大小/SHA-256/40 位源码 Commit 校验、暂存激活与启动失败回滚流程。
   - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），后台自动下载更新包并校验 SHA-256，持久化 `update-metadata.json`（离线时保留上次检查缓存并标记 `stale: true`）。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
-- **自带的 Keepwork MCP Server（与 `apps/aichat-desktop` 一致）**：
-  - 安装包内直接携带 `apps/mcp-runtime` 运行时：`scripts/bundle-mcp-runtime.cjs` 在打包前把 `apps/mcp-runtime/staging/<platform>-<arch>` 校验（product / 平台 / 架构 / 版本 / 40 位源码 Commit / node 与入口文件 / 陈旧检测）后复制到 `src-tauri/resources/mcp-runtime/<arch>/`，由 Tauri `bundle.resources` 打进 `.app` / NSIS 安装包。
-  - 启动时按当前架构选择 `resources/mcp-runtime/<arch>`（macOS universal 包同时携带 arm64 与 x64 两份运行时），没有自带运行时才回退到 DesktopLauncher 已安装版本或 CDN 热更新，因此首次安装即可离线使用本机 MCP 能力，来源显示为 `AIChat Desktop / NodeRuntime`。
-  - `pnpm build` 在缺少 staging 时只告警；`pnpm make:mac` 与 `make:win:x64` 使用 `--require`，缺运行时、运行时陈旧或不是 `npm run stage` 产物（例如手工 symlink 的调试运行时）都会直接失败，避免发出没有自带 MCP 的安装包。上游暂未发布 `windows-arm64` staging，因此 `make:win:arm64` 安装包继续从 CDN 获取运行时。
-  - **Rust 守护进程（预览）**：`pnpm make:mcp-rust:mac` 把 `apps/mcp-rust` 的二进制按架构放进 `resources/mcp-runtime/<arch>/{runtime.json,bin/keepwork-mcp}`（清单 v2：`product: keepwork-mcp-runtime`、`engine: rust`），宿主发现 Rust 运行时后直接执行 `entry`（不再 spawn Node），并关闭该构建的 MCP 热更新，避免被 Node feed 覆盖。Rust 线目前到 P1：文件面板（`/fs/*` 全量）、文件夹选择（`/fs/locations|browse`）、终端（PTY）、`run_terminal`/`grep_files`/`web_search`/`fetch_url` 均可用；Agent、消息、人格、浏览器、电脑操作等能力尚未移植，AIChat 会按能力缺失降级；详见 [迁移契约](../../docs/rust-runtime-migration.md)。
+- **自带的 Rust Keepwork MCP Server（`apps/mcp-rust`）**：
+  - `aichat-rust` 默认运行 `apps/mcp-rust`，由 `scripts/bundle-mcp-rust.cjs` 构建原生守护进程并写入 `src-tauri/resources/mcp-runtime/<arch>/{runtime.json,bin/keepwork-mcp}`（Windows 为 `.exe`）。清单 v2 使用 `product: keepwork-mcp-runtime` 与 `engine: rust`；宿主直接执行原生入口。
+  - 标准开发与 `make:mac` / `make:win:x64` / `make:win:arm64` 打包入口选择 Rust MCP；`bundle:mcp` 默认捆绑 Rust，`bundle:mcp-rust` 保留为同义入口。`apps/mcp-runtime` 的 Node 版通过 `bundle:mcp-node`、`make:mcp-node:mac` 和 `make:mcp-node:win:x64` 显式选择，仍须先准备并校验对应 Node staging。Rust 构建或校验失败时明确报错，不因缺少可选能力自动改用 Node。
+  - Rust 已提供本地文件、文件夹浏览、PTY、五个可移植 MCP 工具，以及分身和钉钉/飞书消息的部分能力。原生 Agent CLI、浏览器、电脑操作等仍未全面移植；按 `/health` 的实际能力降级，不能凭引擎或版本号推断支持。详见 [迁移契约](../../docs/rust-runtime-migration.md)。
+  - 既有共享 8089 服务继续按所有权和接管规则处理；默认候选为 Rust 不代表已有外部服务已被替换，实际引擎须检查 `/health.runtimeEngine` 与进程入口。
 - **双本地 Runtime 守护进程监管**：
-  - 监管 `keepwork-mcp-node-runtime`（`127.0.0.1:8089`）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检，启动时自动识别并平滑接管低版本 `runtimeVersion` 的本机 MCP 进程，同时保护外部（VS Code / Local Helper）管理的同版本或高版本实例。
+  - 监管 MCP（`127.0.0.1:8089`，默认 Rust）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检。MCP 引擎选择不改变外部 VS Code / Local Helper 实例的所有权保护，也不放宽 Origin、鉴权、路径和任务执行边界。
 - **透明置顶桌面宠物窗口（`pet.html`）**：
   - 固定工作区画布尺寸（`DESKTOP-PET-CLICK-STABILITY-001`），支持 `0.5×`–`4×` 缩放、抱抱龙/跟随 AIChat 宠物外观、快捷回复、语音听写/通话、完全退出分身/通道确认气泡（`#exit-bubble`）以及主屏截图权限审批气泡（`#permission-bubble`，连接 `~/.keepwork-mcp/pet-permission-bridge.json`，点击后先隐藏窗口再返回授权结果以确保气泡不入镜）。
 - **本地文件夹授权、工作区文件读写与直连 PTY 终端**：
@@ -44,15 +44,15 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 
 ## 开发与验证命令
 
-### 日常启动与 Rust MCP 预览
+### 日常启动与运行时选择
 
-在 `apps/aichat-rust` 目录执行 `pnpm tauri dev` 启动桌面；日常开发使用完整的 **Node MCP**，以保留 WorkBuddy、Codex 等原生 CLI 会话能力。VS Code 任务 `keepwork Rust Desktop: Start` 使用同一默认入口；这里的 Rust 指桌面客户端，不表示选择 Rust MCP。`pnpm dev` 只启动桌面页面的 Vite 服务，不启动桌面或 MCP。
+在 `apps/aichat-rust` 目录执行 `pnpm tauri dev` 启动桌面；默认构建并使用 **`apps/mcp-rust`**。VS Code 任务 `keepwork Rust Desktop: Start` 使用同一入口，`pnpm dev:rust` 保留为显式 Rust 别名。`pnpm dev` 只启动桌面页面的 Vite 服务，不启动桌面或 MCP。
 
-常规启动需要 Node.js 22 或更新版本，并已安装仓库、`apps/mcp-runtime` 与本桌面的依赖。启动器从当前源码生成独立的开发运行时，使用当前 Node 和已安装依赖，不依赖之前的 staging，不自动安装或下载依赖；准备失败时停止启动并保留错误。缺依赖时，在仓库根目录执行 `npm ci`、`npm ci --include=dev --prefix apps/mcp-runtime`，并在本桌面目录执行 `pnpm install` 后重试。
+默认入口需要 Rust/Cargo 工具链及桌面开发依赖；准备 Rust MCP 失败会停止启动并保留错误。Node.js 仍用于桌面开发工具和可选外部 CLI，并不表示 MCP 服务端使用 Node。`pnpm build` 只构建桌面前端，不会准备或覆盖 MCP 资源；运行时由开发启动器或 `make:*` / `bundle:mcp*` 命令准备。
 
-如显式设置 `AICHAT_MCP_BUNDLED_DIR`（优先）或 `AICHAT_MCP_RUNTIME_DIR`，常规入口会校验并使用指定的 Node 运行时，不覆盖该目录。默认 Node 开发目录也不会被旧的 Rust 打包资源覆盖。
+需要 Node MCP 兼容能力时显式执行 `pnpm dev:node`，或设置 `AICHAT_MCP_ENGINE=node`。该路线要求 Node.js 22 或更新版本，以及仓库、`apps/mcp-runtime` 与桌面的已安装依赖；从当前源码生成独立的 Node 开发运行时，不依赖之前的 staging，也不自动安装或下载依赖。
 
-需要验证 **Rust MCP 预览** 时显式执行 `pnpm dev:rust`，或为开发启动器设置 `AICHAT_MCP_ENGINE=rust`；这个选项不会切换运行中的 MCP。Rust MCP 当前尚未提供原生 CLI 会话接口，不能用该入口验收 CLI 连接器；版本号较大也不代表支持这些能力。详细边界见 [运行时迁移契约](../../docs/rust-runtime-migration.md#当前可用的桌面运行时选择)。
+如显式设置 `AICHAT_MCP_BUNDLED_DIR`（优先）或 `AICHAT_MCP_RUNTIME_DIR`，启动器会校验指定运行时与所选引擎一致；默认 Rust 入口不能借此静默加载 Node。目录设置只在下一次启动读取，不会动态切换运行中的 MCP。Rust MCP 当前尚未提供原生 CLI 会话接口；需要该能力时由用户显式选择 Node，不能自动切换执行语义。
 
 开发页面固定使用 `http://127.0.0.1:1430`。重复启动会先检查开发服务的身份协议和真实项目目录，只复用同一 checkout 的服务。另一个项目、没有身份端点的旧 Vite 服务、无法确认身份的监听者会产生明确的端口占用错误；请在拥有该服务的终端中处理后重试。启动器不结束未知进程，也不自动换端口。关闭复用者不会关闭先前终端拥有的 Vite 服务；关闭原服务的终端后，需要重新启动开发服务。
 
@@ -60,7 +60,7 @@ AIChat 本地源码服务通过 `AICHAT_DESKTOP_LOCAL_SOURCE=1` 或「使用本�
 
 固定 origin 为同一浏览器配置下的本地会话选择、工具页和偏好提供稳定的存储边界。当前自动化验证覆盖地址复用与失败处理；浏览器存储及登录状态在真实桌面重启后的恢复仍需单独验收。旧版本随机端口下的本地数据不会自动搬迁；网页与桌面之间沿用现有云同步规则，当前会话选择和已打开工具页仍只保存在各自本地。
 
-默认运行时选择决定本次桌面启动使用的候选，不能证明已存在的共享 MCP 已切换。外部 VS Code / Local Helper 的服务仍受所有权与接管规则保护；CLI 验收必须检查实际 `127.0.0.1:8089/health` 的 `agentSessionApi` 和目标平台接口，不能仅检查打包目录。若仍连接到不支持 CLI 的 Rust 预览服务，先确认其所有者和活跃任务，再按实际启动方式恢复完整运行时。
+修改启动配置不会停止当前运行的服务；新选择在下次桌面进程启动时生效。默认运行时选择决定本次桌面启动使用的候选，不能证明已存在的共享 MCP 已切换。外部 VS Code / Local Helper 的服务仍受所有权与接管规则保护；验收必须检查实际 `127.0.0.1:8089/health` 的引擎与目标能力，不能仅检查打包目录。需要切换已有服务时，先确认所有者和活跃任务，再按实际启动方式受控重启；不能自动重放未确认结果的任务。
 
 ### Windows 签名与交互安装
 
@@ -82,10 +82,8 @@ pnpm smoke
 # 完整检查（TypeScript + Vite + Cargo Test + Node 契约测试）
 pnpm check
 
-# 自带 MCP 运行时：先 staging，再让打包带上它
-npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch arm64
-npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch x64
-pnpm bundle:mcp --target universal-apple-darwin
+# 自带 Rust MCP 运行时（从仓库根目录执行）
+node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
 ```
 
 ## 多平台打包矩阵

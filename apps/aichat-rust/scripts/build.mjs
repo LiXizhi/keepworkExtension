@@ -24,37 +24,8 @@ for (const name of ["keepwork.png", "keepwork-mac.png", "keepwork-attention.png"
   }
 }
 
-// Ship the Keepwork MCP runtime with the app when a staged copy exists; the
-// release scripts run the same step with --require, so a missing runtime still
-// fails a release but never blocks development or checks.
-// Do not overwrite an already-staged Rust MCP runtime (engine: "rust").
-function hasStagedRustMcpRuntime() {
-  if (process.env.AICHAT_MCP_ENGINE === "rust") return true;
-  const mcpResRoot = path.join(tauriDir, "resources", "mcp-runtime");
-  if (!fs.existsSync(mcpResRoot)) return false;
-  for (const entry of fs.readdirSync(mcpResRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const manifestPath = path.join(mcpResRoot, entry.name, "runtime.json");
-    if (!fs.existsSync(manifestPath)) continue;
-    try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-      if (String(manifest.engine || "").toLowerCase() === "rust") return true;
-    } catch {
-      /* ignore malformed manifest */
-    }
-  }
-  return false;
-}
-
-if (hasStagedRustMcpRuntime()) {
-  console.log("[aichat-rust] Preserving staged Rust MCP runtime in resources/mcp-runtime");
-} else {
-  try {
-    require("./bundle-mcp-runtime.cjs").bundle({});
-  } catch (error) {
-    console.warn(`[aichat-rust] Bundled MCP runtime skipped: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
+// Runtime preparation belongs to the desktop launcher and make:* scripts.
+// Frontend builds and checks must never select an engine or replace resources.
 
 // Node 22 refuses to spawn .cmd shims without a shell (EINVAL). Vite's package
 // exports hide bin/vite.js, so resolve the package root and run that file.

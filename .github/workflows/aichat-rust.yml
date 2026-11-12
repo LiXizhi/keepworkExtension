@@ -6,6 +6,7 @@ on:
     branches: [master, main]
     paths:
       - "apps/aichat-rust/**"
+      - "apps/mcp-rust/**"
       - "src/core/**"
       - "src/pet/**"
       - ".github/workflows/aichat-rust.yml"
@@ -38,17 +39,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm check
           pnpm smoke
-      - name: Stage the bundled Keepwork MCP runtime
-        env:
-          KP_RUNTIME_NODE_VERSION: 22.23.2
-        run: |
-          npm ci
-          npm ci --prefix apps/pet-companion
-          npm run prepare:all --prefix apps/pet-companion -- darwin-arm64 darwin-x64
-          npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch arm64
-          npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch x64
-          npm run smoke --prefix apps/mcp-runtime
-      - name: Build macOS Universal app and DMG
+      - name: Build macOS Universal app and DMG with Rust MCP
         working-directory: apps/aichat-rust
         run: pnpm make:mac
       - name: Verify Universal binary architectures and DMG
@@ -60,7 +51,9 @@ jobs:
           echo "$ARCHS" | grep -q "x86_64"
           echo "$ARCHS" | grep -q "arm64"
           for slice in arm64 x64; do
-            test -f "src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app/Contents/Resources/resources/mcp-runtime/$slice/runtime.json"
+            RUNTIME_DIR="src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app/Contents/Resources/resources/mcp-runtime/$slice"
+            node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (m.engine !== "rust" || m.product !== "keepwork-mcp-runtime") process.exit(1)' "$RUNTIME_DIR/runtime.json"
+            test -x "$RUNTIME_DIR/bin/keepwork-mcp"
           done
           for dmg in src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg; do
             hdiutil verify "$dmg"
@@ -104,20 +97,16 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm typecheck
           pnpm build
-      - name: Stage the bundled Keepwork MCP runtime (x64)
-        if: matrix.arch == 'x64'
-        env:
-          KP_RUNTIME_NODE_VERSION: 22.23.2
-        run: |
-          npm ci
-          npm ci --prefix apps/mcp-runtime
-          npm ci --prefix apps/pet-companion
-          npm run prepare:runtime --prefix apps/pet-companion
-          npm run stage --prefix apps/mcp-runtime -- --platform win32 --arch x64
-          npm run smoke --prefix apps/mcp-runtime
-      - name: Build Windows NSIS installer (${{ matrix.target }})
+      - name: Build Windows NSIS installer with Rust MCP (${{ matrix.target }})
         working-directory: apps/aichat-rust
         run: pnpm run ${{ matrix.script }}
+      - name: Verify bundled Rust MCP
+        shell: pwsh
+        run: |
+          $runtime = "apps/aichat-rust/src-tauri/resources/mcp-runtime/${{ matrix.arch }}"
+          $manifest = Get-Content "$runtime/runtime.json" -Raw | ConvertFrom-Json
+          if ($manifest.engine -ne 'rust' -or $manifest.product -ne 'keepwork-mcp-runtime') { throw 'Expected Rust MCP runtime' }
+          if (-not (Test-Path "$runtime/bin/keepwork-mcp.exe")) { throw 'Rust MCP executable is missing' }
       - uses: actions/upload-artifact@v4
         with:
           name: aichat-rust-windows-${{ matrix.arch }}

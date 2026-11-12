@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Development starts with a complete Node MCP runtime even if an earlier Rust
-// preview was bundled into resources. Release commands still go straight to Tauri.
+// Desktop development builds apps/mcp-rust by default. Node MCP is available
+// only through an explicit engine selection. Release commands pass through.
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
@@ -10,14 +10,14 @@ const APP_ROOT = path.resolve(__dirname, '..');
 
 function parseInvocation(argv, env = process.env) {
   const args = [...argv];
-  const explicitRust = args[0] === '--mcp-rust';
-  if (explicitRust) args.shift();
+  const explicitEngine = args[0] === '--mcp-rust' ? 'rust' : args[0] === '--mcp-node' ? 'node' : undefined;
+  if (explicitEngine) args.shift();
   const separator = args.indexOf('--');
   const cliArgs = separator < 0 ? args : args.slice(0, separator);
   const command = cliArgs.find(arg => arg !== '--verbose' && !/^-v+$/.test(arg));
   const informational = cliArgs.some(arg => ['--help', '-h', '--version', '-V'].includes(arg)) || command === 'help';
   return { args, development: command === 'dev' && !informational,
-    engine: explicitRust || env.AICHAT_MCP_ENGINE === 'rust' ? 'rust' : 'node' };
+    engine: explicitEngine || env.AICHAT_MCP_ENGINE || 'rust' };
 }
 
 function runtimeTarget(platform = process.platform, arch = process.arch) {
@@ -40,6 +40,31 @@ function validateNodeRuntime(directory) {
   if (!raw.commit || !raw.node || !raw.entry) {
     throw new Error('Development runtime manifest needs commit, node and entry. Re-stage the runtime or remove AICHAT_MCP_BUNDLED_DIR.');
   }
+  return manifest;
+}
+
+function validateRustRuntime(directory) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'runtime.json'), 'utf8'));
+  const target = runtimeTarget();
+  if (manifest.schemaVersion !== 2 || manifest.engine !== 'rust' || manifest.product !== 'keepwork-mcp-runtime') {
+    throw new Error('Rust MCP requires a schema v2 Rust runtime manifest; use pnpm dev:node to select Node MCP explicitly.');
+  }
+  if (manifest.platform !== target.platform || manifest.arch !== target.arch) {
+    throw new Error(`Rust MCP runtime must target ${target.platform}-${target.arch}`);
+  }
+  if (!/^[a-f0-9]{40}$/.test(manifest.commit || '') || typeof manifest.version !== 'string' || !manifest.version) {
+    throw new Error('Rust MCP runtime manifest needs version and source commit');
+  }
+  const entry = manifest.entry;
+  if (typeof entry !== 'string' || !entry || path.isAbsolute(entry) || entry.includes('\\') || entry.split('/').some(part => !part || part === '.' || part === '..')) {
+    throw new Error('Rust MCP runtime entry must be a confined relative path');
+  }
+  const root = fs.realpathSync(directory);
+  const executable = fs.realpathSync(path.join(root, entry));
+  if (!executable.startsWith(root + path.sep) || !fs.statSync(executable).isFile()) {
+    throw new Error('Rust MCP runtime entry must be a confined executable file');
+  }
+  fs.accessSync(executable, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
   return manifest;
 }
 
@@ -121,17 +146,14 @@ async function launch(argv, options = {}) {
   const env = { ...(options.env || process.env) };
   const invocation = parseInvocation(argv, env);
   if (invocation.development) {
-    if (invocation.engine === 'rust') {
-      process.stderr.write('[tauri-dev] Rust MCP preview: external CLI sessions are not implemented; use pnpm tauri dev for CLI connectors.\n');
+    if (!['rust', 'node'].includes(invocation.engine)) {
+      throw new Error(`Unsupported MCP engine: ${invocation.engine}; select rust or node.`);
     }
     const custom = env.AICHAT_MCP_BUNDLED_DIR || env.AICHAT_MCP_RUNTIME_DIR;
     if (custom) {
       const directory = path.resolve(appRoot, custom);
       if (invocation.engine === 'node') await (options.validateNodeRuntime || validateNodeRuntime)(directory);
-      else {
-        const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'runtime.json'), 'utf8'));
-        if (manifest.engine !== 'rust') throw new Error('Rust preview override requires a Rust runtime manifest');
-      }
+      else await (options.validateRustRuntime || validateRustRuntime)(directory);
       env.AICHAT_MCP_BUNDLED_DIR = directory;
     } else {
       const prepare = invocation.engine === 'rust' ? options.prepareRustRuntime || prepareRustRuntime : options.prepareNodeRuntime || prepareNodeRuntime;
@@ -147,4 +169,4 @@ if (require.main === module) {
     process.stderr.write(`[tauri-dev] ${error.message || error}\n`); process.exitCode = 1;
   });
 }
-module.exports = { parseInvocation, runtimeTarget, validateNodeRuntime, prepareNodeRuntime, prepareRustRuntime, launch };
+module.exports = { parseInvocation, runtimeTarget, validateNodeRuntime, validateRustRuntime, prepareNodeRuntime, prepareRustRuntime, launch };
