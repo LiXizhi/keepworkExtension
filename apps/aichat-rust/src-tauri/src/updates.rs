@@ -620,6 +620,11 @@ mod tests {
             while requests < 2 && std::time::Instant::now() < deadline {
                 if let Ok((mut stream, _)) = listener.accept() {
                     requests += 1;
+                    // BSD-derived platforms hand back an accepted socket that
+                    // inherits O_NONBLOCK, so clear it before the blocking read
+                    // or the request bytes are missed and the feed request is
+                    // answered with the package payload.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
@@ -660,7 +665,7 @@ mod tests {
 
         let mcp_snap = RuntimeStatusSnapshot::initial("mcp", 8089);
         let snap = manager.snapshot(&mcp_snap);
-        assert_eq!(snap.desktop.state, "ready");
+        assert_eq!(snap.desktop.state, "ready", "{}", snap.desktop.error);
         assert_eq!(snap.desktop.latest_version, "0.3.0");
         assert!(snap.desktop.can_apply);
 

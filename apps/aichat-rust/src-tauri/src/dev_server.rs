@@ -462,7 +462,11 @@ impl DevServer {
     pub fn stop(&mut self) {
         if let Some(h) = self.handle.take() {
             self.stop_flag.store(true, Ordering::Relaxed);
-            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            // The accept loop polls a nonblocking listener, so it notices the
+            // flag on its own. Do not wake it with a loopback connect: the
+            // accepted socket stays bound to the saved origin for a moment
+            // after this returns, and macOS refuses to rebind that port until
+            // the connection is gone.
             let _ = h.join();
         }
     }
