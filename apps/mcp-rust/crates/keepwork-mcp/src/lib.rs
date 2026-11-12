@@ -8,7 +8,8 @@
 //! under `~/.keepwork-mcp/personas-v1` and answer through Keepwork when AIChat
 //! is logged in. Messaging (`messagingApi: messaging-v1`) hosts DingTalk (`dws`
 //! listener) and Feishu (`lark-cli` polling) channels for persona bindings;
-//! native agent CLI sessions and WeChat stay unadvertised.
+//! native ACP/Codex sessions and their owner-bound AIChat tool bridge expose
+//! optional `/agents` capabilities. WeChat stays unadvertised.
 
 pub mod agents;
 pub mod cli;

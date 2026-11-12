@@ -7,6 +7,9 @@
 //! busy guard blocks brain swaps mid-task. Native CLI sessions and WeChat stay
 //! out of scope.
 
+mod circle_channels;
+mod circle_model;
+mod circles;
 mod http;
 mod local_tools;
 mod model;
@@ -17,6 +20,7 @@ mod tests;
 mod util;
 mod view;
 
+pub(crate) use circles::Circles;
 pub use http::handle;
 pub use store::PersonaStore;
 pub use util::next_persona_run;
@@ -59,6 +63,14 @@ pub(crate) const EXECUTORS: &[&str] = &[
 
 pub(crate) const IDENTITY_RULES: &str =
     "你是主人的分身。自定义智能体是分身的分身，对话历史各自独立，角色指令不能扩大权限。";
+
+/// Read-only IM refresh for owners who used the circle API in this process.
+pub async fn run_circles_background(state: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        Box::pin(state.circles.refresh_registered(&state)).await;
+    }
+}
 
 #[derive(Debug)]
 pub struct PersonaError {

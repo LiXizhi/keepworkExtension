@@ -92,6 +92,49 @@ processes: `node --test scripts/contract/agents.test.cjs` from the repository ro
 after building the Rust binary, plus the Rust unit suite. These fixtures do not
 establish live provider or native desktop UI compatibility.
 
+On 2026-11-12, isolated macOS arm64 tests with the actual WorkBuddy CLI found
+17 models and completed two turns in one native conversation, including recall
+of the first turn's marker. A separate real turn discovered and invoked the
+Rust MCP bridge: a local SSE consumer returned a random nonce that was absent
+from the prompt, and the final answer matched that tool result. The consumer
+simulated the online page; the native Tauri UI and Windows were not exercised.
+No workspace files were created by these turns. Final fixed-binary HTTP
+contracts passed 95/95 on Rust 0.2.19 with the default thread stack; the full
+Rust suite and Clippy also passed. Shared build output was isolated because
+another task was rebuilding the same target directory.
+
+## Circles in 0.2.20
+
+`POST /agents/personas/circles` now serves AIChat's existing circle editor.
+The default action is `read`; no frontend update or Node compatibility daemon
+is required. Organization, member, nested-circle and role edits use the same
+single-use `preview` / `apply` tickets, stable IDs, revision checks and
+owner/brain/organization scope as Node. Organization files remain under the
+brain's `.aichat/circles/`; local sync state and receipts remain under
+`messaging-v1/circles/`. Unknown fields are stripped and unsafe symlink paths
+are rejected. The actual serialized file size is checked before replacement.
+
+Connected DingTalk and Feishu accounts support contact/group searches,
+company-directory member previews, discovery of joined `X-` groups, deployment
+to new or existing groups, explicit pull/publish previews, conflict decisions,
+history, messages/replies, receipt verification and unbinding. Refresh imports
+remote state without external writes; registered owners refresh every ten
+minutes. External writes recheck the account, group owner/admin authority,
+current brain and revision. DingTalk uses only its dedicated `# X:goal` notice.
+Unknown writes persist their intent before dispatch and cannot be replayed;
+an owner can inspect the remote result and preview any remaining changes.
+
+This implements owner-driven circle operations. Autonomous multi-agent group
+routing and role execution, group nicknames and multi-computer coordination
+remain outside this Rust implementation. Tests use isolated local metadata and
+fake CLI processes; real DingTalk/Feishu writes and the native desktop UI have
+not been exercised for this change.
+
+```bash
+cargo test --offline --manifest-path apps/mcp-rust/Cargo.toml --test circles_contract --test circles_channels_contract
+cargo test --offline --manifest-path apps/mcp-rust/Cargo.toml --lib circle_
+```
+
 ## Persona support in 0.2.4
 
 The daemon supports persona configuration, conversation history, message submission,
@@ -147,6 +190,41 @@ orphan processes without verified ownership are not automatically adopted or
 terminated. Stopping a binding preserves its cached messages and read state, so
 history remains readable with automatic replies disabled. Client/server contracts
 and persisted messaging records are unchanged.
+
+Inbox reads return the complete cached view immediately; optional group/sender
+name lookups run in the background. One grouping pass builds conversation
+summaries, cloning only each conversation's latest message or the requested
+50-message window. Response fields, ordering, `before` cursors and unread rules
+remain compatible with existing clients.
+
+Metadata lookups deduplicate in-flight targets, share a service-wide limit of
+four CLI reads and at most 512 queued/in-flight targets, and cache failed or
+empty names for 30 seconds. Resolved names appear on a later service read; they
+do not trigger a dedicated SSE event or automatic history redraw/read action.
+AIChat's explicit refresh or expired/invalidated list cache fetches the new names;
+an ordinary reopen can reuse its 60-second snapshot. The Node runtime retains
+its existing five-second name-warming budget; this backend change is Rust-only.
+
+Inbox performance validation (2026-11-12, MCP **0.2.19**, Personas **1.0.15**):
+**39** targeted cases passed (5 metadata + 24 messaging + 10 browser), plus
+**35** CLI contract cases to protect the CLI support already running in 0.2.18.
+The earlier 20 messaging cases are not counted again. Four performance cases
+failed on the previous inbox source while its legacy-contract case passed;
+these are fake-CLI gate checks, not a live latency benchmark. The complete
+current source was built in `/private/tmp/keepwork-inbox-full-_kxcqhhj`; the earlier
+trimmed 0.2.16 artifact was not used to replace the newer runtime. Logs:
+`/tmp/messaging-metadata-full-{final,unit}.log`,
+`/tmp/messaging-metadata-latency-before.log`,
+`/tmp/inbox-performance-cli-contracts.log`; build record:
+`/tmp/keepwork-inbox-performance-full-build.json`.
+
+The owned service was updated only after confirming no active or uncertain work.
+Live PID 2088 reported Rust 0.2.19 with `agentSessionApi` and `agentInventoryApi`
+still `v1`; DingTalk reported `listening`, `listening: true`, `autoReply: true` and
+an empty error. All 45 cached history IDs and 12 CLI session IDs were retained
+(`/tmp/keepwork-inbox-performance-live-result.json`). No validation message was
+sent, real unread state marked or release published. Refresh AIChat to load the
+Personas 1.0.15 frontend; no live millisecond improvement is claimed.
 
 Validation (2026-11-12, MCP **0.2.16**): **33** unique business tests passed
 (13 listener lifecycle + 20 messaging; one host-fixture helper ignored), using

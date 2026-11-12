@@ -468,6 +468,8 @@ pub fn run() {
                 error
             });
             let main_win = main_win?;
+            #[cfg(target_os = "macos")]
+            crate::navigation::install_frame_navigation(&main_win)?;
             #[cfg(windows)]
             signal_launcher_webview_ready();
 

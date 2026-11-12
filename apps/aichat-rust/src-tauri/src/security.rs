@@ -47,9 +47,9 @@ pub fn trusted_page(raw_url: &str, dev_url: Option<&str>) -> bool {
 
 /// Policy for the main window's `on_navigation`.
 ///
-/// wry reports subframe (tool iframe) navigations to the same handler without
-/// frame information, so this accepts same-origin keepwork.com pages and the
-/// exact dev-source origin in addition to `trusted_page`. `trusted_page` stays
+/// WebView2 reports main document navigations here. On macOS the native delegate
+/// handles subframes before Wry's URL-only callback (see `navigation`). Keep the
+/// existing Keepwork/CDN/dev-source rules for this callback; `trusted_page` stays
 /// strict for bridge senders, media grants and entry validation.
 pub fn allowed_navigation(raw_url: &str, dev_url: Option<&str>) -> bool {
     let Ok(parsed) = Url::parse(raw_url) else {
@@ -89,6 +89,19 @@ pub fn allowed_navigation(raw_url: &str, dev_url: Option<&str>) -> bool {
         }
     }
     trusted_page(raw_url, dev_url)
+}
+
+/// Only use this policy after the native engine identifies a real subframe.
+/// Loading a website in a preview does not grant it any desktop bridge access.
+pub fn allowed_subframe_navigation(raw_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw_url) else {
+        return false;
+    };
+    if has_credentials(&parsed) {
+        return false;
+    }
+    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
+        || raw_url == "about:blank"
 }
 
 fn is_login_iframe(parsed: &Url) -> bool {
@@ -234,6 +247,38 @@ pub fn assert_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_websites_stay_in_real_subframes_without_receiving_desktop_privileges() {
+        for raw_url in [
+            "https://www.baidu.com/",
+            "https://example.org/redirected?token=private",
+            "http://127.0.0.1:8089/preview/index.html",
+            "http://localhost:3001/index.html",
+            "https://example.org:8443/page",
+            "about:blank",
+        ] {
+            assert!(allowed_subframe_navigation(raw_url), "{raw_url}");
+            assert!(!allowed_navigation(raw_url, None), "{raw_url}");
+            assert!(!trusted_page(raw_url, None), "{raw_url}");
+            assert!(assert_sender("main", "main", false, raw_url, None).is_err());
+        }
+        // A trusted URL in a subframe still cannot call the desktop bridge.
+        assert!(allowed_subframe_navigation(ENTRY));
+        assert!(assert_sender("main", "main", false, ENTRY, None).is_err());
+        for raw_url in [
+            "https://user:pass@example.org/",
+            "http://user@localhost/",
+            "file:///etc/passwd",
+            "tauri://localhost/index.html",
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "about:config",
+            "not a URL",
+        ] {
+            assert!(!allowed_subframe_navigation(raw_url), "{raw_url}");
+        }
+    }
 
     #[test]
     fn validates_trusted_pages_and_rejects_untrusted_or_credentialed_urls() {

@@ -48,13 +48,16 @@ inline bool LoginPopup(const Url& url) {
 }
 
 inline bool Navigation(const Url& url, bool popup, bool main_frame) {
+  // Preview iframes browse arbitrary websites and local workspace servers.
+  // Only actual subframes get this rule; top-level and popup policies stay strict.
+  if (!main_frame) {
+    return !url.credentials && !url.host.empty() &&
+           (url.scheme == "http" || url.scheme == "https");
+  }
   if (!Https(url)) return false;
   if (url.host == "keepwork.com") return true;
   if (popup && LoginProvider(url)) return true;
-  return !main_frame &&
-         (url.host == "cdn.keepwork.com" ||
-          (url.host == "open.weixin.qq.com" &&
-           url.path.compare(0, 9, "/connect/") == 0));
+  return false;
 }
 
 inline int Hex(char ch) {

@@ -130,6 +130,9 @@ async fn run(args: cli::Args) -> i32 {
     });
 
     // Messaging pump + binding resume runs for the process lifetime.
+    tokio::spawn(keepwork_mcp::personas::run_circles_background(Arc::clone(
+        &state,
+    )));
     tokio::spawn(keepwork_mcp::messaging::MessagingService::run_background(
         Arc::clone(&state.messaging),
     ));

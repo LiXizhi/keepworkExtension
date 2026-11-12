@@ -9,6 +9,7 @@ pub mod git_setup;
 pub mod installer_stop;
 pub mod login_startup;
 pub mod menu;
+pub mod navigation;
 pub mod page_connection;
 pub mod permissions;
 pub mod pet;

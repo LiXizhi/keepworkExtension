@@ -11,6 +11,7 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - 在受信任顶层主框架内注入 Closed Shadow DOM `#keepwork-desktop-titlebar`：34px 单行 Web 标题栏，包含居中标题、地址胶囊与刷新按钮；Windows / Linux 同行显示校准居中的 K 图标及「文件 / 编辑 / 视图 / 帮助」菜单标题。Windows 使用无系统装饰的窗口，网页为此标题栏预留 34px 空间；macOS 保留系统应用菜单。
   - Web 下拉菜单由客户端自身在 Closed Shadow DOM 内统一绘制，使用 Rust `menu_payload` 提供的菜单数据，不依赖远端页面绘制；采用紧凑的菜单布局，支持展开后横向悬停切换、键盘导航、Esc 与点击外部关闭。标题栏与菜单同步页面深浅色和皮肤 CSS 变量，地址与刷新按钮保留在顶部原位置。
   - 注入只读冻结的 `window.aichatDesktop`（Bridge v1）契约，对现有 Web 端 `desktop.js`、`keepwork_fs.js`、`desktop_menu.js` 保持 100% 兼容。
+  - 集成网页浏览器的普通 HTTP(S) 地址在预览子框架内加载，不因域名不同自动打开系统浏览器；主窗口外链和登录弹窗沿用原策略。macOS 在原生 WebKit 导航阶段区分真实子框架，CEF 兼容模式使用已有框架标识。第三方网页不获得桌面 Bridge 权限，站点自身的嵌入限制仍由浏览器执行。
 - **菜单协议 `aichat.desktop-menu.v1` 与命令路由（对齐 `apps/aichat-desktop`）**：
   - 菜单载荷同时提供桌面版形状 `menu: { id, label, items }` 与冗余兼容字段 `menuId` / `items` / `anchor` / `x` / `y`，菜单项标签与 `CmdOrCtrl` 加速键、`shortcut`（macOS `⌘ ⇧ ⌥`）与桌面版逐项一致。
   - **页面命令**（`new-chat`、`toggle-sidebar`、`toggle-files`、`open-settings`、`experience-simple`、`experience-professional`、`theme-light`、`theme-dark`）只投递给 AIChat 页面；**主机命令**（`open-folder`、`reload`、`check-updates`、`toggle-login`、`quit`、编辑/缩放/全屏/开发者工具、`mcp-status`/`mcp-dashboard`/`mcp-restart`、`open-browser`、`local-source`、`published-site` 等）由桌面进程原生执行，未知 id 一律拒绝。
@@ -54,6 +55,7 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 | `app/pet_audio_host.rs` | 文档绑定的录音 IPC、私有音频投递、采集停止与超时监控 |
 | `app/platform.rs` | 系统浏览器、文件管理器与平台调用 |
 | `app/updates_window.rs` | 更新窗口、更新 IPC 与状态通知 |
+| `navigation.rs` / `navigation_macos.m` | macOS 子框架导航策略与原 WebKit delegate 的事件转发 |
 | `runtime.rs` | 运行时进程监管、所有权、重试、激活和回退；重导出原有运行时 API |
 | `runtime/manifest.rs` | 清单类型、平台名称、版本比较与兼容性验证 |
 | `runtime/archive.rs` | 受限路径 ZIP 解压、归档生成与摘要 |

@@ -44,6 +44,16 @@ pub fn starts_media_capture(snapshot: &Value, action: &str) -> bool {
     }
 }
 
+/// Voice capture is additive: old pages and unsupported targets retain their
+/// existing microphone path instead of silently receiving different semantics.
+pub fn uses_pet_audio(snapshot: &Value, action: &str) -> bool {
+    starts_media_capture(snapshot, action)
+        && (action == "dictation"
+            || (action == "call"
+                && snapshot["target"].as_str() == Some("persona")
+                && snapshot["petVoiceAudioVersion"].as_u64() == Some(1)))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PetPreferences {
@@ -496,6 +506,7 @@ pub fn sanitize_pet_state(
         "richDraft": raw.get("richDraft").and_then(|v| v.as_bool()).unwrap_or(false),
         "canCall": raw.get("canCall").and_then(|v| v.as_bool()).unwrap_or(false),
         "compactVoice": raw.get("compactVoice").and_then(|v| v.as_bool()).unwrap_or(false),
+        "petVoiceAudioVersion": raw.get("petVoiceAudioVersion").and_then(|v| v.as_u64()).filter(|v| *v == 1),
         "draft": raw.get("draft").and_then(|v| v.as_str()).map(|s| truncate_str(s, MAX_PET_INPUT_CHARS)).unwrap_or_default(),
         "attention": raw.get("attention").and_then(|v| v.as_str()).map(|s| truncate_str(s, 240)).unwrap_or_default(),
         "error": raw.get("error").and_then(|v| v.as_str()).map(|s| truncate_str(s, 300)).unwrap_or_default(),

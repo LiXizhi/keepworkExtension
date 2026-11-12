@@ -58,7 +58,10 @@ pub(crate) async fn handle_inner(
         (_, Some("messaging-computers"), None) => {
             Err(PersonaError::unsupported("本机 Rust 服务尚未提供消息协同"))
         }
-        (_, Some("circles"), _) => Err(PersonaError::unsupported("Rust 运行时尚未提供圈子接口")),
+        ("POST", Some("circles"), None) => Ok(ok_json(
+            &Box::pin(state.circles.request(&state, &owner, &input)).await?,
+        )),
+        (_, Some("circles"), _) => Err(PersonaError::method()),
         ("GET", Some(id), None) => {
             let before = query
                 .get("before")

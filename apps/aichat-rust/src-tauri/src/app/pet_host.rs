@@ -363,7 +363,9 @@ pub(super) fn desktop_publish_pet_state(
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state_mgr)?;
     let incoming = state.unwrap_or_else(|| json!({}));
-    let supports_audio = incoming["petDictationAudioVersion"].as_u64() == Some(pet_audio::VERSION)
+    let supports_audio = (incoming["petDictationAudioVersion"].as_u64() == Some(pet_audio::VERSION)
+        || (incoming["target"].as_str() == Some("persona")
+            && incoming["petVoiceAudioVersion"].as_u64() == Some(pet_audio::VERSION)))
         && incoming["ready"].as_bool() == Some(true);
     state_mgr.pet.update_raw_state(incoming);
     let context = state_mgr.pet.snapshot()["context"]
@@ -429,8 +431,7 @@ async fn request_pet_command(
             return Ok(stopped);
         }
     }
-    let pet_capture = name == "dictation"
-        && pet::starts_media_capture(&snapshot, name)
+    let pet_capture = pet::uses_pet_audio(&snapshot, name)
         && core.pet_audio.supported(context);
     let capture_id = if pet_capture {
         let (id, replaced) = match core.pet_audio.issue(context, &request_id) {

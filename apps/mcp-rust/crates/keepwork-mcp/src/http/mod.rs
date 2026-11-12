@@ -32,6 +32,7 @@ pub struct AppState {
     pub personas: Arc<crate::personas::PersonaStore>,
     pub messaging: Arc<crate::messaging::MessagingService>,
     pub agents: Arc<crate::agents::AgentManager>,
+    pub(crate) circles: crate::personas::Circles,
 }
 
 impl AppState {
@@ -81,6 +82,7 @@ impl AppState {
             port,
         );
         personas.attach_messaging(Arc::clone(&messaging));
+        let circles = crate::personas::Circles::new(messaging.home.join("circles"));
         let started_at = now_iso();
         let shell = Arc::new(ShellRunner::default());
         personas.attach_tools(Arc::new(crate::personas::LocalToolEnv {
@@ -104,6 +106,7 @@ impl AppState {
             messaging,
             personas,
             agents,
+            circles,
         }
     }
 

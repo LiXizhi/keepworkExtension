@@ -29,6 +29,29 @@ generations cannot update a replacement connection, its cursor or its inbox.
 Changing a channel's brain directory still requires the existing explicit
 `CHANNEL_OCCUPIED` / `switchFromRoot` confirmation, including after a login failure.
 
+Rust inbox reads return the full cached response before optional display-name
+lookups finish. Conversation summaries use one grouping pass and clone only the
+latest message per conversation; focused history clones only its requested
+50-message window. Existing fields, message ordering, `before` cursors, unread
+rules and persisted records are preserved. The Node runtime keeps its existing
+five-second name-warming budget; this performance change is Rust-only.
+
+Background metadata reads deduplicate in-flight targets across requests, share
+four CLI slots across the service and register at most 512 queued/in-flight
+targets. Failed or empty names are cached for 30 seconds. Name completion does
+not emit a dedicated SSE event, redraw open history or mark it read. New names
+appear on a subsequent service read, such as an explicit AIChat refresh or a
+reopen after its list cache expires or is invalidated.
+
+AIChat renders unread and all-group lists in batches of 50 per source with
+previews bounded to 160 Unicode characters; complete message text stays available in history.
+Pagination retains the total unread count and scroll position. Bulk read uses a
+fresh complete conversation list, including rows not rendered yet. List snapshots
+are isolated in memory and expire after 60 seconds; existing persona SSE events,
+explicit refreshes, read actions and a fresh binding unread total that contradicts
+the cached list invalidate or refresh them. Existing server response shapes remain
+usable without new pagination parameters or a coordinated client/server upgrade.
+
 ## Dashboard channel status
 
 Overview shows separate DingTalk (`dingtalk-cli`) and Feishu (`lark-cli`) cards above

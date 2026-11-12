@@ -1,5 +1,16 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-12：集成浏览器导航保留在预览内（0.2.62）
+
+修复 macOS 的 Wry URL 导航回调无法区分主框架和子框架、把预览网址交给系统浏览器的问题。主 WKWebView 的原生 delegate 代理仅处理真实子框架的普通导航，允许无 URL 凭据的 HTTP(S) 和初始 `about:blank`；主窗口、弹窗、下载及其它事件继续交给原 delegate。CEF 兼容宿主也按真实框架标识允许普通 HTTP(S) 预览。桌面 Bridge、媒体授权、敏感链接外传过滤和浏览器嵌入限制不变，Web/MCP 无协议或同步升级要求。
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建通过，Rust **87/87**，Node **276 通过、4 个平台用例跳过、0 失败**。完整检查需允许测试监听 loopback；默认沙箱禁止监听时的端口夹具失败不能视为代码回归。最终日志 `/private/tmp/keepwork-preview-navigation-check.log`。
+- `node --test apps/aichat-rust/tests/navigation-macos.test.cjs`：真实 WKWebView **1/1**。同一隔离夹具先不安装代理，复现跨源 iframe 被原 delegate 拒绝；安装生产代理后，`localhost` 子框架经 302 成功渲染并向父页回传消息，原外链分支调用为零。随后顶层跳转仍被原 delegate 拒绝，加载完成事件转发和拒绝后的重载正常。只使用非持久 WebKit 数据与本地 HTTP 服务，未请求百度、未打开 Chrome。
+- `clang++ -std=c++17 apps/aichat-rust/windows/cef-host/navigation_policy_test.cpp -o /private/tmp/keepwork-cef-navigation-test`，再运行该二进制：**通过**。覆盖百度 HTTPS、本地 HTTP、跨域跳转、顶层/登录弹窗限制、URL 凭据和非 HTTP(S) 边界。
+- `npm run check:shared`：通过；日志 `/private/tmp/keepwork-preview-navigation-shared.log`。
+
+已同步四处版本至 **0.2.62**。本次修复需要加载新的桌面原生进程，仅刷新网页不能更新已运行的旧桌面壳。未发布安装包；Windows 仅验证 CEF 策略夹具，未进行 Windows 实机测试；Linux WebKitGTK 未加入本轮原生适配。`blob:`/`data:` 预览仍沿用既有拒绝行为。
+
 ## 2026-11-12：超长源码按职责拆分（0.2.59）
 
 `lib.rs` 从 3240 行降至 31 行，保留公开模块与 API 重导出；窗口装配、状态、IPC、发送者验证、菜单托盘和平台操作移入 `app/`。`app/pet_audio_host.rs` 独立承担文档绑定的录音 IPC、私有音频投递与采集生命周期，消除主窗口与宠物窗口的循环依赖；11 个实现模块的显式同级依赖检查通过。`runtime.rs` 从 2124 行降至 769 行，保留进程监管，清单验证、归档、更新暂存和测试拆入 `runtime/`。原有公开 API、29 条命令的注册顺序及安全验证保持不变。

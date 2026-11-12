@@ -14,7 +14,7 @@
 //!   (`bindings.json`, `<id>.json`, `inbox.json`, `channel-roots.json`,
 //!   `<id>.cursor.json`).
 //! - Out of slice (stay Node-only): agent CLI executors, headless worker
-//!   pages, multi-computer coordination, group nicknames, Circles, DingTalk
+//!   pages, multi-computer coordination, group nicknames, DingTalk
 //!   history backfill and multi-agent group routing. Unsupported surfaces
 //!   keep their `UNSUPPORTED_FEATURE` errors instead of degrading silently.
 
@@ -30,6 +30,9 @@ mod service;
 mod tests;
 
 pub(crate) use cli::shell_child_path;
+pub(crate) use cli::{dws_call, lark_call};
+pub(crate) use dingtalk::dingtalk_group_name;
+pub(crate) use feishu::feishu_identity_checked;
 pub use http::handle_messaging_http;
 pub use service::MessagingService;
 

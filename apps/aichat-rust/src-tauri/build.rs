@@ -6,6 +6,13 @@ mod installer_stop;
 mod macos_resources;
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        cc::Build::new()
+            .file("src/navigation_macos.m")
+            .flag("-fobjc-arc")
+            .compile("keepwork_frame_navigation");
+        println!("cargo:rerun-if-changed=src/navigation_macos.m");
+    }
     #[cfg(windows)]
     if std::env::var("PROFILE").as_deref() == Ok("debug") {
         // Tauri copies bundled resources next to the executable. A detached

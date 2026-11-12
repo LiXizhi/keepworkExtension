@@ -28,6 +28,27 @@ int main() {
   Url tool{"https", "cdn.keepwork.com", "", "/apps/calendar.html", "token=secret", false};
   Check(Navigation(tool, false, false), "trusted tool iframe");
   Check(!Navigation(tool, false, true), "CDN cannot replace main page");
+  Url website{"https", "www.baidu.com", "", "/", "", false};
+  Check(Navigation(website, false, false), "ordinary website stays in preview iframe");
+  Check(!Navigation(website, false, true), "ordinary website cannot replace main page");
+  Check(!Navigation(website, true, true), "ordinary website cannot replace login popup");
+  website.host = "redirected.example.test";
+  Check(Navigation(website, false, false), "cross-origin redirect stays in preview iframe");
+  website.scheme = "http";
+  website.host = "127.0.0.1";
+  website.port = "3001";
+  Check(Navigation(website, false, false), "local HTTP preview server stays embedded");
+  Check(!Navigation(website, false, true), "local preview server cannot replace main page");
+  website.credentials = true;
+  Check(!Navigation(website, false, false), "preview URL credentials remain forbidden");
+  website.credentials = false;
+  for (const auto* scheme : {"file", "javascript", "data", "keepwork"}) {
+    website.scheme = scheme;
+    Check(!Navigation(website, false, false), "preview scheme boundary");
+  }
+  website.scheme = "https";
+  website.host.clear();
+  Check(!Navigation(website, false, false), "preview URLs require a host");
   Check(!External(tool), "token cannot leave app");
   for (const auto* query : {"%74oken=a", "x=1&ACCESS_TOKEN=a", "id_token=a", "authorization=a"}) {
     tool.query = query;
@@ -47,6 +68,7 @@ int main() {
   Url wechat{"https", "open.weixin.qq.com", "", "/connect/qrconnect", "", false};
   Check(Navigation(wechat, false, false), "WeChat login iframe");
   wechat.path = "/cgi-bin/other";
-  Check(!Navigation(wechat, false, false), "WeChat iframe path limit");
+  Check(Navigation(wechat, false, false), "ordinary provider pages stay in preview iframe");
+  Check(!Navigation(wechat, false, true), "provider page cannot replace main page");
   std::cout << "CEF navigation policy tests passed\n";
 }

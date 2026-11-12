@@ -96,6 +96,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     gitSetup: true,
     floatingPet: true,
     petDictationAudioVersion: 1,
+    petVoiceAudioVersion: 1,
     startupSignIn: true,
   }});
 
