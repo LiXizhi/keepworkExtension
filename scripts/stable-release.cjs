@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const qiniu = require('./lib/qiniu-release.cjs');
+const { writeCdnSummary } = require('./lib/cdn-summary.cjs');
 const TARGETS = ['windows-x64', 'macos-arm64', 'macos-x64'];
 const PREFIX = 'keepwork/mcp-stable/';
 const DOMAIN = 'https://cdn.keepwork.com';
@@ -57,6 +58,10 @@ async function main() {
       } else if (res.status !== 404) throw new Error(`CDN preflight HTTP ${res.status}`);
     }
     await publish(release.archives, config);
+    writeCdnSummary({
+      title: 'MCP Stable — 版本文件已上传', version, entries: release.archives,
+      note: '以下版本文件已通过 CDN 校验。稳定渠道尚未在此步骤更新，请查看后续渠道更新结果。',
+    });
   } else if (args.mode === 'promote') {
     await qiniu.verifyEntriesWithRetry(release.archives);
     // Do not let a delayed rerun downgrade an already promoted stable channel.
@@ -69,6 +74,10 @@ async function main() {
       } else if (res.status !== 404) throw new Error(`CDN preflight HTTP ${res.status}`);
     }
     await publish(release.descriptors, config);
+    writeCdnSummary({
+      title: 'MCP Stable — 稳定渠道已更新', version, entries: release.descriptors,
+      note: '以下稳定渠道清单已发布并通过 CDN 校验。固定清单地址会被后续发布覆盖；下载地址请查看清单或本次运行的版本文件表。',
+    });
   } else throw new Error('Expected --mode validate, artifacts or promote');
 }
 if (require.main === module) main().catch(e => { console.error(e.message); process.exitCode = 1; });

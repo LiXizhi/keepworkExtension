@@ -1,0 +1,25 @@
+:root { color-scheme: light dark; font: 14px/1.6 system-ui, sans-serif; color: #20252b; background: #f6f7f9; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 740px; padding: 24px; margin: auto; }
+h1 { margin: 0 0 12px; font-size: 24px; }
+p { margin: 12px 0; }
+#status { background: #e6edf7; padding: 10px 14px; border-radius: 8px; }
+#error { color: #a13024; overflow-wrap: anywhere; }
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+label { display: block; margin: 12px 0 4px; font-weight: 600; }
+input, button { font: inherit; border: 1px solid #aab1bd; border-radius: 6px; padding: 8px 10px; }
+input { width: 100%; background: #fff; color: inherit; min-width: 0; }
+.path { display: flex; gap: 8px; }
+button { white-space: nowrap; cursor: pointer; background: #fff; color: inherit; }
+button:disabled { opacity: .5; cursor: default; }
+.actions { display: flex; gap: 8px; margin-top: 20px; flex-wrap: wrap; }
+#start { background: #2863d4; color: #fff; border-color: #2863d4; }
+.hint { color: #596373; font-size: 12px; }
+@media (prefers-color-scheme: dark) {
+  :root { color: #e8ebef; background: #20232a; }
+  input, button { background: #2b303a; border-color: #626b7a; }
+  #status { background: #293c5c; }
+  #error { color: #ffada2; }
+  .hint { color: #b0b9c7; }
+}

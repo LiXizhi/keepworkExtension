@@ -483,13 +483,13 @@ test('rebinding the webpage restores tools on the same native session without re
 test('ACP session/load history is isolated during page rebinding while another session stays live', async () => {
   const conversationId = 'history-rebind';
   await registerReplayContext(conversationId, 'history-generation-a');
-  const session = await create(conversationId, { contextVersion: 1, mode: 'ask' });
+  const session = await create(conversationId, { contextVersion: 1, mode: 'craft' });
   assert.equal((await turn(session, 'history-rebind-1', 'First question')).status, 200);
   const first = await waitSession(session, (view) => view.status === 'completed');
   const peer = await create('history-rebind-peer', { mode: 'ask' });
   assert.equal((await turn(peer, 'history-peer-1', 'FIXTURE_SLOW')).status, 200);
   await waitSession(peer, (view) => answerText(view).includes('中文 fixture'));
-  replayOnLoad(session, { permission: true, peerSessionId: peer.threadId });
+  replayOnLoad(session, { permission: true, metadata: true, peerSessionId: peer.threadId });
   await registerReplayContext(conversationId, 'history-generation-b');
   try {
     const sent = await turn(session, 'history-rebind-2', 'List the top-level project files');
@@ -504,6 +504,13 @@ test('ACP session/load history is isolated during page rebinding while another s
     const response = logRows().find((row) => row.id === 'history-permission-' + session.threadId && !row.method);
     assert.ok(response, 'history permission requests must receive a bounded rejection');
     assert.ok(response.error || response.result?.outcome?.outcome === 'cancelled', 'history permissions cannot be approved');
+    const backend = await request(`/backends?backend=workbuddy&sessionId=${session.id}`);
+    assert.equal(backend.status, 200, JSON.stringify(backend.json));
+    assert.ok(backend.json.workbuddy.models.some((model) => model.id === 'restored-model'),
+      'configuration notifications survive a load reply without optional metadata');
+    assert.ok(logRows().some((row) => row.method === 'session/set_mode'
+      && row.params.sessionId === session.threadId && row.params.modeId === 'default'),
+    'the replayed native plan mode is reconciled with the requested Craft mode');
     const peerView = await waitSession(peer, (view) => answerText(view).includes('LIVE_DURING_RESTORE'));
     assert.equal(peerView.status, 'running', 'a load guard belongs only to its own session');
     const promptCount = prompts().filter((row) => row.params.sessionId === session.threadId).length;

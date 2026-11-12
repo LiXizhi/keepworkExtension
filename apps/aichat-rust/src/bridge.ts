@@ -23,6 +23,7 @@ const ALLOWED_HOST_COMMANDS = new Set([
   "cut",
   "copy",
   "paste",
+  "remote-voice",
   "select-all",
   "zoom-in",
   "zoom-out",
@@ -62,9 +63,18 @@ export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
     gitSetup: true,
     floatingPet: true,
     startupSignIn: true,
+    ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceVersion: 1 as const, browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
   });
 
   const petListeners = new Set<(payload: Record<string, unknown>) => void>();
+  const browserListeners = new Set<(payload: Record<string, unknown>) => void>();
+  void listen<Record<string, unknown>>("aichat-desktop:browser-surface", (event) => {
+    for (const cb of browserListeners) { try { cb(event.payload); } catch {} }
+  });
+  window.addEventListener("__aichat_desktop_event__", ((event: CustomEvent) => {
+    if (event.detail?.event !== "browser-surface") return;
+    for (const cb of browserListeners) { try { cb(event.detail.payload); } catch {} }
+  }) as EventListener);
   const updateListeners = new Set<(payload: UpdatesSnapshot) => void>();
   const folderListeners = new Set<(root: RootGrant) => void>();
 
@@ -111,6 +121,13 @@ export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
   const bridge: AIChatDesktopBridge = Object.freeze({
     version: 1,
     capabilities,
+    browserSurface(op: string, args: Record<string, unknown> = {}): Promise<unknown> {
+      return invoke("desktop_browser_surface", { op, args });
+    },
+    onBrowserSurface(callback: (payload: Record<string, unknown>) => void): () => void {
+      browserListeners.add(callback);
+      return () => { browserListeners.delete(callback); };
+    },
     reportStartupSignIn(signedIn: boolean): Promise<boolean> {
       return invoke<boolean>("desktop_report_startup_signin", { signedIn: !!signedIn });
     },

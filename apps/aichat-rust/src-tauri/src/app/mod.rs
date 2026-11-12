@@ -1,6 +1,7 @@
 //! Application composition. Domain modules above this layer remain independent
 //! of Tauri window and command wiring.
 
+mod browser_surface;
 mod commands;
 mod events;
 mod host_menu;
@@ -8,6 +9,7 @@ mod main_window;
 mod pet_audio_host;
 mod pet_host;
 mod platform;
+mod remote_voice_host;
 mod sender;
 mod startup;
 mod state;

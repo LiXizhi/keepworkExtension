@@ -11,7 +11,8 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - 在受信任顶层主框架内注入 Closed Shadow DOM `#keepwork-desktop-titlebar`：34px 单行 Web 标题栏，包含居中标题、地址胶囊与刷新按钮；Windows / Linux 同行显示校准居中的 K 图标及「文件 / 编辑 / 视图 / 帮助」菜单标题。Windows 使用无系统装饰的窗口，网页为此标题栏预留 34px 空间；macOS 保留系统应用菜单。
   - Web 下拉菜单由客户端自身在 Closed Shadow DOM 内统一绘制，使用 Rust `menu_payload` 提供的菜单数据，不依赖远端页面绘制；采用紧凑的菜单布局，支持展开后横向悬停切换、键盘导航、Esc 与点击外部关闭。标题栏与菜单同步页面深浅色和皮肤 CSS 变量，地址与刷新按钮保留在顶部原位置。
   - 注入只读冻结的 `window.aichatDesktop`（Bridge v1）契约，对现有 Web 端 `desktop.js`、`keepwork_fs.js`、`desktop_menu.js` 保持 100% 兼容。
-  - 集成网页浏览器的普通 HTTP(S) 地址在预览子框架内加载，不因域名不同自动打开系统浏览器；主窗口外链和登录弹窗沿用原策略。macOS 在原生 WebKit 导航阶段区分真实子框架，CEF 兼容模式使用已有框架标识。第三方网页不获得桌面 Bridge 权限，站点自身的嵌入限制仍由浏览器执行。
+  - macOS 集成网页浏览器通过可选 `browserSurfaceVersion: 1` 在工具画布内显示独立的原生 WKWebView，支持 HTTP(S)、前进/后退和刷新。外站使用独立非持久网站数据，不注入桌面 Bridge、IPC 或 AIChat 凭据；切页、遮挡及关闭时隐藏或销毁视图。工作区 HTML 保留原有 iframe 预览调试。旧网页、旧桌面和其他平台沿用 iframe；新版网页明确提示无法确认外站嵌入结果并提供外部打开入口，不把 iframe 错误文档误报为加载成功。主窗口外链和登录弹窗策略不变。
+  - `browserSurfaceViewportVersion: 1` 保留固定 CSS 视口，`browserSurfaceScaleVersion: 1` 使完整视口等比缩小到可用画布。1280×800 页面在较小面板中四边完整可见，内部布局尺寸不变；调整窗口或 Console 不重载网页。原生坐标变换同步绘制及点击位置，不以改网页缩放或伪造页面属性代替。仅支持旧 viewport-v1 的宿主明确按原尺寸滚动，缺少该能力时保持自适应并禁用固定预设。此选项不模拟平板 UA、触屏或物理屏幕；网站自身超出所选视口的内容仍由网页滚动。
 - **菜单协议 `aichat.desktop-menu.v1` 与命令路由（对齐 `apps/aichat-desktop`）**：
   - 菜单载荷同时提供桌面版形状 `menu: { id, label, items }` 与冗余兼容字段 `menuId` / `items` / `anchor` / `x` / `y`，菜单项标签与 `CmdOrCtrl` 加速键、`shortcut`（macOS `⌘ ⇧ ⌥`）与桌面版逐项一致。
   - **页面命令**（`new-chat`、`toggle-sidebar`、`toggle-files`、`open-settings`、`experience-simple`、`experience-professional`、`theme-light`、`theme-dark`）只投递给 AIChat 页面；**主机命令**（`open-folder`、`reload`、`check-updates`、`toggle-login`、`quit`、编辑/缩放/全屏/开发者工具、`mcp-status`/`mcp-dashboard`/`mcp-restart`、`open-browser`、`local-source`、`published-site` 等）由桌面进程原生执行，未知 id 一律拒绝。
@@ -38,6 +39,20 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - `src-tauri/src/brain_folder.rs`：管理 `<Documents>/MyBrain` 默认第二大脑文件夹预览与初始化授权。
   - `src-tauri/src/terminal.rs`：基于原生 PTY（Unix `libc::openpty` / Windows Shell）提供 `desktop:<id>` 会话、游标增量输出、窗口尺寸同步与中断控制。
 
+### 小米遥控器语音输入
+
+正常的 Tauri 客户端在「编辑 → 遥控器语音输入…」和系统托盘提供独立设置窗口，适配小米蓝牙语音遥控器 2 / 2 Pro（RC001 / RC003）。蓝牙连接、ATVV 音频解码与输入控制内置于 Rust 客户端，语音由 **Keepwork 云端 ASR** 转为文字，再粘贴到当前光标位置。无需安装 Python、下载本地语音模型或准备额外运行环境。此入口独立于 AIChat 网页和 MCP 版本；语音识别需要网络。CEF 兼容宿主不包含此能力。真实蓝牙与跨应用粘贴的验收状态见 [VALIDATION.md](VALIDATION.md)。
+
+1. 在系统蓝牙设置中配对遥控器，并先断开其与电视、盒子或其他桥接软件的连接。打开「遥控器语音输入…」，可填写 BLE 设备 ID 指定遥控器；留空时查找支持的设备。
+2. 阅读窗口中的云端识别提示，点击「启动语音输入」，等待连接就绪。把光标放在 AIChat 或其他应用的输入框，按住遥控器语音键说话，松手后上传本次录音并等待识别和粘贴。不会自动按 Enter、发送聊天消息或切回 AIChat。
+3. 不再使用时点击「停止」。此功能默认关闭，重启客户端后需要重新启动；完全退出客户端会停止录音、识别和输入控制并释放蓝牙连接。隐藏主聊天窗口不等同于停止遥控器输入。
+
+macOS 首次使用需按系统提示授予 Keepwork 蓝牙、辅助功能和输入监控权限。权限拒绝或缺失时按窗口提示在系统设置中处理，不绕过系统授权。Windows 需要可用 BLE 适配器；向权限级别更高的应用粘贴可能被系统阻止。Linux 及旧 Windows/CEF 路径不在本轮支持范围内。
+
+ATVV 只在按住语音键时传输，松手后才识别，不提供会议常开麦或边说边上屏。就绪期间会全局预留 F5，实体键盘的 F5 也会被拦截；停止、断连或退出会释放。录音开始时记录前台目标，粘贴前再次核对；目标已变化时仅把结果复制到剪贴板，需自行粘贴，不抢焦点。自动粘贴同样会使用剪贴板，替换原有剪贴板内容。
+
+**录音会发送到 Keepwork 语音服务进行识别。** 按住期间的音频只保留在内存中，松手后把当前一段解码为 16 kHz 单声道 PCM16，发送至 `wss://speechrtc.keepwork.com/speech`；客户端不保存录音文件、不记录音频或转写文字日志，也不把它们转发给 AIChat 网页或 MCP。识别后的文字在粘贴或复制时进入系统剪贴板。断网、服务拒绝、识别超时或连接中断会显示错误，不自动重发这段音频、不回退本地模型、不粘贴未完成结果；恢复网络后可重新按住录制新的一段。停止或退出会取消在途识别，迟到结果不会继续粘贴。
+
 ### Rust 源码模块
 
 `src-tauri/src/lib.rs` 仅声明公共领域模块并重导出桌面入口、状态类型与窗口操作，保留原有 crate 根路径的公开 API。Tauri 应用装配集中在私有 `app/` 模块，业务领域模块不依赖窗口装配层。
@@ -51,6 +66,7 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 | `app/sender.rs` | 主窗口、宠物和更新窗口的 IPC 发送者验证 |
 | `app/events.rs` | 主页面事件分发 |
 | `app/commands.rs` | 文件、终端、菜单、标题栏与主题 IPC |
+| `app/browser_surface.rs` / `browser_surface_macos.m` | 原生网页视图的发送者、URL、边界校验及隔离 WebKit 生命周期 |
 | `app/main_window.rs` | 主文档生命周期、连接恢复、本地源码切换与缩放 |
 | `app/host_menu.rs` | 原生命令执行、系统菜单、托盘与退出流程 |
 | `app/pet_host.rs` | 宠物窗口、原生拖动跟踪、菜单操作与页面命令编排 |

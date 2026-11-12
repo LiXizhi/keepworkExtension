@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.65"
+version = "0.2.70"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
@@ -76,10 +76,16 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+btleplug = "=0.13.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_LibraryLoader"] }

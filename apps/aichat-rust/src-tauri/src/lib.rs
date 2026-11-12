@@ -17,6 +17,7 @@ pub mod pet_audio;
 pub mod pet_canvas;
 pub mod pet_menu;
 pub mod runtime;
+pub mod remote_voice;
 pub mod security;
 pub mod terminal;
 pub mod tray_channels;

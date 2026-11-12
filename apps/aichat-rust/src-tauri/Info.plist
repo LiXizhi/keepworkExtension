@@ -8,6 +8,8 @@
   <string>Keepwork</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>KeepWork 第二大脑需要访问麦克风以用于语音输入、实时通话和课堂录音。</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Keepwork 通过蓝牙接收小米遥控器按住语音键时的音频，用于本地语音输入。</string>
   <key>NSCameraUsageDescription</key>
   <string>KeepWork 第二大脑需要访问摄像头以用于视频交互。</string>
   <key>NSHumanReadableCopyright</key>

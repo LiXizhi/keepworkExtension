@@ -9,9 +9,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         cc::Build::new()
             .file("src/navigation_macos.m")
+            .file("src/browser_surface_macos.m")
+            .file("src/remote_voice/native_input_macos.m")
             .flag("-fobjc-arc")
             .compile("keepwork_frame_navigation");
         println!("cargo:rerun-if-changed=src/navigation_macos.m");
+        println!("cargo:rerun-if-changed=src/browser_surface_macos.m");
+        println!("cargo:rerun-if-changed=src/remote_voice/native_input_macos.m");
     }
     #[cfg(windows)]
     if std::env::var("PROFILE").as_deref() == Ok("debug") {

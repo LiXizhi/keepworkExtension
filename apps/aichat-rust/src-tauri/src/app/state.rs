@@ -48,6 +48,7 @@ pub struct AppCore {
     pub updates: Arc<UpdateManager>,
     pub pet: Arc<PetController>,
     pub pet_audio: Arc<pet_audio::PetAudioRelay>,
+    pub remote_voice: Arc<crate::remote_voice::RemoteVoice>,
     pub pet_menu: pet_menu::Session,
     pub dev_server: Mutex<Option<DevServer>>,
     pub entry_url: Mutex<String>,

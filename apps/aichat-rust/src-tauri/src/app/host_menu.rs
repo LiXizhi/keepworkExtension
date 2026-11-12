@@ -30,6 +30,7 @@ use tauri::{
 /// 退出桌面端：关闭原生终端、停止两个受管 Runtime 后退出进程
 /// （托盘「完全退出」与菜单「退出」共用）。
 fn quit_desktop(app: &AppHandle, core: &Arc<AppCore>) {
+    core.remote_voice.stop();
     stop_pet_audio(app, core, None, "应用正在退出", false);
     core.quitting.store(true, Ordering::Relaxed);
     core.terminals.close_all();
@@ -165,6 +166,7 @@ pub async fn execute_host_command(
             }
         }
         "reload" => reload_main_window(app, core),
+        "remote-voice" => super::remote_voice_host::open_remote_voice_window(app),
         "fullscreen" => {
             if let Some(win) = app.get_webview_window("main") {
                 let cur = win.is_fullscreen().unwrap_or(false);
@@ -299,6 +301,7 @@ pub(super) fn setup_native_menu_and_tray(
     )?;
     let check_updates =
         MenuItem::with_id(app, "help:check-updates", "检查更新…", true, None::<&str>)?;
+    let remote_voice = MenuItem::with_id(app, "remote-voice", "遥控器语音输入…", true, None::<&str>)?;
     let tray_version = MenuItem::with_id(
         app,
         "tray:version",
@@ -318,6 +321,7 @@ pub(super) fn setup_native_menu_and_tray(
             &open_chat,
             &new_chat,
             &open_settings,
+            &remote_voice,
             &sep4,
             &open_folder,
             &toggle_pet,
@@ -428,6 +432,8 @@ pub(super) fn setup_native_menu_and_tray(
                 &PredefinedMenuItem::copy(app, Some("复制"))?,
                 &PredefinedMenuItem::paste(app, Some("粘贴"))?,
                 &PredefinedMenuItem::select_all(app, Some("全选"))?,
+                &PredefinedMenuItem::separator(app)?,
+                &remote_voice,
             ],
         )?;
         let view_sub = Submenu::with_items(

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost tauri://localhost; frame-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>遥控器语音输入</title>
+  <link rel="stylesheet" href="/src/remote-voice.css">
+</head>
+<body>
+  <main>
+    <h1>遥控器语音输入</h1>
+    <p>小米遥控器 2 / 2 Pro（RC001 / RC003）：按住语音键说话，松手后交给 Keepwork 语音识别，粘贴到当前光标。不会自动按回车。</p>
+    <div id="status" role="status" aria-live="polite">正在读取状态…</div>
+    <p id="error" role="alert"></p>
+    <fieldset id="configuration">
+      <label for="device">蓝牙设备 ID（可选）</label>
+      <input id="device" type="text" spellcheck="false" placeholder="留空自动查找；Windows 可填蓝牙地址，macOS 可填设备 UUID">
+    </fieldset>
+    <div class="actions"><button id="start" type="button">启动语音输入</button><button id="stop" type="button" disabled>停止</button></div>
+    <p class="hint">蓝牙接收与解码已内置，直接启动即可。每段录音只在松手后发送给 Keepwork 云端语音识别，需要联网；客户端不保存录音，不使用本地模型。失败不会自动重传，请重新按住语音键录制。</p>
+    <p class="hint">先在系统蓝牙设置中配对遥控器，并断开电视或其他桥接软件。macOS 需允许 Keepwork 使用蓝牙、辅助功能及输入监控。权限不足会给出错误提示。</p>
+    <p class="hint">就绪期间会全局预留 F5，普通键盘的 F5 也会被拦截；停止或断连后恢复。请启动后切回输入框再按住语音键。切换前台目标时只复制识别文字，请手动粘贴。识别结果会覆盖系统剪贴板。</p>
+    <p class="hint">默认关闭，重启后需手动启动。关闭此设置窗口会继续语音输入；可从托盘重新打开并停止。</p>
+  </main>
+  <script type="module" src="/src/remote-voice.ts"></script>
+</body>
+</html>

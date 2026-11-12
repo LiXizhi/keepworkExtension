@@ -110,22 +110,21 @@ status is distinct from a missing installation. Metadata queries never start
 login or submit a prompt. Native resume preserves the original conversation;
 reconnects and uncertain submissions never resend a prompt automatically.
 
-Antigravity NDJSON remains explicitly unsupported in Rust; its executable
-inventory entry is retained. Backend responses expose the optional
-`protocolSupported` boolean separately from installation discovery. A full
-query that finds an unsupported CLI
-keeps `available: false`, its `cli.path`, `probe: "executable"` and unknown
-authentication, with `setup: "unsupported"` and `code: "UNSUPPORTED_FEATURE"`.
-Executable-only inventory still reports whether the CLI was found. Missing
-executables keep the historical missing-CLI error without unsupported setup or
-code fields. AIChat accepts both this additive response and older Rust's explicit
-native-protocol-unavailable error: it performs the fixed local executable check,
-reuses existing installations, and runs the program installer only when that
-check confirms the CLI is missing. Installation is verified separately and may
-finish with "installed; connection unsupported"; it does not claim a verified
-account or usable native session, start login, or change the MCP
-engine. MCP authentication/permission/connection errors and uncertain command
-results do not trigger installation retries.
+Antigravity CLI uses native `agy` stream-json under the stable `gemini` backend
+key. Model discovery reads `agy models`; no reasoning options are invented.
+Each conversation reuses its native process across turns and resumes with its
+exact saved conversation ID after restart. Text and tool updates stream through
+the owned session API; interruption, process exits and uncertain submissions
+never replay a prompt. Ask and Plan use agy's native plan mode. Native permissions
+remain in force: denied tools produce a failed turn, and headless sessions cannot
+answer interactive permission requests. Page-bound MCP configuration stays in a
+host-owned launch directory, with capability credentials inherited only by the
+child process. Neither user workspace nor global CLI configuration is changed.
+Node Antigravity history remains readable and resumable across runtime engines;
+legacy Gemini ACP history stays readable but requires a new Antigravity chat to
+continue. Antigravity accepts text only and explicitly rejects image input.
+Executable discovery remains separate from protocol/account verification, and
+metadata queries do not launch login or submit a prompt.
 
 Image turns, account switching, non-Codex native history import and the Copilot
 VS Code custom-model bridge also remain outside this Rust implementation. A

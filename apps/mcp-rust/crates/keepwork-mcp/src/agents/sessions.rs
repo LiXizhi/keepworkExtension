@@ -180,9 +180,9 @@ impl AgentManager {
                 let harness = self.harness_for(backend, &cwd, cursor_preview).await?;
                 value["probe"] = json!("protocol");
                 value["cli"] = harness.cli_info();
-                if matches!(spec.protocol, Protocol::Codex | Protocol::Claude) {
+                if matches!(spec.protocol, Protocol::Codex | Protocol::Claude | Protocol::Antigravity) {
                     let account = harness
-                        .call("account/read", json!({"refreshToken":false}), RPC_TIMEOUT)
+                        .call("account/read", json!({"refreshToken":false,"refresh":query.get("refresh").map(String::as_str)==Some("1")}), RPC_TIMEOUT)
                         .await?;
                     if account["authUnknown"] == true {
                         value["authenticated"] = Value::Null;
@@ -203,7 +203,7 @@ impl AgentManager {
                         value["account"] = Value::Object(display);
                     }
                     match harness
-                        .call("model/list", json!({"limit":100,"refresh":query.get("refresh").map(String::as_str)==Some("1")}), RPC_TIMEOUT)
+                        .call("model/list", json!({"limit":100,"refresh":spec.protocol != Protocol::Antigravity && query.get("refresh").map(String::as_str)==Some("1")}), RPC_TIMEOUT)
                         .await
                     {
                         Ok(models) => {
@@ -570,14 +570,17 @@ impl AgentManager {
                 parameters["config"] = codex_server(&server);
                 parameters["developerInstructions"]=json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
             }
-        } else if spec.protocol == Protocol::Claude {
+        } else if matches!(spec.protocol, Protocol::Claude | Protocol::Antigravity) {
             parameters["roots"] = json!(roots);
             parameters["mode"] = json!(selected_mode);
             if contextual {
                 parameters["aichatInstructions"] = json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
             }
         }
-        if matches!(spec.protocol, Protocol::Codex | Protocol::Claude) {
+        if matches!(
+            spec.protocol,
+            Protocol::Codex | Protocol::Claude | Protocol::Antigravity
+        ) {
             if let Some(model) = &requested_model {
                 parameters["model"] = json!(model);
             }
@@ -760,7 +763,12 @@ impl AgentManager {
         })
     }
 
-    async fn load(self: &Arc<Self>, session_id: &str, owner: &str) -> Result<Arc<Harness>, String> {
+    async fn load(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &str,
+        request_id: &str,
+    ) -> Result<Arc<Harness>, String> {
         let data = self.view(session_id, owner)?;
         for value in data["roots"].as_array().ok_or("Workspace unavailable")? {
             let root = value.as_str().ok_or("Workspace unavailable")?;
@@ -806,7 +814,7 @@ impl AgentManager {
                     return Err("UNSUPPORTED_FEATURE: This CLI cannot resume its previous native session; start a new conversation".into());
                 }
                 json!({"sessionId":data["threadId"],"cwd":data["roots"][0],"mcpServers":server.into_iter().collect::<Vec<_>>()})
-            } else if harness.protocol() == Protocol::Claude {
+            } else if matches!(harness.protocol(), Protocol::Claude | Protocol::Antigravity) {
                 // Public snapshots omit receipts. Read the owned raw record so
                 // a restored conversation retains its existing native identity.
                 let resume = self.sessions.lock().unwrap()[session_id].data["submissions"]
@@ -817,6 +825,26 @@ impl AgentManager {
                         })
                     });
                 let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"roots":data["roots"],"model":data["model"],"mode":data["mode"],"resume":resume,"mcpServers":server.into_iter().collect::<Vec<_>>()});
+                if harness.protocol() == Protocol::Antigravity {
+                    let sessions = self.sessions.lock().unwrap();
+                    let session = &sessions[session_id];
+                    let native = &session.native;
+                    params["driver"] = native["driver"].clone();
+                    params["nativeId"] = native["nativeId"].clone();
+                    params["effort"] = data["effort"].clone();
+                    // Node creates its wrapper before starting agy. Only a
+                    // positively empty native history with no uncertain prior
+                    // submission may initialize its first conversation here.
+                    params["allowEmpty"] = json!(
+                        native["driver"] == "antigravity-v1"
+                            && (native["nativeId"].is_null() || native["nativeId"] == "")
+                            && native["turns"].as_array().is_some_and(|t| t.is_empty())
+                            && session.data["submissions"].as_object().is_some_and(|r| r
+                                .iter()
+                                .all(|(id, receipt)| receipt["state"] == "rejected"
+                                    || (id == request_id && receipt["state"] == "starting")))
+                    );
+                }
                 if contextual {
                     params["aichatInstructions"] = json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
                 }
@@ -989,7 +1017,10 @@ impl AgentManager {
                 .configuration
                 .clone();
             let _guard = gate.lock().await;
-            let harness = self.load(session_id, owner).await?;
+            let harness = self.load(session_id, owner, &request_id).await?;
+            if harness.protocol() == Protocol::Antigravity && !images.is_empty() {
+                return Err("UNSUPPORTED_FEATURE: Antigravity supports text input only. Remove the images or switch agents.".into());
+            }
             if harness.protocol() == Protocol::Acp {
                 if !images.is_empty()
                     && harness.capabilities()["promptCapabilities"]["image"] != true
@@ -1036,7 +1067,12 @@ impl AgentManager {
                 if harness.protocol()==Protocol::Claude && s.data["model"]!=*model && requested_effort.is_none(){s.data["effort"]=Value::Null;}
                 s.data["model"]=json!(model);
             }
-            if let Some(effort)=&requested_effort{s.data["effort"]=json!(effort);}Ok(())
+            if let Some(effort)=&requested_effort{s.data["effort"]=json!(effort);}
+            if harness.protocol() == Protocol::Antigravity {
+                for key in ["model", "effort", "roots"] { s.native[key] = s.data[key].clone(); }
+                s.native["mode"] = json!(selected_mode);
+            }
+            Ok(())
         })?;
         if harness.protocol() == Protocol::Acp {
             let dispatched = match harness
@@ -1098,7 +1134,7 @@ impl AgentManager {
             });
         } else {
             let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":native_content,"sandboxPolicy":{"type":if selected_mode=="craft"{"dangerFullAccess"}else{"readOnly"}},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
-            if harness.protocol() == Protocol::Claude {
+            if matches!(harness.protocol(), Protocol::Claude | Protocol::Antigravity) {
                 params.as_object_mut().unwrap().remove("sandboxPolicy");
                 params.as_object_mut().unwrap().remove("approvalPolicy");
                 params["mode"] = json!(selected_mode);

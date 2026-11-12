@@ -1,5 +1,53 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-12：固定分辨率完整缩放显示（0.2.70）
+
+上一轮只验证网页内部尺寸，遗漏较小面板应完整显示固定视口的要求。新增独立可选 `browserSurfaceScaleVersion: 1`，依赖 surface-v1 和 viewport-v1。工具使用 `min(1, 可用宽/视口宽, 可用高/视口高)` 计算显示比例；原生以外层 NSView 的 frame/bounds 坐标变换缩放完整 WKWebView，保留内部 CSS 视口及应用 pageZoom。宿主按相同比例换算裁剪偏移，缺少能力时明确保留旧原尺寸滚动行为，不静默忽略缩放请求。旧 bounds/viewport 请求继续有效；没有 UA、screen 或第三方网页样式改写。
+
+- 本轮修改前原生夹具失败：逻辑 1280×800、显示区域 640×400，实际整页转换到父视图仍为 1280×800，证明仍在裁切。日志 `/private/tmp/keepwork-browser-fit-before.log`。
+- 原生专项 **2/2**：1280×800 整页转换后为 640×400，四边均在 visibleRect 内；原生 NSEvent 点击逻辑右下角按钮、聚焦输入并键入成功。2×应用缩放叠加 0.25×适配仍保持 1280×800、显示 640×400，原生点击命中正确。没有用 DOM click 替代缩放输入验收。旧视口、权限隔离、导航及销毁回归继续通过。日志 `/private/tmp/keepwork-browser-fit-native-input.log`。
+- 百度实测 **2/2**：innerWidth/clientWidth=1280、innerHeight/clientHeight=800、documentWidth=1280，整页完整可见，搜索输入和提交按钮都位于视口内。原生页快照按已验证的 640×400 显示尺寸导出，截图 `/private/tmp/keepwork-native-baidu-fit.png` 已查看；日志 `/private/tmp/keepwork-browser-fit-baidu.log`。这是隔离原生视图和输入测试，不是用户当前桌面窗口的截图或真人鼠标验收。
+
+网页完整显示、四角截图像素、旧能力兼容及宿主消息回归见 AIChat `tests/README.md`。需要新桌面进程及更新后的网页源码；未发布安装包。
+
+## 2026-11-12：固定视口与原生裁剪分离（0.2.68）
+
+确认原生页面此前直接采用被宿主裁小的可见区域作为 WKWebView 尺寸，导致平板/桌面预设受到窗口、Console 和滚动画布影响。新增可选 `browserSurfaceViewportVersion: 1`：`bounds` 仍表示可见区域，`viewport` 独立给出完整 CSS 尺寸及裁剪偏移。原生裁剪容器限制绘制范围，内层网页保持完整布局尺寸；应用缩放同步 pageZoom，不伪造页面属性或改变网站内容。旧请求省略 viewport 时继续采用历史 bounds 语义；新网页对未声明能力的旧原生宿主禁用固定尺寸，普通浏览不受影响。
+
+- 真实修改前原生回归失败：请求 768×1024、可见 600×400，网页实际得到 `{width:600,height:400}`。证据 `/private/tmp/keepwork-browser-viewport-before.log`；本轮修改前源码保存在临时文件中，不是历史发布版本验收。
+- 原生专项 **2/2**：平板 768×1024、手机 390×844、桌面 1280×800 的页面实际 innerWidth/innerHeight 与媒体查询；裁剪/滚动偏移；2×应用缩放；响应式旧请求恢复；页面状态不因改尺寸丢失。原网页隔离、链接/历史和生命周期检查继续通过，日志 `/private/tmp/keepwork-browser-viewport-native.log`。
+- `pnpm --prefix apps/aichat-rust check`：最终 TypeScript、前端构建、Rust **101/101**、Node **279通过/4平台跳过/0失败**，包含工作区并行新增模块。日志 `/private/tmp/keepwork-browser-viewport-full-final.log`。`npm run check:shared` 与 `cargo build --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 也通过，日志 `/private/tmp/keepwork-browser-viewport-{shared,build}.log`。
+- 实际百度专项 **2/2**：innerWidth=768、innerHeight=1024，宽度媒体查询匹配；站点文档仍宽 1250（其 `#wrapper` CSS 设置 min-width:1250px），因此横向溢出不能视为视口未生效。其水平滚动条占 15px 时 clientHeight/visualViewport.height=1009，高度媒体查询不会等于包括滚动条的 innerHeight。没有改写百度样式、UA 或 screen 属性。日志 `/private/tmp/keepwork-browser-viewport-baidu.log`；截图 `/private/tmp/keepwork-native-baidu-viewport.png` 已查看。
+
+AIChat 宿主、工具、能力降级与画布滚动回归见相邻源码 `tests/README.md`。本轮未发布安装包，需要加载新桌面进程和更新后的网页源码；Windows/Linux/Electron 不宣称支持此原生能力。
+
+## 2026-11-12：小米遥控器 ATVV 与 Keepwork 云端听写（本轮验证待补）
+
+本轮将遥控器输入改为 Rust 原生内置的蓝牙连接、ATVV 解码和输入控制；松手后把当前一段内存 PCM 发送到 Keepwork 云端 ASR，识别完成再粘贴到系统光标。设置窗口只保留可选设备 ID 和启动/停止，不再要求安装 Python、准备 venv 或下载本地模型。使用入口、联网要求和权限说明见 [README.md](README.md#小米遥控器语音输入)。默认关闭，不自动启动；不依赖网页或 MCP 版本，不向网页暴露音频、转写文字或任意键盘注入接口。
+
+**当前记录状态**：本轮实际执行命令、通过数量、版本与日志路径待最终验证后补充。上一轮 0.2.69 的测试针对已替换实现，不能作为 Rust 原生与 Keepwork 云端识别链路已经通过的证据。以下为本轮验收要求，不代表已实测通过。
+
+- **免环境准备与失败边界**：在未安装 Python、没有本地语音模型的系统中直接启动；无“准备环境/模型”按钮、路径要求、安装脚本或后台下载。覆盖设备 ID 留空/指定、无 BLE 适配器、设备不可达、权限拒绝、重复启动和停止。错误有明确来源，不影响普通聊天或其他原生能力。
+- **协议与音频夹具**：验证 ATVV 握手、控制消息、120 字节 ADPCM 帧、高 nibble 优先解码与已知 PCM 向量，覆盖通知分片、重复起止、空录音、超长录音、断连中止及重连。核对 `MIC_OPEN` 时机，避免“约 1.9 秒无声音频”旧问题；输出须为 16 kHz 单声道 signed PCM16 little-endian。
+- **Keepwork ASR 契约**：使用固定 `wss://speechrtc.keepwork.com/speech`，`asr_format=pcm`、`asr_rate=16000`；等待 `ready` 后发送当前录音的二进制 PCM，结束发送 `{type:"asr_end"}`，仅在本轮 ASR 完成后使用识别文字。覆盖多个结果、空结果、服务错误、握手/完成超时、连接中断、未知附加字段及缺失可选 TTS 元信息；不发送 TTS 请求。握手与识别结果使用隔离 WebSocket 夹具验证，不能据此声称线上 ASR 已通过。
+- **网络与重试**：录音松手前不上传。断网、服务拒绝或超时后显示识别失败，不自动重传音频、不回退本地模型、不输入部分结果。网络恢复后仅新录音可建立新请求；停止、退出和新会话令旧请求失效，迟到结果不得粘贴。
+- **输入与生命周期**：仅就绪后预留全局 F5，实体键盘 F5 同样被预留；停止、断连和退出后恢复。记录开始录音时的前台目标，识别完成前切换目标时仅复制文字、不自动粘贴；不按 Enter、不唤起主窗口。停止或退出时取消未完成录音/识别，不延迟粘贴、不重复输入。
+- **权限与兼容**：macOS 覆盖首次蓝牙、辅助功能与输入监控的允许/拒绝/撤销；Windows 覆盖 BLE 不可用、访问被拒绝和更高权限应用拒绝粘贴。分别验证新旧 AIChat 网页、MCP 未运行或旧 MCP、离线网页下的原生入口；网页离线不影响入口，但云端识别仍需网络。普通聊天、网页麦克风、终端和文件操作保持可用。CEF/Linux 不宣称具备该输入能力。
+- **隐私边界**：启动前明确提示录音将发送到 Keepwork 云端。确认录音按住期间仅在内存保存、松手后仅发送当前一段，不写入本地录音文件；音频与转写文字不进入 Rust 日志、网页或 MCP。粘贴/目标变化时仅预期文字进入系统剪贴板。
+
+**待真实设备与服务验证**：Windows 与 macOS 分别连接 RC001/RC003，完成按住录音、松手后由真实 Keepwork 服务识别、中文及中英混输，并在 AIChat 输入框和外部编辑器中验证当前光标插入、焦点变化、停止、睡眠/唤醒、断连恢复及网络中断。还需验证实际权限提示归属、F5 恢复和目标应用对粘贴的接受情况。协议与输入夹具通过不等于真实蓝牙到云端 ASR 端到端通过；本记录尚不宣称任一平台的完整真机链路已通过，也不代表已发布安装包。
+
+## 2026-11-12：集成浏览器使用原生网页视图（0.2.67）
+
+确认原集成浏览器对外部网址仍设置 `iframe.src`，且把 iframe 错误文档的 load 事件标为“页面已加载”。新增可选 `browserSurfaceVersion: 1`；macOS 桌面通过独立 WKWebView 在工具画布内浏览外站，不移除网站的 XFO/CSP。网页没有 Tauri 注册、IPC、应用初始化脚本，也不共享 AIChat 的 cookies/localStorage。宿主按工具实例管理不透明 ID、裁剪边界、遮挡、切页、关闭及迟到事件；工作区调试保留原协议。能力缺失的旧端继续可用，外站状态和日志明确显示未知。未改变 MCP 协议或要求客户端/服务端同步升级。
+
+- `pnpm --prefix apps/aichat-rust check`：最终 TypeScript、前端构建、Rust **98/98**、Node **278通过/4平台跳过/0失败**，日志 `/private/tmp/keepwork-browser-surface-full-final.log`。Bridge 行为及原生输出边界定向复验 **2/2**，日志 `/private/tmp/keepwork-browser-surface-native-final.log`。
+- `node --test apps/aichat-rust/tests/browser-surface-macos.test.cjs`：真实 WKWebView 覆盖 XFO DENY/CSP frame-ancestors none 页面渲染与原生像素快照、无桌面凭据/脚本、链接/历史、禁止本地协议、隐藏/恢复/关闭及主文档重置。仅监听本轮临时 loopback 服务；测试结束移除视图与临时文件。
+- `AICHAT_BROWSER_SURFACE_LIVE=1 node --test apps/aichat-rust/tests/browser-surface-macos.test.cjs`：实际百度标题“百度一下，你就知道”、搜索框和无桌面 Bridge 检查通过。截图 `/private/tmp/keepwork-native-baidu.png` 已查看。当前百度 GET 未返回 XFO，未将它的具体白屏原因声称为已经确认的 XFO 拦截；已确认的是错误的 iframe 浏览路径与假成功状态。
+- `npm run check:shared` 通过，日志 `/private/tmp/keepwork-browser-surface-shared.log`。AIChat 工具、宿主、兼容性、安全回归及版本见相邻源码 `tests/README.md`。
+
+此项原生实现仅在 macOS Rust 桌面声明；Windows/Linux/Electron 不宣称已支持或实测。实时百度为隔离原生视图验证，宿主路由使用真实 AIChat 加夹具验证，不等于已在用户运行的桌面窗口中验收。需要新桌面原生进程和更新的 AIChat 源码同时加载；仅刷新旧桌面网页不会更新原生层。未发布安装包或修改现有共享服务。
+
 ## 2026-11-12：桌宠分身系统播音与隐藏主窗调度（0.2.64）
 
 主窗口显式使用 `BackgroundThrottlingPolicy::Disabled`。macOS 14+ 的 WebKit 默认后台调度在隐藏窗口停止系统播音后，可能让下一次播音及 JS 回调停住；单变量原生对照复现，并确认禁用节流后恢复。保持主窗隐藏和焦点不变，不改媒体权限、宠物窗口或弹窗；较旧 macOS、Windows/Linux 的支持边界沿用 Tauri，此项不代表这些平台已实测。维持后台通话和终端的页面调度可能增加后台耗能。

@@ -1,5 +1,6 @@
 //! Native CLI sessions. The browser receives normalized snapshots, never a raw
 //! RPC tunnel or a choice of executable. Credentials and tool grants stay in RAM.
+mod antigravity;
 mod claude;
 pub mod context;
 pub mod discovery;
@@ -287,7 +288,9 @@ impl AgentManager {
             }
             data["pending"] = json!([]);
             let needs_native_history = data["backend"] == "codex" && !data["items"].is_array();
-            if !data["items"].is_array() {
+            if !data["items"].is_array()
+                || (data["backend"] == "gemini" && !data["nativeMetadata"]["nativeId"].is_string())
+            {
                 let loaded = history::load(
                     &file,
                     data["backend"].as_str().unwrap_or("codex"),
@@ -295,18 +298,26 @@ impl AgentManager {
                 );
                 match loaded {
                     Ok(Some(mut thread)) => {
-                        data["items"] = json!(thread["turns"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .flat_map(|t| t["items"].as_array().into_iter().flatten().cloned())
-                            .collect::<Vec<_>>());
+                        if !data["items"].is_array() {
+                            data["items"] = json!(thread["turns"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .flat_map(|t| t["items"].as_array().into_iter().flatten().cloned())
+                                .collect::<Vec<_>>());
+                        }
                         thread["sessionId"] = data["threadId"].clone();
                         data["nativeMetadata"] = thread;
                     }
-                    Ok(None) => data["items"] = json!([]),
+                    Ok(None) => {
+                        if !data["items"].is_array() {
+                            data["items"] = json!([]);
+                        }
+                    }
                     Err(error) => {
-                        data["items"] = json!([]);
+                        if !data["items"].is_array() {
+                            data["items"] = json!([]);
+                        }
                         data["error"] = json!(error);
                     }
                 }
@@ -367,7 +378,14 @@ impl AgentManager {
                 data.as_object_mut().unwrap().remove("items");
             }
             let mut metadata = serde_json::Map::new();
-            for key in ["sessionId", "models", "modes", "configOptions"] {
+            for key in [
+                "sessionId",
+                "models",
+                "modes",
+                "configOptions",
+                "driver",
+                "nativeId",
+            ] {
                 if let Some(value) = session.native.get(key) {
                     metadata.insert(key.into(), value.clone());
                 }

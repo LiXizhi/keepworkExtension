@@ -52,6 +52,8 @@ This repository contains the shared Keepwork MCP runtime and its separately pack
 
 Each application owns its manifest, dependencies, entry points, tests and build output. Applications may import the shared root source, but they do not import each other.
 
+After a CDN release, open **GitHub Actions → the workflow run → Summary** to find clickable download links with the version, platform, file size and SHA-256. Links are recorded after upload and CDN verification succeed; fixed URLs may be overwritten by later releases. For builds without CDN publication, download the files from the run's **Artifacts** section.
+
 The VS Code extension provides only editor and MCP capabilities on port `8089`. The Windows x64 KP Local Helper installer provides the same MCP service on `8089` and supervises the separate local-model process on `18089`. A model change therefore requires a Local Helper version increase and a complete Helper update.
 
 The VS Code extension, **Second brain(keepwork)**, is your digital brain powered by LLM wiki and tools. Its embedded [AIChat](https://keepwork.com/chat) workspace puts a personal second brain at the center of AI assistance, with knowledge workflows and HTML tools for students, teachers and everyday tasks. It also connects to Keepwork projects and runs a **local MCP daemon** for terminal, file and other local capabilities. Its Marketplace ID remains `Xizhi.keepwork`.

@@ -43,7 +43,7 @@ jobs:
       - name: Install runtime test dependencies
         run: npm ci --ignore-scripts --prefix apps/mcp-runtime
       - name: Test release publication and existing Local Helper compatibility
-        run: node --test apps/mcp-runtime/scripts/*.test.cjs apps/local-helper/scripts/publish-qiniu-release.test.cjs
+        run: node --test scripts/cdn-summary.test.cjs apps/mcp-runtime/scripts/*.test.cjs apps/local-helper/scripts/publish-qiniu-release.test.cjs
 
   build:
     needs: prepare

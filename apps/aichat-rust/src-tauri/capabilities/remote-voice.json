@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-voice",
+  "description": "Local voice settings only; no remote origins, filesystem or arbitrary input commands.",
+  "local": true,
+  "windows": ["remote-voice"],
+  "permissions": ["allow-remote-voice-settings"]
+}

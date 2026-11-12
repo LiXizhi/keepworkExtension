@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const qiniu = require('../../../scripts/lib/qiniu-release.cjs');
+const { writeCdnSummary } = require('../../../scripts/lib/cdn-summary.cjs');
 const {
   required, normalizeHttpsUrl, normalizePrefix, normalizeVersion, sha256, readArgs,
   uploadEntry, refreshUrls, verifyEntriesWithRetry,
@@ -92,6 +93,10 @@ async function main() {
     await verifyEntriesWithRetry(group);
   }
   process.stdout.write('Qiniu upload, refresh, and CDN verification completed.\n');
+  writeCdnSummary({
+    title: 'KP Local Helper / windows-x64 — CDN 发布成功', version, entries,
+    note: '以下文件已发布并通过 CDN 校验。latest.json、latest.yml 等固定地址会被后续发布覆盖。',
+  });
 }
 
 if (require.main === module) {

@@ -1,4 +1,7 @@
 export interface DesktopCapabilities {
+  readonly browserSurfaceVersion?: 1;
+  readonly browserSurfaceViewportVersion?: 1;
+  readonly browserSurfaceScaleVersion?: 1;
   readonly files: true;
   readonly terminal: true;
   readonly defaultBrainFolder: true;
@@ -101,6 +104,8 @@ export interface PageConnectionSnapshot {
 }
 
 export interface AIChatDesktopBridge {
+  browserSurface(op: string, args?: Record<string, unknown>): Promise<unknown>;
+  onBrowserSurface(callback: (payload: Record<string, unknown>) => void): () => void;
   readonly version: 1;
   readonly capabilities: DesktopCapabilities;
   reportStartupSignIn(signedIn: boolean): Promise<boolean>;

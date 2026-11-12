@@ -72,6 +72,7 @@ impl Drop for PendingRpc {
 }
 
 pub struct Harness {
+    antigravity: Option<Arc<super::antigravity::Antigravity>>,
     claude: Option<Arc<super::claude::Claude>>,
     backend: String,
     protocol: Protocol,
@@ -95,6 +96,18 @@ impl Harness {
         params: Value,
         timeout: Duration,
     ) -> Result<PendingRpc, String> {
+        if let Some(antigravity) = &self.antigravity {
+            let result = Box::pin(antigravity.call(method, params, timeout)).await?;
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(Ok(result));
+            return Ok(PendingRpc {
+                harness: Weak::new(),
+                id: 0,
+                receiver: Some(receiver),
+                timeout,
+                method: method.into(),
+            });
+        }
         if let Some(claude) = &self.claude {
             let result = Box::pin(claude.call(method, params, timeout)).await?;
             let (sender, receiver) = oneshot::channel();
@@ -154,12 +167,16 @@ impl Harness {
         launch: CliLaunch,
         cwd: &Path,
     ) -> Result<Arc<Self>, String> {
-        if protocol == Protocol::Claude {
+        if matches!(protocol, Protocol::Claude | Protocol::Antigravity) {
             let (events, _) = broadcast::channel(128);
             let (shutdown, _) = watch::channel(false);
-            let claude = super::claude::Claude::new(launch.clone(), cwd, events.clone());
+            let claude = (protocol == Protocol::Claude)
+                .then(|| super::claude::Claude::new(launch.clone(), cwd, events.clone()));
+            let antigravity = (protocol == Protocol::Antigravity)
+                .then(|| super::antigravity::Antigravity::new(launch.clone(), cwd, events.clone()));
             return Ok(Arc::new(Self {
-                claude: Some(claude),
+                antigravity,
+                claude,
                 backend: backend.into(),
                 protocol,
                 launch,
@@ -171,7 +188,12 @@ impl Harness {
                 alive: AtomicBool::new(true),
                 terminated: AtomicBool::new(false),
                 stopped: Notify::new(),
-                generation: format!("claude-{}-{}", std::process::id(), chrono_generation()),
+                generation: format!(
+                    "{}-{}-{}",
+                    protocol.as_str(),
+                    std::process::id(),
+                    chrono_generation()
+                ),
                 next_id: AtomicU64::new(0),
             }));
         }
@@ -216,6 +238,7 @@ impl Harness {
         let (events, _) = broadcast::channel(128);
         let (shutdown, mut stop) = watch::channel(false);
         let harness = Arc::new(Self {
+            antigravity: None,
             claude: None,
             backend: backend.to_string(),
             protocol,
@@ -430,6 +453,9 @@ impl Harness {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
+        if let Some(antigravity) = &self.antigravity {
+            return Box::pin(antigravity.call(method, params, timeout)).await;
+        }
         if let Some(claude) = &self.claude {
             return Box::pin(claude.call(method, params, timeout)).await;
         }
@@ -470,6 +496,9 @@ impl Harness {
     }
 
     pub async fn respond(&self, id: Value, result: Value) -> Result<(), String> {
+        if let Some(antigravity) = &self.antigravity {
+            return antigravity.respond().await;
+        }
         if let Some(claude) = &self.claude {
             return claude.respond(id, result).await;
         }
@@ -481,6 +510,9 @@ impl Harness {
     }
 
     pub async fn reject(&self, id: Value, code: i64, message: &str) -> Result<(), String> {
+        if let Some(antigravity) = &self.antigravity {
+            return antigravity.respond().await;
+        }
         if let Some(claude) = &self.claude {
             return claude.reject(id, message).await;
         }
@@ -581,6 +613,9 @@ impl Harness {
     }
 
     pub fn close(&self) {
+        if let Some(antigravity) = &self.antigravity {
+            antigravity.close();
+        }
         if let Some(claude) = &self.claude {
             claude.close();
         }
@@ -590,6 +625,11 @@ impl Harness {
     /// Reap owned children before the daemon's Tokio runtime exits. Browser
     /// stream disconnection must never call this operation.
     pub async fn shutdown(&self) {
+        if let Some(antigravity) = &self.antigravity {
+            self.alive.store(false, Ordering::Release);
+            antigravity.shutdown().await;
+            return;
+        }
         if let Some(claude) = &self.claude {
             self.alive.store(false, Ordering::Release);
             claude.shutdown().await;
@@ -613,6 +653,9 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        if let Some(antigravity) = &self.antigravity {
+            antigravity.close();
+        }
         if let Some(claude) = &self.claude {
             claude.close();
         }

@@ -2,6 +2,7 @@
 identifier = "allow-desktop-commands"
 description = "Allows the trusted Keepwork main, pet and updates windows to use the desktop bridge commands."
 commands.allow = [
+  "desktop_browser_surface",
   "desktop_page_connection_status",
   "desktop_retry_page_connection",
   "desktop_page_connection_attempt",
@@ -31,4 +32,13 @@ commands.allow = [
   "updates_window_check",
   "updates_window_apply_mcp",
   "updates_window_apply_desktop",
+]
+
+[[permission]]
+identifier = "allow-remote-voice-settings"
+description = "Allows only the local remote-voice settings window to manage its worker."
+commands.allow = [
+  "remote_voice_status",
+  "remote_voice_start",
+  "remote_voice_stop",
 ]

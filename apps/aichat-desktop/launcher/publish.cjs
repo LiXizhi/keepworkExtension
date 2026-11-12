@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const qiniu = require('../../../scripts/lib/qiniu-release.cjs');
 const { publish } = require('../../../scripts/stable-release.cjs');
+const { writeCdnSummary } = require('../../../scripts/lib/cdn-summary.cjs');
 const targets = ['windows-x64', 'macos-arm64', 'macos-x64'];
 const prefix = 'keepwork/aichat-launcher/v1/';
 const base = 'https://cdn.keepwork.com/' + prefix;
@@ -95,6 +96,19 @@ async function main() {
   }
   // Switch the website's existing download buttons only after first launch works.
   if (downloadManifests.length) await publish(downloadManifests, config);
+  writeCdnSummary({
+    title: retry ? 'AIChat Desktop Launcher — 重用现有签名发布' : 'AIChat Desktop Launcher — CDN 发布成功',
+    version: manifest.version,
+    entries: [
+      ...downloads,
+      ...downloadManifests.map((item, index) => ({ ...item, name: `${targets[index]} / latest-client.json` })),
+      ...(mode !== 'launchers' && !retry ? [entry(file, 'stable.json'), ...uploads.map(item => ({
+        ...item,
+        name: `${item.sha256 === manifest.app.sha256 ? 'AIChat app' : targets.filter(target => manifest.platforms[target].sha256 === item.sha256).join(', ')} / ${item.name}`,
+      }))] : []),
+    ],
+    note: `发布模式：${mode}。${retry ? '签名渠道已存在，本次重用；以下仅列出本次上传或校验的文件。' : '以下文件已发布并通过 CDN 校验。'}stable.json 和 latest-client.json 等固定地址会被后续发布覆盖。`,
+  });
 }
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
 module.exports = { plan, unpack };

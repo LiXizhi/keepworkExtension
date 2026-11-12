@@ -20,6 +20,7 @@ export default defineConfig({
         main: resolve(__dirname, "index.html"),
         pet: resolve(__dirname, "pet.html"),
         updates: resolve(__dirname, "updates.html"),
+        remoteVoice: resolve(__dirname, "remote-voice.html"),
       },
     },
   },

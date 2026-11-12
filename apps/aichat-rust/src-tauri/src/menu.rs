@@ -41,6 +41,7 @@ pub const HOST_COMMANDS: &[&str] = &[
     "close-window",
     "toggle-pet",
     "open-keepwork",
+    "remote-voice",
 ];
 
 /// 历史 id → 规范化 id。原生菜单/托盘与旧页面仍可能投递旧 id，
@@ -175,6 +176,8 @@ fn edit_menu() -> Value {
         { "id": "copy", "label": "复制", "role": "copy", "accelerator": "CmdOrCtrl+C", "shortcut": shortcut("CmdOrCtrl+C") },
         { "id": "paste", "label": "粘贴", "role": "paste", "accelerator": "CmdOrCtrl+V", "shortcut": shortcut("CmdOrCtrl+V") },
         { "id": "select-all", "label": "全选", "role": "selectAll", "accelerator": "CmdOrCtrl+A", "shortcut": shortcut("CmdOrCtrl+A") },
+        { "type": "separator" },
+        { "id": "remote-voice", "label": "遥控器语音输入…" },
     ])
 }
 

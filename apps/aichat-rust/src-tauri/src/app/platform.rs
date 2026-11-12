@@ -6,7 +6,10 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 #[cfg(target_os = "macos")]
-use std::{process::Stdio, time::Duration};
+use std::{
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 pub fn open_in_system_browser(raw_url: &str) -> Result<(), String> {
     let valid = external_url(raw_url).ok_or_else(|| format!("Invalid external URL: {raw_url}"))?;
@@ -39,56 +42,93 @@ fn spawn_macos_open(url: &str) -> Result<(), String> {
     std::thread::Builder::new()
         .name("open-url".into())
         .spawn(move || {
-            // The status-item menu is still tracking when this is requested.
-            // `open` and NSWorkspace only activate Chrome in that state and drop
-            // the URL (Chrome is often already running with --no-startup-window).
-            // AppleScript `open location` is what actually creates the tab.
+            // Let a native menu finish tracking before dispatching the URL.
             std::thread::sleep(Duration::from_millis(200));
-            if let Some(bundle_id) = default_browser_bundle_id() {
-                // Do not fall back to `open` after this fails. That command
-                // brings Chrome forward and still does not load the URL.
-                if let Err(err) = browser_open_location(&bundle_id, &url) {
-                    eprintln!("mcp-dashboard: {err}");
-                }
-                return;
+            let bundle_id = default_browser_bundle_id();
+            if let Err(err) = open_macos_url(&url, bundle_id.as_deref(), run_browser_command) {
+                eprintln!("open browser failed: {err}");
             }
-            let _ = Command::new("/usr/bin/open")
-                .arg("--")
-                .arg(&url)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
         })
         .map(|_| ())
         .map_err(|e| format!("无法打开 {url_for_err}：{e}"))
 }
 
 #[cfg(target_os = "macos")]
-fn browser_open_location(bundle_id: &str, url: &str) -> Result<(), String> {
-    if !bundle_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-    {
-        return Err(format!("浏览器标识无效：{bundle_id}"));
-    }
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(
+fn open_macos_url(
+    url: &str,
+    bundle_id: Option<&str>,
+    mut run: impl FnMut(&mut Command, Duration) -> Result<(), String>,
+) -> Result<(), String> {
+    let timeout = Duration::from_secs(3);
+    let mut primary_error = None;
+    if let Some(bundle_id) = bundle_id {
+        if bundle_id.is_empty()
+            || !bundle_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err("浏览器标识无效".to_string());
+        }
+        let mut command = Command::new("/usr/bin/osascript");
+        command.args([
+            "-e",
             "on run argv\ntell application id (item 1 of argv) to open location (item 2 of argv)\nend run",
-        )
-        .arg(bundle_id)
-        .arg(url)
+            bundle_id,
+            url,
+        ]);
+        match run(&mut command, timeout) {
+            Ok(()) => return Ok(()),
+            Err(error) => primary_error = Some(error),
+        }
+    }
+
+    // AppleScript can be denied or wait indefinitely for Automation consent.
+    // LaunchServices does not need that permission; opening this read-only URL
+    // again is safe even if the first request reached the browser before timeout.
+    let mut fallback = Command::new("/usr/bin/open");
+    fallback.args(["--", url]);
+    run(&mut fallback, timeout).map_err(|error| match primary_error {
+        Some(primary) => format!("AppleScript: {primary}; LaunchServices: {error}"),
+        None => error,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn run_browser_command(command: &mut Command, timeout: Duration) -> Result<(), String> {
+    let mut child = command
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        Err(format!("osascript {} {}", output.status, detail.trim()))
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("{status}"))
+                }
+            }
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(25))
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match result {
+                    Err(error) => error.to_string(),
+                    _ => "打开浏览器超时".to_string(),
+                });
+            }
+        }
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "platform_tests.rs"]
+mod tests;
 
 #[cfg(target_os = "macos")]
 fn default_browser_bundle_id() -> Option<String> {

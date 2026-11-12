@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const qiniu = require('./lib/qiniu-release.cjs');
 const { publish } = require('./stable-release.cjs');
+const { writeCdnSummary } = require('./lib/cdn-summary.cjs');
 const DOMAIN = 'https://cdn.keepwork.com';
 const TARGETS = {
   'win32-x64': { platform: 'windows', arch: 'x64' },
@@ -90,9 +91,14 @@ async function main() {
   const args = qiniu.readArgs(process.argv.slice(2));
   const dir = path.resolve(args.dir);
   const entries = args.channel === 'migration' ? await migrationEntries(dir, args.target) : collect(dir, args.target);
+  const version = args.channel === 'migration' ? '0.1.10' : JSON.parse(fs.readFileSync(path.join(dir, 'latest-client.json'), 'utf8')).version;
   if (args.dryRun) { console.log(entries.map(e => e.name)); return; }
   const config = { accessKey: qiniu.required(process.env.KP_QINIU_ACCESS_KEY, 'KP_QINIU_ACCESS_KEY'), secretKey: qiniu.required(process.env.KP_QINIU_SECRET_KEY, 'KP_QINIU_SECRET_KEY'), bucket: 'haqi', uploadHost: 'https://up-z2.qiniup.com' };
   await publishRelease(entries, config);
+  writeCdnSummary({
+    title: `AIChat Desktop / ${args.target} — CDN 发布成功`, version, entries,
+    note: '以下文件已发布并通过 CDN 校验。latest-client.json、更新清单和 KeepWork-SecondBrain.zip 等固定地址会被后续发布覆盖。',
+  });
 }
 if (require.main === module) main().catch(e => { console.error(e.message); process.exitCode = 1; });
 module.exports = { collect, publishRelease };

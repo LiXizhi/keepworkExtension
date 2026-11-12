@@ -1,4 +1,4 @@
-//! Node-compatible ACP history. The registry is shared by independently shipped
+//! Node-compatible ACP / Antigravity history. The registry is shared by independently shipped
 //! hosts, so transcripts must remain readable after switching runtime engines.
 use super::discovery::{definition, Protocol};
 use serde_json::{json, Value};
@@ -11,7 +11,7 @@ fn sidecar(file: &Path, backend: &str, thread: &str) -> Result<Option<PathBuf>, 
     let Some(spec) = definition(backend) else {
         return Ok(None);
     };
-    if spec.protocol != Protocol::Acp {
+    if !matches!(spec.protocol, Protocol::Acp | Protocol::Antigravity) {
         return Ok(None);
     }
     if thread.is_empty()
@@ -124,6 +124,15 @@ pub fn save(file: &Path, data: &Value, native: &Value) -> Result<(), String> {
     if !Path::new(cwd).is_absolute() {
         return Err("Native history workspace must be absolute".into());
     }
+    // A legacy Gemini ACP record has no Antigravity driver. Its wrapper ID is
+    // not an agy conversation ID, so saving its readable history must never
+    // silently turn it into an Antigravity conversation.
+    let antigravity = definition(backend)
+        .is_some_and(|spec| spec.protocol == Protocol::Antigravity)
+        && native["driver"] == "antigravity-v1"
+        && existing
+            .as_ref()
+            .is_none_or(|old| old["driver"] == "antigravity-v1");
     let mut out = existing.unwrap_or_else(|| json!({"id":thread,"cwd":cwd,"turns":[]}));
     out["id"] = json!(thread);
     out["cwd"] = json!(cwd);
@@ -132,6 +141,21 @@ pub fn save(file: &Path, data: &Value, native: &Value) -> Result<(), String> {
     for key in ["models", "modes", "normalMode", "configOptions"] {
         if let Some(value) = native.get(key).filter(|value| !value.is_null()) {
             out[key] = safe(value, 0, &mut 2_000_000);
+        }
+    }
+    if antigravity {
+        if out["nativeId"].is_string()
+            && native["nativeId"].is_string()
+            && out["nativeId"] != native["nativeId"]
+        {
+            return Err(
+                "Antigravity history identity mismatch; original data was preserved".into(),
+            );
+        }
+        for key in ["driver", "nativeId", "model", "effort", "mode", "roots"] {
+            if let Some(value) = native.get(key) {
+                out[key] = safe(value, 0, &mut 2_000_000);
+            }
         }
     }
     let obj = out.as_object_mut().ok_or("Invalid native history")?;
@@ -301,5 +325,73 @@ mod tests {
         assert_eq!(std::fs::read(&cache).unwrap(), b"broken original");
         assert!(load(&file, "workbuddy", "../outside").is_err());
         assert_eq!(load(&file, "codex", "thread").unwrap(), None);
+    }
+
+    #[test]
+    fn antigravity_native_identity_and_settings_survive_both_runtime_histories() {
+        let (_temp, file, mut data) = setup();
+        data["backend"] = json!("gemini");
+        let metadata = json!({"driver":"antigravity-v1","nativeId":"native-conversation","model":"native-model","effort":"high","mode":"plan","roots":data["roots"],"mcpServers":[{"env":{"CAPABILITY":"private-capability"}}]});
+        data["items"] = json!([{"id":"rust-item","type":"agentMessage","text":"Rust 中文"}]);
+        save(&file, &data, &metadata).unwrap();
+        let cache = sidecar(&file, "gemini", "thread").unwrap().unwrap();
+        assert_eq!(
+            cache.parent().unwrap().file_name().unwrap(),
+            "agent-sessions-v1.json.gemini"
+        );
+        let mut node = load(&file, "gemini", "thread").unwrap().unwrap();
+        for key in ["driver", "nativeId", "model", "effort", "mode", "roots"] {
+            assert_eq!(node[key], metadata[key]);
+        }
+        node["turns"].as_array_mut().unwrap().push(json!({"id":"node-turn","status":"completed","items":[{"id":"node-item","type":"agentMessage","text":"Node answer","providerField":9}]}));
+        std::fs::write(&cache, serde_json::to_vec(&node).unwrap()).unwrap();
+        data["items"] = json!([{"id":"rust-item","type":"agentMessage","text":"Rust 中文"},{"id":"node-item","type":"agentMessage","text":"Node answer"}]);
+        save(&file, &data, &Value::Null).unwrap();
+        let restored = load(&file, "gemini", "thread").unwrap().unwrap();
+        assert_eq!(restored["nativeId"], "native-conversation");
+        assert_eq!(restored["turns"].as_array().unwrap().len(), 2);
+        assert_eq!(restored["turns"][1]["items"][0]["providerField"], 9);
+        let raw = std::fs::read_to_string(cache).unwrap();
+        assert!(!raw.contains("private-capability") && !raw.contains("mcpServers"));
+    }
+
+    #[test]
+    fn legacy_gemini_history_is_readable_and_never_upgraded_to_antigravity() {
+        let (_temp, file, mut data) = setup();
+        data["backend"] = json!("gemini");
+        let cache = sidecar(&file, "gemini", "thread").unwrap().unwrap();
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        let legacy = json!({"id":"thread","cwd":data["roots"][0],"turns":[{"id":"legacy-turn","items":[{"id":"legacy-item","type":"agentMessage","text":"Saved Gemini answer"}]}],"models":{"currentModelId":"old-gemini"}});
+        std::fs::write(&cache, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(load(&file, "gemini", "thread").unwrap().unwrap(), legacy);
+        save(&file, &data, &json!({"driver":"antigravity-v1","nativeId":"unrelated-native-id","model":"new-model","roots":data["roots"]})).unwrap();
+        let preserved = load(&file, "gemini", "thread").unwrap().unwrap();
+        assert!(preserved.get("driver").is_none());
+        assert!(preserved.get("nativeId").is_none());
+        assert!(preserved.get("model").is_none());
+        assert_eq!(preserved["turns"], legacy["turns"]);
+    }
+
+    #[test]
+    fn antigravity_history_never_rebinds_the_original_native_conversation() {
+        let (_temp, file, mut data) = setup();
+        data["backend"] = json!("gemini");
+        save(
+            &file,
+            &data,
+            &json!({"driver":"antigravity-v1","nativeId":"original-id"}),
+        )
+        .unwrap();
+        let cache = sidecar(&file, "gemini", "thread").unwrap().unwrap();
+        let original = std::fs::read(&cache).unwrap();
+        assert!(save(
+            &file,
+            &data,
+            &json!({"driver":"antigravity-v1","nativeId":"different-id"})
+        )
+        .unwrap_err()
+        .contains("identity mismatch"));
+        assert_eq!(std::fs::read(&cache).unwrap(), original);
+        assert!(load(&file, "gemini", "../outside").is_err());
     }
 }

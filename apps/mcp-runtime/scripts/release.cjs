@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const qiniu = require('../../../scripts/lib/qiniu-release.cjs');
+const { writeCdnSummary } = require('../../../scripts/lib/cdn-summary.cjs');
 
 const PRODUCT = 'keepwork-mcp-node-runtime';
 const TARGETS = ['windows-x64', 'macos-arm64', 'macos-x64'];
@@ -109,6 +110,14 @@ async function main() {
   };
   const published = await publishRelease(config, release, () => isMainHead(identity.commit));
   process.stdout.write(published ? 'NodeRuntime published and CDN verified.\n' : 'Superseded by a newer main commit; no CDN files were changed.\n');
+  writeCdnSummary({
+    title: published ? 'MCP NodeRuntime — CDN 发布成功' : 'MCP NodeRuntime — 本次未发布',
+    version: identity.version,
+    entries: published ? [...release.archives, ...release.descriptors] : [],
+    note: published
+      ? '以下文件已发布并通过 CDN 校验。固定地址会被后续发布覆盖。'
+      : 'main 已有更新的提交，本次跳过发布，CDN 文件未更改。',
+  });
 }
 
 if (require.main === module) {

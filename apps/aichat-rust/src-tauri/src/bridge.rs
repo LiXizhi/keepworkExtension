@@ -72,10 +72,13 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
   Object.defineProperty(window, "__AICHAT_PET_AUDIO_DOCUMENT__", {{ value: petAudioDocument }});
   const updateListeners = new Set();
   const folderListeners = new Set();
+  const browserListeners = new Set();
 
   window.addEventListener("__aichat_desktop_event__", (e) => {{
     const detail = e.detail || {{}};
-    if (detail.event === "pet-command") {{
+    if (detail.event === "browser-surface") {{
+      for (const cb of browserListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
+    }} else if (detail.event === "pet-command") {{
       for (const cb of petListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
     }} else if (detail.event === "pet-audio") {{
       for (const cb of petAudioListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
@@ -98,12 +101,19 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     petDictationAudioVersion: 1,
     petVoiceAudioVersion: 1,
     startupSignIn: true,
+    ...(bootstrap.platform === "darwin" ? {{ browserSurfaceVersion: 1, browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
   }});
 
   if (!window.aichatDesktop) {{
     const bridge = Object.freeze({{
       version: 1,
       capabilities,
+      browserSurface: (op, args = {{}}) => invoke("desktop_browser_surface", {{ op: String(op || ""), args: args || {{}} }}),
+      onBrowserSurface: (cb) => {{
+        if (typeof cb !== "function") return () => {{}};
+        browserListeners.add(cb);
+        return () => browserListeners.delete(cb);
+      }},
       reportStartupSignIn: (signedIn) => invoke("desktop_report_startup_signin", {{ signedIn: !!signedIn }}),
       publishPetState: (state) => invoke("desktop_publish_pet_state", {{ state: state || {{}}, document: petAudioDocument }}),
       petResult: (result) => invoke("desktop_pet_result", {{ result: result || {{}} }}),

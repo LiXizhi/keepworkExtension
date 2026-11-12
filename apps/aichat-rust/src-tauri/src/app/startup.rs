@@ -293,6 +293,7 @@ pub fn run() {
         updates,
         pet: Arc::new(PetController::new(pet_prefs_path)),
         pet_audio: Arc::new(pet_audio::PetAudioRelay::default()),
+        remote_voice: Arc::new(crate::remote_voice::RemoteVoice::new(&profile_dir)),
         pet_menu: pet_menu::Session::default(),
         dev_server: Mutex::new(initial_dev_srv),
         entry_url: Mutex::new(initial_entry),
@@ -423,6 +424,8 @@ pub fn run() {
                 // Finished can arrive after the new page has published its pet
                 // snapshot, so it must leave that state intact.
                 if payload.event() == PageLoadEvent::Started {
+                    #[cfg(target_os = "macos")]
+                    super::browser_surface::reset(&window);
                     if let Some(identity) = core_for_page_load.pet_audio.reset_page() {
                         notify_pet_audio_stopped(window.app_handle(), identity, "录音页面已重新加载", false);
                     }
@@ -564,6 +567,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            super::browser_surface::desktop_browser_surface,
             main_window::desktop_page_connection_status,
             main_window::desktop_retry_page_connection,
             main_window::desktop_page_connection_attempt,
@@ -593,8 +597,19 @@ pub fn run() {
             updates_window::updates_window_check,
             updates_window::updates_window_apply_mcp,
             updates_window::updates_window_apply_desktop,
+            super::remote_voice_host::remote_voice_status,
+            super::remote_voice_host::remote_voice_start,
+            super::remote_voice_host::remote_voice_stop,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!())
+        .map(|app| {
+            let voice = Arc::clone(&core.remote_voice);
+            app.run(move |_, event| {
+                if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+                    voice.stop();
+                }
+            });
+        });
     #[cfg(windows)]
     if let Err(error) = result {
         eprintln!("error while running KeepWork 第二大脑 (aichat-rust): {error}");
