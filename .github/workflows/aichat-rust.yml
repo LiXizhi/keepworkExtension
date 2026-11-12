@@ -27,6 +27,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # runtime::tests::staged_node_bundle_is_readable_by_rust_on_macos_and_windows
+      # runs apps/mcp-runtime/scripts/stage-runtime.cjs, so the runtime's
+      # devDependencies must exist before `pnpm check` runs `cargo test`.
+      - name: Install MCP runtime deps required by cargo tests
+        run: npm ci --prefix apps/mcp-runtime
       - name: Install dependencies & run checks
         working-directory: apps/aichat-rust
         run: |
@@ -38,7 +43,6 @@ jobs:
           KP_RUNTIME_NODE_VERSION: 22.23.2
         run: |
           npm ci
-          npm ci --prefix apps/mcp-runtime
           npm ci --prefix apps/pet-companion
           npm run prepare:all --prefix apps/pet-companion -- darwin-arm64 darwin-x64
           npm run stage --prefix apps/mcp-runtime -- --platform darwin --arch arm64
