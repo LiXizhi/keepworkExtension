@@ -175,7 +175,12 @@ async fn send(state: &Arc<AppState>, path: &str, input: Value) -> (StatusCode, V
         .header("x-agent-owner", OWNER)
         .body(Body::from(input.to_string()))
         .unwrap();
-    let response = router(Arc::clone(state)).oneshot(request).await.unwrap();
+    // Poll each request in its own task, as an HTTP server would, instead of
+    // combining the long fixture and router's debug poll frames on one stack.
+    let response = tokio::spawn(router(Arc::clone(state)).oneshot(request))
+        .await
+        .unwrap()
+        .unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&bytes).unwrap())

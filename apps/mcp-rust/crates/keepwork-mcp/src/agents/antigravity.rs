@@ -410,7 +410,10 @@ impl Connection {
             .is_some_and(|s| !s.is_empty());
         let runtime = if scoped {
             let dir = std::env::temp_dir().join(format!("keepwork-agy-{}", uuid::Uuid::new_v4()));
+            #[cfg(unix)]
             let mut builder = std::fs::DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;

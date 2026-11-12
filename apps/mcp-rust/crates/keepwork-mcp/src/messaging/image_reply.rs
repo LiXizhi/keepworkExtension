@@ -88,7 +88,10 @@ impl StagedImage {
     fn create(root: &str, image: &Image) -> Result<(Self, String), MessageError> {
         let relative = format!(".keepwork-reply-{}", uuid::Uuid::new_v4());
         let directory = Path::new(root).join(&relative);
+        #[cfg(unix)]
         let mut builder = std::fs::DirBuilder::new();
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
