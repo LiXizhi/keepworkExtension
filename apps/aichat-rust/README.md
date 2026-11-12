@@ -185,3 +185,17 @@ xcrun swiftc -parse-as-library -module-cache-path /private/tmp/aichat-wk-module-
 | **macOS Universal**（Apple Silicon + Intel 单包） | `universal-apple-darwin` | `pnpm make:mac` | `Keepwork.app`、`Keepwork_<版本>_universal.dmg` |
 | **Windows x64** | `x86_64-pc-windows-msvc` | `pnpm make:win:x64` | `Keepwork_<版本>_x64-setup.exe` |
 | **Windows ARM64** | `aarch64-pc-windows-msvc` | `pnpm make:win:arm64` | `Keepwork_<版本>_arm64-setup.exe` |
+
+### GitHub Release 与 CDN 下载地址
+
+在 `aichat-rust-v<版本>` 标签上手动触发 [Rust 安装包发布工作流](../../.github/workflows/aichat-rust-windows-release.yml) 时，发布任务使用仓库 secrets `KP_QINIU_ACCESS_KEY` 和 `KP_QINIU_SECRET_KEY` 上传 Windows x64 / ARM64 EXE 与 macOS Universal DMG，并校验 CDN 文件的大小与 SHA-256。三个安装包全部校验通过后，工作流会把完整、可点击的 CDN 下载地址写入 GitHub Release 正文顶部，保留原有发布说明，再上传安装包、Windows 产物验证清单及校验和并公开 Release。新建 Release 在验证失败时保留为草稿；重跑时替换同一自动区块。
+
+版本安装包使用存储端禁止覆盖策略；同版本重跑只接受内容一致的已有 CDN 文件。CDN 返回 404 也不会授权覆盖源站已有对象。发生内容冲突时应复用原构建产物或发布新版本，不能覆盖 GitHub 附件来绕过校验。
+
+此发布流程新增按版本存放的安装包路径 `https://cdn.keepwork.com/keepwork/aichat-rust/<版本>/<安装包文件名>`，已有桌面自动更新 feed 保持原地址。只有对应版本完成实际上传和校验后，该版本的下载链接才可视为已发布。
+
+从仓库根目录预览本地安装包的发布计划（不上传）：
+
+```bash
+node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version <版本> --dry-run
+```

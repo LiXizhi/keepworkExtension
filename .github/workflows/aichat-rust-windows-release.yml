@@ -225,9 +225,16 @@ jobs:
     needs: [build, build-macos]
     if: startsWith(github.ref, 'refs/tags/aichat-rust-v')
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check release publication contracts
+        run: node --test apps/aichat-rust/tests/release-publication.test.cjs
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -236,9 +243,10 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#aichat-rust-v}"
           ls -l dist
+          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --dry-run
           (cd dist && shasum -a 256 *.exe *.dmg) > "SHA256SUMS-${version}.txt"
           cat "SHA256SUMS-${version}.txt"
-      - name: Upload assets to the GitHub release
+      - name: Ensure the GitHub release exists
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -249,4 +257,23 @@ jobs:
             gh release create "$TAG" --verify-tag --draft \
               --title "KeepWork 第二大脑 ${version}（Windows / macOS）" --generate-notes
           fi
-          gh release upload "$TAG" dist/*.exe dist/*.dmg "SHA256SUMS-${version}.txt" --clobber
+      - name: Publish installers to CDN and add download links to release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+        run: |
+          version="${GITHUB_REF_NAME#aichat-rust-v}"
+          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version"
+      # An existing version must pass CDN byte-for-byte verification before any
+      # GitHub attachment is replaced; newly created releases stay draft on error.
+      - name: Upload verified assets and publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#aichat-rust-v}"
+          gh release upload "$TAG" dist/*.exe dist/*.dmg dist/release-manifest-${version}-*.json "SHA256SUMS-${version}.txt" --clobber
+          gh release edit "$TAG" --draft=false --latest

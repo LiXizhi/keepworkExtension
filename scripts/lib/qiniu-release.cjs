@@ -53,8 +53,11 @@ function urlSafeBase64(value) {
   return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
 }
 
-function createUploadToken(accessKey, secretKey, bucket, remoteKey, deadline = Math.floor(Date.now() / 1000) + 3600) {
-  const policy = urlSafeBase64(JSON.stringify({ scope: `${bucket}:${remoteKey}`, deadline }));
+function createUploadToken(accessKey, secretKey, bucket, remoteKey, deadline = Math.floor(Date.now() / 1000) + 3600, options = {}) {
+  const policy = urlSafeBase64(JSON.stringify({
+    scope: `${bucket}:${remoteKey}`, deadline,
+    ...(options.insertOnly === true ? { insertOnly: 1 } : {}),
+  }));
   const signature = urlSafeBase64(crypto.createHmac('sha1', secretKey).update(policy).digest());
   return `${accessKey}:${signature}:${policy}`;
 }
@@ -290,7 +293,7 @@ async function uploadLargeEntry(config, entry, createToken) {
 }
 
 async function uploadEntry(config, entry) {
-  const createToken = () => createUploadToken(config.accessKey, config.secretKey, config.bucket, entry.remoteKey);
+  const createToken = () => createUploadToken(config.accessKey, config.secretKey, config.bucket, entry.remoteKey, undefined, config);
   if (entry.size > MULTIPART_THRESHOLD) {
     await uploadLargeEntry(config, entry, createToken);
     return;

@@ -5,7 +5,73 @@ const os = require('node:os');
 const path = require('node:path');
 const { Readable, Writable } = require('node:stream');
 const test = require('node:test');
-const { uploadLargeEntry } = require('./lib/qiniu-release.cjs');
+const { createUploadToken, uploadEntry, uploadLargeEntry } = require('./lib/qiniu-release.cjs');
+
+function uploadPolicy(token) {
+  return JSON.parse(Buffer.from(token.split(':')[2], 'base64url').toString('utf8'));
+}
+
+test('insert-only upload tokens preserve the legacy deadline and default overwrite policy', () => {
+  const deadline = 1234567890;
+  const expected = { scope: 'haqi:release/client.zip', deadline };
+  const token = options => createUploadToken('fixture-access', 'fixture-secret', 'haqi', 'release/client.zip', deadline, options);
+  assert.deepEqual(uploadPolicy(token()), expected);
+  for (const insertOnly of [undefined, false, 0, 1, 'true']) {
+    assert.deepEqual(uploadPolicy(token({ insertOnly })), expected);
+  }
+  assert.deepEqual(uploadPolicy(token({ insertOnly: true })), { ...expected, insertOnly: 1 });
+});
+
+test('form and multipart uploads carry insert-only policy only when explicitly enabled', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qiniu-upload-policy-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const policies = [];
+  t.mock.method(https, 'request', (requestUrl, options, callback) => {
+    const form = options.headers['Content-Type']?.startsWith('multipart/form-data');
+    const chunks = [];
+    if (options.headers.Authorization) policies.push(uploadPolicy(options.headers.Authorization.slice('UpToken '.length)));
+    const request = new Writable({
+      write(chunk, _encoding, done) { if (form) chunks.push(chunk); done(); },
+      final(done) {
+        if (form) {
+          const match = Buffer.concat(chunks).toString('utf8').match(/name="token"\r\n\r\n([^\r]+)/);
+          policies.push(uploadPolicy(match[1]));
+        }
+        const body = options.method === 'PUT' ? { etag: 'part-etag' }
+          : new URL(requestUrl).pathname.endsWith('/uploads') ? { uploadId: 'upload-1' }
+            : { key: 'release/client.zip' };
+        process.nextTick(() => {
+          const response = Readable.from([Buffer.from(JSON.stringify(body))]);
+          response.statusCode = 200;
+          callback(response);
+          done();
+        });
+      },
+    });
+    request.setTimeout = () => request;
+    return request;
+  });
+
+  for (const size of [7, 4 * 1024 * 1024 + 1]) {
+    const filePath = path.join(dir, `${size}.zip`);
+    fs.closeSync(fs.openSync(filePath, 'w'));
+    fs.truncateSync(filePath, size);
+    for (const insertOnly of [undefined, true]) {
+      policies.length = 0;
+      await uploadEntry({
+        accessKey: 'fixture-access', secretKey: 'fixture-secret', bucket: 'haqi',
+        uploadHost: 'https://upload.example.test', insertOnly,
+      }, { filePath, name: 'client.zip', remoteKey: 'release/client.zip', size });
+      assert.equal(policies.length, size > 4 * 1024 * 1024 ? 3 : 1);
+      for (const policy of policies) {
+        assert.equal(policy.scope, 'haqi:release/client.zip');
+        assert.ok(policy.deadline > Math.floor(Date.now() / 1000));
+        if (insertOnly) assert.equal(policy.insertOnly, 1);
+        else assert.equal(Object.hasOwn(policy, 'insertOnly'), false);
+      }
+    }
+  }
+});
 
 test('multipart requests mint a fresh upload token, including after a failed part attempt', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qiniu-multipart-'));
