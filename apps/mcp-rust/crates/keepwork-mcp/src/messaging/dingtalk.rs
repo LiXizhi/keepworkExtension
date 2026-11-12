@@ -88,7 +88,6 @@ pub(crate) fn subscription_key(config: &MessageConfig, all_groups: bool) -> Stri
 
 pub(crate) async fn wait_listener_ready(
     stderr: &mut (impl AsyncReadExt + Unpin),
-    child: &mut Child,
 ) -> Result<(), DwsError> {
     let mut diagnostics = String::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(CLI_TIMEOUT_MS);
@@ -96,13 +95,11 @@ pub(crate) async fn wait_listener_ready(
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            let _ = child.kill().await;
             return Err(DwsError::rejected("DWS listener not ready"));
         }
         let read = tokio::select! {
             chunk = stderr.read(&mut buffer) => chunk,
             _ = tokio::time::sleep(remaining) => {
-                let _ = child.kill().await;
                 return Err(DwsError::rejected("DWS listener not ready"));
             }
         };
@@ -115,12 +112,10 @@ pub(crate) async fn wait_listener_ready(
                     r"(?i)unknown.{0,30}(event|rule)|unsupported|not supported|invalid.{0,10}event",
                     &diagnostics,
                 ) {
-                    let _ = child.kill().await;
                     return Err(DwsError::rejected(
                         "DWS CLI update required for message subscriptions",
                     ));
                 }
-                let _ = child.kill().await;
                 if regex_is_match(
                     r"(?i)invalid.?grant|token.*expired|unauthorized|\b401\b|auth login|未登录|请.*登录",
                     &diagnostics,
@@ -138,7 +133,6 @@ pub(crate) async fn wait_listener_ready(
                 }
             }
             Err(_) => {
-                let _ = child.kill().await;
                 return Err(DwsError::rejected("DWS listener could not start"));
             }
         }
@@ -169,7 +163,9 @@ pub(crate) fn spawn_listener_child(
         .arg(profile)
         .current_dir(if root.is_empty() { "." } else { root })
         .env(path_env_key(), cli_child_path(Some(program)))
-        .stdin(std::process::Stdio::null())
+        // DWS treats EOF on a held pipe as host shutdown. A null stdin cannot
+        // convey parent death and leaves consumers behind after a daemon crash.
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -178,7 +174,7 @@ pub(crate) fn spawn_listener_child(
         .map_err(|_| MessageError::bad("DWS listener could not start"))
 }
 
-async fn listener_stopped(stop: &mut tokio::sync::watch::Receiver<bool>) {
+pub(crate) async fn listener_stopped(stop: &mut tokio::sync::watch::Receiver<bool>) {
     while !*stop.borrow() {
         if stop.changed().await.is_err() {
             break;
@@ -186,13 +182,29 @@ async fn listener_stopped(stop: &mut tokio::sync::watch::Receiver<bool>) {
     }
 }
 
-pub(crate) async fn reap_listener_children(mut children: Vec<Child>) {
-    for child in &mut children {
+async fn close_listener_child(child: &mut Child) {
+    drop(child.stdin.take());
+    // Give DWS time to unregister its consumers and cancel its own subscriptions.
+    // Only this Child handle may be force-reaped if graceful exit is unresponsive.
+    if !matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await,
+        Ok(Ok(_))
+    ) {
         let _ = child.start_kill();
-    }
-    for child in &mut children {
         let _ = child.wait().await;
     }
+}
+
+pub(crate) async fn reap_listener_children(mut children: Vec<Child>) {
+    // Close every pipe before waiting so sibling subscriptions shut down together.
+    for child in &mut children {
+        drop(child.stdin.take());
+    }
+    let mut cleanup = tokio::task::JoinSet::new();
+    for mut child in children {
+        cleanup.spawn(async move { close_listener_child(&mut child).await });
+    }
+    while cleanup.join_next().await.is_some() {}
 }
 
 /// Every child stays owned through ready and is reaped on partial failure.
@@ -218,7 +230,7 @@ pub(crate) async fn start_listener_children(
             let ready = tokio::select! {
                 biased;
                 _ = listener_stopped(stop) => Err(DwsError::rejected("Start cancelled")),
-                ready = wait_listener_ready(&mut stderr, child) => ready,
+                ready = wait_listener_ready(&mut stderr) => ready,
             };
             // Keep draining the same pipe after ready; taking it a second time
             // would lose it and eventually block the CLI on its own logs.
@@ -289,6 +301,9 @@ pub(crate) async fn supervise_listeners(
                 }
                 std::future::pending::<()>().await;
             };
+            // Child::wait closes stdin itself. Keep the host-lifetime pipe out
+            // of Child while supervising, otherwise a ready CLI sees EOF at once.
+            let lifetime_stdin = child.stdin.take();
             let unexpected = tokio::select! {
                 biased;
                 _ = listener_stopped(&mut cancelled) => false,
@@ -296,8 +311,8 @@ pub(crate) async fn supervise_listeners(
                 _ = events => true,
                 _ = diagnostics => unreachable!(),
             };
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            drop(lifetime_stdin);
+            close_listener_child(&mut child).await;
             unexpected
         });
     }

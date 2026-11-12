@@ -80,9 +80,13 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 
 默认入口需要 Rust/Cargo 工具链及桌面开发依赖；准备 Rust MCP 失败会停止启动并保留错误。Node.js 仍用于桌面开发工具和可选外部 CLI，并不表示 MCP 服务端使用 Node。`pnpm build` 只构建桌面前端，不会准备或覆盖 MCP 资源；运行时由开发启动器或 `make:*` / `bundle:mcp*` 命令准备。
 
+Rust 开发启动与 Node 一样，每次在 `src-tauri/target/dev-mcp-runtime/rust-*` 独立目录准备运行时；不覆盖仍可能被存活 daemon 使用的资源目录或先前开发运行时。
+
 需要 Node MCP 兼容能力时显式执行 `pnpm dev:node`，或设置 `AICHAT_MCP_ENGINE=node`。该路线要求 Node.js 22 或更新版本，以及仓库、`apps/mcp-runtime` 与桌面的已安装依赖；从当前源码生成独立的 Node 开发运行时，不依赖之前的 staging，也不自动安装或下载依赖。
 
-如显式设置 `AICHAT_MCP_BUNDLED_DIR`（优先）或 `AICHAT_MCP_RUNTIME_DIR`，启动器会校验指定运行时与所选引擎一致；默认 Rust 入口不能借此静默加载 Node。目录设置只在下一次启动读取，不会动态切换运行中的 MCP。Rust MCP 当前尚未提供原生 CLI 会话接口；需要该能力时由用户显式选择 Node，不能自动切换执行语义。
+如显式设置 `AICHAT_MCP_BUNDLED_DIR`（优先）或 `AICHAT_MCP_RUNTIME_DIR`，启动器会校验指定运行时与所选引擎一致；默认 Rust 入口不能借此静默加载 Node。目录设置只在下一次启动读取，不会动态切换运行中的 MCP。
+
+Rust MCP 0.2.18 提供原生 ACP（含 WorkBuddy/CodeBuddy）与 Codex 文字会话，以及审批、停止、状态流、AIChat 网页上下文工具桥和页面重连后的工具桥恢复；0.2.16 及更早的 listener 仍缺少原生 CLI 能力，须核验实际 `/health`，不能以桌面版本或源码升版推断已升级。Rust 尚未覆盖 Claude/Antigravity 原生执行、图片轮次、原生历史导入、Copilot 编辑器自定义模型，以及离线云端/Git 文件操作；这些动作在边界明确提示不可用，不自动切换引擎或 provider。背景文件操作只支持明确授权的本机空间，远程文件仍需原网页在线。完整范围见 [Rust MCP 说明](../mcp-rust/README.md#native-cli-sessions)。
 
 开发页面固定使用 `http://127.0.0.1:1430`。重复启动会先检查开发服务的身份协议和真实项目目录，只复用同一 checkout 的服务。另一个项目、没有身份端点的旧 Vite 服务、无法确认身份的监听者会产生明确的端口占用错误；请在拥有该服务的终端中处理后重试。启动器不结束未知进程，也不自动换端口。关闭复用者不会关闭先前终端拥有的 Vite 服务；关闭原服务的终端后，需要重新启动开发服务。
 
@@ -115,6 +119,8 @@ pnpm check
 # 自带 Rust MCP 运行时（从仓库根目录执行）
 node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
 ```
+
+Rust binary 的 `--build-info` 返回编译时 `version`、`commit`、`target`、`sourceHash` 和 `capabilities`，不受宿主运行时身份环境变量覆写。捆绑脚本先验证所有目标的二进制身份、当前源码指纹及必需能力，再写资源；`--no-build` 也会拒绝旧版、同版过期或缺少能力的产物，不能用新 manifest 版本包装旧 binary。打包成功后仍须核验实际 `127.0.0.1:8089/health` 的运行身份与能力，并检查 `/agents/backends`；本地产物通过不代表运行中的共享服务已经更新，也不代表真实 CLI 生成验收通过。
 
 ### macOS 原生语音采集回归
 

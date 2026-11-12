@@ -48,7 +48,7 @@ pub fn api_docs(state: &AppState) -> Response {
     } else {
         "Optional Bearer token; authentication currently disabled"
     };
-    let endpoints = json!([
+    let mut endpoints = json!([
         {
             "group": "Service",
             "method": "GET",
@@ -113,6 +113,40 @@ pub fn api_docs(state: &AppState) -> Response {
             "example": format!("fetch(\"{base}/exists?path=~\").then(r => r.json()).then(console.log);")
         }
     ]);
+    let agent_auth = format!("Explicit allowed Origin and the same private X-Agent-Owner capability (32–128 ASCII letters/digits/hyphens); {guarded}. Browser owner capabilities and bearer tokens must not be exported or logged.");
+    for (method, path, description, parameters) in [
+        ("GET", "/agents/backends", "Native CLI inventory or targeted protocol/account/model discovery. Installation and ACP initialization do not verify an account.", "Query: probe=executable (read-only; no child processes), backend, cwd, conversationId or owned sessionId, model, refresh=1. Missing optional capability is unknown; unsupported provider semantics return a bounded error."),
+        ("GET", "/agents/accounts", "Read-only native account login/logout command catalog. Commands are displayed for user-operated terminals; this request does not execute them.", "No parameters. Reuse the original owner for later requests."),
+        ("POST", "/agents/login", "Start native Codex browser login, or return another provider's reviewed terminal login command.", "JSON: {backend?}. Non-Codex terminal commands are not executed by this endpoint."),
+        ("GET", "/agents/sessions", "List up to 100 owned session summaries and a nextCursor.", "Query: cursor (nonnegative integer, default 0)."),
+        ("POST", "/agents/sessions", "Create an idempotent owner/backend/conversation native text session. Unsupported context, model or workspace semantics are rejected before a prompt.", "JSON: {backend?,conversationId,roots,rootNames?,model?,mode?,contextVersion?,cloudPrimary?}. roots are existing absolute local directories; mode=craft|ask|plan. contextVersion=1 requires a registered AIChat page. Copilot context sessions remain unsupported."),
+        ("GET", "/agents/sessions/:id", "Read the owned normalized session snapshot, visible items, pending requests and last submission receipt. Only a legacy Node Codex record without items triggers one read-only native thread/read to recover history.", "Path: owned session id. Ordinary persisted Rust history stays local; legacy retrieval failures are explicit. Reading never starts/resumes a thread or replays a prompt or uncertain mutation."),
+        ("PATCH", "/agents/sessions/:id", "Rename, archive or remove an owned inactive session. Removal preserves native history.", "JSON: {title?,archived?,remove?}. Removal archives; this API has no DELETE route."),
+        ("POST", "/agents/sessions/:id/turns", "Submit one native text turn exactly once per requestId. Empty model/effort selections retain legacy defaults; unsupported explicit semantics do not dispatch.", "JSON: {requestId,text,model?,effort?,mode?,contextVersion?}. Reconcile the original receipt after an unknown outcome; never auto-resubmit under a new id."),
+        ("POST", "/agents/sessions/:id/interrupt", "Interrupt the current owned native turn and cancel bound webpage calls. Starting turns may require retrying Stop after configuration finishes.", "JSON: {}. Dispatched tool results may remain unknown; cancellation never replays them."),
+        ("POST", "/agents/sessions/:id/respond", "Answer one current native approval or user question. Decisions cannot silently widen the permission scope offered by the CLI.", "JSON: {id,decision:accept|acceptForSession|decline|cancel} or {id,answers:{questionId:text}}. Persistent permission grants are accepted only when explicitly offered."),
+        ("GET", "/agents/sessions/:id/events", "Bounded NDJSON full snapshots with initial reconciliation and heartbeat lines. Disconnecting a viewer does not stop execution.", "Query: cursor optional; each frame is {cursor,session}. Reconcile using session GET after EOF or failure."),
+        ("POST", "/agents/contexts/:conversationId", "Register the original AIChat page's bounded instructions and tool definitions. A live page binding cannot be silently replaced.", "JSON: {pageId,generation,instructions,revision,tools:[{name,description,inputSchema}]}. Bindings are owner/conversation/page/generation scoped."),
+        ("POST", "/agents/contexts/:conversationId/credentials", "Validate explicit workspace grants. Background file operations support local spaces; cloud/Git credentials are not retained or exposed to a CLI.", "JSON: {username,token?,baseURL?,git?,primaryId,spaces}. Response reports backendWorkspaceTypes:[local]; remote/cloud/Git operations require the original page online."),
+        ("GET", "/agents/contexts/:conversationId/events", "SSE ready/tool/cancel events for the exact registered page and generation.", "Query: pageId and generation. Results and dispatch identity never migrate to another live page."),
+        ("POST", "/agents/contexts/:conversationId/result", "Complete one outstanding webpage tool call. Wrong owner, stale page/generation and duplicate/expired call IDs are rejected.", "JSON: {pageId,generation,callId,result:{content,isError?}}. Results are bounded MCP text/image content."),
+        ("POST", "/agents/contexts/:conversationId/file", "Operate only on explicitly granted local workspace files; remote/cloud/Git background execution returns unsupported-feature errors.", "JSON: {operation,path,...}. Operations: list/search/read/write/replace/delete/rename. Mutations require Craft, confined paths, and read-before-edit or expectedContent checks."),
+        ("POST", "/agents/contexts/:conversationId/overlay", "Preserve Git drafts through import/get/drop/ack. Remote conflict verification, background edits and protected-deck staging remain unsupported.", "JSON: {operation,spaceId,files?,revision?,path?}. Failed imports preserve conflicting originals; unknown remote bases are never reported verified."),
+        ("POST", "/agents/contexts/revoke", "Revoke this owner's page bindings, local workspace grants and private proxy capabilities.", "JSON: {}. Already dispatched mutations remain unknown and are not replayed."),
+    ] {
+        endpoints.as_array_mut().unwrap().push(json!({
+            "group":"Native agent sessions", "method":method, "path":path,
+            "description":description, "auth":agent_auth, "parameters":parameters,
+            "example":format!("// owner is the same private browser capability used to create this session.\nfetch('{base}{path}', {{method:'{method}',headers:{{'X-Agent-Owner':owner{}}}{}}}).then(r=>r.json());",if method=="GET"{""}else{",'Content-Type':'application/json'"},if method=="GET"{""}else{",body:JSON.stringify(/* request documented above */ {})"})
+        }));
+    }
+    endpoints.as_array_mut().unwrap().push(json!({
+        "group":"Internal native tool bridge", "method":"POST", "path":"/agents/tool-proxy",
+        "description":"Private bridge used only by this Rust binary's --agent-tool-proxy stdio mode. Supports bound tools/list, tools/call and cancellation; it is not a browser RPC tunnel.",
+        "auth":"Revocable per-conversation bearer capability; rejects every Origin header. Public daemon tokens and X-Agent-Owner cannot authorize this route.",
+        "parameters":"Daemon-created descriptor only. Browser callers cannot choose executables, flags, endpoint or credentials. A stale capability cannot dispatch to a replacement page.",
+        "example":"Internal transport only; use the daemon-provided native MCP descriptor. Never copy its capability into browser code or logs."
+    }));
     let payload: Value = json!({
         "name": SERVER_NAME,
         "version": SERVER_VERSION,

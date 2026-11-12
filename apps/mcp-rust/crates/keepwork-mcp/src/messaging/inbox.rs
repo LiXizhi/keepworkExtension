@@ -34,7 +34,11 @@ pub(crate) fn decide_incoming(
     if !run.binding.enabled || inner.closed {
         return IncomingDecision::Done;
     }
-    if run.status != "listening" && !recovered {
+    let first_feishu_sweep = run.binding.channel == "feishu"
+        && run.starting
+        && run.status == "connecting"
+        && run.owns_identity;
+    if run.status != "listening" && !first_feishu_sweep && !recovered {
         return IncomingDecision::Done;
     }
     // Disjoint-field borrows: `run` lives in inner.runs; the inbox map and the
@@ -208,17 +212,7 @@ impl MessagingService {
             .await;
     }
 
-    pub(crate) async fn handle_incoming(
-        self: &Arc<Self>,
-        binding_id: &str,
-        message: Incoming,
-        recovered: bool,
-    ) {
-        self.handle_incoming_generation(binding_id, message, recovered, None)
-            .await;
-    }
-
-    async fn handle_incoming_generation(
+    pub(crate) async fn handle_incoming_generation(
         self: &Arc<Self>,
         binding_id: &str,
         message: Incoming,
@@ -828,10 +822,8 @@ impl MessagingService {
         conversation.to_string()
     }
 
-    /// Same shape and warm budget as Node `namedInboxView`: refresh stale group
-    /// and sender display names concurrently under a shared 5-second deadline,
-    /// then return the fresh view. Failures keep cached values so history never
-    /// hides behind unavailable contact metadata.
+    /// Return complete cached history immediately. Optional display-name reads
+    /// run in a deduplicated, bounded background queue and never delay the view.
     pub async fn named_inbox_view(
         self: &Arc<Self>,
         owner: &str,
@@ -859,7 +851,7 @@ impl MessagingService {
 
         // Group targets: the focused conversation, else every conversation whose
         // latest row is a group message, capped at 100 like Node.
-        let group_targets: Vec<String> = if !conversation.is_empty() {
+        let mut group_targets: Vec<String> = if !conversation.is_empty() {
             let last_direct = view["messages"]
                 .as_array()
                 .and_then(|rows| rows.last())
@@ -927,7 +919,30 @@ impl MessagingService {
             }
         }
 
-        let warm_groups = (!group_targets.is_empty() && !closed).then(|| {
+        {
+            let mut inner = self.lock();
+            group_targets.retain(|group| {
+                let key = format!("{id}\0{group}");
+                let fresh = inner.group_names.get(&key).is_some_and(|(name, time)| {
+                    now_ms() - *time < if name.is_empty() { 30_000 } else { 300_000 }
+                });
+                !closed
+                    && !fresh
+                    && inner.metadata_reads.len() < 512
+                    && inner.metadata_reads.insert(format!("group\0{key}"))
+            });
+            sender_targets.retain(|(key, _)| {
+                let fresh = inner
+                    .sender_names
+                    .get(key)
+                    .is_some_and(|(name, time)| !name.is_empty() || now_ms() - *time < 30_000);
+                !closed
+                    && !fresh
+                    && inner.metadata_reads.len() < 512
+                    && inner.metadata_reads.insert(format!("sender\0{key}"))
+            });
+        }
+        let warm_groups = (!group_targets.is_empty()).then(|| {
             tokio::spawn(warm_group_names(
                 Arc::clone(self),
                 id.to_string(),
@@ -937,7 +952,7 @@ impl MessagingService {
                 group_targets,
             ))
         });
-        let warm_senders = (!sender_targets.is_empty() && !closed).then(|| {
+        let warm_senders = (!sender_targets.is_empty()).then(|| {
             tokio::spawn(warm_sender_names(
                 Arc::clone(self),
                 channel,
@@ -946,25 +961,10 @@ impl MessagingService {
                 sender_targets,
             ))
         });
-        let joined = async {
-            match (warm_groups, warm_senders) {
-                (Some(groups), Some(senders)) => {
-                    let _ = tokio::join!(groups, senders);
-                }
-                (Some(groups), None) => {
-                    let _ = groups.await;
-                }
-                (None, Some(senders)) => {
-                    let _ = senders.await;
-                }
-                (None, None) => {}
-            }
-        };
-        // Node races the warmers against a 5-second budget; abandoning them
-        // merely skips this refresh, cached names cover the response meanwhile.
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(5000), joined).await;
-        self.inbox_view(owner, agent_id, id, conversation, before)
-            .await
+        // Dropping JoinHandles detaches these bounded readers. Repeated view
+        // requests share the in-flight keys rather than spawning more CLI calls.
+        drop((warm_groups, warm_senders));
+        Ok(view)
     }
 
     pub async fn inbox_view(
@@ -991,30 +991,29 @@ impl MessagingService {
             )
         };
         let box_ = inner.inbox.get(id);
-        let messages: Vec<Value> = box_
-            .map(|box_| {
-                box_.messages
-                    .iter()
-                    .map(|row| {
-                        let mut row = row.clone();
-                        let key = format!(
-                            "{id}\0{channel}\0{profile}\0{root}\0{}\0{}",
-                            row["conversation"].as_str().unwrap_or(""),
-                            row["sender"].as_str().unwrap_or("")
-                        );
-                        row["senderName"] = json!(inner
-                            .sender_names
-                            .get(&key)
-                            .map(|(name, _)| name.clone())
-                            .unwrap_or_default());
-                        row
-                    })
-                    .collect()
-            })
+        let messages = box_.map(|box_| box_.messages.as_slice()).unwrap_or(&[]);
+        let decorate = |row: &Value| {
+            let mut value = row.clone();
+            let key = format!(
+                "{id}\0{channel}\0{profile}\0{root}\0{}\0{}",
+                row["conversation"].as_str().unwrap_or(""),
+                row["sender"].as_str().unwrap_or("")
+            );
+            value["senderName"] = json!(inner
+                .sender_names
+                .get(&key)
+                .map(|(name, _)| name.as_str())
+                .unwrap_or(""));
+            value
+        };
+        let paused: HashSet<&str> = box_
+            .map(|box_| box_.paused.iter().map(String::as_str).collect())
             .unwrap_or_default();
         if !conversation.is_empty() {
-            let matching: Vec<&Value> = messages
+            // Select the requested page before cloning or decorating message bodies.
+            let mut rows: Vec<Value> = messages
                 .iter()
+                .rev()
                 .filter(|row| {
                     row["conversation"].as_str() == Some(conversation)
                         && row["time"]
@@ -1022,41 +1021,46 @@ impl MessagingService {
                             .map(|time| time < before)
                             .unwrap_or(true)
                 })
+                .take(50)
+                .map(decorate)
                 .collect();
-            let start = matching.len().saturating_sub(50);
-            let rows: Vec<Value> = matching[start..].iter().map(|row| (*row).clone()).collect();
+            rows.reverse();
             return Ok(json!({
                 "name": Self::inbox_name(&inner, &groups, id, conversation),
                 "messages": rows,
                 "before": if rows.len() == 50 { rows.first().and_then(|row| row["time"].as_i64()) } else { None },
-                "paused": box_.map(|box_| box_.paused.iter().any(|item| *item == conversation)).unwrap_or(false),
+                "paused": paused.contains(conversation),
             }));
         }
-        let mut ids: Vec<String> = Vec::new();
-        for row in &messages {
-            let key = row["conversation"].as_str().unwrap_or("").to_string();
-            if key.is_empty() || ids.contains(&key) {
+        // Preserve first-seen conversation order while aggregating in one pass.
+        // Keep references until the result is built: only each last body is cloned.
+        let mut positions: HashMap<&str, usize> = HashMap::new();
+        let mut summaries: Vec<(&str, &Value, usize)> = Vec::new();
+        for row in messages {
+            let key = row["conversation"].as_str().unwrap_or("");
+            if key.is_empty() {
                 continue;
             }
-            ids.push(key);
+            let index = if let Some(index) = positions.get(key) {
+                *index
+            } else {
+                let index = summaries.len();
+                positions.insert(key, index);
+                summaries.push((key, row, 0));
+                index
+            };
+            summaries[index].1 = row;
+            summaries[index].2 += usize::from(inbox_unread(box_, key, row));
         }
-        let conversations: Vec<Value> = ids
-            .iter()
-            .map(|key| {
-                let rows: Vec<&Value> = messages
-                    .iter()
-                    .filter(|row| row["conversation"].as_str() == Some(key.as_str()))
-                    .collect();
-                let unread = rows
-                    .iter()
-                    .filter(|row| inbox_unread(box_, key, row))
-                    .count();
+        let conversations: Vec<Value> = summaries
+            .into_iter()
+            .map(|(key, last, unread)| {
                 json!({
                     "id": key,
                     "name": Self::inbox_name(&inner, &groups, id, key),
-                    "last": rows.last().cloned(),
+                    "last": decorate(last),
                     "unread": unread,
-                    "paused": box_.map(|box_| box_.paused.contains(key)).unwrap_or(false),
+                    "paused": paused.contains(key),
                 })
             })
             .collect();
@@ -1385,15 +1389,22 @@ pub(crate) async fn warm_group_names(
                     Some(group) => group,
                     None => return,
                 };
-                let fresh = {
-                    let inner = service.lock();
-                    inner
-                        .group_names
-                        .get(&format!("{binding_id}\0{group}"))
-                        .map(|(_, time)| now_ms() - *time < 300_000)
-                        .unwrap_or(false)
+                let key = format!("{binding_id}\0{group}");
+                let pending = format!("group\0{key}");
+                let Ok(_permit) = service.metadata_gate.acquire().await else {
+                    return;
                 };
-                if fresh {
+                let valid = {
+                    let inner = service.lock();
+                    !inner.closed
+                        && inner.runs.get(&binding_id).is_some_and(|run| {
+                            run.binding.channel == channel
+                                && run.binding.profile == profile
+                                && run.binding.root == root
+                        })
+                };
+                if !valid {
+                    service.lock().metadata_reads.remove(&pending);
                     continue;
                 }
                 let read = if channel == "feishu" {
@@ -1401,18 +1412,31 @@ pub(crate) async fn warm_group_names(
                 } else {
                     dingtalk_group_name(&root, &profile, &group).await
                 };
-                if let Ok(name) = read {
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let mut inner = service.lock();
-                    let key = format!("{binding_id}\0{group}");
-                    inner.group_names.remove(&key);
-                    inner.group_names.insert(key, (name, now_ms()));
-                    if inner.group_names.len() > 1000 {
-                        if let Some(first) = inner.group_names.keys().next().cloned() {
-                            inner.group_names.remove(&first);
-                        }
+                let mut inner = service.lock();
+                inner.metadata_reads.remove(&pending);
+                if inner.closed
+                    || !inner.runs.get(&binding_id).is_some_and(|run| {
+                        run.binding.channel == channel
+                            && run.binding.profile == profile
+                            && run.binding.root == root
+                    })
+                {
+                    continue;
+                }
+                let name = read
+                    .ok()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| {
+                        inner
+                            .group_names
+                            .get(&key)
+                            .map(|(name, _)| name.clone())
+                            .unwrap_or_default()
+                    });
+                inner.group_names.insert(key, (name, now_ms()));
+                if inner.group_names.len() > 1000 {
+                    if let Some(first) = inner.group_names.keys().next().cloned() {
+                        inner.group_names.remove(&first);
                     }
                 }
             }
@@ -1452,15 +1476,22 @@ pub(crate) async fn warm_sender_names(
                     Some(item) => item,
                     None => return,
                 };
-                let fresh = {
-                    let inner = service.lock();
-                    inner
-                        .sender_names
-                        .get(&key)
-                        .map(|(name, time)| !name.is_empty() || now_ms() - *time < 30_000)
-                        .unwrap_or(false)
+                let pending = format!("sender\0{key}");
+                let binding_id = key.split('\0').next().unwrap_or("");
+                let Ok(_permit) = service.metadata_gate.acquire().await else {
+                    return;
                 };
-                if fresh {
+                let valid = {
+                    let inner = service.lock();
+                    !inner.closed
+                        && inner.runs.get(binding_id).is_some_and(|run| {
+                            run.binding.channel == channel
+                                && run.binding.profile == profile
+                                && run.binding.root == root
+                        })
+                };
+                if !valid {
+                    service.lock().metadata_reads.remove(&pending);
                     continue;
                 }
                 let sender = row["sender"].as_str().unwrap_or("").to_string();
@@ -1471,9 +1502,27 @@ pub(crate) async fn warm_sender_names(
                 } else {
                     dingtalk_sender_name(&root, &profile, &conversation, &sender, &kind).await
                 };
-                let name = read.unwrap_or_default();
                 let mut inner = service.lock();
-                inner.sender_names.remove(&key);
+                inner.metadata_reads.remove(&pending);
+                if inner.closed
+                    || !inner.runs.get(binding_id).is_some_and(|run| {
+                        run.binding.channel == channel
+                            && run.binding.profile == profile
+                            && run.binding.root == root
+                    })
+                {
+                    continue;
+                }
+                let name = read
+                    .ok()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| {
+                        inner
+                            .sender_names
+                            .get(&key)
+                            .map(|(name, _)| name.clone())
+                            .unwrap_or_default()
+                    });
                 inner.sender_names.insert(key, (name, now_ms()));
                 if inner.sender_names.len() > 1000 {
                     if let Some(first) = inner.sender_names.keys().next().cloned() {

@@ -128,8 +128,16 @@ function prepareNodeRuntime({ appRoot = APP_ROOT, env = process.env } = {}) {
 }
 
 function prepareRustRuntime({ appRoot = APP_ROOT, env = process.env } = {}) {
-  execFileSync(process.execPath, [path.join(appRoot, 'scripts/bundle-mcp-rust.cjs')], { cwd: appRoot, env, stdio: 'inherit' });
-  return path.join(appRoot, 'src-tauri', 'resources', 'mcp-runtime', process.arch);
+  const cache = path.join(appRoot, 'src-tauri', 'target', 'dev-mcp-runtime');
+  fs.mkdirSync(cache, { recursive: true });
+  const directory = fs.mkdtempSync(path.join(cache, 'rust-'));
+  try {
+    execFileSync(process.execPath, [path.join(appRoot, 'scripts/bundle-mcp-rust.cjs'), '--outdir', directory], { cwd: appRoot, env, stdio: 'inherit' });
+    return path.join(directory, process.arch);
+  } catch (error) {
+    fs.rmSync(directory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function runTauri(args, env, appRoot = APP_ROOT) {

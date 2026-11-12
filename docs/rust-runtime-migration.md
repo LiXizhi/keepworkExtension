@@ -15,7 +15,22 @@
 | 令牌 | `~/.keepwork-mcp/token`，24 字节 hex，0600 |
 | 单实例文件 | `~/.keepwork-mcp/instance.json` `{pid,port,startedAt,name}` |
 
-`/health` 只声明已经实现的能力：当前返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`aichatPresenceApi`(`post-sse-v1`)、`personasApi`(`personas-v1`)、`messagingApi`(`messaging-v1`)、`runtimeEngine`、`runtimeProduct`。`agentSessionApi`、`browserApi` 等未实现能力不出现；缺少可选字段表示不可用或未知，不能推断整个连接损坏，也不能要求客户端与服务端产品版本相同。
+`/health` 只声明已经实现的能力：当前返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`aichatPresenceApi`(`post-sse-v1`)、`personasApi`(`personas-v1`)、`messagingApi`(`messaging-v1`)、原生 CLI 的 `agentSessionApi` / `agentInventoryApi` / `agentContextApi` / `agentModeApi`（均为 `v1`）、`runtimeEngine`、`runtimeProduct`。`agentImageTurnApi`、`browserApi` 等未实现能力不出现；缺少可选字段表示不可用或未知，不能推断整个连接损坏，也不能要求客户端与服务端产品版本相同。
+
+### 原生 CLI 会话切片（Rust 运行时 0.2.18）
+
+Rust 自己实现 `/agents/backends`、只读可执行文件清单、owner 隔离的会话创建/列表/读取/更新、文字轮次、审批回答、停止及 NDJSON 完整快照。WorkBuddy/CodeBuddy 直接启动其原生 `--acp`；其他登记的 ACP CLI 共用适配器；Codex 直接使用原生 `app-server --stdio`。不启动或转发到 Node MCP，不把成功找到 CLI、协议握手或返回模型目录当作真实发言成功。
+
+- **兼容与身份**：沿用 Node 的 HTTP 路由和可选字段，legacy 请求可以省略 `contextVersion`，显式请求未知版本则在提交前拒绝。原生会话只属于 `Origin + X-Agent-Owner` 的哈希身份；保持显式 Origin、可选 Bearer、真实绝对根目录与固定可执行程序/参数边界。浏览器不能使用任意 RPC 透传。
+- **状态与幂等**：完整快照包含原生 thread/turn/item ID、有限 items/pending、递增 cursor、模式及原请求 receipt。先持久化 requestId 再发送，同 ID 不重复执行；不确定提交、进程退出、重连和重启不自动重放。未知结果须先核查，不能换 ID 重发。工作区根目录变化时拒绝继续。
+- **发现与模式**：`probe=executable` 不启动原生进程；targeted backend 仅连接选中的 provider。ACP 无账户查询时返回 `authenticated:null / authState:unknown`。模型及 effort 来自原生目录，不能虚构。Craft 请求完整权限，Ask 保留交互审批，Plan 在 ACP 要求原生 planning mode 并拒绝修改审批；语义无法执行则在发言前返回明确错误。问题回答仍由用户决定。
+- **现行网页上下文**：实现 `/agents/contexts/:conversation`、`credentials`、SSE `events`、`result` 与 `revoke`，每轮注入已登记的指令及 revision。只向原 owner/conversation/pageId/generation 工具流派发；旧页或过期结果不能答复新页调用。同一 Rust executable 的私密 stdio 模式桥接 MCP，不需要 Node 代理。CLI 只得到可撤销的临时能力，得不到网页登录/Git 凭据。断流、超时、取消后明确记录已派发工具结果未知，不重放修改操作。
+- **空间操作边界**：背景 `workspace_file` 真正支持明确授权的本机空间，修改仅在 Craft，保留路径/符号链接限制及读后修改校验。远程、云端和 Git 文件操作使用原在线网页的已发现工具，页面离线时明确不可用。`credentials` 验证空间描述但不保存云端/Git token，并报告 `backendWorkspaceTypes:["local"]`；注入的上下文明确这项限制。Git `import/get/drop/ack` 持久化保留既有草稿及冲突；未验证 remote base 不标成功，后台 Git 编辑、远端 `check`、`stageValidatedDeck` 仍返回特定功能不支持。
+- **本轮未覆盖**：Claude 双向 stream-json、Antigravity 原生 NDJSON、图片轮次、原生历史导入、Copilot VS Code 自定义模型桥与账户切换。Copilot ACP 不支持所需的 per-session MCP 工具桥合同，因此其 `contextVersion:1` 创建请求在发言前明确拒绝；清单/模型发现不代表当前 AIChat 上下文会话已可用，不静默丢失网页工具。保留 provider 清单，未实现协议明确不支持；不能因此宣称缺少 CLI、改用其他 provider 或阻止普通聊天。此实现不接通分身消息执行器的 CLI 路径。
+
+`scripts/contract/agents.test.cjs` 使用隔离真实监听器和原生子进程 fixture 验证 HTTP/stdio/SSE、审批、请求去重、重启及权限边界；Rust 单元测试覆盖发现与上下文。fixture 不代替真实 WorkBuddy/Codex 账户、发布版客户端、Windows 或原生桌面窗口验证，实际通过情况须单独记录。
+
+历史显示保留一项严格限定的旧版适配：Node 的 Codex registry 不保存 visible items，这类记录首次经原 owner 的会话 GET 读取时，只调用 App Server `thread/read(includeTurns:true)` 恢复并缓存历史；失败明确报错，不伪造空对话，不创建/恢复线程或发送 prompt。普通 Rust 持久历史、内部 view 与 backend status 仍不因读取历史而启动 CLI。未恢复的旧记录在其他会话保存或退出时继续保留缺项，避免丢失后续恢复机会。这不是原生会话目录导入能力。
 
 ### 分身文字问答边界（Rust 运行时 0.2.4）
 
@@ -87,7 +102,7 @@ Rust 运行时 0.2.5 给分身模型接入了本地工具，0.2.6 修复由此�
 
 `pnpm dev:node`、启动器 `--mcp-node` 或 `AICHAT_MCP_ENGINE=node` 才显式选择 `apps/mcp-runtime`。Node 路线使用 Node.js 22 或更新版本，从当前源码和本机已安装依赖生成独立开发运行时；缺依赖或编译失败会中止，不自动安装依赖。`AICHAT_MCP_ENGINE=rust` 继续接受。显式 `AICHAT_MCP_BUNDLED_DIR` / `AICHAT_MCP_RUNTIME_DIR` 优先，但必须通过所选引擎的清单与入口校验，不能在默认 Rust 入口中混入 Node。`AICHAT_MCP_ENGINE` 属于开发启动器，不是此前未实现的 `KEEPWORK_MCP_ENGINE`，也不会动态切换当前监听服务。
 
-Rust MCP 当前仍缺少原生 CLI 会话接口；用户选择 Rust 后，CLI 连接器应按能力缺失明确提示，不自动改用 Node 或改变请求执行语义。修改默认配置不会停止当前监听服务，新选择在下次桌面进程启动时读取。开发入口选择不改变既有共享服务的所有权、接管和能力协商规则；运行中的 8089 服务仍须单独核验。
+Rust MCP 0.2.18 提供上述原生 CLI 会话切片与网页重连后的原生工具桥恢复；0.2.16 及更早的 listener 仍缺少该接口，客户端应按实际能力缺失明确提示，不自动改用 Node 或改变请求执行语义。修改默认配置不会停止当前监听服务，新选择在下次桌面进程启动时读取。开发入口选择不改变既有共享服务的所有权、接管和能力协商规则；运行中的 8089 服务仍须单独核验。
 
 桌面开发页面固定绑定 `127.0.0.1:1430`。重复启动只复用身份协议、真实 checkout 目录均匹配的 Vite 服务；未知服务占用时明确失败，不终止该进程或自动更换端口。关闭复用启动不关闭原终端拥有的服务。这解决开发服务重复启动冲突，不会补齐 Rust MCP 的功能。
 
@@ -101,7 +116,7 @@ Rust MCP 当前仍缺少原生 CLI 会话接口；用户选择 Rust 后，CLI �
 
 2026-11-11 排查确认：Rust `0.2.11` 不声明 `agentSessionApi`，原生 CLI
 连接器的 `/agents/backends` 返回 404；Node 源码运行时的隔离实测结果不适用
-于仍在运行的 Rust listener。使用 CLI 时需显式选择已验证提供该能力的 Node 兼容运行时，
+于仍在运行的旧 Rust listener。当时使用 CLI 需显式选择已验证提供该能力的 Node 兼容运行时，
 不能把这一例外改成 `aichat-rust` 的默认引擎。切换前检查共享服务的所有者、活跃客户端和任务，
 完成受控重启后重新读取实际端口的 `/health` 与目标 `/agents/backends`；
 不得把重装 CLI 或反复重连当作补齐服务端实现。

@@ -19,6 +19,10 @@ fn main() {
         println!("{}", cli::USAGE);
         return;
     }
+    if args.build_info {
+        println!("{}", keepwork_mcp::identity::BUILD_INFO);
+        return;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -33,6 +37,13 @@ fn main() {
 }
 
 async fn run(args: cli::Args) -> i32 {
+    if let Some(endpoint) = args.agent_tool_proxy {
+        // This is a private stdio MCP child of a native CLI, not another daemon.
+        return match keepwork_mcp::agents::context::proxy_main(&endpoint).await {
+            Ok(()) => 0,
+            Err(_) => 1,
+        };
+    }
     let port = config::resolve_port(args.port);
     let require_auth = config::resolve_require_auth(args.require_auth);
     let root = paths::resolve_workspace_root(args.root.as_deref());
@@ -124,11 +135,14 @@ async fn run(args: cli::Args) -> i32 {
     ));
 
     let messaging = Arc::clone(&state.messaging);
+    let agents = Arc::clone(&state.agents);
     let app = http::router(state);
     let shutdown_messaging = Arc::clone(&messaging);
+    let shutdown_agents = Arc::clone(&agents);
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         shutdown_signal().await;
         shutdown_messaging.close().await;
+        shutdown_agents.close().await;
     });
     let code = match server.await {
         Ok(()) => 0,
@@ -138,6 +152,7 @@ async fn run(args: cli::Args) -> i32 {
         }
     };
     messaging.close().await;
+    agents.close().await;
     config::clear_instance();
     code
 }

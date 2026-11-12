@@ -39,7 +39,7 @@ test('personas api lists, runs without login, and persists', async () => {
   const health = await (await fetch(`${rust.base}/health`)).json();
   assert.equal(health.personasApi, 'personas-v1');
   assert.equal(health.messagingApi, 'messaging-v1');
-  assert.equal(health.agentSessionApi, undefined);
+  assert.equal(health.agentSessionApi, 'v1');
 
   const missingOrigin = await fetch(`${rust.base}/agents/personas`, {
     headers: { 'x-agent-owner': owner },

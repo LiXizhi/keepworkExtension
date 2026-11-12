@@ -239,7 +239,12 @@ pub(crate) fn classify_cli_error(output: &str, diagnostics: &str, feishu: bool) 
     if regex_is_match(r"(?i)token|auth login|unauthorized|未登录", &error_text) {
         return DwsError {
             uncertain: false,
-            message: "DingTalk login required".into(),
+            message: if feishu {
+                "Feishu login required"
+            } else {
+                "DingTalk login required"
+            }
+            .into(),
         };
     }
     if feishu {

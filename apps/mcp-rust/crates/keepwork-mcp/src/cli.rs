@@ -6,9 +6,12 @@ pub struct Args {
     pub root: Option<String>,
     pub require_auth: Option<bool>,
     pub help: bool,
+    pub build_info: bool,
+    pub agent_tool_proxy: Option<String>,
 }
 
-pub const USAGE: &str = "Usage: keepwork-mcp [--port <port>] [--root <dir>] [--require-auth]";
+pub const USAGE: &str =
+    "Usage: keepwork-mcp [--port <port>] [--root <dir>] [--require-auth] [--build-info]";
 
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
     let mut parsed = Args::default();
@@ -32,6 +35,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
                 );
             }
             "--require-auth" => parsed.require_auth = Some(true),
+            "--build-info" => parsed.build_info = true,
+            "--agent-tool-proxy" => {
+                parsed.agent_tool_proxy = Some(
+                    iter.next()
+                        .ok_or("--agent-tool-proxy requires a loopback endpoint")?,
+                );
+            }
             // The Node runtime manifest passes `["--port","8089"]`; external
             // hosts may also append flags we do not need yet.
             "--help" | "-h" => parsed.help = true,

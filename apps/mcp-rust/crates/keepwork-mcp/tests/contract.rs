@@ -91,7 +91,7 @@ async fn health_reports_identity_and_only_served_capabilities() {
     assert_eq!(value["fsApi"], "workspace");
     assert_eq!(value["terminalApi"], "pty-session-v1");
     assert_eq!(value["personasApi"], "personas-v1");
-    assert!(value.get("agentSessionApi").is_none());
+    assert_eq!(value["agentSessionApi"], "v1");
     assert_eq!(value["messagingApi"], "messaging-v1");
 }
 

@@ -21,6 +21,14 @@ multi-agent group routing and WeChat; those surfaces keep their `UNSUPPORTED_FEA
 errors. The slice boundary and registered differences live in
 `docs/rust-runtime-migration.md`.
 
+Feishu connection verifies the personal identity and completes one bounded search
+page before reporting `listening`; later polls retain the ten-minute interval.
+An unavailable or unverified personal login returns the same `needs-login` shape
+as Node. Stopping or replacing a connection cancels its pending CLI work; old poll
+generations cannot update a replacement connection, its cursor or its inbox.
+Changing a channel's brain directory still requires the existing explicit
+`CHANNEL_OCCUPIED` / `switchFromRoot` confirmation, including after a login failure.
+
 ## Dashboard channel status
 
 Overview shows separate DingTalk (`dingtalk-cli`) and Feishu (`lark-cli`) cards above
@@ -84,6 +92,15 @@ After the HTTP daemon starts, `MessagingService.resume()` reads the loaded disk 
 starts every binding with `enabled: true`, including DingTalk and Feishu. No AIChat tab or click
 is required. Closing the daemon preserves this flag; an explicit Stop persists `enabled: false`
 and remains stopped across restarts. A CLI login alone is not a saved messaging binding.
+
+The Rust runtime holds a stdin pipe for each DWS listener it starts. Parent exit closes
+that pipe, allowing DWS to clean up on EOF. Normal stop, partial startup failure and
+listener replacement close stdin first and allow two seconds for a clean exit; only
+an unresponsive child still owned by its `Child` handle is force-reaped. Replacement
+waits for those children to exit. This does not stop the shared DWS bus or other
+applications' consumers, delete unknown subscriptions, or automatically adopt historical
+orphans without verified ownership. Client/server contracts and persisted messaging
+records are unchanged; recovery never replays model work or uncertain message sends.
 
 Transport failures and occupied listeners retain the enabled flag and retry every five minutes.
 Startup still attempts connection immediately. DingTalk checks status before starting a consumer: existing

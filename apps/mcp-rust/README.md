@@ -6,10 +6,11 @@ Node. Same wire contract, no Node in the installer.
 - Binds `127.0.0.1:8089` (same port, same `/mcp`, `/health`, `/admin/*` paths).
 - `/health.name` stays `keepwork-mcp`; the runtime reports
   `runtimeEngine: "rust"` and `runtimeProduct: "keepwork-mcp-runtime"`.
-- `/health` advertises `fsApi: "workspace"`, `folderBrowserApi: "folders-v1"`,
-  `terminalApi: "pty-session-v1"`, `aichatPresenceApi: "post-sse-v1"` and
-  `personasApi: "personas-v1"`; native agent sessions, messaging and browser
-  surfaces stay unadvertised until their implementations are available.
+- `/health` advertises file, folder-browser, PTY, presence, persona and messaging
+  contracts, plus `agentSessionApi`, `agentInventoryApi`, `agentContextApi` and
+  `agentModeApi` (`"v1"`) for the native CLI slice described below. Image turns,
+  native history import, browser automation and unsupported provider protocols
+  are not advertised as available.
 - Only advertises capabilities it actually serves, so AIChat degrades instead of
   calling a 404 while the port is in progress.
 
@@ -19,11 +20,77 @@ Node. Same wire contract, no Node in the installer.
 | --- | --- | --- |
 | P0 | lifecycle, config/paths, CORS/auth, `/health`, `/exists`, `/fs/stat`, `/admin/status|stop`, MCP handshake + `mcp_status` | implemented |
 | P1 | `/fs/*` full (`list`/`search`/`stat`/`file`/`dir`/`reveal`), `/fs/locations|browse`, PTY `/terminal/*`, `run_terminal`, `grep_files`, `web_search`, `fetch_url` | implemented |
-| P2 | agents/ACP, messaging, personas, presence SSE | partial: presence JSON/SSE and basic persona text replies implemented; agents/ACP, messaging and persona tool execution pending |
+| P2 | agents/ACP, messaging, personas, presence SSE | partial: native ACP/Codex sessions, page-bound tool context, presence, persona tools and DingTalk/Feishu messaging implemented; provider-specific gaps remain |
 | P3 | browser, computer, paracraft, dashboard, admin API docs/history | planned |
 
 See [docs/rust-runtime-migration.md](../../docs/rust-runtime-migration.md) for the
 migration contract, manifest v2 and rollout order.
+
+## Native CLI sessions
+
+The Rust daemon now implements `/agents/backends`, executable-only inventory,
+owner-scoped session create/list/read/update, text turns, approval replies,
+interruptions and NDJSON session snapshots. WorkBuddy and CodeBuddy use their
+native `--acp` process; the same adapter supports registered ACP CLIs. Codex uses
+its native `app-server --stdio` protocol. Neither path forwards to a Node MCP
+daemon or treats installation detection as a successful model turn.
+
+- Native executable discovery is read-only and bounded. A targeted provider
+  query starts only that provider. Provider credentials stay in its native CLI;
+  an ACP handshake with no account query reports authentication as unknown.
+- Every public request keeps explicit allowed Origin, hashed `X-Agent-Owner`
+  isolation and optional daemon bearer authentication. The browser cannot pass
+  executable names, flags or arbitrary native RPC calls.
+- Turns persist their request ID before submission. Reconnect, timeout and
+  restart never replay an uncertain prompt. Restarted in-flight turns remain
+  uncertain and can be inspected; native history is resumed only when the
+  provider advertises the required contract.
+- Craft requests full access, Ask preserves interactive native approvals, and
+  Plan requires a native planning mode for ACP and denies mutating permissions.
+  Unsupported model, effort or mode semantics fail before the prompt is sent.
+  Questions are not auto-approved.
+- AIChat context registration, SSE tool dispatch and result delivery bind to the
+  original owner/conversation/page/generation. A private MCP stdio process uses
+  this same Rust binary (`--agent-tool-proxy`); only its revocable capability
+  enters the CLI environment. Page disconnects report unknown dispatched
+  results and never replay mutations. Cloud and Git credentials are not stored
+  or handed to native agents.
+- Page reload or replacement revokes the former capability. An existing native
+  session is considered connected only when its current page/generation and
+  binding incarnation still match. ACP `session/load` or Codex `thread/resume`
+  installs the new descriptor before a later prompt; providers without that
+  restore contract fail explicitly. Reading Rust's persisted history does not
+  start a CLI. A legacy Node Codex registry without visible items is the narrow
+  exception: its first owned session GET performs read-only App Server
+  `thread/read` with `includeTurns: true`, caches the recovered visible history,
+  and reports a clear error if retrieval fails. It never starts/resumes a thread
+  or submits a prompt; unhydrated records keep the missing-items marker across
+  unrelated saves instead of becoming a false empty transcript.
+- Background `workspace_file` operates on explicitly granted local spaces;
+  mutations require Craft and retain path/symlink confinement and read-before-
+  edit checks. Remote/cloud/Git file operations require the original online
+  page's discovered tools. Git draft import/get/drop/ack preserves the existing
+  draft store without pretending to verify a remote base. Remote conflict
+  checks, Git background edits and protected-deck staging remain unsupported.
+
+Claude stream-json and Antigravity NDJSON are separate protocols and remain
+explicitly unsupported in this slice; their executable inventory entries are
+retained. Image turns, account switching, native history import and the Copilot
+VS Code custom-model bridge also remain outside this Rust implementation. A
+registered ACP provider is not evidence that its installed version, account,
+models or platform have passed a live acceptance run.
+
+Copilot ACP does not support the required per-session AIChat MCP-server binding
+in this contract. Its inventory/model discovery does not mean that an AIChat
+`contextVersion: 1` conversation is usable: those creation requests are rejected
+before a prompt, rather than silently dropping browser tools or changing
+providers. Direct legacy sessions remain limited to the native contract the
+installed CLI actually supports.
+
+Validation uses real isolated HTTP listeners and deterministic native child
+processes: `node --test scripts/contract/agents.test.cjs` from the repository root
+after building the Rust binary, plus the Rust unit suite. These fixtures do not
+establish live provider or native desktop UI compatibility.
 
 ## Persona support in 0.2.4
 
@@ -69,12 +136,38 @@ service and a local second-brain folder are connected. This does not complete P2
 The runtime owns only the DWS listener children it starts. Stopping the binding,
 a partial startup failure, a listener disconnect or graceful daemon shutdown
 cleans up those children; a replacement waits for the previous children to exit.
+Each listener keeps a stdin pipe held by the daemon, so parent exit closes the
+pipe and DWS can clean up on EOF. Normal shutdown closes that pipe first and
+allows two seconds for DWS to exit and release its own consumers and subscriptions.
+Only an unresponsive child still owned by its `Child` handle is force-reaped.
 Events and exit callbacks from an older listener generation cannot affect its
 replacement. External consumers and subscriptions remain protected: the runtime
 waits for their occupancy to clear and never stops or deletes them. Historical
 orphan processes without verified ownership are not automatically adopted or
 terminated. Stopping a binding preserves its cached messages and read state, so
-history remains readable with automatic replies disabled.
+history remains readable with automatic replies disabled. Client/server contracts
+and persisted messaging records are unchanged.
+
+Validation (2026-11-12, MCP **0.2.16**): **33** unique business tests passed
+(13 listener lifecycle + 20 messaging; one host-fixture helper ignored), using
+the release's isolated source stage at
+`/private/tmp/keepwork-dingtalk-eof-o14q2xg1/apps/mcp-rust`. Both new EOF regressions
+failed against the actual previous source. A direct working-tree compile was
+blocked by another unfinished task's `Weak` import; that code was preserved.
+Logs: `/tmp/dws-stdin-eof-{before-tests,final-lifecycle,final-messaging-unit}.log`;
+build record: `/tmp/keepwork-dingtalk-eof-build.json`.
+
+Live recovery verified ownership of the old consumers through inherited
+`KEEPWORK_MCP_HOST_KIND=rust-node-runtime`, `KEEPWORK_MCP_HOST_VERSION=0.2.55` and
+`KEEPWORK_MCP_RUNTIME_VERSION=0.2.11`, plus exact arguments/profile/cwd and PPID 1.
+PID 61826 exited before intervention; after rechecking identity, only PID 61858
+received SIGTERM. Shared bus PID 35877 remained running. The replacement Rust
+daemon, PID 64048 / 0.2.16, reported DingTalk `status: listening`, `listening: true`,
+`autoReply: true` and an empty error; cached history IDs were retained. Native
+DWS PIDs 64082/64114 belonged to that daemon through the DWS Node launcher, held
+stdin pipes, and maintained three stable event subscriptions. No message was
+sent for validation, unknown subscription deleted, shared bus stopped or release
+published.
 
 ## Commands
 
@@ -121,12 +214,25 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release          # target/release/keepwork-mcp (~0.7 MB in P0)
+target/release/keepwork-mcp --build-info # immutable compiled identity; no listener
 
 node scripts/smoke.cjs                                  # spawn + handshake + /admin/stop
 # from the repository root
 node --test scripts/contract/*.test.cjs                  # contract suite (Node reference when built)
 node --test apps/mcp-rust/scripts/dashboard-personas.test.cjs # isolated browser fixtures; installed Chrome
 ```
+
+`--build-info` reports the compiled `version`, `commit`, `target`, `sourceHash`
+and `capabilities`; host identity environment variables cannot override them.
+The desktop bundler validates every requested target against the current source
+and required capabilities before writing resources. `--no-build` still rejects
+older binaries, stale binaries with the same version and missing capabilities.
+Rust development launches prepare separate
+`apps/aichat-rust/src-tauri/target/dev-mcp-runtime/rust-*` directories, as Node
+development launches do, so a surviving daemon's files are not overwritten.
+After packaging or restart, inspect the actual port-8089 `/health` identity and
+capabilities and `/agents/backends`; a verified local bundle does not prove that
+the shared listener was replaced or that a real provider turn passed.
 
 Contract tests run the same assertions against this binary and, when a local
 `apps/mcp-runtime/dist/cli.cjs` exists, against the Node daemon on a second port.

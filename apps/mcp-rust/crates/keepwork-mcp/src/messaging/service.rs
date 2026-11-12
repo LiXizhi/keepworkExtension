@@ -185,6 +185,7 @@ pub(crate) struct Inner {
     pub(crate) closed: bool,
     pub(crate) group_names: HashMap<String, (String, i64)>,
     pub(crate) sender_names: HashMap<String, (String, i64)>,
+    pub(crate) metadata_reads: HashSet<String>,
 }
 
 pub struct MessagingService {
@@ -194,6 +195,7 @@ pub struct MessagingService {
     pub(crate) inner: Mutex<Inner>,
     pub(crate) login_gate: tokio::sync::Mutex<()>,
     pub(crate) start_gate: tokio::sync::Mutex<()>,
+    pub(crate) metadata_gate: tokio::sync::Semaphore,
     /// Bumped on every persistence write; `/messaging/events` frames full
     /// views per change like Node's `persist()` watcher fan-out.
     pub(crate) events: tokio::sync::watch::Sender<u64>,
@@ -342,9 +344,11 @@ impl MessagingService {
                 closed: false,
                 group_names: HashMap::new(),
                 sender_names: HashMap::new(),
+                metadata_reads: HashSet::new(),
             }),
             login_gate: tokio::sync::Mutex::new(()),
             start_gate: tokio::sync::Mutex::new(()),
+            metadata_gate: tokio::sync::Semaphore::new(4),
             events: tokio::sync::watch::channel(0u64).0,
         });
         service.persist_all();

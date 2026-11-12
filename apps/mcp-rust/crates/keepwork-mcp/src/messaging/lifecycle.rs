@@ -1037,11 +1037,50 @@ impl MessagingService {
                 }
                 run.status = "connecting".into();
             }
-            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+            let (done_tx, done_rx) = tokio::sync::watch::channel(false);
             {
                 let mut inner = self.lock();
+                if inner.closed {
+                    return Ok(());
+                }
                 if let Some(run) = inner.runs.get_mut(&binding_id) {
+                    if !run.binding.enabled || run.generation != generation {
+                        return Ok(());
+                    }
                     run.stop = Some(stop_tx);
+                    run.listener_done = Some(done_rx);
+                }
+            }
+            let cursor_path = self.home.join(format!("{binding_id}.cursor.json"));
+            let mut checkpoint = read_feishu_checkpoint(&cursor_path);
+            // Verify reception before reporting a live connection. Further
+            // sweeps wait ten minutes, matching Node's sweep-then-schedule.
+            let first = tokio::select! {
+                biased;
+                _ = listener_stopped(&mut stop_rx) => None,
+                result = feishu_sweep(self, &binding_id, generation, &binding.root, &binding.profile, &mut checkpoint, &cursor_path) => Some(result),
+            };
+            if !matches!(first, Some(Ok(()))) {
+                finish_feishu_poll(self, &binding_id, generation);
+                let _ = done_tx.send(true);
+                return match first {
+                    Some(Err(error)) => Err(MessageError::bad(error)),
+                    _ => Ok(()),
+                };
+            }
+            {
+                let mut inner = self.lock();
+                if inner.closed
+                    || inner
+                        .runs
+                        .get(&binding_id)
+                        .is_none_or(|run| !run.binding.enabled || run.generation != generation)
+                {
+                    let _ = done_tx.send(true);
+                    return Ok(());
+                }
+                if let Some(run) = inner.runs.get_mut(&binding_id) {
                     run.status = "listening".into();
                     run.retrying = false;
                     run.error = String::new();
@@ -1052,7 +1091,15 @@ impl MessagingService {
                 self.persist_run_and_notify(&mut inner, id)
             };
             self.bump_owners(owners);
-            tokio::spawn(feishu_poll_task(self.clone(), binding_id.clone(), stop_rx));
+            tokio::spawn(feishu_poll_task(
+                self.clone(),
+                binding_id,
+                generation,
+                checkpoint,
+                cursor_path,
+                stop_rx,
+                done_tx,
+            ));
             return Ok(());
         }
 
@@ -1244,6 +1291,7 @@ impl MessagingService {
                 halt_runtime(run);
             }
         }
+        self.metadata_gate.close();
         let _start = self.start_gate.lock().await;
         let completions: Vec<_> = self
             .lock()
@@ -1346,43 +1394,16 @@ pub(crate) fn select_profile(value: &Value) -> Option<String> {
 pub(crate) async fn feishu_poll_task(
     service: Arc<MessagingService>,
     binding_id: String,
-    stop: tokio::sync::watch::Receiver<bool>,
+    generation: u64,
+    mut checkpoint: FeishuCheckpoint,
+    cursor_path: PathBuf,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    done: tokio::sync::watch::Sender<bool>,
 ) {
-    let cursor_path = {
-        let inner = service.lock();
-        match inner.runs.get(&binding_id) {
-            Some(run) => service.home.join(format!("{}.cursor.json", run.binding.id)),
-            None => return,
-        }
-    };
-    let mut checkpoint = {
-        let mut parsed = FeishuCheckpoint {
-            since: now_ms(),
-            window: None,
-        };
-        if let Ok(text) = std::fs::read_to_string(&cursor_path) {
-            if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                if let Some(since) = value["since"].as_i64() {
-                    parsed.since = since;
-                }
-                parsed.window = value.get("window").cloned().filter(Value::is_object);
-            }
-        }
-        write_json_private(
-            &cursor_path,
-            &json!({ "since": parsed.since, "window": parsed.window }),
-        );
-        parsed
-    };
-    let mut stop = stop;
     loop {
         tokio::select! {
-            changed = stop.changed() => {
-                if *stop.borrow() {
-                    break;
-                }
-                let _ = changed;
-            }
+            biased;
+            _ = listener_stopped(&mut stop) => break,
             _ = tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL as u64)) => {}
         }
         if *stop.borrow() {
@@ -1391,19 +1412,19 @@ pub(crate) async fn feishu_poll_task(
         let (root, profile) = {
             let inner = service.lock();
             match inner.runs.get(&binding_id) {
-                Some(run) => (run.binding.root.clone(), run.binding.profile.clone()),
-                None => break,
+                Some(run)
+                    if run.generation == generation && run.binding.enabled && !inner.closed =>
+                {
+                    (run.binding.root.clone(), run.binding.profile.clone())
+                }
+                _ => break,
             }
         };
-        let outcome = feishu_sweep(
-            &service,
-            &binding_id,
-            &root,
-            &profile,
-            &mut checkpoint,
-            &cursor_path,
-        )
-        .await;
+        let outcome = tokio::select! {
+            biased;
+            _ = listener_stopped(&mut stop) => break,
+            result = feishu_sweep(&service, &binding_id, generation, &root, &profile, &mut checkpoint, &cursor_path) => result,
+        };
         match outcome {
             Ok(()) => {}
             Err(message) => {
@@ -1413,6 +1434,14 @@ pub(crate) async fn feishu_poll_task(
                 if needs_repair_text(&message) {
                     let mut guard = service.lock();
                     let inner: &mut Inner = &mut guard;
+                    if inner.closed
+                        || inner
+                            .runs
+                            .get(&binding_id)
+                            .is_none_or(|run| run.generation != generation || !run.binding.enabled)
+                    {
+                        break;
+                    }
                     let (identity, owns) = match inner.runs.get(&binding_id) {
                         Some(run) => (run.identity.clone(), run.owns_identity),
                         None => break,
@@ -1434,23 +1463,73 @@ pub(crate) async fn feishu_poll_task(
                 {
                     let mut inner = service.lock();
                     if let Some(run) = inner.runs.get_mut(&binding_id) {
+                        if run.generation != generation || !run.binding.enabled {
+                            break;
+                        }
                         run.status = "listening-tick".into();
                     }
                 }
                 service
-                    .disconnected(&binding_id, "Listener disconnected")
+                    .disconnected_generation(&binding_id, "Listener disconnected", Some(generation))
                     .await;
                 break;
             }
         }
     }
+    finish_feishu_poll(&service, &binding_id, generation);
+    let _ = done.send(true);
+}
+
+fn finish_feishu_poll(service: &MessagingService, binding_id: &str, generation: u64) {
     let mut inner = service.lock();
-    if let Some(run) = inner.runs.get_mut(&binding_id) {
+    if let Some(run) = inner.runs.get_mut(binding_id) {
+        if run.generation != generation {
+            return;
+        }
         run.stop = None;
         if run.status == "listening" || run.status == "listening-tick" {
             run.status = "stopped".into();
         }
     }
+}
+
+fn read_feishu_checkpoint(cursor_path: &Path) -> FeishuCheckpoint {
+    let mut parsed = FeishuCheckpoint {
+        since: now_ms(),
+        window: None,
+    };
+    if let Ok(text) = std::fs::read_to_string(cursor_path) {
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if let Some(since) = value["since"].as_i64() {
+                parsed.since = since;
+            }
+            parsed.window = value.get("window").cloned().filter(Value::is_object);
+        }
+    }
+    parsed
+}
+
+fn save_feishu_checkpoint(
+    service: &MessagingService,
+    binding_id: &str,
+    generation: u64,
+    checkpoint: &FeishuCheckpoint,
+    cursor_path: &Path,
+) -> Result<(), String> {
+    let inner = service.lock();
+    if inner.closed
+        || inner
+            .runs
+            .get(binding_id)
+            .is_none_or(|run| run.generation != generation || !run.binding.enabled)
+    {
+        return Err("Cancelled".into());
+    }
+    write_json_private(
+        cursor_path,
+        &json!({ "since": checkpoint.since, "window": checkpoint.window }),
+    );
+    Ok(())
 }
 
 /// One bounded poll sweep, mirroring Node `pollFeishu` sweep semantics: a
@@ -1459,6 +1538,7 @@ pub(crate) async fn feishu_poll_task(
 pub(crate) async fn feishu_sweep(
     service: &Arc<MessagingService>,
     binding_id: &str,
+    generation: u64,
     root: &str,
     profile: &str,
     checkpoint: &mut FeishuCheckpoint,
@@ -1475,10 +1555,7 @@ pub(crate) async fn feishu_sweep(
         }
     };
     checkpoint.window = Some(window.clone());
-    write_json_private(
-        cursor_path,
-        &json!({ "since": checkpoint.since, "window": checkpoint.window }),
-    );
+    save_feishu_checkpoint(service, binding_id, generation, checkpoint, cursor_path)?;
     let start = window["start"].as_i64().unwrap_or(0);
     let end_at = window["end"].as_i64().unwrap_or(end);
     let mut args = vec![
@@ -1532,7 +1609,9 @@ pub(crate) async fn feishu_sweep(
         if message.time < start || message.time > end_at {
             continue;
         }
-        service.handle_incoming(binding_id, message, false).await;
+        service
+            .handle_incoming_generation(binding_id, message, false, Some(generation))
+            .await;
     }
     if has_more {
         let Some(window) = checkpoint.window.as_mut() else {
@@ -1542,13 +1621,12 @@ pub(crate) async fn feishu_sweep(
     } else {
         checkpoint.window = None;
     }
-    write_json_private(
-        cursor_path,
-        &json!({ "since": checkpoint.since, "window": checkpoint.window }),
-    );
+    save_feishu_checkpoint(service, binding_id, generation, checkpoint, cursor_path)?;
     let mut inner = service.lock();
     if let Some(run) = inner.runs.get_mut(binding_id) {
-        run.last_poll_at = Some(end);
+        if run.generation == generation && run.binding.enabled {
+            run.last_poll_at = Some(end);
+        }
     }
     Ok(())
 }

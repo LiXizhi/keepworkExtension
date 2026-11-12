@@ -31,6 +31,7 @@ pub struct AppState {
     pub presence: Arc<crate::presence::PresenceState>,
     pub personas: Arc<crate::personas::PersonaStore>,
     pub messaging: Arc<crate::messaging::MessagingService>,
+    pub agents: Arc<crate::agents::AgentManager>,
 }
 
 impl AppState {
@@ -72,6 +73,13 @@ impl AppState {
             Arc::clone(&personas),
             Arc::clone(&presence),
         );
+        let agents = crate::agents::AgentManager::open(
+            persona_dir
+                .parent()
+                .unwrap_or(&persona_dir)
+                .join("agent-sessions-v1.json"),
+            port,
+        );
         personas.attach_messaging(Arc::clone(&messaging));
         let started_at = now_iso();
         let shell = Arc::new(ShellRunner::default());
@@ -95,6 +103,7 @@ impl AppState {
             presence: Arc::clone(&presence),
             messaging,
             personas,
+            agents,
         }
     }
 
@@ -121,7 +130,11 @@ impl AppState {
             "messagingApi".into(),
             serde_json::json!(crate::messaging::MESSAGING_API),
         );
-        // Native agent sessions and WeChat stay unadvertised.
+        caps.insert("agentSessionApi".into(), serde_json::json!("v1"));
+        caps.insert("agentInventoryApi".into(), serde_json::json!("v1"));
+        caps.insert("agentContextApi".into(), serde_json::json!("v1"));
+        caps.insert("agentModeApi".into(), serde_json::json!("v1"));
+        // Optional image/native history/editor-model surfaces stay unadvertised.
         caps
     }
 
@@ -379,6 +392,33 @@ pub fn sse_response(body: Body, session_id: &str) -> Response {
 // Dispatch
 // ---------------------------------------------------------------------------
 
+type HttpFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'a>>;
+
+fn persona_request<'a>(
+    state: Arc<AppState>,
+    method: &'a str,
+    path: &'a str,
+    query: &'a BTreeMap<String, String>,
+    headers: &'a HeaderMap,
+    req: Request,
+) -> HttpFuture<'a> {
+    Box::pin(crate::personas::handle(
+        state, method, path, query, headers, req,
+    ))
+}
+
+fn messaging_request<'a>(
+    manager: Arc<crate::messaging::MessagingService>,
+    method: &'a str,
+    path: &'a str,
+    query: &'a BTreeMap<String, String>,
+    req: Request,
+) -> HttpFuture<'a> {
+    Box::pin(crate::messaging::handle_messaging_http(
+        manager, method, path, query, req,
+    ))
+}
+
 pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let method = req.method().clone();
     let path = normalize_path(req.uri().path());
@@ -610,9 +650,11 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                 ("POST", "/admin/stop") => {
                     state.terminals.close_all();
                     let messaging = Arc::clone(&state.messaging);
+                    let agents = Arc::clone(&state.agents);
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         messaging.close().await;
+                        agents.close().await;
                         std::process::exit(0);
                     });
                     json_response(
@@ -664,7 +706,7 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                 );
                 return denied;
             }
-            crate::messaging::handle_messaging_http(
+            messaging_request(
                 Arc::clone(&state.messaging),
                 method.as_str(),
                 path,
@@ -692,7 +734,39 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                 );
                 return denied;
             }
-            crate::personas::handle(state, method.as_str(), path, &query, &headers, req).await
+            persona_request(state, method.as_str(), path, &query, &headers, req).await
+        }
+        (_, "/agents/tool-proxy") => {
+            Arc::clone(&state.agents.context)
+                .handle_proxy_boxed(req)
+                .await
+        }
+        (_, path) if path.starts_with("/agents/") => {
+            let origin = headers
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if origin.is_empty() || !origin_allowed(origin) {
+                return crate::personas::error_response(
+                    403,
+                    "Explicit allowed Origin required",
+                    None,
+                );
+            }
+            if let Some(denied) = authorize(&state, &headers, &query) {
+                return denied;
+            }
+            // Keep provider/context state machines off the common dispatch
+            // stack: unrelated messaging requests use this same future type.
+            crate::agents::handle(
+                Arc::clone(&state.agents),
+                method.as_str(),
+                path,
+                &query,
+                &headers,
+                req,
+            )
+            .await
         }
         _ => json_response(
             StatusCode::NOT_FOUND,

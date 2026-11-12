@@ -7,6 +7,27 @@ Codex adapter; `acpHarness.ts` adapts native ACP servers; `claudeHarness.ts` ada
 Native CLI sessions have no KP Local Helper or editor-window dependency. Optional
 Copilot custom-model sessions require the VS Code model bridge described below.
 
+Rust MCP implements its own native session manager under
+`apps/mcp-rust/crates/keepwork-mcp/src/agents`, without a Node daemon or Node tool
+proxy. Its initial slice supports ACP providers (including WorkBuddy/CodeBuddy)
+and Codex App Server, owner-scoped text sessions, request receipts, approval and
+interrupt handling, NDJSON snapshots and the current AIChat page-context bridge.
+See the [Rust contract](rust-runtime-migration.md#原生-cli-会话切片rust-运行时-0218)
+for precise limits. Claude/Antigravity execution, images, native-history import,
+the Copilot editor bridge and background cloud/Git file execution remain
+unsupported there; the fuller Node behavior described below is not a claim of
+Rust feature parity. Rust background local-file mutations require Craft;
+remote operations use explicitly online page tools. Git draft import preserves
+data but does not claim remote conflict verification or commit support.
+Copilot's native per-session MCP-server binding is unavailable in this Rust
+contract, so an explicit `contextVersion: 1` session is rejected before a prompt;
+inventory or model discovery must not be presented as a usable AIChat tool bridge.
+Existing Node Codex registry rows without items have a limited compatibility
+adapter: the first owned session GET reads the native thread without resuming
+it or sending a prompt, then caches its visible history. Failure is explicit;
+ordinary Rust cached-history reads do not launch a CLI. This does not implement
+native session catalog discovery or import.
+
 ```mermaid
 flowchart LR
     Browser[AIChat browser] --> HTTP[Shared loopback /agents API]
@@ -332,9 +353,15 @@ initialization. Only completed real turns establish execution in this report.
 The user's active desktop service was a different process: Rust MCP `0.2.11`,
 hosted by desktop `0.2.44` on port 8089. Its health response omitted
 `agentSessionApi`, and `GET /agents/backends?backend=workbuddy` returned 404.
-Rust currently has no native agent-session implementation, so the isolated Node
+At that time Rust had no native agent-session implementation, so the isolated Node
 passes do not make CLI connectors work through that active Rust service.
 Reinstalling WorkBuddy cannot add the missing HTTP interface.
+
+Rust MCP 0.2.18 provides the native ACP/Codex slice and page-reconnection tool-bridge restoration described above. An existing
+0.2.16-or-earlier listener must actually be replaced by the prepared Rust runtime
+before those capabilities appear; rebuilding source or changing a manifest does
+not upgrade a running process. These historical Node live passes do not validate
+the new Rust adapter against real providers.
 
 After the user confirmed continuation, the desktop was switched to the prepared
 Node runtime `0.1.52`. This exposed a packaging defect: staged `runtime.json`

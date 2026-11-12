@@ -45,6 +45,11 @@ case "$1:$2" in
       exit 2
     fi
     printf '%s\n' '[event] ready' >&2
+    if [ -f .read-stdin-eof ] && [ -p /dev/stdin ]; then
+      /bin/cat >/dev/null
+      : > ".fixture-eof-$$"
+      exit 0
+    fi
     if [ -f .flood-stderr ]; then
       i=0
       while [ "$i" -lt 6000 ]; do
@@ -277,6 +282,112 @@ async fn close_reaps_listeners_and_preserves_the_enabled_preference() {
         serde_json::from_slice(&std::fs::read(f.home.join("messaging/bindings.json")).unwrap())
             .unwrap();
     assert_eq!(saved[0]["enabled"], true);
+    f.assert_cached_message().await;
+}
+
+#[tokio::test]
+async fn stop_closes_owned_listener_stdin_and_allows_cli_cleanup_before_exit() {
+    let _env = CLI_ENV.lock().await;
+    let f = Fixture::new();
+    f.flag(".read-stdin-eof");
+    f.service.start(BINDING).await.unwrap();
+    let pids = f.wait_for_pids(2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(pids.iter().copied().all(alive));
+    assert!(pids
+        .iter()
+        .all(|pid| !f.root.join(format!(".fixture-eof-{pid}")).exists()));
+    f.service.stop(BINDING);
+    f.assert_dead(&pids).await;
+    for pid in &pids {
+        assert!(
+            f.root.join(format!(".fixture-eof-{pid}")).exists(),
+            "listener {pid} must observe EOF and run its cleanup, rather than be killed"
+        );
+    }
+    assert_eq!(f.service.view(BINDING).unwrap()["autoReply"], false);
+    f.assert_cached_message().await;
+    f.service.close().await;
+}
+
+// Invoked only by the parent-death regression below. This is an isolated host,
+// not a business test: its process deliberately never reaches a normal exit.
+#[tokio::test]
+#[ignore = "subprocess fixture for the abrupt-parent-exit regression"]
+async fn listener_stdin_eof_host_fixture() {
+    let home = PathBuf::from(
+        std::env::var_os("KEEPWORK_TEST_LISTENER_EOF_HOME")
+            .expect("fixture host requires its private temporary directory"),
+    );
+    let service = MessagingService::open(
+        home.join("messaging"),
+        PersonaStore::open(home.join("personas")),
+        Arc::new(PresenceState::new()),
+    );
+    service.start(BINDING).await.unwrap();
+    std::fs::write(home.join(".fixture-host-ready"), "ready").unwrap();
+    std::future::pending::<()>().await;
+}
+
+#[tokio::test]
+async fn abrupt_parent_exit_closes_listener_pipes_without_leaving_live_consumers() {
+    let _env = CLI_ENV.lock().await;
+    let f = Fixture::new();
+    f.service.close().await;
+    f.flag(".read-stdin-eof");
+    let mut host = DaemonProcess(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "listener_stdin_eof_host_fixture",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("KEEPWORK_TEST_LISTENER_EOF_HOME", &f.home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !f.home.join(".fixture-host-ready").exists() {
+        assert!(
+            host.0.try_wait().unwrap().is_none(),
+            "the isolated fixture host exited before readiness"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the isolated fixture host did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pids = f.wait_for_pids(2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(pids.iter().copied().all(alive));
+    assert!(pids
+        .iter()
+        .all(|pid| !f.root.join(format!(".fixture-eof-{pid}")).exists()));
+    // std::process::Child::kill is SIGKILL on Unix: no service close(), Drop
+    // handlers or graceful signal handling can run inside this fixture host.
+    host.0.kill().unwrap();
+    let exit = host.0.wait().unwrap();
+    assert!(!exit.success(), "the fixture host must exit abruptly");
+    f.assert_dead(&pids).await;
+    for pid in &pids {
+        assert!(
+            f.root.join(format!(".fixture-eof-{pid}")).exists(),
+            "listener {pid} must clean up on lifetime-pipe EOF after parent death"
+        );
+    }
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.home.join("messaging/bindings.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        saved[0]["enabled"], true,
+        "an abrupt host exit cannot disable the user's automatic-reply preference"
+    );
     f.assert_cached_message().await;
 }
 

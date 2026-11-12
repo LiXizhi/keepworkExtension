@@ -42,8 +42,11 @@ test('health only advertises capabilities this build serves', async () => {
   assert.equal(health.terminalApi, 'pty-session-v1');
   assert.equal(health.aichatPresenceApi, 'post-sse-v1');
   assert.equal(health.personasApi, 'personas-v1');
+  assert.equal(health.agentSessionApi, 'v1');
+  assert.equal(health.agentInventoryApi, 'v1');
+  assert.equal(health.agentContextApi, 'v1');
+  assert.equal(health.agentModeApi, 'v1');
   for (const unimplemented of [
-    'agentSessionApi',
     'browserApi',
     'webserverBase',
   ]) {
@@ -58,11 +61,11 @@ test('health matches the Node reference on the shared identity fields', async ()
     for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth', 'fsApi', 'terminalApi', 'aichatPresenceApi', 'personasApi', 'messagingApi']) {
       assert.equal(rust.health[key], node.health[key], `field ${key} must match the Node daemon`);
     }
-    // The Rust runtime ports the local and messaging surfaces; agent sessions stay Node-only.
+    // Native agent sessions now share the Node v1 contract as an independent engine.
     assert.equal(node.health.terminalApi, rust.health.terminalApi);
     assert.equal(node.health.fsApi, rust.health.fsApi);
     assert.equal(node.health.agentSessionApi, 'v1');
-    assert.equal(rust.health.agentSessionApi, undefined);
+    assert.equal(rust.health.agentSessionApi, 'v1');
   } finally {
     await node.stop();
   }

@@ -10,6 +10,7 @@
 //! listener) and Feishu (`lark-cli` polling) channels for persona bindings;
 //! native agent CLI sessions and WeChat stay unadvertised.
 
+pub mod agents;
 pub mod cli;
 pub mod config;
 pub mod dashboard;

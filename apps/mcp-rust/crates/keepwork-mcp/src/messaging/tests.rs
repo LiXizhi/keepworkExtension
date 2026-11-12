@@ -1,6 +1,58 @@
 use super::*;
 use super::{dingtalk::*, feishu::*, lifecycle::*, policy::*};
 
+#[test]
+fn feishu_identity_requires_verified_personal_login() {
+    let ready = json!({
+        "appId": "cli-app",
+        "identities": { "user": {
+            "status": "ready", "available": true, "verified": true, "openId": "ou-user"
+        }, "bot": { "status": "ready" } }
+    });
+    assert_eq!(
+        parse_feishu_identity(&ready, Some("cli-app:ou-user")).unwrap(),
+        ("cli-app:ou-user".into(), "ou-user".into())
+    );
+    for pointer in [
+        "/identities/user",
+        "/identities/user/status",
+        "/identities/user/available",
+        "/identities/user/verified",
+        "/identities/user/openId",
+        "/appId",
+    ] {
+        let mut invalid = ready.clone();
+        *invalid.pointer_mut(pointer).unwrap() = Value::Null;
+        let error = parse_feishu_identity(&invalid, None).unwrap_err();
+        assert_eq!(error.message, "Feishu login required", "{pointer}");
+        assert!(!error.uncertain);
+        assert!(needs_login_text(&error.message));
+    }
+    let mismatch = parse_feishu_identity(&ready, Some("other-app:ou-user")).unwrap_err();
+    assert_eq!(
+        mismatch.message,
+        "Feishu identity does not match configured profile"
+    );
+    assert!(!needs_login_text(&mismatch.message));
+}
+
+#[test]
+fn channel_cli_login_errors_keep_their_platform_and_hide_diagnostics() {
+    for diagnostic in ["expired token: private-value", "run auth login", "未登录"] {
+        let feishu = cli::classify_cli_error("", diagnostic, true);
+        assert_eq!(feishu.message, "Feishu login required");
+        assert!(!feishu.uncertain);
+        assert!(needs_login_text(&feishu.message));
+        let dingtalk = cli::classify_cli_error("", diagnostic, false);
+        assert_eq!(dingtalk.message, "DingTalk login required");
+        assert!(!dingtalk.uncertain);
+    }
+    let permission = cli::classify_cli_error("", "missing scope for private-value", true);
+    assert!(permission.message.starts_with("Feishu permission denied;"));
+    assert!(!needs_login_text(&permission.message));
+    assert!(!permission.message.contains("private-value"));
+}
+
 fn message(id: &str, conversation: &str, text: &str, kind: &str) -> Incoming {
     Incoming {
         id: id.into(),
@@ -294,6 +346,75 @@ impl Drop for LifecycleFixture {
         self.service.lock().closed = true;
         let _ = std::fs::remove_dir_all(&self.home);
     }
+}
+
+#[test]
+fn first_verified_feishu_sweep_preserves_messages_while_connecting() {
+    let f = LifecycleFixture::new();
+    let mut inner = f.service.lock();
+    let run = inner.runs.get_mut("binding").unwrap();
+    run.binding.channel = "feishu".into();
+    run.starting = true;
+    run.status = "connecting".into();
+    run.subscriptions = subscription_key(&MessageConfig::default(), false);
+    assert!(matches!(
+        super::inbox::decide_incoming(
+            &mut inner,
+            "binding",
+            &message("first", "conversation", "hello", "direct"),
+            false,
+            false
+        ),
+        super::inbox::IncomingDecision::SaveQueue
+    ));
+    assert_eq!(inner.inbox["binding"].messages[0]["id"], "first");
+    let run = inner.runs.get_mut("binding").unwrap();
+    run.owns_identity = false;
+    assert!(matches!(
+        super::inbox::decide_incoming(
+            &mut inner,
+            "binding",
+            &message("unverified", "conversation", "hello", "direct"),
+            false,
+            false
+        ),
+        super::inbox::IncomingDecision::Done
+    ));
+}
+
+#[tokio::test]
+async fn stopped_feishu_poll_cannot_clear_a_replacement_connection() {
+    let f = LifecycleFixture::new();
+    let (replacement_stop, replacement_rx) = tokio::sync::watch::channel(false);
+    {
+        let mut inner = f.service.lock();
+        let run = inner.runs.get_mut("binding").unwrap();
+        run.generation = 2;
+        run.stop = Some(replacement_stop);
+    }
+    let (old_stop, old_rx) = tokio::sync::watch::channel(false);
+    old_stop.send_replace(true);
+    let (done, done_rx) = tokio::sync::watch::channel(false);
+    feishu_poll_task(
+        Arc::clone(&f.service),
+        "binding".into(),
+        1,
+        super::service::FeishuCheckpoint {
+            since: now_ms(),
+            window: None,
+        },
+        f.home.join("old-cursor.json"),
+        old_rx,
+        done,
+    )
+    .await;
+    assert!(*done_rx.borrow());
+    let inner = f.service.lock();
+    let run = &inner.runs["binding"];
+    assert!(run.stop.is_some());
+    assert_eq!(run.status, "listening");
+    assert!(!*replacement_rx.borrow());
+    assert!(!f.home.join("old-cursor.json").exists());
 }
 
 #[tokio::test]

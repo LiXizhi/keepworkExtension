@@ -18,6 +18,13 @@ pub(crate) async fn feishu_identity(
         args.push(value.split(':').next().unwrap_or("").to_string());
     }
     let value = lark_call(&args, root).await?;
+    parse_feishu_identity(&value, profile)
+}
+
+pub(crate) fn parse_feishu_identity(
+    value: &Value,
+    profile: Option<&str>,
+) -> Result<(String, String), DwsError> {
     let user = value
         .pointer("/identities/user")
         .cloned()
@@ -32,7 +39,7 @@ pub(crate) async fn feishu_identity(
     {
         return Err(DwsError {
             uncertain: false,
-            message: "Feishu identity is not ready; authorize personal messaging scopes".into(),
+            message: "Feishu login required".into(),
         });
     }
     let id = format!("{app_id}:{open_id}");

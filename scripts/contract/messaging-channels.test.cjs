@@ -71,6 +71,18 @@ test('feishu connect surfaces needs-login when the CLI rejects with a login erro
   assert.deepEqual(result.json, { status: 'needs-login', listening: false, needsLogin: true });
 });
 
+test('feishu connect surfaces needs-login when auth status succeeds without a ready user identity', async () => {
+  const marker = path.join(rootDir, '.feishu-auth-not-ready');
+  fs.writeFileSync(marker, 'fixture');
+  try {
+    const result = await persona(ownerA, 'POST', '/agent-a/channel-connect', { channel: 'feishu', root: rootDir });
+    assert.equal(result.status, 200, JSON.stringify(result.json));
+    assert.deepEqual(result.json, { status: 'needs-login', listening: false, needsLogin: true });
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+});
+
 test('dingtalk connect starts a listener and the persona view carries the binding', async () => {
   const result = await persona(ownerA, 'POST', '/agent-a/channel-connect', { root: rootDir });
   assert.equal(result.status, 200, JSON.stringify(result.json));
@@ -302,4 +314,93 @@ test('inbox actions and manual replies validate ownership and inputs', async () 
   // Another owner cannot act on a binding it does not own.
   const foreign = await persona(ownerB, 'POST', '/agent-b/inbox', { binding: bindingId, conversation: '', action: 'read' });
   assert.equal(foreign.status, 400, JSON.stringify(foreign.json));
+});
+
+test('feishu connects, polls, reuses a binding, restarts and switches only after explicit confirmation', async () => {
+  const [brainA, brainB] = ['a', 'b'].map(suffix => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `kp-feishu-${suffix}-`)));
+    roots.push(root);
+    fs.writeFileSync(path.join(root, '.feishu-ready'), 'fixture');
+    return root;
+  });
+  for (const [owner, id, root] of [[ownerA, 'feishu-a', brainA], [ownerA, 'feishu-peer', brainA], [ownerB, 'feishu-b', brainB]]) {
+    const saved = await persona(owner, 'POST', '', { id, name: id, prompt: 'fixture', root });
+    assert.equal(saved.status, 200, JSON.stringify(saved.json));
+  }
+  const connect = (owner, id, root, extra = {}) => persona(owner, 'POST', `/${id}/channel-connect`, { channel: 'feishu', root, ...extra });
+  const assertConflict = (result, occupiedRoot, requestedRoot) => {
+    assert.equal(result.status, 409, JSON.stringify(result.json));
+    assert.deepEqual(result.json, {
+      error: `Feishu CLI is already occupied by ${occupiedRoot}. Switch to ${requestedRoot}?`,
+      code: 'CHANNEL_OCCUPIED', channel: 'feishu', occupiedRoot, requestedRoot, confirmationRequired: true,
+    });
+  };
+  const readBinding = async (owner, id, bindingId) => {
+    const view = await persona(owner, 'GET', `/${id}`);
+    assert.equal(view.status, 200, JSON.stringify(view.json));
+    const binding = view.json.channels.find(row => row.id === bindingId);
+    assert.ok(binding, JSON.stringify(view.json));
+    return binding;
+  };
+  const waitForPoll = async (owner, bindingId, after = 0) => {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const status = await messaging(owner, 'GET', '/status');
+      assert.equal(status.status, 200, JSON.stringify(status.json));
+      const binding = status.json.bindings.find(row => row.id === bindingId);
+      assert.ok(binding, JSON.stringify(status.json));
+      if (binding.lastPollAt > after && binding.status === 'listening') return binding;
+      assert.ok(Date.now() < deadline, JSON.stringify(binding));
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  };
+
+  // The initial failed login reserved rootDir. A retry from another brain must
+  // preserve the structured conflict so older clients can compare and switch.
+  assertConflict(await connect(ownerA, 'feishu-a', brainA), rootDir, brainA);
+  assertConflict(await connect(ownerA, 'feishu-a', brainA, { switchFromRoot: '/stale-root' }), rootDir, brainA);
+  const connected = await connect(ownerA, 'feishu-a', brainA, { switchFromRoot: rootDir });
+  assert.equal(connected.status, 200, JSON.stringify(connected.json));
+  assert.equal(connected.json.channel, 'feishu');
+  assert.equal(connected.json.root, brainA);
+  assert.equal(connected.json.profile, 'cli_fixture:ou_fixture');
+  assert.equal(connected.json.accountConnected, true);
+  assert.equal(connected.json.listening, true);
+  assert.equal(connected.json.transport, 'polling');
+  assert.equal(connected.json.pollIntervalMs, 600_000);
+  assert.match(connected.json.id, /^[0-9a-f]{32}$/);
+  const bindingId = connected.json.id;
+  const firstPoll = await waitForPoll(ownerA, bindingId);
+
+  const repeated = await connect(ownerA, 'feishu-a', brainA);
+  assert.equal(repeated.status, 200, JSON.stringify(repeated.json));
+  assert.equal(repeated.json.id, bindingId);
+  const shared = await connect(ownerA, 'feishu-peer', brainA);
+  assert.equal(shared.status, 200, JSON.stringify(shared.json));
+  assert.equal(shared.json.id, bindingId);
+  const bindings = await messaging(ownerA, 'GET', '/status');
+  assert.equal(bindings.json.bindings.filter(row => row.channel === 'feishu' && row.root === brainA).length, 1);
+
+  const stopped = await persona(ownerA, 'POST', '/feishu-a/channel-stop', { binding: bindingId });
+  assert.equal(stopped.status, 200, JSON.stringify(stopped.json));
+  assert.equal((await readBinding(ownerA, 'feishu-a', bindingId)).listening, false);
+  const started = await persona(ownerA, 'POST', '/feishu-a/channel-start', { binding: bindingId });
+  assert.equal(started.status, 200, JSON.stringify(started.json));
+  assert.equal((await readBinding(ownerA, 'feishu-a', bindingId)).listening, true);
+  await waitForPoll(ownerA, bindingId, firstPoll.lastPollAt);
+
+  assertConflict(await connect(ownerB, 'feishu-b', brainB), brainA, brainB);
+  assertConflict(await connect(ownerB, 'feishu-b', brainB, { switchFromRoot: rootDir }), brainA, brainB);
+  assert.equal((await readBinding(ownerA, 'feishu-a', bindingId)).listening, true);
+  const switched = await connect(ownerB, 'feishu-b', brainB, { switchFromRoot: brainA });
+  assert.equal(switched.status, 200, JSON.stringify(switched.json));
+  assert.equal(switched.json.root, brainB);
+  assert.equal(switched.json.listening, true);
+  await waitForPoll(ownerB, switched.json.id);
+  const oldBinding = await readBinding(ownerA, 'feishu-a', bindingId);
+  assert.equal(oldBinding.listening, false);
+  assert.equal(oldBinding.enabled, false);
+  assert.equal(oldBinding.status, 'stopped');
+  assertConflict(await connect(ownerA, 'feishu-a', brainA, { switchFromRoot: rootDir }), brainB, brainA);
+  assert.equal((await readBinding(ownerB, 'feishu-b', switched.json.id)).listening, true);
 });

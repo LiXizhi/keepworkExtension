@@ -11,6 +11,11 @@ use crate::SERVER_VERSION;
 /// Commit recorded by `build.rs`; overridable at runtime by the host.
 const BUILD_COMMIT: Option<&str> = option_env!("KEEPWORK_MCP_BUILD_COMMIT");
 
+/// Embedded build identity is independent of host-provided runtime metadata.
+/// Keep the complete document in the binary so cross-target packaging can read
+/// it without executing foreign code or accessing a user's profile.
+pub const BUILD_INFO: &str = include_str!(concat!(env!("OUT_DIR"), "/build-info.json"));
+
 #[derive(Debug, Clone, Default)]
 pub struct Identity {
     pub host_kind: Option<String>,
