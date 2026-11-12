@@ -21,9 +21,6 @@ jobs:
   build:
     name: Windows Rust (${{ matrix.arch }})
     runs-on: windows-latest
-    outputs:
-      # Both matrix legs share the signing configuration, so either one may report it.
-      signed: ${{ steps.signing.outputs.signed }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +51,6 @@ jobs:
             apps/mcp-rust -> target
             apps/aichat-rust/src-tauri -> target
       - name: Import the code-signing certificate
-        id: signing
         shell: pwsh
         env:
           WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
@@ -62,7 +58,6 @@ jobs:
         run: |
           if (-not $env:WINDOWS_CERT_PFX_BASE64) {
             Write-Output '::warning::No Windows signing certificate configured; this build will be unsigned.'
-            "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             exit 0
           }
           $pfx = Join-Path $env:RUNNER_TEMP 'keepwork-signing.pfx'
@@ -79,7 +74,6 @@ jobs:
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
           }
           "WINDOWS_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           @{
             bundle = @{
               windows = @{
@@ -255,17 +249,17 @@ jobs:
         id: gate
         env:
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
-          SIGNED: ${{ needs.build.outputs.signed }}
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
         run: |
           version=$(node -p "require('./apps/aichat-rust/package.json').version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ -z "$KP_QINIU_ACCESS_KEY" ]; then
             echo "::warning::KP_QINIU_ACCESS_KEY is not configured; skipping the CDN copy."
             echo "ready=false" >> "$GITHUB_OUTPUT"
-          elif [ "$SIGNED" != "true" ]; then
-            echo "::warning::The Windows installers are unsigned; skipping the CDN copy so the public download stays signed."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
           else
+            if [ -z "$WINDOWS_CERT_PFX_BASE64" ]; then
+              echo "::notice::The installers are unsigned; copying them to the CDN anyway."
+            fi
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Validate the three installers
@@ -299,6 +293,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      # gh release --generate-notes reads the tag from the local git repository.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
