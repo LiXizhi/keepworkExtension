@@ -72,6 +72,24 @@ async function waitSession(f, id, expected) {
   assert.fail(`Expected ${expected}, received ${JSON.stringify(session)}`);
 }
 
+async function waitOwnedPrompt(f, session) {
+  const deadline = Date.now() + 5000;
+  do {
+    const prompts = f.rows().filter(row => row.method === 'session/prompt'
+      && row.params?.sessionId === session.threadId);
+    if (prompts.length) {
+      assert.equal(prompts.length, 1, 'the owned prompt must be dispatched exactly once');
+      const prompt = prompts[0];
+      assert.ok(prompt.params.prompt.some(part => part.type === 'text' && part.text?.includes('HOLD')));
+      assert.ok(Number.isInteger(prompt.pid) && prompt.pid > 1 && prompt.pid !== process.pid,
+        'the observed prompt must belong to a native fixture process');
+      return prompt;
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  } while (Date.now() < deadline);
+  assert.fail(`Native fixture did not receive the owned prompt: ${JSON.stringify({ threadId: session.threadId, rows: f.rows() })}`);
+}
+
 test('Cursor auth rejection preserves installed availability without starting authorization', async t => {
   const f = await fixture(t);
   const info = await f.status();
@@ -133,9 +151,12 @@ test('Cursor authentication metadata refresh leaves an owned active session and 
   const session = await f.request('/sessions', {
     backend: 'cursor', conversationId: 'cursor-owned-active', roots: [f.workspace],
   });
-  await f.request(`/sessions/${session.id}/turns`, { requestId: 'held-prompt', text: 'HOLD' });
+  const accepted = await f.request(`/sessions/${session.id}/turns`, { requestId: 'held-prompt', text: 'HOLD' });
+  assert.equal(accepted.session.lastSubmission.requestId, 'held-prompt');
   await waitSession(f, session.id, 'running');
-  const activePid = f.rows().find(row => row.method === 'session/prompt').pid;
+  // Local running means accepted by the daemon, before the native peer must
+  // have received stdin. Observe that peer's journal before checking its PID.
+  const activePid = (await waitOwnedPrompt(f, session)).pid;
   fs.writeFileSync(f.failure, 'auth');
   assert.equal((await f.status({ conversationId: 'metadata-while-active' })).authState, 'required');
   fs.rmSync(f.failure);
