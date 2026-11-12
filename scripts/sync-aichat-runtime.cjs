@@ -2,7 +2,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const ts = require('typescript');
 const { verifyFreshness } = require('./aichat-runtime-freshness.cjs');
 const defaultSource = path.resolve(__dirname, '../../apps/official/apps/tools/AIChat/runtime');
 const defaultDest = path.resolve(__dirname, '../src/core/vendor/aichat-runtime');
@@ -36,6 +35,9 @@ function syncRuntime({ source = defaultSource, dest = defaultDest, check = false
         return [];
     }
     const files = runtimeFiles(source);
+    // TypeScript is only needed when transpiling; keep module import cheap for
+    // argument validation and tooling that never reaches this path.
+    const ts = require('typescript');
     const manifestPath = path.join(dest, 'manifest.json');
     const manifest = { version: 1, source: 'AIChat/runtime', files: {} };
     const outputs = new Map();
