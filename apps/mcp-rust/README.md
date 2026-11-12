@@ -9,7 +9,7 @@ Node. Same wire contract, no Node in the installer.
 - `/health` advertises file, folder-browser, PTY, presence, persona and messaging
   contracts, plus `agentSessionApi`, `agentInventoryApi`, `agentContextApi` and
   `agentModeApi` (`"v1"`) for the native CLI slice described below. Image turns,
-  native history import, browser automation and unsupported provider protocols
+  non-Codex native history import, browser automation and unsupported provider protocols
   are not advertised as available.
 - Only advertises capabilities it actually serves, so AIChat degrades instead of
   calling a 404 while the port is in progress.
@@ -20,7 +20,7 @@ Node. Same wire contract, no Node in the installer.
 | --- | --- | --- |
 | P0 | lifecycle, config/paths, CORS/auth, `/health`, `/exists`, `/fs/stat`, `/admin/status|stop`, MCP handshake + `mcp_status` | implemented |
 | P1 | `/fs/*` full (`list`/`search`/`stat`/`file`/`dir`/`reveal`), `/fs/locations|browse`, PTY `/terminal/*`, `run_terminal`, `grep_files`, `web_search`, `fetch_url` | implemented |
-| P2 | agents/ACP, messaging, personas, presence SSE | partial: native ACP/Codex sessions, page-bound tool context, presence, persona tools and DingTalk/Feishu messaging implemented; provider-specific gaps remain |
+| P2 | agents/ACP, messaging, personas, presence SSE | partial: native ACP/Codex/Claude sessions, page-bound tool context, presence, persona tools and DingTalk/Feishu messaging implemented; provider-specific gaps remain |
 | P3 | browser, computer, paracraft, dashboard, admin API docs/history | planned |
 
 See [docs/rust-runtime-migration.md](../../docs/rust-runtime-migration.md) for the
@@ -32,7 +32,8 @@ The Rust daemon now implements `/agents/backends`, executable-only inventory,
 owner-scoped session create/list/read/update, text turns, approval replies,
 interruptions and NDJSON session snapshots. WorkBuddy and CodeBuddy use their
 native `--acp` process; the same adapter supports registered ACP CLIs. Codex uses
-its native `app-server --stdio` protocol. Neither path forwards to a Node MCP
+its native `app-server --stdio` protocol, and Claude Code uses its native
+bidirectional stream-json control protocol. These transports do not forward to a Node MCP
 daemon or treats installation detection as a successful model turn.
 
 - Native executable discovery is read-only and bounded. A targeted provider
@@ -73,9 +74,50 @@ daemon or treats installation detection as a successful model turn.
   draft store without pretending to verify a remote base. Remote conflict
   checks, Git background edits and protected-deck staging remain unsupported.
 
-Claude stream-json and Antigravity NDJSON are separate protocols and remain
-explicitly unsupported in this slice; their executable inventory entries are
-retained. Image turns, account switching, native history import and the Copilot
+Codex native history is available through `GET /agents/native-codex?cursor=`
+and `GET /agents/native-codex/:threadId`, with equivalent
+`/agents/native-sessions/codex` routes. Listing uses opaque pagination and includes
+CLI, editor, exec and app-server threads across providers, excluding threads
+managed by another AIChat owner. Opening history only calls `thread/read` and
+attaches one persistent owner-scoped wrapper; it never starts or resumes a turn.
+The wrapper preserves the original thread and canonical working directory,
+defaults to Ask, and refreshes external busy state on inactive reads. External
+active threads cannot accept AIChat turns or be stopped through this wrapper.
+An explicit user turn resumes the original thread with the existing submission
+receipts and approval contract. Invalid history or unavailable workspaces fail
+without creating an empty replacement. Workspace metadata reports the original
+cwd with `complete: false`; additional native workspace roots are not inferred.
+
+Claude Code reuses the discovered installation and starts a separate native
+stream-json process for each conversation. Native initialization supplies its
+model catalogue; text and reasoning deltas reconcile with complete assistant
+blocks, and native tool approvals, questions and interrupts use the existing
+owned session API. Additional workspace roots use `--add-dir`; page-bound MCP
+tools remain process-scoped. No permission-bypass flag or user-global CLI
+configuration is added. Reading `claude auth status` can verify native sign-in;
+unsupported or unrecognized account status remains unknown, and signed-out
+status is distinct from a missing installation. Metadata queries never start
+login or submit a prompt. Native resume preserves the original conversation;
+reconnects and uncertain submissions never resend a prompt automatically.
+
+Antigravity NDJSON remains explicitly unsupported in Rust; its executable
+inventory entry is retained. Backend responses expose the optional
+`protocolSupported` boolean separately from installation discovery. A full
+query that finds an unsupported CLI
+keeps `available: false`, its `cli.path`, `probe: "executable"` and unknown
+authentication, with `setup: "unsupported"` and `code: "UNSUPPORTED_FEATURE"`.
+Executable-only inventory still reports whether the CLI was found. Missing
+executables keep the historical missing-CLI error without unsupported setup or
+code fields. AIChat accepts both this additive response and older Rust's explicit
+native-protocol-unavailable error: it performs the fixed local executable check,
+reuses existing installations, and runs the program installer only when that
+check confirms the CLI is missing. Installation is verified separately and may
+finish with "installed; connection unsupported"; it does not claim a verified
+account or usable native session, start login, or change the MCP
+engine. MCP authentication/permission/connection errors and uncertain command
+results do not trigger installation retries.
+
+Image turns, account switching, non-Codex native history import and the Copilot
 VS Code custom-model bridge also remain outside this Rust implementation. A
 registered ACP provider is not evidence that its installed version, account,
 models or platform have passed a live acceptance run.
@@ -91,6 +133,32 @@ Validation uses real isolated HTTP listeners and deterministic native child
 processes: `node --test scripts/contract/agents.test.cjs` from the repository root
 after building the Rust binary, plus the Rust unit suite. These fixtures do not
 establish live provider or native desktop UI compatibility.
+
+Claude's Rust transport is covered by isolated native-process and HTTP fixtures,
+including installed/signed-out/unknown-account states, initialization, streamed
+text, approvals, questions, interruption and continuation. This is protocol
+regression coverage; fixtures alone do not establish live account or model
+access. A running older Rust daemon can still report Claude's
+protocol as unsupported until the changed runtime is installed and started.
+
+On 2026-11-12, an isolated macOS arm64 Rust 0.2.25 debug daemon used the existing
+Claude Code 2.1.322 installation. Read-only native auth status confirmed sign-in,
+and initialization returned the native model catalogue. In each of two separate
+temporary workspaces, the first turn used one native file-tool call to read
+`probe.txt` and returned its exact random Unicode marker (including Chinese and
+emoji); a second turn recalled that marker without a tool call in the same native
+thread. All four turns completed. A separate Rust 0.2.26 debug run read a new
+workspace's random Unicode file marker, stopped and restarted the isolated daemon
+with the same profile and Origin, and restored the exact cached transcript. An
+explicit new turn then recalled that marker in the same native thread. This task
+did not restart or replace the shared listener, which initially ran Rust 0.2.21
+with four clients. A later read found Rust 0.2.26 on 8089 after an external update;
+its refreshed Claude backend query returned `available: true`,
+`protocolSupported: true`, verified authentication, six native models and the
+existing CLI path.
+These checks verify native file access, continuation and daemon-restart resume on
+this machine; Windows, native desktop UI and live AIChat page-tool execution were
+not exercised by these Claude runs.
 
 On 2026-11-12, isolated macOS arm64 tests with the actual WorkBuddy CLI found
 17 models and completed two turns in one native conversation, including recall

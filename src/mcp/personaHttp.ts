@@ -44,6 +44,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
         if(action==='inbox'&&req.method==='GET'){send(200,await messaging.namedInboxView(owner,id,url.searchParams.get('binding')||'',url.searchParams.get('conversation')||'',Number(url.searchParams.get('before')||Infinity)));return;}
         if(req.method!=='POST'){send(405,{error:'Method not allowed',code:'UNSUPPORTED_FEATURE'});return;}
         switch(action){
+            case 'inbox-refresh':send(200,await messaging.refreshInbox(owner,id,String(input.binding||'')));return;
             case 'messaging-groups':send(200,{groups:await messaging.agentGroups(owner,id,String(input.binding||''),String(input.query||''))});return;
             case 'messages':send(200,personas.submit(owner,id,input));return;
             case 'clear':send(200,personas.clear(owner,id));return;

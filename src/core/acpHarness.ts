@@ -52,6 +52,8 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
     private modelFlights = new Map<string, Promise<{ data: any[] }>>();
     private catalogEpoch = 0;
     private launchEpoch = 0;
+    private authRequired = false;
+    private inFlightCalls = 0;
     cliInfo() { return this.launch && { path: this.launch.path, source: this.launch.source }; }
     constructor(readonly backend: AcpBackend, private directory: string,
         private executable?: string,
@@ -215,6 +217,11 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
     }
     private isBuddy() { return this.backend === 'workbuddy' || this.backend === 'codebuddy'; }
     async call(method: string, p: any = {}): Promise<any> {
+        this.inFlightCalls++;
+        try { return await this.callNative(method, p); }
+        finally { this.inFlightCalls--; }
+    }
+    private async callNative(method: string, p: any): Promise<any> {
         if (method === 'thread/list') {
             if (this.nativeHistory) return this.nativeHistory.list(p.cursor);
             await this.start();
@@ -299,7 +306,12 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
                 return { data };
             })();
             if (shared) this.modelFlights.set(key, task);
-            try { return await task; } finally { if (this.modelFlights.get(key) === task) this.modelFlights.delete(key); }
+            try { return await task; }
+            catch (error) {
+                if (this.backend === 'cursor' && !p.threadId && (error as any).rpcRejected
+                    && /^Authentication required[.!]?$/i.test((error as Error).message.trim())) this.authRequired = true;
+                throw error;
+            } finally { if (this.modelFlights.get(key) === task) this.modelFlights.delete(key); }
         }
         if (method === 'account/login/start') throw Object.assign(new Error(`Login in your terminal using ${AGENT_CLI[this.backend].login}; then reconnect.`), { rpcRejected: true });
         if (method === 'thread/start') {
@@ -424,6 +436,14 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         // Only unused, prompt-free previews are discarded; owned sessions/processes stay alive.
         for (const { thread } of this.catalogs.values()) this.threads.delete(thread.id);
         this.catalogs.clear();
+        // Cursor snapshots login at process startup. An external terminal login
+        // cannot update a rejected preview process. Refresh only an unused one;
+        // calls waiting for startup and owned sessions must retain their process.
+        if (this.authRequired && !this.inFlightCalls && !this.threads.size && !this.scoped.size
+            && !this.active.size && !this.pending.size && !this.catalogTasks.size) {
+            this.authRequired = false;
+            this.close();
+        }
     }
     private async setOption(thread: Thread, option: any, value: string) {
         if (!this.values(option).some(o => o.value === value)) throw Object.assign(new Error('Unsupported native configuration value: ' + value), { rpcRejected: true });

@@ -26,7 +26,7 @@ impl Protocol {
     }
 
     pub fn supported(self) -> bool {
-        matches!(self, Self::Acp | Self::Codex)
+        matches!(self, Self::Acp | Self::Codex | Self::Claude)
     }
 }
 
@@ -678,7 +678,8 @@ mod tests {
         assert_eq!(definition("workbuddy").unwrap().args, &["--acp"]);
         assert_eq!(definition("workbuddy").unwrap().commands[0], "codebuddy");
         assert_eq!(definition("codex").unwrap().protocol, Protocol::Codex);
-        assert!(!definition("claude").unwrap().protocol.supported());
+        assert!(definition("claude").unwrap().protocol.supported());
+        assert!(!definition("gemini").unwrap().protocol.supported());
         assert!(definition("other").is_none());
     }
 

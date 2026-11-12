@@ -15,7 +15,8 @@
 //!   `<id>.cursor.json`).
 //! - Out of slice (stay Node-only): agent CLI executors, headless worker
 //!   pages, multi-computer coordination, group nicknames, DingTalk
-//!   history backfill and multi-agent group routing. Unsupported surfaces
+//!   automatic history backfill and multi-agent group routing. Explicit,
+//!   receive-only DingTalk inbox refresh is available separately. Unsupported surfaces
 //!   keep their `UNSUPPORTED_FEATURE` errors instead of degrading silently.
 
 mod cli;
@@ -26,6 +27,7 @@ mod image_reply;
 mod inbox;
 mod lifecycle;
 mod policy;
+mod refresh;
 mod service;
 #[cfg(test)]
 mod tests;

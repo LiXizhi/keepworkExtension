@@ -1,5 +1,24 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-12：桌宠分身系统播音与隐藏主窗调度（0.2.64）
+
+主窗口显式使用 `BackgroundThrottlingPolicy::Disabled`。macOS 14+ 的 WebKit 默认后台调度在隐藏窗口停止系统播音后，可能让下一次播音及 JS 回调停住；单变量原生对照复现，并确认禁用节流后恢复。保持主窗隐藏和焦点不变，不改媒体权限、宠物窗口或弹窗；较旧 macOS、Windows/Linux 的支持边界沿用 Tauri，此项不代表这些平台已实测。维持后台通话和终端的页面调度可能增加后台耗能。
+
+相邻 AIChat 分身包 **1.0.26**：系统音色由页面持有浏览器 utterance，明确正常语速和中文音色/语言，兼容忽略 lang/voice 的旧 SDK；无需同步更新 MCP 或 SDK。结束回调前不重启 ASR；启动/播放超时、错误、挂断和旧回调均有边界，不重发分身任务。云端音色沿用原路径。
+
+- `RUST_TEST_THREADS=1 pnpm --prefix apps/aichat-rust check`：TypeScript/前端构建、Rust **88/88**、Node **276通过/4平台跳过/0失败**；日志 `/private/tmp/pet-silent-native-check.log`。
+- `npm run check:shared`：通过；日志 `/private/tmp/pet-silent-shared-check.log`。
+- 持久原生回归 `scripts/wk-persona-playback.swift`：实际加载 AIChat `persona_voice.js` 与 `desktop_pet_audio.js`，非持久 WKWebView、无麦克风/账号/网络；隐藏主窗完成三轮中文播音、播报中停止和立即新播。最终 **PASS**，旧 promise **1ms** 释放，新播 **2598ms** 完整结束，SDK 调用为零；日志 `/private/tmp/wk-persona-playback-repo-fixed.log`。仅改后台调度为默认策略的对照会在停止后新播超时；增加250ms等待无效，没有在产品里加入等待或自动重播。
+
+复跑原生回归（macOS 14+，源码目录通过环境变量传入）：
+
+```sh
+xcrun swiftc -parse-as-library -module-cache-path /tmp/wk-persona-module-cache apps/aichat-rust/scripts/wk-persona-playback.swift -o /tmp/wk-persona-playback -framework Cocoa -framework WebKit
+PERSONA_MODULE_SOURCE_ROOT=/path/to/AIChat /tmp/wk-persona-playback
+```
+
+设置 `PERSONA_DISABLE_THROTTLING=0` 运行默认调度对照；低于 macOS 14 退出77。该验证证明真实 OS 播音事件和完整持续时间，不代表已做真人耳听或线上版本组合验收。未发布安装包。
+
 ## 2026-11-12：宠物分身后台通话与语音播放速率（0.2.63）
 
 新增可选 `petVoiceAudioVersion: 1`，仅网页与宿主双方协商、分身目标且使用云端识别时启用。由可见宠物在一次原生点击签发的文档/context绑定租约内采集，主窗口保持原可见性、最小化状态和焦点。一次通话持续持有采集，每轮 ASR 只在 ready 后订阅 PCM；静音、思考、播报期间 ACK 后丢弃音频，不上传或留到下一轮。挂断（含权限等待中）、隐藏、账号/目标/引擎变化、原生停止或错误释放整个采集；旧端与不支持的目标/引擎保留既有路径。不修改 MCP 或分身消息请求契约。

@@ -61,3 +61,24 @@ test('self identity requires exact authenticated user and profile, not a matchin
  result.resolvedFilters.senders[0].selected.userId='someone-else';
  await assert.rejects(dingtalkHistorySelf('/brain','corp:user',async()=>result));
 });
+
+test('Node resumes Rust refresh checkpoints without changing the fixed window or opaque continuation',async t=>{
+ for(const [cursor,visited] of [['0',[]],['rust+/next==',['0']]]){
+  const f=file(t),start=now-3600000,end=now-1000;
+  // Rust serializes an empty visited array on its initial page and includes
+  // prior cursors on continuation pages. Both are shared on-disk contracts.
+  fs.writeFileSync(f,JSON.stringify({since:start+600000,pending:{start,end,cursor,visited}}));
+  const calls=[],stored=[];
+  const sync=new DingTalkHistorySync(f,now,'corp:user','/brain','self',async rows=>stored.push(...rows),async args=>{
+   calls.push(args);return page([{...row('resumed-from-rust'),createTime:now-60000}]);
+  });
+  assert.equal(await sync.step(now,()=>true),true,'a completed older fixed window still reports remaining catch-up');
+  assert.equal(calls.length,1);
+  const args=calls[0],arg=flag=>args[args.indexOf(flag)+1];
+  assert.equal(arg('--cursor'),cursor,'runtime switching cannot reset an opaque continuation');
+  assert.equal(arg('--start'),'2026-10-29 15:00:00');
+  assert.equal(arg('--end'),'2026-10-29 15:59:59');
+  assert.equal(stored.length,1);assert.equal(stored[0].id,'resumed-from-rust');
+  assert.deepEqual(JSON.parse(fs.readFileSync(f,'utf8')),{since:end});
+ }
+});

@@ -109,7 +109,7 @@ impl AgentManager {
         {
             let spec = definition(backend).unwrap();
             let launch = discover(backend);
-            let mut value = json!({"name":spec.name,"protocol":spec.protocol.as_str(),"installUrl":spec.install_url,"available":launch.is_ok(),"authenticated":null,"authState":"unknown","probe":"executable","models":[]});
+            let mut value = json!({"name":spec.name,"protocol":spec.protocol.as_str(),"protocolSupported":spec.protocol.supported(),"installUrl":spec.install_url,"available":launch.is_ok(),"authenticated":null,"authState":"unknown","probe":"executable","models":[]});
             match launch {
                 Ok(launch) => value["cli"] = launch.info(),
                 Err(error) => {
@@ -123,7 +123,13 @@ impl AgentManager {
                 continue;
             }
             if !spec.protocol.supported() {
+                // Finding a CLI and supporting its session protocol are separate
+                // observations. Preserve executable evidence and classify this
+                // boundary so setup can inspect/reuse the installation without
+                // treating an unavailable adapter as an installer failure.
                 value["available"] = json!(false);
+                value["setup"] = json!("unsupported");
+                value["code"] = json!("UNSUPPORTED_FEATURE");
                 value["error"] = json!(format!(
                     "UNSUPPORTED_FEATURE: {} native protocol is not yet available in Rust MCP",
                     spec.name
@@ -160,21 +166,33 @@ impl AgentManager {
                 canonical_root(&cwd.to_string_lossy())?
             };
             let status: Result<Value, String> = async {
-                let harness = self.harness(backend, &cwd).await?;
+                // Cursor caches the native login state at process startup. Keep
+                // prompt-free previews separate so a rejected preview can be
+                // retired without interrupting an owned or in-flight session.
+                let cursor_preview = backend == "cursor" && scoped.is_none();
+                // Acquire the preview under the catalog lock as well: a queued
+                // probe must not retain a process retired by an earlier probe.
+                let mut preview_catalog = if cursor_preview {
+                    Some(self.catalogs.lock().await)
+                } else {
+                    None
+                };
+                let harness = self.harness_for(backend, &cwd, cursor_preview).await?;
                 value["probe"] = json!("protocol");
                 value["cli"] = harness.cli_info();
-                if spec.protocol == Protocol::Codex {
+                if matches!(spec.protocol, Protocol::Codex | Protocol::Claude) {
                     let account = harness
                         .call("account/read", json!({"refreshToken":false}), RPC_TIMEOUT)
                         .await?;
-                    let authenticated =
-                        account["account"].is_object() || account["requiresOpenaiAuth"] == false;
-                    value["authenticated"] = json!(authenticated);
-                    value["authState"] = json!(if authenticated {
-                        "verified"
+                    if account["authUnknown"] == true {
+                        value["authenticated"] = Value::Null;
+                        value["authState"] = json!("unknown");
                     } else {
-                        "required"
-                    });
+                        let authenticated =
+                            account["account"].is_object() || account["requiresOpenaiAuth"] == false;
+                        value["authenticated"] = json!(authenticated);
+                        value["authState"] = json!(if authenticated { "verified" } else { "required" });
+                    }
                     if let Some(account) = account["account"].as_object() {
                         let mut display = serde_json::Map::new();
                         for key in ["type", "email", "username", "name", "planType"] {
@@ -185,7 +203,7 @@ impl AgentManager {
                         value["account"] = Value::Object(display);
                     }
                     match harness
-                        .call("model/list", json!({"limit":100}), RPC_TIMEOUT)
+                        .call("model/list", json!({"limit":100,"refresh":query.get("refresh").map(String::as_str)==Some("1")}), RPC_TIMEOUT)
                         .await
                     {
                         Ok(models) => {
@@ -200,7 +218,10 @@ impl AgentManager {
                         cwd.display(),
                         query.get("model").map(String::as_str).unwrap_or("")
                     );
-                    let mut cache = self.catalogs.lock().await;
+                    let mut cache = match preview_catalog.take() {
+                        Some(cache) => cache,
+                        None => self.catalogs.lock().await,
+                    };
                     if query.get("refresh").map(String::as_str) == Some("1") {
                         cache.remove(&key);
                     }
@@ -255,6 +276,14 @@ impl AgentManager {
                                 native
                             }
                             Err(error) => {
+                                if cursor_preview
+                                    && error == "Native RPC rejected: Authentication required"
+                                {
+                                    // Do not replay this request or start browser
+                                    // authentication. The next probe reads the
+                                    // login completed in the user's terminal.
+                                    harness.close();
+                                }
                                 value["modelsError"] = json!(error);
                                 json!({})
                             }
@@ -541,8 +570,14 @@ impl AgentManager {
                 parameters["config"] = codex_server(&server);
                 parameters["developerInstructions"]=json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
             }
+        } else if spec.protocol == Protocol::Claude {
+            parameters["roots"] = json!(roots);
+            parameters["mode"] = json!(selected_mode);
+            if contextual {
+                parameters["aichatInstructions"] = json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
+            }
         }
-        if spec.protocol == Protocol::Codex {
+        if matches!(spec.protocol, Protocol::Codex | Protocol::Claude) {
             if let Some(model) = &requested_model {
                 parameters["model"] = json!(model);
             }
@@ -601,14 +636,20 @@ impl AgentManager {
         self.view(&session_id, owner)
     }
 
-    /// Only legacy Node Codex registries need this read-only CLI query. Ordinary
-    /// Rust history, internal views and metadata discovery remain local.
+    /// Imported Codex threads refresh with read-only thread/read. Legacy Node
+    /// records hydrate once; ordinary Rust-managed history remains local.
     pub(super) async fn read_owned(
         self: &Arc<Self>,
         session_id: &str,
         owner: &str,
     ) -> Result<Value, String> {
-        self.view(session_id, owner)?;
+        let data = self.view(session_id, owner)?;
+        if data["native"] == true
+            && data["backend"] == "codex"
+            && !self.sessions.lock().unwrap()[session_id].needs_native_history
+        {
+            return self.refresh_native(session_id, owner).await;
+        }
         let gate = {
             let sessions = self.sessions.lock().unwrap();
             let session = &sessions[session_id];
@@ -648,51 +689,9 @@ impl AgentManager {
                 )
             })?;
         let response=harness.call("thread/read",json!({"threadId":data["threadId"],"includeTurns":true}),RPC_TIMEOUT).await.map_err(|error|format!("Legacy Codex history could not be read; original registry was preserved: {error}"))?;
-        let thread = &response["thread"];
-        if thread["id"] != data["threadId"] || !thread["turns"].is_array() {
-            return Err(
-                "Legacy Codex history response is incompatible; original registry was preserved"
-                    .into(),
-            );
-        }
-        let mut items = Vec::new();
-        let mut budget = 2_000_000;
-        for turn in thread["turns"].as_array().unwrap() {
-            if turn.get("items").is_some_and(|items| !items.is_array()) {
-                return Err(
-                    "Legacy Codex history items are invalid; original registry was preserved"
-                        .into(),
-                );
-            }
-            for item in turn["items"].as_array().into_iter().flatten() {
-                if !item.is_object() {
-                    return Err(
-                        "Legacy Codex history item is invalid; original registry was preserved"
-                            .into(),
-                    );
-                }
-                let mut item = scrub(item, 0, &mut budget);
-                if item["type"] == "userMessage" {
-                    if let Some(content) = item["content"].as_array_mut() {
-                        for part in content {
-                            if let Some(text) = part["text"]
-                                .as_str()
-                                .filter(|text| text.starts_with("<aichat_context "))
-                            {
-                                if let Some((_, visible)) =
-                                    text.split_once("\n</aichat_context>\n<aichat_user_message>\n")
-                                {
-                                    part["text"] = json!(visible);
-                                }
-                            }
-                        }
-                    }
-                }
-                if !item.is_null() {
-                    items.push(item);
-                }
-            }
-        }
+        let mut items =
+            native::thread_items(&response["thread"], data["threadId"].as_str().unwrap())
+                .map_err(|error| format!("{error}; original registry was preserved"))?;
         let restored = self.edit(session_id, |session| {
             // A native turn may emit while this read is in flight. Keep its
             // newer normalized items when merging the recovered transcript.
@@ -713,6 +712,10 @@ impl AgentManager {
                 }
             }
             session.data["items"] = json!(items);
+            if session.data["native"] == true {
+                session.data["externalBusy"] =
+                    json!(response["thread"]["status"]["type"] == "active");
+            }
             session.needs_native_history = false;
             Ok(())
         });
@@ -801,6 +804,21 @@ impl AgentManager {
                     return Err("UNSUPPORTED_FEATURE: This CLI cannot resume its previous native session; start a new conversation".into());
                 }
                 json!({"sessionId":data["threadId"],"cwd":data["roots"][0],"mcpServers":server.into_iter().collect::<Vec<_>>()})
+            } else if harness.protocol() == Protocol::Claude {
+                // Public snapshots omit receipts. Read the owned raw record so
+                // a restored conversation retains its existing native identity.
+                let resume = self.sessions.lock().unwrap()[session_id].data["submissions"]
+                    .as_object()
+                    .is_some_and(|receipts| {
+                        receipts.values().any(|receipt| {
+                            receipt["state"] != "rejected" && receipt["state"] != "starting"
+                        })
+                    });
+                let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"roots":data["roots"],"model":data["model"],"mode":data["mode"],"resume":resume,"mcpServers":server.into_iter().collect::<Vec<_>>()});
+                if contextual {
+                    params["aichatInstructions"] = json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
+                }
+                params
             } else {
                 let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"sandbox":if data["mode"]=="craft"{"danger-full-access"}else{"read-only"},"approvalPolicy":if data["mode"]=="ask"{"on-request"}else{"never"}});
                 if let Some(server) = server {
@@ -903,6 +921,7 @@ impl AgentManager {
                 return Ok(());
             }
             if s.data["archived"] == true
+                || s.data["externalBusy"] == true
                 || ACTIVE.contains(&s.data["status"].as_str().unwrap_or(""))
             {
                 return Err("Session is archived or already running".into());
@@ -969,7 +988,10 @@ impl AgentManager {
         self.edit(session_id,|s|{
             s.data["turnId"]=json!(turn_id);
             s.data["items"].as_array_mut().unwrap().push(json!({"id":format!("local-user-{}",id()),"type":"userMessage","content":[{"type":"text","text":text}]}));
-            if let Some(model)=&requested_model{s.data["model"]=json!(model);}
+            if let Some(model)=&requested_model{
+                if harness.protocol()==Protocol::Claude && s.data["model"]!=*model && requested_effort.is_none(){s.data["effort"]=Value::Null;}
+                s.data["model"]=json!(model);
+            }
             if let Some(effort)=&requested_effort{s.data["effort"]=json!(effort);}Ok(())
         })?;
         if harness.protocol() == Protocol::Acp {
@@ -1021,6 +1043,22 @@ impl AgentManager {
             });
         } else {
             let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":[{"type":"text","text":native_text}],"sandboxPolicy":{"type":if selected_mode=="craft"{"dangerFullAccess"}else{"readOnly"}},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
+            if harness.protocol() == Protocol::Claude {
+                params.as_object_mut().unwrap().remove("sandboxPolicy");
+                params.as_object_mut().unwrap().remove("approvalPolicy");
+                params["mode"] = json!(selected_mode);
+                // An omitted setting preserves this conversation's selection,
+                // including after the daemon has restored its native process.
+                if let Some(model) = data["model"].as_str().filter(|m| !m.is_empty()) {
+                    params["model"] = json!(model);
+                }
+                if requested_model.is_none() || requested_model.as_deref() == data["model"].as_str()
+                {
+                    if let Some(effort) = data["effort"].as_str().filter(|e| !e.is_empty()) {
+                        params["effort"] = json!(effort);
+                    }
+                }
+            }
             if let Some(model) = requested_model {
                 params["model"] = json!(model);
             }

@@ -248,6 +248,8 @@ export class MessagingService {
         return this.recentMessages.slice().reverse().map(({receipt,...row})=>({...row,id:receipt.id,time:receipt.time,state:receipt.state,reason:receipt.reason||'',executor:receipt.executor||'',model:receipt.model||'',server:receipt.server||''}));
     }
     private logins = new Map<string, Promise<any>>();
+    private inboxRefreshes = new Map<string, Promise<{status:string;since:number;imported:number}>>();
+    private inboxRefreshEpoch = new WeakMap<Runtime, number>();
     private inbox: Record<string, { messages: InboxMessage[]; paused: string[]; read: Record<string,number>; readFutureIds?: Record<string,string[]>; sends?: Record<string,string>; autoReplyTimes?: Record<string,number[]> }> = {};
     private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
     private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
@@ -432,6 +434,45 @@ export class MessagingService {
         groups:[...(this.inboxScope(owner,agentId,b.id)||[])].map(id=>({id,name:this.inboxName(owner,agentId,b.id,id)})),
         unread:this.scopedInbox(owner,agentId,b.id).filter(m=>this.inboxUnread(owner,agentId,b.id,m)).length}));}
     assertAgentBinding(owner:string,agentId:string,id:string){const b=this.get(id).binding;if(!this.hasAgent(b,owner,agentId))throw Error('渠道不属于此分身');}
+    /** Explicit remote reads only: never admit recovered messages to the reply queue. */
+    async refreshInbox(owner:string,agentId:string,id:string) {
+        this.assertAgentBinding(owner,agentId,id);
+        const r=this.get(id);
+        if(r.binding.channel==='feishu')throw Object.assign(Error('当前渠道不支持主动同步'),{code:'UNSUPPORTED_FEATURE'});
+        let task=this.inboxRefreshes.get(id);
+        if(!task){
+            task=this.refreshInboxPage(owner,agentId,r).finally(()=>{if(this.inboxRefreshes.get(id)===task)this.inboxRefreshes.delete(id);});
+            this.inboxRefreshes.set(id,task);
+        }
+        const result=await task;
+        this.assertAgentBinding(owner,agentId,id);
+        return result;
+    }
+    private async refreshInboxPage(owner:string,agentId:string,r:Runtime) {
+        const {id,root,profile}=r.binding,epoch=this.inboxRefreshEpoch.get(r)||0;
+        const active=()=>!this.closed&&this.runs.get(id)===r&&(this.inboxRefreshEpoch.get(r)||0)===epoch&&r.binding.root===root&&r.binding.profile===profile&&this.hasAgent(r.binding,owner,agentId);
+        const requireActive=()=>{if(!active())throw Error('消息同步已取消，请重新刷新');};
+        requireActive();
+        const status=await dws(['event','status','--profile',profile,'--format','json'],root);
+        requireActive();
+        if(!status.identity?.corp_id||!status.identity?.user_id||`${status.identity.corp_id}:${status.identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
+        const self=status.identity.open_dingtalk_id||await dingtalkHistorySelf(root,profile);
+        requireActive();
+        const now=Date.now();
+        let imported=0;
+        // The first manual page covers recent messages immediately. Full older
+        // history recovery has its own background cursor and reply policy.
+        const sync=new DingTalkHistorySync(path.join(this.home,id+'.refresh-cursor.json'),now-86400000+600000,profile,root,self,async rows=>{
+            requireActive();
+            const box=this.box(id),keys=new Set(box.messages.map(m=>JSON.stringify([m.conversation,m.id])));
+            for(const row of rows){const key=JSON.stringify([row.conversation,row.id]);if(keys.has(key))continue;keys.add(key);box.messages.push({...row,state:'synced'});imported++;}
+            box.messages.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));
+            this.saveInbox();
+        });
+        const more=await sync.step(now,active);
+        requireActive();this.persist(r);
+        return {status:more?'syncing':'current',since:sync.state.since,imported};
+    }
     bindAgent(owner:string,agentId:string,id:string,shareRoot=false){
         const r=this.get(id);
         if(!/^[\w-]{1,160}$/.test(agentId))throw Error('Invalid Agent ID');
@@ -652,7 +693,7 @@ export class MessagingService {
     list() { return [...this.runs.values()].map(r => this.view(r.binding.id)); }
     view(id: string) {
         const r = this.get(id);
-        return { ...r.binding, nicknameErrors:[...(this.nicknameReadErrors.has(r.binding.id)?[this.nicknameReadErrors.get(r.binding.id)!]:[]),...[...this.nicknameErrors.entries()].filter(([key])=>(this.messageAgents?.()||[]).some(p=>p.root===r.binding.root&&p.messaging?.groups.some(g=>g.channel===(r.binding.channel||'dingtalk')&&g.account===r.binding.profile&&nicknameKey({channel:g.channel,account:g.account,group:g.id,root:p.root,names:[]})===key))).map(([,error])=>error)], transitioning: !!r.starting, channel:r.binding.channel||'dingtalk', historySync:r.historySync, transport:r.binding.channel==='feishu'?'polling':'events', pollIntervalMs:r.binding.channel==='feishu'?600000:undefined, lastPollAt:r.lastPollAt||null, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', serving: this.servingView(r), autoReply: r.binding.enabled };
+        return { ...r.binding, ...(r.binding.channel!=='feishu'?{inboxRefreshVersion:1}:{}), nicknameErrors:[...(this.nicknameReadErrors.has(r.binding.id)?[this.nicknameReadErrors.get(r.binding.id)!]:[]),...[...this.nicknameErrors.entries()].filter(([key])=>(this.messageAgents?.()||[]).some(p=>p.root===r.binding.root&&p.messaging?.groups.some(g=>g.channel===(r.binding.channel||'dingtalk')&&g.account===r.binding.profile&&nicknameKey({channel:g.channel,account:g.account,group:g.id,root:p.root,names:[]})===key))).map(([,error])=>error)], transitioning: !!r.starting, channel:r.binding.channel||'dingtalk', historySync:r.historySync, transport:r.binding.channel==='feishu'?'polling':'events', pollIntervalMs:r.binding.channel==='feishu'?600000:undefined, lastPollAt:r.lastPollAt||null, status: r.status, error: r.error, nextRetryAt: r.nextRetryAt || null, needsRepair: r.status === 'error', active: r.active.size, queued: [...r.queues.values()].reduce((n,q) => n + q.length,0), recent: r.receipts.slice(-40).reverse(), accountConnected: !!r.identity, listening: r.status === 'listening', executor: [...r.receipts].reverse().find(x => x.executor)?.executor || '', serving: this.servingView(r), autoReply: r.binding.enabled };
     }
     rules(id: string) { const b=this.get(id).binding;return readRules(b.root,b.rulesDir); }
     private replyPlan(r: Runtime) {
@@ -944,6 +985,7 @@ export class MessagingService {
         this.halt(r); this.persist(r);
     }
     private halt(r: Runtime) {
+        this.inboxRefreshEpoch.set(r,(this.inboxRefreshEpoch.get(r)||0)+1);
         clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined; r.retries = 0;
         r.historyStop?.(); r.historyStop = undefined; r.pollAbort?.abort(); r.stop?.(); r.stop = undefined; this.releaseIdentity(r);
         for (const q of r.queues.values()) for (const job of q) job.receipt.state = 'cancelled';
@@ -959,7 +1001,7 @@ export class MessagingService {
     private async receiveOne(r: Runtime, event: any, recovered=false) {
         if (!this.canRun(r) || this.closed || !this.gatewayAllowed(r,true)) return;
         const message: Incoming | null = r.binding.channel==='feishu' ? event : incoming(event); if (!message) return;
-        if (!recovered && this.box(r.binding.id).messages.some(m=>['recovered','recovery-claimed'].includes(m.state||'')&&m.id===message.id&&m.conversation===message.conversation)) return;
+        if (!recovered && this.box(r.binding.id).messages.some(m=>['recovered','recovery-claimed','synced'].includes(m.state||'')&&m.id===message.id&&m.conversation===message.conversation)) return;
         if(recovered)message.recovered=true;
         const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
         const receipt: Receipt = { id, time: Date.now(), state: 'ignored' }; r.receipts.push(receipt); r.receipts = r.receipts.slice(-200);
@@ -984,10 +1026,10 @@ export class MessagingService {
             recent.relevant = receipt.reason === 'reply' || (message.kind !== 'group' && !['self','echo'].includes(receipt.reason));
             if(receipt.reason==='self') {
                 const box=this.box(r.binding.id);
-                if(!box.messages.some(m=>m.id===message.id))box.messages.push({...message,direction:'out'});
+                if(!box.messages.some(m=>m.id===message.id&&m.conversation===message.conversation))box.messages.push({...message,direction:'out'});
                 this.saveInbox();
             }
-            if(!['old','self','echo'].includes(receipt.reason)) { const box=this.box(r.binding.id);if(!box.messages.some(m=>m.id===message.id&&m.direction==='in'))box.messages.push({...message,direction:'in'});this.saveInbox();if(box.paused.includes(message.conversation))receipt.reason='taken-over'; }
+            if(!['old','self','echo'].includes(receipt.reason)) { const box=this.box(r.binding.id);if(!box.messages.some(m=>m.id===message.id&&m.conversation===message.conversation&&m.direction==='in'))box.messages.push({...message,direction:'in'});this.saveInbox();if(box.paused.includes(message.conversation))receipt.reason='taken-over'; }
             // A group-keyword subscription can deliver before the @me subscription.
             // An ignored group event must not consume the accepted message's dedup key.
             r.seen.push(receipt.reason === 'reply' ? id : id + ':' + message.kind); r.seen = r.seen.slice(-10000);

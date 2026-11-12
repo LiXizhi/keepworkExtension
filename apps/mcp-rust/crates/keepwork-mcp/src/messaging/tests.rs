@@ -382,6 +382,45 @@ fn first_verified_feishu_sweep_preserves_messages_while_connecting() {
     ));
 }
 
+#[test]
+fn explicitly_synced_message_is_not_admitted_again_when_the_live_event_arrives_late() {
+    let f = LifecycleFixture::new();
+    let message = message("synced-id", "conversation", "hello", "direct");
+    let mut inner = f.service.lock();
+    inner
+        .inbox
+        .entry("binding".into())
+        .or_default()
+        .messages
+        .push(message.to_row("in", Some("synced")));
+    assert!(matches!(
+        super::inbox::decide_incoming(&mut inner, "binding", &message, false, false),
+        super::inbox::IncomingDecision::Done
+    ));
+    assert_eq!(inner.inbox["binding"].messages.len(), 1);
+    assert!(inner.runs["binding"].receipts.is_empty());
+    assert!(inner.runs["binding"].queues.is_empty());
+}
+
+#[test]
+fn live_messages_with_the_same_id_in_different_conversations_are_kept_separately() {
+    let f = LifecycleFixture::new();
+    let mut inner = f.service.lock();
+    inner.runs.get_mut("binding").unwrap().since = 0;
+    inner.runs.get_mut("binding").unwrap().subscriptions =
+        subscription_key(&MessageConfig::default(), false);
+    for conversation in ["first", "second"] {
+        let incoming = message("shared-id", conversation, "hello", "direct");
+        assert!(matches!(
+            super::inbox::decide_incoming(&mut inner, "binding", &incoming, false, false),
+            super::inbox::IncomingDecision::SaveQueue
+        ));
+    }
+    assert_eq!(inner.inbox["binding"].messages.len(), 2);
+    assert_eq!(inner.inbox["binding"].messages[0]["conversation"], "first");
+    assert_eq!(inner.inbox["binding"].messages[1]["conversation"], "second");
+}
+
 #[tokio::test]
 async fn stopped_feishu_poll_cannot_clear_a_replacement_connection() {
     let f = LifecycleFixture::new();

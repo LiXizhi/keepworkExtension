@@ -26,7 +26,11 @@ Rust 自己实现 `/agents/backends`、只读可执行文件清单、owner 隔�
 - **发现与模式**：`probe=executable` 不启动原生进程；targeted backend 仅连接选中的 provider。ACP 无账户查询时返回 `authenticated:null / authState:unknown`。模型及 effort 来自原生目录，不能虚构。Craft 请求完整权限，Ask 保留交互审批，Plan 在 ACP 要求原生 planning mode 并拒绝修改审批；语义无法执行则在发言前返回明确错误。问题回答仍由用户决定。
 - **现行网页上下文**：实现 `/agents/contexts/:conversation`、`credentials`、SSE `events`、`result` 与 `revoke`，每轮注入已登记的指令及 revision。只向原 owner/conversation/pageId/generation 工具流派发；旧页或过期结果不能答复新页调用。同一 Rust executable 的私密 stdio 模式桥接 MCP，不需要 Node 代理。CLI 只得到可撤销的临时能力，得不到网页登录/Git 凭据。断流、超时、取消后明确记录已派发工具结果未知，不重放修改操作。
 - **空间操作边界**：背景 `workspace_file` 真正支持明确授权的本机空间，修改仅在 Craft，保留路径/符号链接限制及读后修改校验。远程、云端和 Git 文件操作使用原在线网页的已发现工具，页面离线时明确不可用。`credentials` 验证空间描述但不保存云端/Git token，并报告 `backendWorkspaceTypes:["local"]`；注入的上下文明确这项限制。Git `import/get/drop/ack` 持久化保留既有草稿及冲突；未验证 remote base 不标成功，后台 Git 编辑、远端 `check`、`stageValidatedDeck` 仍返回特定功能不支持。
-- **本轮未覆盖**：Claude 双向 stream-json、Antigravity 原生 NDJSON、图片轮次、原生历史导入、Copilot VS Code 自定义模型桥与账户切换。Copilot ACP 不支持所需的 per-session MCP 工具桥合同，因此其 `contextVersion:1` 创建请求在发言前明确拒绝；清单/模型发现不代表当前 AIChat 上下文会话已可用，不静默丢失网页工具。保留 provider 清单，未实现协议明确不支持；不能因此宣称缺少 CLI、改用其他 provider 或阻止普通聊天。此实现不接通分身消息执行器的 CLI 路径。
+- **当前未覆盖**：Antigravity 原生 NDJSON、图片轮次、原生历史导入、Copilot VS Code 自定义模型桥与账户切换。Copilot ACP 不支持所需的 per-session MCP 工具桥合同，因此其 `contextVersion:1` 创建请求在发言前明确拒绝；清单/模型发现不代表当前 AIChat 上下文会话已可用，不静默丢失网页工具。保留 provider 清单，未实现协议明确不支持；不能因此宣称缺少 CLI、改用其他 provider 或阻止普通聊天。此实现不接通分身消息执行器的 CLI 路径。
+
+后续 Claude 适配器直接使用原生双向 stream-json，每个原生会话保留独立进程和 session ID，支持初始化模型目录、文字流、工具审批、问题回答、停止及原生恢复。多根目录通过 `--add-dir` 传入，网页工具使用进程级 MCP 配置；不绕过原生权限、不修改全局 CLI 配置、不自动重发不确定请求。`probe=executable` 仍不启动 CLI 或验证登录；完整状态用只读 `claude auth status` 区分已登录、未登录与未知，旧版命令不支持时不读取凭据文件代替检测。`protocolSupported` 为可选字段，旧运行时缺少该适配器时继续明确报告不支持，已找到 CLI 不能触发重复安装或隐式切换 Node。
+
+2026-11-12 的 Claude 实测使用 macOS arm64、隔离的 Rust 0.2.25 debug daemon 和已有 Claude Code 2.1.322：原生登录检测及初始化成功，两个独立临时工作区分别完成一次真实文件工具读取与一次同线程无工具回忆，四轮均准确返回随机中文/emoji 标记。同日 Rust 0.2.26 debug 的独立实测在新临时工作区读出随机 Unicode 文件标记后，停止并使用相同 profile、固定 Origin 重启隔离 daemon；持久化历史完全一致，显式新发的一轮在原生同线程中正确回忆标记。未验证 Windows、原生桌面 UI 或真实网页工具。本任务未重启或替换共享 8089 服务：初查为 Rust 0.2.21、四个客户端；外部更新后复查为 Rust 0.2.26，真实端口的 Claude 刷新查询返回 HTTP 200、可用/协议支持/已验证登录、六个原生模型及既有 CLI 路径。此记录与 fixture 回归分开，不构成跨平台全量通过声明。
 
 `scripts/contract/agents.test.cjs` 使用隔离真实监听器和原生子进程 fixture 验证 HTTP/stdio/SSE、审批、请求去重、重启及权限边界；Rust 单元测试覆盖发现与上下文。fixture 不代替真实 WorkBuddy/Codex 账户、发布版客户端、Windows 或原生桌面窗口验证，实际通过情况须单独记录。
 

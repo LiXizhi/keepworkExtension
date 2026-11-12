@@ -1,10 +1,12 @@
 //! Native CLI sessions. The browser receives normalized snapshots, never a raw
 //! RPC tunnel or a choice of executable. Credentials and tool grants stay in RAM.
+mod claude;
 pub mod context;
 pub mod discovery;
 mod events;
 pub mod harness;
 mod history;
+mod native;
 mod sessions;
 
 use axum::body::{Body, Bytes};
@@ -439,10 +441,23 @@ impl AgentManager {
     }
 
     async fn harness(self: &Arc<Self>, backend: &str, cwd: &Path) -> Result<Arc<Harness>, String> {
+        self.harness_for(backend, cwd, false).await
+    }
+
+    async fn harness_for(
+        self: &Arc<Self>,
+        backend: &str,
+        cwd: &Path,
+        metadata_only: bool,
+    ) -> Result<Arc<Harness>, String> {
         if self.closing.load(Ordering::Acquire) {
             return Err("Agent service is stopping".into());
         }
-        let key = format!("{backend}\0{}", cwd.display());
+        let key = if metadata_only {
+            format!("metadata\0{backend}\0{}", cwd.display())
+        } else {
+            format!("{backend}\0{}", cwd.display())
+        };
         let mut harnesses = self.harnesses.lock().await;
         if let Some(harness) = harnesses.get(&key).filter(|h| h.alive()) {
             return Ok(Arc::clone(harness));
@@ -603,6 +618,16 @@ async fn handle_request(
         ("GET", ["agents", "backends"]) => manager.backends(&owner, query).await,
         ("GET", ["agents", "accounts"]) => Ok(manager.accounts()),
         ("POST", ["agents", "login"]) => manager.login(&input).await,
+        ("GET", ["agents", "native-codex"]) => manager.native_catalog(&owner, "codex", query).await,
+        ("GET", ["agents", "native-codex", thread_id]) => {
+            manager.native_session(&owner, "codex", thread_id).await
+        }
+        ("GET", ["agents", "native-sessions", backend]) => {
+            manager.native_catalog(&owner, backend, query).await
+        }
+        ("GET", ["agents", "native-sessions", backend, thread_id]) => {
+            manager.native_session(&owner, backend, thread_id).await
+        }
         ("GET", ["agents", "sessions"]) => manager.list(&owner, query),
         ("POST", ["agents", "sessions"]) => manager.create(&owner, &input).await,
         ("GET", ["agents", "sessions", session_id]) => manager.read_owned(session_id, &owner).await,

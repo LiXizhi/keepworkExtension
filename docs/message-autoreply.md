@@ -16,7 +16,7 @@ CLI-native credential storage; AIChat login stays in process memory. Restart nev
 The Rust daemon (`apps/mcp-rust`, 0.2.6) hosts the same DingTalk listener and Feishu
 polling core with the `/messaging/*` management surface and advertises
 `messagingApi: "messaging-v1"`. Node-only for now: headless worker pages, agent CLI
-executors, multi-computer coordination, group nicknames, DingTalk history backfill,
+executors, multi-computer coordination, group nicknames, automatic DingTalk history backfill,
 multi-agent group routing and WeChat; those surfaces keep their `UNSUPPORTED_FEATURE`
 errors. The slice boundary and registered differences live in
 `docs/rust-runtime-migration.md`.
@@ -51,6 +51,38 @@ are isolated in memory and expire after 60 seconds; existing persona SSE events,
 explicit refreshes, read actions and a fresh binding unread total that contradicts
 the cached list invalidate or refresh them. Existing server response shapes remain
 usable without new pagination parameters or a coordinated client/server upgrade.
+
+### Explicit DingTalk inbox refresh
+
+A DingTalk binding view may advertise `inboxRefreshVersion: 1`. Only that explicit
+contract enables `POST /agents/personas/:id/inbox-refresh` with `{binding}` under
+the existing allowed Origin, owner and optional daemon authentication checks.
+The operation reads one bounded page of account-visible DingTalk messages and
+imports new rows into the local inbox. It preserves read markers, takeover state
+and binding enablement; it does not queue automatic replies or send messages.
+Account identity and binding ownership are verified, and stale results cannot
+write into a replaced binding.
+
+The response is `{status: "current" | "syncing", since, imported}`. `since` is
+the completed coverage timestamp and `imported` counts new rows from this page.
+The first manual synchronization starts with the most recent 24 hours; subsequent
+refreshes follow its dedicated incremental cursor. Inbox data is persisted before
+that cursor. Pagination and pending windows resume from it; `syncing` means the
+fixed query endpoint is not yet complete, so the user can refresh again to
+continue. `current` means only that this fixed query window completed, not that
+all historical messages were recovered. Repeated pages deduplicate by conversation
+and message ID. Reads stay within the account's authorized visibility; upstream
+visibility and indexing delays still limit coverage.
+
+AIChat waits for this page before fetching a fresh local conversation list and
+shows an in-progress or failure message. Missing or unknown capability, or an
+unsupported route after a peer change, falls back to refreshing local records
+with an explicit notice that active DingTalk synchronization is unavailable.
+Other failures retain the existing list and allow retry. Legacy `GET .../inbox`
+continues to read local records without remote synchronization, so older clients
+and unrelated operations remain usable. Rust supports this manual contract;
+Node's existing automatic historical backfill remains a separate mechanism with
+its existing cursor and coverage rules.
 
 ## Dashboard channel status
 

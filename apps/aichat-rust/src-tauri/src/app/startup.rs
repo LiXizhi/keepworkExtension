@@ -400,6 +400,10 @@ pub fn run() {
             .min_inner_size(640.0, 480.0)
             .resizable(true)
             .visible(!background_launch)
+            // The pet keeps calls on this document while the main window is
+            // hidden. WebKit's default inactive scheduling can suspend speech
+            // callbacks after cancel/restart, leaving the next reply silent.
+            .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
             .initialization_script(&connection_script)
             .initialization_script(&init_script)
             .on_navigation(move |nav_url| {

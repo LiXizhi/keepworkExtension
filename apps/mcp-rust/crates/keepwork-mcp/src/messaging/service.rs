@@ -196,6 +196,7 @@ pub struct MessagingService {
     pub(crate) login_gate: tokio::sync::Mutex<()>,
     pub(crate) start_gate: tokio::sync::Mutex<()>,
     pub(crate) metadata_gate: tokio::sync::Semaphore,
+    pub(crate) refresh_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Bumped on every persistence write; `/messaging/events` frames full
     /// views per change like Node's `persist()` watcher fan-out.
     pub(crate) events: tokio::sync::watch::Sender<u64>,
@@ -349,6 +350,7 @@ impl MessagingService {
             login_gate: tokio::sync::Mutex::new(()),
             start_gate: tokio::sync::Mutex::new(()),
             metadata_gate: tokio::sync::Semaphore::new(4),
+            refresh_gates: Mutex::new(HashMap::new()),
             events: tokio::sync::watch::channel(0u64).0,
         });
         service.persist_all();
@@ -495,6 +497,8 @@ impl MessagingService {
         });
         if run.binding.channel == "feishu" {
             view["pollIntervalMs"] = json!(POLL_INTERVAL);
+        } else if run.binding.channel == "dingtalk" {
+            view["inboxRefreshVersion"] = json!(1);
         }
         view["lastPollAt"] = json!(run.last_poll_at);
         view["status"] = json!(run.status);

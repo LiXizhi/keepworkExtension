@@ -1,5 +1,8 @@
 const readline = require('node:readline');
 const fs = require('node:fs');
+const authMarker = process.argv.find(a => a.startsWith('--auth-marker='))?.slice(14);
+// Cursor snapshots the native login state when its ACP process starts.
+const authenticatedAtStartup = !authMarker || fs.existsSync(authMarker);
 let currentModel = 'fixture', effort = 'medium', mode = 'code';
 const modes = () => ({ currentModeId: mode, availableModes: ['code', 'ask', 'plan'].map(id => ({ id, name: id })) });
 const config = () => [
@@ -23,7 +26,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(m.method==='session/list') return reply(m.id,{sessions:[{sessionId:'same-thread',cwd:process.argv.find(a=>a.startsWith('--native-cwd=')).slice(13),title:'Native ACP',updatedAt:new Date().toISOString()}],nextCursor:null});
  if(m.method==='session/load'&&process.argv.includes('--native-list')) {update({sessionUpdate:'user_message_chunk',content:{type:'text',text:'historical user'}});update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'historical assistant'}});return reply(m.id,{});}
  if(m.method==='session/new') {
-   if(process.argv.includes('--auth-required')) return send({id:m.id,error:{code:-32000,message:'Authentication required'}});
+   const rejectCwd = process.argv.find(a => a.startsWith('--auth-reject-cwd='))?.slice(18);
+   if(process.argv.includes('--auth-required') || !authenticatedAtStartup || m.params.cwd === rejectCwd) return send({id:m.id,error:{code:-32000,message:'Authentication required'}});
    return reply(m.id,{...(process.argv.includes('--modes') ? {modes:modes()} : {}), ...(process.argv.includes('--config-options')?{sessionId:'same-thread',configOptions:config()}:{sessionId:'same-thread',models:{currentModelId:'fixture',availableModels:[{modelId:'fixture',name:'Fixture model'}]}})});
  }
  if(m.method==='session/set_mode') {mode=m.params.modeId;return reply(m.id,{});}

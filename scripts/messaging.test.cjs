@@ -25,18 +25,18 @@ const message = (id='1', conversation='dm', sender='sender') => ({type:'user_im_
 function fixture(t, channel = 'dingtalk') {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-messaging-test-'))); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
     const root=path.join(dir,'brain');fs.mkdirSync(path.join(root,'public'),{recursive:true});fs.writeFileSync(path.join(root,'public','lesson.md'),'课程学习计划：先读教材，再练习。');
-    const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let historyResponse={success:true,result:{conversationMessagesList:[],hasMore:false}}; let remoteRows=null, contextError=false, answerText='课程学习答案'; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0, deferAbort=false, sendHook;
+    const historyCalls=[]; const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let historyResponse={success:true,result:{conversationMessagesList:[],hasMore:false}}; let remoteRows=null, contextError=false, answerText='课程学习答案'; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0, deferAbort=false, sendHook;
     class BeforeSubmission extends Error {}
     const serviceModule=load('messaging',{
         './messagingFeishu':{feishuContext:load('messagingFeishu').feishuContext,feishuConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},feishuIdentity:async()=>({id:'corp:user',self:'owner'}),pollFeishu:async(_r,_p,_f,event)=>{events.push(event);return()=>{};},FeishuDelivery:class{async create(){cards.push('created');return 'test-card';}async send(...args){sent.push(args);}}},
         './aichatPresence':{latestAichatClient:()=>null,latestAichatBrainRoot:()=>root},
-        './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{if(args[0]==='chat'&&args[1]==='message'&&args[2]==='list-all')return historyResponse;statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);await sendHook?.();}}},
+        './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{if(args[0]==='chat'&&args[1]==='message'&&args[2]==='list-all'){historyCalls.push(args);return typeof historyResponse==='function'?historyResponse(args):historyResponse;}statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);await sendHook?.();}}},
         './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal,_login,executeTool){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve(answerText);};const fail=error=>{active--;reject(error);};pending.push({input,end,fail,executeTool});signal.addEventListener('abort',()=>{if(!deferAbort)fail(Error('cancelled'));},{once:true});});}close(){}}},
     });
     const createService=()=>{const instance=new serviceModule.MessagingService(path.join(dir,'state'),8089);instance.nicknameReader=async()=>({nickname:'',name:'Owner'});t.after(()=>instance.close());return instance;};
     const service=createService();
     const binding=service.configure({channel,root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
-    return {set historyResponse(v){historyResponse=v;},set remoteRows(v){remoteRows=v;},set contextError(v){contextError=v;},set answerText(v){answerText=v;},set deferAbort(v){deferAbort=v;},set sendHook(v){sendHook=v;},service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
+    return {historyCalls,set historyResponse(v){historyResponse=v;},set remoteRows(v){remoteRows=v;},set contextError(v){contextError=v;},set answerText(v){answerText=v;},set deferAbort(v){deferAbort=v;},set sendHook(v){sendHook=v;},service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
@@ -1493,4 +1493,96 @@ test('DingTalk cancels a recovered answer if the human replies during generation
  f.remoteRows=[target,{...target,id:'human',sender:'owner',time:time+1000,text:'answered'}];
  f.pending[0].end();await tick();assert.equal(f.sent.length,0);
  assert.match(f.service.view(f.binding.id).recent[0].reason,/聊天已更新/);
+});
+
+test('explicit DingTalk refresh imports recent remote messages without replying or changing takeover/read settings',async t=>{
+ const f=fixture(t),time=Date.now()-60000,id=f.binding.id;
+ f.service.bindAgent('owner','default-persona',id);
+ const box=f.service.box(id);box.paused=['dm'];box.read.dm=time-1000;
+ box.messages.push({id:'old',conversation:'dm',sender:'sender',time:time-2000,text:'old local',kind:'direct',direction:'in'});
+ f.historyResponse=recoveredHistory([{id:'old',time:time-2000},{id:'new',time}]);
+ assert.equal(f.service.agentBindings('owner','default-persona')[0].inboxRefreshVersion,1);
+ assert.equal(f.service.inboxView('owner','default-persona',id).conversations[0].last.id,'old','ordinary old-client GET does not pull remote messages');
+ assert.equal(f.historyCalls.length,0);
+ const enabled=f.service.view(id).autoReply;
+ const result=await f.service.refreshInbox('owner','default-persona',id);
+ assert.equal(result.status,'current');assert.equal(result.imported,1);
+ const view=f.service.inboxView('owner','default-persona',id).conversations[0];
+ assert.equal(view.last.id,'new');assert.equal(view.unread,1);assert.equal(view.paused,true);
+ assert.deepEqual(box.read,{dm:time-1000});assert.deepEqual(box.paused,['dm']);
+ assert.equal(f.service.view(id).autoReply,enabled);
+ assert.equal(box.messages[1].state,'synced');assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
+ f.service.get(id).binding.enabled=true;
+ await f.service.receive(f.service.get(id),{...message('new'),create_time:time});
+ assert.equal(f.pending.length,0,'late event for manually synced message cannot enqueue an automatic reply');
+ assert.equal(f.sent.length,0);
+});
+
+test('explicit refresh coalesces concurrent pages and resumes the checkpoint across restart without duplicate IDs',async t=>{
+ const f=fixture(t),time=Date.now()-60000,id=f.binding.id;
+ f.service.bindAgent('owner','default-persona',id);
+ let release;
+ f.historyResponse=()=>new Promise(resolve=>{release=resolve;});
+ const a=f.service.refreshInbox('owner','default-persona',id),b=f.service.refreshInbox('owner','default-persona',id);
+ await tick();assert.equal(f.historyCalls.length,1);
+ const first=recoveredHistory([{id:'same',time}]);first.result.hasMore=true;first.result.nextCursor='next';release(first);
+ assert.deepEqual(await a,await b);assert.equal((await a).status,'syncing');
+ const next=f.createService();
+ const second=recoveredHistory([{id:'same',time},{id:'newer',time:time+1000}]);
+ second.result.conversationMessagesList.push({singleChat:false,openConversationId:'group',messages:[{openMessageId:'same',senderOpenDingTalkId:'sender',createTime:time,content:'other conversation'}]});
+ f.historyResponse=second;
+ const result=await next.refreshInbox('owner','default-persona',id);
+ assert.equal(result.imported,2);assert.equal(result.status,'current');
+ assert.equal(f.historyCalls[1][f.historyCalls[1].indexOf('--cursor')+1],'next');
+ assert.equal(next.box(id).messages.length,3);
+ assert.equal(next.box(id).messages.at(-1).id,'newer');
+ assert.equal(f.sent.length,0);assert.equal(f.pending.length,0);
+});
+
+for(const cancel of ['stop','detach','close'])test('explicit refresh rejects late remote results after '+cancel,async t=>{
+ const f=fixture(t),id=f.binding.id;f.service.bindAgent('owner','default-persona',id);
+ let release;f.historyResponse=()=>new Promise(resolve=>{release=resolve;});
+ const refreshing=f.service.refreshInbox('owner','default-persona',id);await tick();
+ if(cancel==='stop')f.service.stop(id);
+ else if(cancel==='detach')f.service.detachAgent('owner','default-persona');
+ else f.service.close();
+ release(recoveredHistory([{id:'late',time:Date.now()-60000}]));
+ await assert.rejects(refreshing,/取消/);
+ assert.equal(f.service.box(id).messages.length,0);assert.equal(f.sent.length,0);
+});
+
+test('explicit refresh keeps the same page after incomplete upstream results and rejects unowned/unsupported bindings',async t=>{
+ const f=fixture(t),id=f.binding.id;f.service.bindAgent('owner','default-persona',id);
+ await assert.rejects(f.service.refreshInbox('wrong-owner','default-persona',id),/不属于/);assert.equal(f.statusChecks,0);
+ f.historyResponse={...recoveredHistory([]),partial:true};
+ await assert.rejects(f.service.refreshInbox('owner','default-persona',id),/不完整/);
+ assert.equal(f.service.box(id).messages.length,0);
+ const checkpoint=path.join(path.dirname(f.root),'state',id+'.refresh-cursor.json');
+ const pending=JSON.parse(fs.readFileSync(checkpoint)).pending;
+ f.historyResponse=recoveredHistory([{id:'retry',time:Date.now()-60000}]);
+ assert.equal((await f.service.refreshInbox('owner','default-persona',id)).imported,1);
+ assert.deepEqual(f.historyCalls[0],f.historyCalls[1],'failed page retries the exact window and cursor');
+ assert.equal(pending.cursor,'0');
+ const feishu=fixture(t,'feishu');feishu.service.bindAgent('owner','default-persona',feishu.binding.id);
+ assert.equal(feishu.service.view(feishu.binding.id).inboxRefreshVersion,undefined);
+ await assert.rejects(feishu.service.refreshInbox('owner','default-persona',feishu.binding.id),error=>error.code==='UNSUPPORTED_FEATURE');
+});
+
+test('manual refresh and live messages preserve identical IDs in different conversations for incoming and self messages',async t=>{
+ const f=fixture(t),id=f.binding.id,time=Date.now()-60000;
+ f.service.bindAgent('owner','default-persona',id);await f.service.start(id);await tick();
+ f.service.inboxAction('owner','default-persona',id,'dm','pause');
+ f.service.inboxAction('owner','default-persona',id,'other','pause');
+ f.historyResponse=recoveredHistory([{id:'shared-id',time}]);
+ await f.service.refreshInbox('owner','default-persona',id);
+ await f.events[0](message('shared-id','dm'));
+ await f.events[0](message('shared-id','other'));
+ await f.events[0](message('shared-id','other'));
+ await f.events[0](message('self-shared','dm','owner'));
+ await f.events[0](message('self-shared','other','owner'));
+ await f.events[0](message('self-shared','other','owner'));
+ const rows=f.service.box(id).messages;
+ assert.deepEqual(rows.filter(m=>m.id==='shared-id').map(m=>m.conversation).sort(),['dm','other']);
+ assert.deepEqual(rows.filter(m=>m.id==='self-shared').map(m=>m.conversation).sort(),['dm','other']);
+ assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
 });

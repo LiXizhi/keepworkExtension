@@ -116,7 +116,18 @@ pub(crate) async fn handle_inner(
     }
 }
 
-pub(crate) async fn post_action(
+fn post_action<'a>(
+    state: Arc<AppState>,
+    owner: &'a str,
+    id: &'a str,
+    action: &'a str,
+    input: &'a Value,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, PersonaError>> + Send + 'a>> {
+    // Keep action state machines out of the shared persona request future.
+    Box::pin(post_action_inner(state, owner, id, action, input))
+}
+
+async fn post_action_inner(
     state: Arc<AppState>,
     owner: &str,
     id: &str,
@@ -204,6 +215,10 @@ pub(crate) async fn post_action(
             messaging.set_agent_prompt(owner, id, &agent_prompt());
             Ok(store.read(owner, id, i64::MAX)?)
         }
+        "inbox-refresh" => messaging
+            .inbox_refresh(owner, id, input["binding"].as_str().unwrap_or(""))
+            .await
+            .map_err(|error| error.into_persona_error()),
         "inbox" => {
             let binding = input["binding"].as_str().unwrap_or("");
             let conversation = input["conversation"].as_str().unwrap_or("");
@@ -212,19 +227,17 @@ pub(crate) async fn post_action(
                 .inbox_action(owner, id, binding, conversation, inbox_action)
                 .map_err(|error| error.into_persona_error())
         }
-        "reply-image" => {
-            messaging
-                .manual_image_reply(
-                    owner,
-                    id,
-                    input["binding"].as_str().unwrap_or(""),
-                    input["conversation"].as_str().unwrap_or(""),
-                    input["requestId"].as_str().unwrap_or(""),
-                    &input["image"],
-                )
-                .await
-                .map_err(|error| error.into_persona_error())
-        }
+        "reply-image" => messaging
+            .manual_image_reply(
+                owner,
+                id,
+                input["binding"].as_str().unwrap_or(""),
+                input["conversation"].as_str().unwrap_or(""),
+                input["requestId"].as_str().unwrap_or(""),
+                &input["image"],
+            )
+            .await
+            .map_err(|error| error.into_persona_error()),
         "reply" => {
             let binding = input["binding"].as_str().unwrap_or("");
             let conversation = input["conversation"].as_str().unwrap_or("");
@@ -279,7 +292,11 @@ pub(crate) async fn read_json(headers: &HeaderMap, req: Request) -> Result<Value
     read_json_bounded(headers, req, MAX_BODY).await
 }
 
-async fn read_json_bounded(headers: &HeaderMap, req: Request, limit: usize) -> Result<Value, PersonaError> {
+async fn read_json_bounded(
+    headers: &HeaderMap,
+    req: Request,
+    limit: usize,
+) -> Result<Value, PersonaError> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())

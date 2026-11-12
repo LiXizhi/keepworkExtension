@@ -72,6 +72,7 @@ impl Drop for PendingRpc {
 }
 
 pub struct Harness {
+    claude: Option<Arc<super::claude::Claude>>,
     backend: String,
     protocol: Protocol,
     launch: CliLaunch,
@@ -94,6 +95,18 @@ impl Harness {
         params: Value,
         timeout: Duration,
     ) -> Result<PendingRpc, String> {
+        if let Some(claude) = &self.claude {
+            let result = Box::pin(claude.call(method, params, timeout)).await?;
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(Ok(result));
+            return Ok(PendingRpc {
+                harness: Weak::new(),
+                id: 0,
+                receiver: Some(receiver),
+                timeout,
+                method: method.into(),
+            });
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (sender, receiver) = oneshot::channel();
         {
@@ -141,6 +154,27 @@ impl Harness {
         launch: CliLaunch,
         cwd: &Path,
     ) -> Result<Arc<Self>, String> {
+        if protocol == Protocol::Claude {
+            let (events, _) = broadcast::channel(128);
+            let (shutdown, _) = watch::channel(false);
+            let claude = super::claude::Claude::new(launch.clone(), cwd, events.clone());
+            return Ok(Arc::new(Self {
+                claude: Some(claude),
+                backend: backend.into(),
+                protocol,
+                launch,
+                capabilities: Mutex::new(json!({})),
+                stdin: AsyncMutex::new(None),
+                pending: Mutex::new(HashMap::new()),
+                events,
+                shutdown,
+                alive: AtomicBool::new(true),
+                terminated: AtomicBool::new(false),
+                stopped: Notify::new(),
+                generation: format!("claude-{}-{}", std::process::id(), chrono_generation()),
+                next_id: AtomicU64::new(0),
+            }));
+        }
         let mut command = Command::new(&launch.executable);
         command
             .args(&launch.args)
@@ -182,6 +216,7 @@ impl Harness {
         let (events, _) = broadcast::channel(128);
         let (shutdown, mut stop) = watch::channel(false);
         let harness = Arc::new(Self {
+            claude: None,
             backend: backend.to_string(),
             protocol,
             launch,
@@ -395,6 +430,9 @@ impl Harness {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
+        if let Some(claude) = &self.claude {
+            return Box::pin(claude.call(method, params, timeout)).await;
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (sender, receiver) = oneshot::channel();
         {
@@ -432,6 +470,9 @@ impl Harness {
     }
 
     pub async fn respond(&self, id: Value, result: Value) -> Result<(), String> {
+        if let Some(claude) = &self.claude {
+            return claude.respond(id, result).await;
+        }
         let mut message = json!({ "id": id, "result": result });
         if self.protocol == Protocol::Acp {
             message["jsonrpc"] = json!("2.0");
@@ -440,6 +481,9 @@ impl Harness {
     }
 
     pub async fn reject(&self, id: Value, code: i64, message: &str) -> Result<(), String> {
+        if let Some(claude) = &self.claude {
+            return claude.reject(id, message).await;
+        }
         let mut result = json!({ "id": id, "error": { "code": code, "message": message } });
         if self.protocol == Protocol::Acp {
             result["jsonrpc"] = json!("2.0");
@@ -537,12 +581,20 @@ impl Harness {
     }
 
     pub fn close(&self) {
+        if let Some(claude) = &self.claude {
+            claude.close();
+        }
         self.fail("Native CLI closed; prompts were not rerun");
     }
 
     /// Reap owned children before the daemon's Tokio runtime exits. Browser
     /// stream disconnection must never call this operation.
     pub async fn shutdown(&self) {
+        if let Some(claude) = &self.claude {
+            self.alive.store(false, Ordering::Release);
+            claude.shutdown().await;
+            return;
+        }
         self.close();
         let _ = tokio::time::timeout(Duration::from_secs(6), async {
             loop {
@@ -561,6 +613,9 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        if let Some(claude) = &self.claude {
+            claude.close();
+        }
         let _ = self.shutdown.send(true);
     }
 }
@@ -586,7 +641,7 @@ fn chrono_generation() -> u128 {
         .as_nanos()
 }
 
-async fn stop_child(child: &mut Child) {
+pub(super) async fn stop_child(child: &mut Child) {
     if let Some(pid) = child.id() {
         #[cfg(unix)]
         {

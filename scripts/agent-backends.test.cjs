@@ -181,6 +181,39 @@ test('native model discovery requiring authentication marks the connected CLI as
  const result=await manager.status('cursor');assert.equal(result.available,true);assert.equal(result.authenticated,false);assert.equal(result.authState,'required');assert.equal(result.modelsError,'Authentication required');
 });
 
+test('Cursor refresh reads a login completed after the metadata process started', async t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cursor-login-refresh-')),marker=path.join(dir,'signed-in'),log=path.join(dir,'rpc.log');
+ const adapter=new AcpHarness('cursor',dir,process.execPath,[fixture,'--auth-marker='+marker,'--log='+log]);
+ const manager=new AgentSessions(path.join(dir,'registry'),undefined,{cursor:adapter});
+ t.after(()=>{manager.close();fs.rmSync(dir,{recursive:true,force:true});});
+ const scope={owner:'cursor-owner',cwd:dir,conversationId:'login-refresh'};
+ const first=await manager.status('cursor',scope),pid=adapter.child.pid;
+ assert.equal(first.available,true);assert.equal(first.authenticated,false);assert.equal(first.authState,'required');
+ assert.match(first.modelsError,/Authentication required/);
+ fs.writeFileSync(marker,'fixture login complete');
+ const ready=await manager.status('cursor',{...scope,refresh:true});
+ assert.equal(ready.available,true);assert.equal(ready.modelsError,undefined);assert.equal(ready.authenticated,null);
+ assert.equal(ready.models[0].id,'fixture');assert.notEqual(adapter.child.pid,pid);
+ const calls=fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
+ assert.equal(calls.filter(m=>m.method==='initialize').length,2);
+ assert.equal(calls.some(m=>m.method==='authenticate'||m.method==='session/prompt'),false);
+});
+
+test('Cursor authentication failures in metadata never recycle an owned running session', async t => {
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'cursor-login-owned-'))),rejected=path.join(dir,'metadata');fs.mkdirSync(rejected);
+ const adapter=new AcpHarness('cursor',dir,process.execPath,[fixture,'--auth-reject-cwd='+rejected]);
+ const manager=new AgentSessions(path.join(dir,'registry'),undefined,{cursor:adapter});
+ t.after(()=>{manager.close();fs.rmSync(dir,{recursive:true,force:true});});
+ const session=await manager.create('cursor-owner',{backend:'cursor',conversationId:'owned',roots:[dir]});
+ await manager.turn(session.id,'cursor-owner',{requestId:'running',text:'wait'});
+ const pid=adapter.child.pid,scope={owner:'cursor-owner',cwd:rejected,conversationId:'preview'};
+ assert.equal((await manager.status('cursor',scope)).authState,'required');
+ assert.equal((await manager.status('cursor',{...scope,refresh:true})).authState,'required');
+ assert.equal(adapter.child.pid,pid);assert.equal(manager.get(session.id,'cursor-owner').status,'running');
+ await manager.interrupt(session.id,'cursor-owner');
+ assert.equal((await done(manager,session.id,'cursor-owner')).status,'interrupted');
+});
+
 test('account status distinguishes a confirmed missing login, unknown auth and verified credentials', async t => {
  const {EventEmitter}=require('node:events');
  const cases=[

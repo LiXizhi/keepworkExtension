@@ -9,11 +9,12 @@ Copilot custom-model sessions require the VS Code model bridge described below.
 
 Rust MCP implements its own native session manager under
 `apps/mcp-rust/crates/keepwork-mcp/src/agents`, without a Node daemon or Node tool
-proxy. Its initial slice supports ACP providers (including WorkBuddy/CodeBuddy)
-and Codex App Server, owner-scoped text sessions, request receipts, approval and
+proxy. Its native transports support ACP providers (including WorkBuddy/CodeBuddy),
+Codex App Server and Claude bidirectional stream-json, owner-scoped text sessions,
+request receipts, approval and
 interrupt handling, NDJSON snapshots and the current AIChat page-context bridge.
 See the [Rust contract](rust-runtime-migration.md#原生-cli-会话切片rust-运行时-0218)
-for precise limits. Claude/Antigravity execution, images, native-history import,
+for the initial slice's limits. Antigravity execution, images, non-Codex native-history import,
 the Copilot editor bridge and background cloud/Git file execution remain
 unsupported there; the fuller Node behavior described below is not a claim of
 Rust feature parity. Rust background local-file mutations require Craft;
@@ -25,8 +26,11 @@ inventory or model discovery must not be presented as a usable AIChat tool bridg
 Existing Node Codex registry rows without items have a limited compatibility
 adapter: the first owned session GET reads the native thread without resuming
 it or sending a prompt, then caches its visible history. Failure is explicit;
-ordinary Rust cached-history reads do not launch a CLI. This does not implement
-native session catalog discovery or import.
+ordinary Rust cached-history reads do not launch a CLI. Rust also supports the
+[native Codex catalog and history attachment](#native-codex-history-in-aichat)
+through the existing Codex aliases and generic native-session routes. Opening an
+imported history reads the original thread without resuming it; only an explicit
+new turn resumes it. Other backends' native catalog/import routes remain unsupported.
 
 ```mermaid
 flowchart LR
@@ -142,6 +146,74 @@ and cannot confirm a login. ACP providers without a native account query keep
 change that into a verified account. Explicit signed-out results use
 `authenticated: false` / `authState: "required"`. The account name may remain
 unavailable even when authentication is confirmed.
+
+Cursor reads native login state when its ACP process starts. If a prompt-free
+model probe receives an explicit authentication rejection, reconnecting after
+terminal login must read the new login state instead of retaining that rejected
+process. Node retires it on refresh only when no owned sessions or calls use it.
+Rust isolates Cursor metadata processes from owned session processes and retires
+only the rejected metadata process; concurrent probes acquire it serially.
+The failed probe still reports `available: true`, `authenticated: false` and
+`authState: "required"`. Later successful model discovery keeps account identity
+unknown. Neither path invokes background `authenticate`, opens a login browser,
+reinstalls the CLI, interrupts owned prompts or replays a request. Existing
+client request and response contracts remain unchanged.
+
+Rust backend responses add `protocolSupported`, independently of executable
+discovery. Claude's native stream-json adapter reports support; the executable
+inventory still does not verify its account or model access. Full Claude status
+uses the native read-only `auth status` JSON command, accepting signed-out
+status at exit code 1 and keeping authentication unknown when the installed CLI
+cannot report it. Models come from native initialization rather than a static
+catalogue. A missing installation remains an executable-discovery error.
+
+When an Antigravity executable is found but its protocol is
+unsupported, the full backend query preserves `available: false`, `cli.path`,
+`probe: "executable"` and unknown authentication, and adds `setup: "unsupported"`
+with `code: "UNSUPPORTED_FEATURE"`. Executable-only inventory still reports
+whether the CLI was found. A missing CLI keeps the historical missing-executable
+error without those setup/error-code fields, so installation remains available.
+These optional fields do not change existing ACP/Codex session contracts.
+
+AIChat also recognizes the older Rust response that only carries the explicit
+native-protocol-unavailable error. That response enters the same deterministic
+local installation check instead of an automatic AI installation repair. Only
+a separate successful local check that reports a missing executable permits
+installation; a found executable is reused. After an installer exits, the
+program checks again and can report "CLI installed; this service does not yet
+support connecting it." This outcome does not verify an account, start login,
+enable native chat, or replace/restart the shared MCP service. Unknown checks,
+cancelled commands and uncertain installation results never authorize a repeat
+installation. MCP connection, authentication and permission errors retain their
+own recovery paths.
+
+Rust Claude sessions use a native process per conversation, preserve the original
+native session ID on continuation, and pass additional workspace roots through
+`--add-dir`. AIChat's MCP descriptor is process-scoped and is rebound on explicit
+native resume after its page capability changes. Native stream deltas and complete
+blocks share transcript identities; tool approvals and AskUserQuestion use the
+existing pending-response API. Unknown controls are rejected, and native permission
+policy is preserved without bypass flags or global configuration changes. A
+process exit, timeout or reconnect never resubmits an uncertain prompt. Native
+history import and image turns remain unsupported in Rust.
+
+Rust Claude regression uses deterministic native children and isolated HTTP
+listeners; those fixtures alone do not establish real model generation or account
+access. Older Rust daemons
+continue to return their unsupported-provider response; installing a CLI alone
+cannot add an adapter to an already-running daemon.
+
+| Rust Claude live check | Result |
+| --- | --- |
+| 2026-11-12, macOS arm64; isolated Rust 0.2.25 debug daemon; existing Claude Code 2.1.322 | Native auth status confirmed sign-in; initialization returned the native model catalogue. Two separate temporary workspaces each passed a native `probe.txt` read with one file-tool call and an exact random Chinese/emoji marker response, followed by a tool-free second-turn recall in the same native thread. All four turns completed. |
+| 2026-11-12, macOS arm64; isolated Rust 0.2.26 debug daemon; same installed Claude | A new temporary workspace passed a native file-tool read of a random Unicode marker. After stopping and restarting the isolated daemon with the same profile and stable Origin, the cached transcript matched exactly; an explicit new turn recalled the marker in the same native thread. |
+| 2026-11-12, actual shared listener on 8089; Rust 0.2.26 | After an external runtime update, a read-only refreshed Claude query returned HTTP 200, `available: true`, `protocolSupported: true`, `authenticated: true`, `authState: "verified"`, six native models and the existing CLI path. |
+
+These runs did not exercise Windows, the native desktop UI or live AIChat page
+tools. This task did not restart or replace the shared daemon; its initial Rust
+0.2.21/four-client state and later Rust 0.2.26 state are separate observations.
+Earlier dated Node acceptance
+records below remain historical results for their stated versions and systems.
 
 Picker inventory errors must identify a connection, access or unsupported-service
 problem instead of presenting every CLI as missing. An older peer without the
@@ -517,7 +589,8 @@ stream deltas instead of duplicating them. Native permission policy is preserved
 no permission-bypass flags are added. Unknown controls fail explicitly. Startup
 errors, invalid output, process crashes and timeouts do not cause prompt replay.
 `cli-executable` in a probe report is only a version check; protocol verification
-occurs at native session creation. Auth remains unknown until real execution.
+occurs at native session creation. An executable check alone leaves authentication
+unknown; the separate read-only native auth-status query may confirm it.
 
 Cursor question and plan extension calls become interactive cards. Answers map
 labels to native option IDs; invalid answers remain pending. A plan is not approved

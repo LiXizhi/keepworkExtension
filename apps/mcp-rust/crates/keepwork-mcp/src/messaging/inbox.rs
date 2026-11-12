@@ -48,7 +48,7 @@ pub(crate) fn decide_incoming(
         && box_.messages.iter().any(|row| {
             matches!(
                 row["state"].as_str(),
-                Some("recovered" | "recovery-claimed")
+                Some("recovered" | "recovery-claimed" | "synced")
             ) && row["id"].as_str() == Some(message.id.as_str())
                 && row["conversation"].as_str() == Some(message.conversation.as_str())
         })
@@ -93,6 +93,7 @@ pub(crate) fn decide_incoming(
     if reason != "echo"
         && !box_.messages.iter().any(|row| {
             row["id"].as_str() == Some(message.id.as_str())
+                && row["conversation"].as_str() == Some(message.conversation.as_str())
                 && row["direction"].as_str() == Some("in")
         })
     {
