@@ -236,7 +236,16 @@ impl AgentManager {
                         {
                             Ok(mut native) => {
                                 if let Some(model) = query.get("model") {
-                                    self.set_acp_model(&harness, &mut native, model).await?;
+                                    // Discovery receives a saved preference, which may
+                                    // outlive a provider's catalog. Keep explicit
+                                    // create/turn model requests strict.
+                                    let models = harness::normalize_models(&native);
+                                    if scoped.is_some()
+                                        || models.is_empty()
+                                        || models.iter().any(|m| m["id"] == *model)
+                                    {
+                                        self.set_acp_model(&harness, &mut native, model).await?;
+                                    }
                                 }
                                 native["_pidGeneration"] = json!(harness.generation());
                                 if cache.len() >= 64 {

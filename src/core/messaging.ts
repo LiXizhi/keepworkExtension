@@ -7,7 +7,8 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { configValue, confined, defaultMessageConfig, DEFAULT_PROMPT, digestMessage, incoming, Incoming, knowledgeContext, knowledgeDirectory, MessageConfig, readRules, RULE_DIR, trigger, conversationContext, automatedText } from './messagingPolicy';
 import { FeishuDelivery, feishuIdentity, pollFeishu, feishuConversation, feishuGroups, feishuNickname, setFeishuNickname, feishuGroupName, feishuSenderName } from './messagingFeishu';
-import { DingTalkDelivery, dws, listenDws, loginDws, dingtalkConversation, dingtalkNickname, setDingtalkNickname, dingtalkGroupName, dingtalkSenderName } from './messagingDingtalk';
+import { DingTalkDelivery, DwsError, dws, listenDws, loginDws, dingtalkConversation, dingtalkNickname, setDingtalkNickname, dingtalkGroupName, dingtalkSenderName } from './messagingDingtalk';
+import { replyImageCapability, ReplyImageMetadata, parseReplyImage, stageReplyImage, saveReplyImageLedger, imageSendReceipt } from './messagingImage';
 import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
 import { MessagingNicknames, NicknameTarget, nicknameKey } from './messagingNicknames';
 import { MessageAgent, routeMessageAgents, agentNameMentioned, agentBrainInstructions, nicknameAgentNames, normalizedAgentName } from './personaMessaging';
@@ -16,6 +17,7 @@ import { AGENT_ROLE_WRITE_POLICY, roleApprovalProperties, roleNeedsApproval, rol
 import { runTerminal } from './terminal';
 
 interface Binding { channel?: 'dingtalk' | 'feishu'; id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; peers?: {owner:string;agentId:string}[]; rulesDir?: string; agentPrompt?: string }
+type InboxMessage = Incoming & { direction: string; state?: string; image?: ReplyImageMetadata; error?: string };
 interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; model?: string; server?: 'cli' | 'client' | 'headless'; card?: string; workKey?: string }
 interface RecentMessage { binding: string; channel: string; persona: string; profile: string; conversation: string; sender: string; direction: string; kind: string; relevant: boolean; text: string; reply: string; receipt: Receipt }
 interface Runtime { historyStop?: () => void; historySync?: { status: string; since?: number; error?: string }; admitting?: number; inbound?: Promise<void>; pollAbort?: AbortController; lastPollAt?: number; binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt; agent?: MessageAgent }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
@@ -246,7 +248,7 @@ export class MessagingService {
         return this.recentMessages.slice().reverse().map(({receipt,...row})=>({...row,id:receipt.id,time:receipt.time,state:receipt.state,reason:receipt.reason||'',executor:receipt.executor||'',model:receipt.model||'',server:receipt.server||''}));
     }
     private logins = new Map<string, Promise<any>>();
-    private inbox: Record<string, { messages: (Incoming & { direction: string; state?: string })[]; paused: string[]; read: Record<string,number>; readFutureIds?: Record<string,string[]>; sends?: Record<string,string>; autoReplyTimes?: Record<string,number[]> }> = {};
+    private inbox: Record<string, { messages: InboxMessage[]; paused: string[]; read: Record<string,number>; readFutureIds?: Record<string,string[]>; sends?: Record<string,string>; autoReplyTimes?: Record<string,number[]> }> = {};
     private saveInbox() { const file=path.join(this.home,'inbox.json');fs.writeFileSync(file+'.tmp',JSON.stringify(this.inbox),{mode:0o600});fs.renameSync(file+'.tmp',file); }
     private box(id:string) { return this.inbox[id] ||= {messages:[],paused:[],read:{}}; }
     private nicknames: MessagingNicknames;
@@ -495,7 +497,7 @@ export class MessagingService {
     }
     async namedInboxView(owner:string,agentId:string,id:string,conversation='',before=Infinity) {
         const view=this.inboxView(owner,agentId,id,conversation,before),r=this.get(id);
-        const rows=conversation?[{id:conversation,last:view.messages?.at(-1)}]:view.conversations||[];
+        const rows=conversation?[{id:conversation,last:'messages' in view?view.messages?.at(-1):undefined}]:view.conversations||[];
         const targets=rows.filter(row=>row.last?.kind!=='direct').slice(0,100);
         let cursor=0;
         const warm=Promise.all(Array.from({length:Math.min(4,targets.length)},async()=>{
@@ -508,13 +510,13 @@ export class MessagingService {
             }
         }));
         let timer:NodeJS.Timeout|undefined;
-        const senders=this.warmSenderNames(id,conversation?(view.messages||[]).filter(m=>m.direction==='in'):(view.conversations||[]).flatMap(c=>c.last?.direction==='in'?[c.last]:[]));
+        const senders=this.warmSenderNames(id,conversation?('messages' in view?view.messages||[]:[]).filter(m=>m.direction==='in'):(view.conversations||[]).flatMap(c=>c.last?.direction==='in'?[c.last]:[]));
         try{await Promise.race([Promise.all([warm,senders]),new Promise(resolve=>{timer=setTimeout(resolve,5000);})]);}finally{clearTimeout(timer);}
         return this.inboxView(owner,agentId,id,conversation,before);
     }
     inboxView(owner:string,agentId:string,id:string,conversation='',before=Infinity){
         this.assertAgentBinding(owner,agentId,id);const box=this.box(id),messages=this.scopedInbox(owner,agentId,id).map(m=>({...m,senderName:this.senderNames.get(this.senderNameKey(id,m))?.name||''}));
-        if(conversation){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');const rows=messages.filter(m=>m.conversation===conversation&&m.time<before).slice(-50);return {name:this.inboxName(owner,agentId,id,conversation),messages:rows,before:rows.length===50?rows[0].time:null,paused:box.paused.includes(conversation)};}
+        if(conversation){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');const rows=messages.filter(m=>m.conversation===conversation&&m.time<before).slice(-50);return {name:this.inboxName(owner,agentId,id,conversation),messages:rows,before:rows.length===50?rows[0].time:null,paused:box.paused.includes(conversation),...((this.get(id).binding.channel||'dingtalk')==='dingtalk'?{replyImage:replyImageCapability}:{})};}
         const scope=this.inboxScope(owner,agentId,id);const ids=[...new Set([...(scope||[]),...messages.map(m=>m.conversation)])];return {conversations:ids.map(key=>({id:key,name:this.inboxName(owner,agentId,id,key),last:messages.filter(m=>m.conversation===key).at(-1),unread:messages.filter(m=>m.conversation===key&&this.inboxUnread(owner,agentId,id,m)).length,paused:box.paused.includes(key)}))};
     }
     inboxAction(owner:string,agentId:string,id:string,conversation:string,action:string){this.assertAgentBinding(owner,agentId,id);const box=this.box(id),r=this.get(id);if(['pause','resume'].includes(action)&&!this.gatewayAllowed(r))throw Error('Use the active messaging computer to change takeover state');if(action==='read'){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');const key=this.readKey(owner,agentId,conversation),now=Date.now();
@@ -530,6 +532,71 @@ export class MessagingService {
         const target:Incoming|undefined=[...box.messages].reverse().find(m=>m.conversation===conversation&&m.direction==='in')||(scope?.has(conversation)?{id:requestId,conversation,sender:'',text:'',time:Date.now(),kind:'group'}:undefined);if(!target)throw Error('请选择已有会话');if(takeover)this.inboxAction(owner,agentId,id,conversation,'pause');
         const row={...target,id:requestId,text,time:Date.now(),direction:'out',state:'sending'};box.messages.push(row);(box.sends||={})[requestId]='unknown';this.saveInbox();const r=this.get(id);
         try{await this.delivery(r).send(target,requestId,text);row.state='sent';}catch{row.state='unknown';}box.sends![requestId]=row.state;this.saveInbox();return row;}
+    async manualImageReply(owner:string,agentId:string,id:string,conversation:string,requestId:string,input:unknown){
+        this.assertAgentBinding(owner,agentId,id);
+        if(typeof requestId!=='string'||!/^[\w-]{1,160}$/.test(requestId)||typeof conversation!=='string'||!conversation)throw Error('Invalid image reply');
+        const image=parseReplyImage(input),r=this.get(id),binding=r.binding,root=binding.root,profile=binding.profile;
+        if((binding.channel||'dingtalk')!=='dingtalk')throw Object.assign(Error('此渠道尚不支持图片附件，文字仍可发送'),{code:'UNSUPPORTED_FEATURE'});
+        const check=()=>{
+            this.assertAgentBinding(owner,agentId,id);
+            if(this.closed)throw Error('消息服务已停止');
+            if(this.get(id)!==r||r.binding.root!==root||r.binding.profile!==profile||(r.binding.channel||'dingtalk')!=='dingtalk')throw Error('渠道已切换，请重新打开此会话');
+            if(!this.gatewayAllowed(r))throw Error('Use the active messaging computer to send attachments');
+            const scope=this.inboxScope(owner,agentId,id);
+            if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');
+            this.claimChannel('dingtalk',root);
+            return scope;
+        };
+        const scope=check(),box=this.box(id);
+        const existing=()=>{
+            const previous=box.messages.find(m=>m.id===requestId&&m.direction==='out');
+            if(previous){
+                if(previous.conversation!==conversation||!previous.image||
+                    (Object.keys(image.metadata) as (keyof ReplyImageMetadata)[]).some(key=>previous.image![key]!==image.metadata[key]))throw Error('此请求编号已用于其他内容，请勿重复发送');
+                return {...previous,state:previous.state==='sending'?'unknown':previous.state};
+            }
+            if(box.sends?.[requestId])throw Error('此请求编号已使用，请在钉钉核实发送结果');
+        };
+        const previous=existing();if(previous)return previous;
+        const target:Incoming|undefined=[...box.messages].reverse().find(m=>m.conversation===conversation&&m.direction==='in')||
+            (scope?.has(conversation)?{id:requestId,conversation,sender:'',text:'',time:Date.now(),kind:'group'}:undefined);
+        if(!target)throw Error('请选择已有会话');
+        if(target.kind==='direct'&&!target.sender)throw Error('此会话缺少收件人，图片尚未发送');
+        const staged=stageReplyImage(root,image);
+        try{
+            // A remote renewal may yield: recheck ownership, routing and duplicate identity afterwards.
+            const coordinator=this.coordinator(r);
+            if(this.coordinated(r)&&coordinator?.snapshot(this.resource(r)).online){
+                try{await coordinator.request(this.resource(r),'renew');}catch{throw Error('无法确认消息电脑权限，图片尚未发送');}
+            }
+            check();const duplicate=existing();if(duplicate)return duplicate;
+            if(Object.values(this.inbox).reduce((n,b)=>n+b.messages.filter(m=>m.image&&m.state==='sending').length,0)>=4)throw Error('图片发送繁忙，请稍后重试');
+            const row:InboxMessage={id:requestId,conversation,sender:target.sender,text:`[图片附件] ${image.metadata.name}`,time:Date.now(),kind:target.kind,direction:'out',state:'sending',image:image.metadata};
+            const alreadyPaused=box.paused.includes(conversation);
+            if(!alreadyPaused)box.paused.push(conversation);
+            box.messages.push(row);(box.sends||={})[requestId]='unknown';
+            try{saveReplyImageLedger(this.home,this.inbox);}catch(error){
+                box.messages=box.messages.filter(m=>m!==row);delete box.sends[requestId];
+                if(!alreadyPaused)box.paused=box.paused.filter(key=>key!==conversation);
+                throw error;
+            }
+            r.active.get(conversation)?.abort();
+            for(const job of r.queues.get(conversation)||[])job.receipt.state='cancelled';
+            r.queues.delete(conversation);
+            try{
+                const result=await dws(['chat','+messages-send','--as','user',...(target.kind==='direct'?['--open-dingtalk-id',target.sender]:['--group',conversation]),
+                    '--msg-type','file','--file',staged.relative,'--idempotency-key',`${requestId}-image`,'--profile',profile,'-f','json','--yes'],root);
+                row.state=imageSendReceipt(result)?'sent':'unknown';
+            }catch(error){row.state=error instanceof DwsError&&!error.uncertain?'failed':'unknown';}
+            if(row.state==='failed')row.error='钉钉拒绝发送图片附件，请检查登录与权限后重试';
+            else if(row.state==='unknown')row.error='发送结果未知，请在钉钉核实，勿重复发送';
+            box.sends[requestId]=row.state;
+            // A failed final write leaves the durable pre-send unknown receipt, never a replayable gap.
+            try{saveReplyImageLedger(this.home,this.inbox);}catch{/* outcome can still be read during this process */}
+            try{this.persist(r);}catch{/* keep the image outcome even when unrelated status persistence fails */}
+            return row;
+        }finally{try{staged.cleanup();}catch{/* temporary paths and bytes never enter diagnostics */}}
+    }
     private runs = new Map<string, Runtime>();
     private identities = new Set<string>();
     private closed = false;

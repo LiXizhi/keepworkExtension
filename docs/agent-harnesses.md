@@ -120,6 +120,21 @@ a daemon-owned empty `model-discovery` directory supplies the metadata session c
 Model discovery failure is
 reported as `modelsError`, independently of executable/handshake availability.
 
+During metadata discovery without `sessionId`, `model` is a saved preference hint.
+Rust MCP ignores it when the native catalog explicitly omits that model, returning
+the available catalog instead. Existing-session model changes and explicit
+session/turn execution choices remain strict. Platform selection discovers the
+catalog before applying saved preferences, so it also works with older daemons
+that reject obsolete hints. A replaced model clears its saved reasoning effort;
+DeepSeek continues to prefer an advertised account model when no valid preference
+exists. Selection never submits a prompt or replays a turn.
+
+The browser also keeps a background connection probe separate from an explicit
+platform selection. A busy status alone does not discard a card click. Only
+duplicate clicks on the current pending selection are coalesced; switching away
+and back gives the last selection priority, and closing the picker cancels its
+pending selection without cancelling native work.
+
 Installation discovery, protocol connection, authentication and successful turns
 are separate observations. An inventory-only response uses `probe: "executable"`
 and cannot confirm a login. ACP providers without a native account query keep

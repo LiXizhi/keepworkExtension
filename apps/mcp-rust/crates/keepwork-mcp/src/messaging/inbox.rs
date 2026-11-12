@@ -1025,12 +1025,16 @@ impl MessagingService {
                 .map(decorate)
                 .collect();
             rows.reverse();
-            return Ok(json!({
+            let mut result = json!({
                 "name": Self::inbox_name(&inner, &groups, id, conversation),
                 "messages": rows,
                 "before": if rows.len() == 50 { rows.first().and_then(|row| row["time"].as_i64()) } else { None },
                 "paused": paused.contains(conversation),
-            }));
+            });
+            if channel == "dingtalk" {
+                result["replyImage"] = super::image_reply::capability();
+            }
+            return Ok(result);
         }
         // Preserve first-seen conversation order while aggregating in one pass.
         // Keep references until the result is built: only each last body is cloned.

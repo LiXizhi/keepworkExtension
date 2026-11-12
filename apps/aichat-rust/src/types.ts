@@ -5,6 +5,7 @@ export interface DesktopCapabilities {
   readonly gitSetup: true;
   readonly floatingPet: true;
   readonly petDictationAudioVersion?: 1;
+  readonly petVoiceAudioVersion?: 1;
   readonly startupSignIn: true;
 }
 

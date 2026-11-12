@@ -8,8 +8,8 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
     const send=(status:number,value:any)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
     try{
         const owner=ownerKey(String(req.headers.origin||''),String(req.headers['x-agent-owner']||''));
-        let input:any={};if(req.method==='POST'){if(!String(req.headers['content-type']).startsWith('application/json'))throw Error('JSON required');let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>131072)throw Error('Request too large');}input=JSON.parse(raw||'{}');}
         const parts=url.pathname.split('/').filter(Boolean),id=parts[2],action=parts[3];
+        let input:any={};if(req.method==='POST'){if(!String(req.headers['content-type']).startsWith('application/json'))throw Error('JSON required');const limit=parts.length===4&&action==='reply-image'?7*1024*1024+65536:131072;const chunks:Buffer[]=[];let size=0;for await(const chunk of req){const bytes=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);size+=bytes.length;if(size>limit)throw Error('Request too large');chunks.push(bytes);}input=JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}');}
         if(id==='circles'){if(req.method!=='POST'){send(405,{error:'POST required'});return;}send(200,await messaging.circleRequest(owner,input));return;}
         if(id==='messaging-computers'){if(!['GET','POST'].includes(req.method||'')){send(405,{error:'Method not allowed',code:'UNSUPPORTED_FEATURE'});return;}send(200,req.method==='GET'?messaging.coordinationView(owner):await messaging.configureCoordination(owner,input));return;}
         if(id==='events'&&req.method==='GET'){
@@ -59,6 +59,7 @@ export async function handlePersonaHttp(req:http.IncomingMessage,res:http.Server
             case 'bind':{const result=messaging.bindAgent(owner,id,input.binding);messaging.setAgentPrompt(owner,id,personas.read(owner,id).prompt);send(200,result);return;}
             case 'inbox':send(200,messaging.inboxAction(owner,id,input.binding,input.conversation||'',input.action));return;
             case 'reply':send(200,await messaging.manualReply(owner,id,input.binding,input.conversation,input.requestId,input.text));return;
+            case 'reply-image':send(200,await messaging.manualImageReply(owner,id,input.binding,input.conversation,input.requestId,input.image));return;
             case 'channel-start':messaging.assertAgentBinding(owner,id,input.binding);await messaging.start(input.binding);send(200,{ok:true});return;
             case 'channel-stop':messaging.assertAgentBinding(owner,id,input.binding);messaging.stop(input.binding);send(200,{ok:true});return;
             default:send(404,{error:'Unknown Agent operation',code:'UNSUPPORTED_FEATURE'});

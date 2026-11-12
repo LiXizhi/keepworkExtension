@@ -27,7 +27,12 @@ pub(crate) async fn handle_inner(
 ) -> Result<Response, PersonaError> {
     let owner = owner_hash(headers)?;
     let input = if method == "POST" {
-        read_json(headers, req).await?
+        let route: Vec<_> = path.split('/').filter(|part| !part.is_empty()).collect();
+        if route.len() == 4 && route[3] == "reply-image" {
+            read_json_bounded(headers, req, 7 * 1024 * 1024 + 65_536).await?
+        } else {
+            read_json(headers, req).await?
+        }
     } else {
         Value::Null
     };
@@ -207,6 +212,19 @@ pub(crate) async fn post_action(
                 .inbox_action(owner, id, binding, conversation, inbox_action)
                 .map_err(|error| error.into_persona_error())
         }
+        "reply-image" => {
+            messaging
+                .manual_image_reply(
+                    owner,
+                    id,
+                    input["binding"].as_str().unwrap_or(""),
+                    input["conversation"].as_str().unwrap_or(""),
+                    input["requestId"].as_str().unwrap_or(""),
+                    &input["image"],
+                )
+                .await
+                .map_err(|error| error.into_persona_error())
+        }
         "reply" => {
             let binding = input["binding"].as_str().unwrap_or("");
             let conversation = input["conversation"].as_str().unwrap_or("");
@@ -258,6 +276,10 @@ pub(crate) fn owner_hash(headers: &HeaderMap) -> Result<String, PersonaError> {
 }
 
 pub(crate) async fn read_json(headers: &HeaderMap, req: Request) -> Result<Value, PersonaError> {
+    read_json_bounded(headers, req, MAX_BODY).await
+}
+
+async fn read_json_bounded(headers: &HeaderMap, req: Request, limit: usize) -> Result<Value, PersonaError> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -265,7 +287,7 @@ pub(crate) async fn read_json(headers: &HeaderMap, req: Request) -> Result<Value
     if !content_type.starts_with("application/json") {
         return Err(PersonaError::bad("JSON required"));
     }
-    let bytes = axum::body::to_bytes(req.into_body(), MAX_BODY)
+    let bytes = axum::body::to_bytes(req.into_body(), limit)
         .await
         .map_err(|_| PersonaError::bad("Request too large"))?;
     if bytes.is_empty() {

@@ -39,7 +39,7 @@ else if(is('chat','group','notice','edit')) {if(arg('--notice-id')!=='goal-notic
 else if(is('auth','status')) output({appId:st.wrongAccount?'other-app':'app',identities:{user:{openId:'self',status:'ready',available:true,verified:true,userName:'Fixture Human',tenantName:'Fixture Company'}}});
 else if(is('im','+messages-search')) output({messages:[],has_more:false});
 else if(is('contact','+search-user')) output({users:[{open_id:'directory-user',name:'Directory Human'}]});
-else if(is('im','+chat-search')) output({chats:st.group?[{chat_id:st.group,name:st.name,chat_mode:'group'}]:[]});
+else if(is('im','+chat-search')) output({chats:st.bulkSearch?Array.from({length:60},(_,i)=>({chat_id:'search-'+i,name:i===0?'':'Result '+i,chat_mode:'group'})):(st.group?[{chat_id:st.group,name:st.name,chat_mode:'group'}]:[])});
 else if(is('im','+chat-list')) output({chats:st.group?[{chat_id:st.group,name:st.name,chat_mode:'group'}]:[],has_more:false});
 else if(is('im','chats','get')) output({name:st.name,description:st.description,owner_id:st.admin?'self':'other-human',user_manager_id_list:[]});
 else if(is('im','+chat-members-list')) output({users:st.members.map(m=>({member_id:m.id,name:m.name})),has_more:false,truncations:[]});
@@ -288,6 +288,19 @@ async fn external_previews_permissions_receipts_and_argument_boundaries_match_no
         "new-group"
     );
     assert_eq!(f.writes(), 1);
+
+    f.change(|im| im["bulkSearch"] = json!(true));
+    let group_search = circles(
+        &f,
+        json!({"action":"search","channel":"feishu","account":"app:self","query":"Design"}),
+    )
+    .await;
+    assert_eq!(group_search["items"].as_array().unwrap().len(), 50);
+    assert_eq!(
+        group_search["items"][0]["name"], "search-0",
+        "unnamed group falls back to its stable id"
+    );
+    f.change(|im| im["bulkSearch"] = json!(false));
 
     let mut org = snapshot["organization"].clone();
     org["circles"][0]["goal"] = json!("Ship a clear design");

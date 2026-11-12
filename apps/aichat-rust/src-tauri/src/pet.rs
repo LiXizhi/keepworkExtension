@@ -17,8 +17,8 @@ pub const MAX_PET_INPUT_CHARS: usize = 32_000;
 pub const MAX_PET_IMAGE_DATA_BYTES: usize = 8 * 1024 * 1024;
 pub const ALLOWED_SCALES: &[f64] = &[0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
 
-/// A native pet click is delivered to the retained main page. On macOS that
-/// page must be visible before WebKit will start a new microphone request.
+/// Classify clicks that start microphone capture. Legacy main-page capture on
+/// macOS needs a visible page; negotiated pet capture keeps the main page hidden.
 pub fn starts_media_capture(snapshot: &Value, action: &str) -> bool {
     if snapshot["ready"].as_bool() != Some(true) {
         return false;
@@ -1325,6 +1325,38 @@ mod tests {
         let mut rich = ready.clone();
         rich["richDraft"] = json!(true);
         assert!(!starts_media_capture(&rich, "dictation"));
+    }
+
+    #[test]
+    fn background_persona_call_requires_explicit_page_support() {
+        let ready = json!({
+            "ready": true, "canCall": true, "target": "persona",
+            "petVoiceAudioVersion": 1
+        });
+        assert!(uses_pet_audio(&ready, "call"));
+        assert!(uses_pet_audio(&ready, "dictation"));
+        for action in ["mute", "voice-stop", "record-start", "voice-start"] {
+            assert!(!uses_pet_audio(&ready, action), "{action}");
+        }
+        for version in [Value::Null, json!(0), json!(2), json!("1")] {
+            let mut older = ready.clone();
+            older["petVoiceAudioVersion"] = version;
+            assert!(!uses_pet_audio(&older, "call"));
+        }
+        for (key, value) in [
+            ("target", json!("chat")),
+            ("ready", json!(false)),
+            ("canCall", json!(false)),
+            ("voice", json!({"active": true})),
+            ("dictating", json!(true)),
+        ] {
+            let mut unsupported = ready.clone();
+            unsupported[key] = value;
+            assert!(!uses_pet_audio(&unsupported, "call"), "{key}");
+        }
+        let controller = command_controller();
+        controller.update_raw_state(ready);
+        assert!(uses_pet_audio(&controller.snapshot(), "call"));
     }
 
     #[test]

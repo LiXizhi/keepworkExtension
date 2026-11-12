@@ -205,7 +205,14 @@ impl CircleChannels {
             }
         }
         let mut label = json!({"organization": "", "accountName": ""});
-        let clean = |value: Option<&Value>| -> String { scalar(value).chars().take(160).collect() };
+        let clean = |value: Option<&Value>| -> String {
+            value
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect()
+        };
         if channel == "dingtalk" {
             if let Ok(value) =
                 Box::pin(self.dws(root, &args(&["profile", "list", "-f", "json"]))).await
@@ -222,9 +229,14 @@ impl CircleChannels {
                                 ) == account)
                     })
                 }) {
-                    label["organization"] =
-                        json!(clean(first(profile, &["corpName", "corp_name"])));
-                    label["accountName"] = json!(clean(first(profile, &["userName", "user_name"])));
+                    label["organization"] = json!(clean(choose(&[
+                        profile.get("corpName"),
+                        profile.get("corp_name")
+                    ])));
+                    label["accountName"] = json!(clean(choose(&[
+                        profile.get("userName"),
+                        profile.get("user_name")
+                    ])));
                 }
             }
         } else if let Ok(value) = Box::pin(self.lark(
@@ -241,8 +253,12 @@ impl CircleChannels {
         {
             let user = &value["identities"]["user"];
             if format!("{}:{}", text(&value, "appId"), text(user, "openId")) == account {
-                label["organization"] = json!(clean(first(user, &["corpName", "tenantName"])));
-                label["accountName"] = json!(clean(first(user, &["userName", "name"])));
+                label["organization"] = json!(clean(choose(&[
+                    user.get("corpName"),
+                    user.get("tenantName")
+                ])));
+                label["accountName"] =
+                    json!(clean(choose(&[user.get("userName"), user.get("name")])));
             }
         }
         let mut labels = self
@@ -437,6 +453,18 @@ impl CircleChannels {
             args(&["chat", "search", "--query", query])
         };
         let raw = Box::pin(self.call(root, b, arguments, false)).await?;
+        if feishu && !contacts {
+            let chats = data(&raw)["chats"]
+                .as_array()
+                .ok_or_else(|| PersonaError::bad("Unexpected Feishu group response"))?;
+            return Ok(json!(chats.iter()
+                .filter(|group| group["chat_id"].is_string()
+                    && text(group,"chat_status") != "dissolved"
+                    && text(group,"chat_mode") != "p2p")
+                .take(50)
+                .map(|group| json!({"id":group["chat_id"],"name":scalar(choose(&[group.get("name"),group.get("chat_id")]))}))
+                .collect::<Vec<_>>()));
+        }
         let mut result = Vec::new();
         for row in rows(
             &raw,

@@ -347,3 +347,6 @@ crates/keepwork-mcp/
   `src/core/fsServe.ts`; add cases to both engines' tests when in doubt.
 - Do not advertise an API string in `/health` before its routes exist.
 - Bump `crates/keepwork-mcp/Cargo.toml` version and keep its `Cargo.lock` in sync.
+
+
+DingTalk manual image attachments use the additive conversation `replyImage` contract and `POST /agents/personas/:id/reply-image`. One PNG/JPEG/GIF/WebP up to 5 MiB is validated, staged privately under the binding root, sent through current-user DWS file transport, and cleaned after the attempt. Images arrive as downloadable attachments. Text replies keep their legacy request shape; Feishu and older services keep text usable without advertising this optional capability. The persistent request ledger prevents replay of unknown sends. See [manual image attachments](../../docs/message-autoreply.md#manual-image-attachments).

@@ -1,5 +1,18 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-12：宠物分身后台通话与语音播放速率（0.2.63）
+
+新增可选 `petVoiceAudioVersion: 1`，仅网页与宿主双方协商、分身目标且使用云端识别时启用。由可见宠物在一次原生点击签发的文档/context绑定租约内采集，主窗口保持原可见性、最小化状态和焦点。一次通话持续持有采集，每轮 ASR 只在 ready 后订阅 PCM；静音、思考、播报期间 ACK 后丢弃音频，不上传或留到下一轮。挂断（含权限等待中）、隐藏、账号/目标/引擎变化、原生停止或错误释放整个采集；旧端与不支持的目标/引擎保留既有路径。不修改 MCP 或分身消息请求契约。
+
+相邻 SDK 修复在 `keepworksdk` **1.0.9**：使用 `/speech` 的 `ready.tts` 实际格式/采样率播放，保留请求默认值及旧服务缺字段行为，重连清空协商状态。真实历史源码隔离夹具复现 16000 个 16kHz PCM 样本仅播放 0.667 秒，修复后为 1 秒；不调整语速参数。
+
+- AIChat 相关 Node **95/95**；Chrome **11/11**（后台通话、两轮/静音/播报、旧听写与旧端分身语音）。本轮修改前 `persona_voice.js` 注入同一浏览器回归时，因主页面创建采集 AudioContext（1 而非 0）失败。日志 `/private/tmp/pet-call-node-complete-20261112.log`、`/private/tmp/pet-call-browser-{before,fixed}-20261112.log`。
+- SDK 新增音频格式/时长回归、原语音协议、缓存测试及类型检查通过；覆盖 16/24/48kHz、48kHz硬件上下文、突发分块顺序、共享 ASR/TTS、重连和有界音频错误。新回归命令 `node test/runSpeechAudioFormatTests.mjs`，根复验日志 `/private/tmp/pet-call-sdk-format-root-20261112.log`。
+- `RUST_TEST_THREADS=1 pnpm --prefix apps/aichat-rust check`：TypeScript/前端构建、Rust **88/88**、Node **276通过/4平台跳过/0失败**。日志 `/private/tmp/pet-call-rust-check-serial-20261112.log`。初次默认沙箱阻止20个本机端口夹具；允许loopback后的并发检查有1条既有 dev_server 端口池冲突（87/88），改为串行测试后完整通过，未修改该用例或运行时。
+- `npm run check:shared`：通过；日志 `/private/tmp/pet-call-shared-check-20261112.log`。AIChat 源语法、JSON、91包/3配置清单与 diff 检查通过。基础包 **1.0.50**；分身包本切片 **1.0.17**，并行产品修改已继续升至 **1.0.18**。
+
+上述浏览器与音频测试使用隔离宿主/SDK/MCP/合成 PCM，不等同原生隐藏窗口、真人麦克风、线上语音服务或已发布版本配对验证。临时测试服务已关闭。需要新的桌面原生进程及网页/SDK 源码加载后生效；未发布安装包或线上 SDK。
+
 ## 2026-11-12：集成浏览器导航保留在预览内（0.2.62）
 
 修复 macOS 的 Wry URL 导航回调无法区分主框架和子框架、把预览网址交给系统浏览器的问题。主 WKWebView 的原生 delegate 代理仅处理真实子框架的普通导航，允许无 URL 凭据的 HTTP(S) 和初始 `about:blank`；主窗口、弹窗、下载及其它事件继续交给原 delegate。CEF 兼容宿主也按真实框架标识允许普通 HTTP(S) 预览。桌面 Bridge、媒体授权、敏感链接外传过滤和浏览器嵌入限制不变，Web/MCP 无协议或同步升级要求。

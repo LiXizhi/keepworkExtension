@@ -167,7 +167,7 @@
       ],
       "login": "traecli",
       "source": "https://docs.trae.cn/cli_get-started-with-trae-code-cli-2",
-      "reviewedAt": "2026-10-07",
+      "reviewedAt": "2026-11-12",
       "windows": {
         "kind": "powershell-script",
         "url": "https://trae.cn/trae-cli/install_v2.ps1",
@@ -180,6 +180,7 @@
         "evidence": "documented"
       },
       "notes": [
+        "TRAE CLI 2.0 官方当前仅支持企业旗舰版套餐账号，与 TRAE 个人版 IDE 权益独立；官方安装脚本和默认 traecli 登录会引导企业授权，安装成功不代表已登录或取得 CLI 使用权限。",
         "TRAE 桌面版与 TraeCode CLI 2.0 分开；首次运行可能需要账号权限、沙箱初始化和项目受信任设置，不能自动代替用户确认。"
       ],
       "update": "traecli update"

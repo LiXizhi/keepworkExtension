@@ -22,6 +22,7 @@ mod cli;
 mod dingtalk;
 mod feishu;
 mod http;
+mod image_reply;
 mod inbox;
 mod lifecycle;
 mod policy;

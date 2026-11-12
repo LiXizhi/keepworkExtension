@@ -1,7 +1,7 @@
 # Trae CLI 安装参考
 
 这是产品运行时安装参考，不是独立 Skill。后端：`trae`。
-官方来源：[Trae](https://docs.trae.cn/cli_get-started-with-trae-code-cli-2)；核对日期：2026-10-07。
+官方来源：[Trae](https://docs.trae.cn/cli_get-started-with-trae-code-cli-2)；核对日期：2026-11-12。
 
 先查已有 CLI 路径和版本，只安装用户请求的平台。通过 Keepwork run_terminal 和现有确认流程执行；没有本机工具时不声称已安装。
 
@@ -10,6 +10,7 @@
 - 版本：`traecli --version`。
 - 登录：`traecli`，由用户完成授权，不读取或复制凭据。
 
+- TRAE CLI 2.0 官方当前仅支持企业旗舰版套餐账号，与 TRAE 个人版 IDE 权益独立；官方安装脚本和默认 traecli 登录会引导企业授权，安装成功不代表已登录或取得 CLI 使用权限。
 - TRAE 桌面版与 TraeCode CLI 2.0 分开；首次运行可能需要账号权限、沙箱初始化和项目受信任设置，不能自动代替用户确认。
 
 安装后重新检测真实路径，验证握手、原生模型及真实请求；未登录、未测试不能报告通过。旧 GUI PATH 不代表安装丢失。
