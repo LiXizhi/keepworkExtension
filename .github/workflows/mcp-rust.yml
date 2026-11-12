@@ -5,6 +5,8 @@ on:
   push:
     branches: [master, main]
     paths:
+      - "package.json"
+      - "package-lock.json"
       - "apps/mcp-rust/**"
       - "scripts/contract/**"
       - "docs/rust-runtime-migration.md"
@@ -14,6 +16,7 @@ jobs:
   build:
     name: Build and contract (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +46,7 @@ jobs:
         working-directory: apps/mcp-rust
         run: cargo build --release
       - name: Wire contract against the Node reference when available
+        timeout-minutes: 10
         env:
           KEEPWORK_MCP_TEST_BIN: ${{ github.workspace }}/${{ env.BIN }}
         run: node --test scripts/contract/*.test.cjs

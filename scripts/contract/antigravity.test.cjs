@@ -152,16 +152,17 @@ test('a zero-turn Rust sidecar can be read and continued by the Node native adap
   assert.equal(saved.mode, 'plan');
   assert.deepEqual(saved.turns, []);
   const count = rows('prompt').length;
-  await stop();
-  const ts = require('typescript');
   const previous = require.extensions['.ts'];
-  require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-  }).outputText, filename);
-  const { AntigravityHarness } = require('../../src/core/antigravityHarness.ts');
-  const adapter = new AntigravityHarness(directory, process.execPath, [fixture]);
-  let completionTimeout;
+  let adapter, completionTimeout;
+  await stop();
   try {
+    // Loading the Node adapter can fail too; always restore the shared Rust peer.
+    const ts = require('typescript');
+    require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+    }).outputText, filename);
+    const { AntigravityHarness } = require('../../src/core/antigravityHarness.ts');
+    adapter = new AntigravityHarness(directory, process.execPath, [fixture]);
     assert.equal((await adapter.call('thread/read', { threadId: session.threadId })).thread.nativeId, saved.nativeId);
     await adapter.call('thread/resume', { threadId: session.threadId });
     const completion = new Promise((resolve, reject) => {
@@ -181,9 +182,12 @@ test('a zero-turn Rust sidecar can be read and continued by the Node native adap
     assert.equal(rows('prompt').length, count, 'Node fixture does not write to the Rust process log');
   } finally {
     clearTimeout(completionTimeout);
-    adapter.close();
-    if (previous) require.extensions['.ts'] = previous; else delete require.extensions['.ts'];
-    await start();
+    try {
+      adapter?.close();
+    } finally {
+      if (previous) require.extensions['.ts'] = previous; else delete require.extensions['.ts'];
+      await start();
+    }
   }
 });
 

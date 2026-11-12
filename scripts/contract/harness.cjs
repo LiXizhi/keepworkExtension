@@ -8,7 +8,7 @@
  * Every test gets its own HOME so tokens/instance files never touch the user's
  * profile, and each server runs on a free port so both engines can run at once.
  */
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
@@ -47,12 +47,16 @@ function isolatedHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kp-contract-'));
 }
 
-async function waitForHealth(port, timeoutMs = 10_000) {
+async function waitForHealth(port, timeoutMs = 10_000, signal) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      const timeout = AbortSignal.timeout(Math.min(1000, deadline - Date.now()));
+      const response = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      });
       if (response.ok) return await response.json();
     } catch (error) {
       lastError = error;
@@ -74,62 +78,117 @@ function spawnDaemon(command, args, { home, port, env }) {
       ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Give only this test-owned daemon a process group for bounded fallback
+    // cleanup. Windows uses taskkill /T on this exact child's PID instead.
+    detached: process.platform !== 'win32',
+    windowsHide: true,
   });
   let output = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { output += chunk; });
-  const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
-  return { child, exited, output: () => output };
+  const exited = new Promise((resolve) => {
+    child.once('error', (error) => resolve({ error }));
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  const closed = new Promise((resolve) => child.once('close', () => resolve(true)));
+  return { child, exited, closed, output: () => output };
+}
+
+async function within(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function running(child) {
+  return child.pid && child.exitCode === null && child.signalCode === null;
+}
+
+async function killOwnedTree(child) {
+  if (process.platform === 'win32') {
+    await new Promise((resolve, reject) => {
+      execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+        windowsHide: true, timeout: 5000,
+      }, error => error && running(child) ? reject(error) : resolve());
+    });
+  } else {
+    try { process.kill(-child.pid, 'SIGKILL'); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+  }
+}
+
+async function stopDaemon(daemon, { home, port, ownsEndpoint }) {
+  const { child } = daemon;
+  try {
+    if (running(child) && ownsEndpoint) {
+      // SIGTERM force-kills on Windows and bypasses Rust's native CLI cleanup.
+      // The admin route closes/reaps owned consumers on both engines first.
+      try {
+        const token = fs.readFileSync(path.join(home, '.keepwork-mcp', 'token'), 'utf8').trim();
+        const response = await fetch(`http://127.0.0.1:${port}/admin/stop`, {
+          method: 'POST', headers: { authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(2000),
+        });
+        await response.arrayBuffer();
+        if (response.ok) await within(daemon.exited, 5000);
+      } catch { /* Failed startup or an unresponsive peer: terminate our tree. */ }
+    }
+    if (running(child)) await killOwnedTree(child);
+    if (!await within(daemon.exited, 5000)) throw new Error(`test daemon ${child.pid} did not exit`);
+    if (!await within(daemon.closed, 1000)) {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      throw new Error(`test daemon ${child.pid} left stdio open`);
+    }
+  } finally {
+    await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+}
+
+async function startDaemon(engine, command, extraArgs, env) {
+  const port = await freePort();
+  const home = isolatedHome();
+  const daemon = spawnDaemon(command, [...extraArgs, '--port', String(port)], { home, port, env });
+  let ownsEndpoint = false, stopping;
+  const stop = () => stopping ||= stopDaemon(daemon, { home, port, ownsEndpoint });
+  const controller = new AbortController();
+  let health;
+  try {
+    health = await Promise.race([
+      waitForHealth(port, 10_000, controller.signal),
+      daemon.exited.then(result => { throw result.error || new Error(`test daemon exited before health: ${JSON.stringify(result)}`); }),
+    ]);
+    // Never send /admin/stop to a different daemon that won a free-port race.
+    if (health.pid !== daemon.child.pid) throw new Error(`port ${port} belongs to another daemon`);
+    ownsEndpoint = true;
+  } catch (error) {
+    try { await stop(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], 'test daemon startup and cleanup failed'); }
+    throw error;
+  } finally {
+    controller.abort();
+  }
+  return {
+    engine, port, home, health,
+    base: `http://127.0.0.1:${port}`,
+    output: daemon.output,
+    stop,
+  };
 }
 
 async function startRust({ requireAuth = false, env = {} } = {}) {
-  const port = await freePort();
-  const home = isolatedHome();
-  const args = ['--port', String(port)];
-  if (requireAuth) args.push('--require-auth');
-  const daemon = spawnDaemon(rustBinary(), args, { home, port, env });
-  const health = await waitForHealth(port);
-  return {
-    engine: 'rust',
-    port,
-    home,
-    base: `http://127.0.0.1:${port}`,
-    health,
-    output: daemon.output,
-    async stop() {
-      daemon.child.kill('SIGTERM');
-      const result = await Promise.race([
-        daemon.exited,
-        new Promise((resolve) => setTimeout(() => resolve({ code: 'timeout' }), 5000)),
-      ]);
-      if (result.code === 'timeout') daemon.child.kill('SIGKILL');
-      fs.rmSync(home, { recursive: true, force: true });
-    },
-  };
+  return startDaemon('rust', rustBinary(), requireAuth ? ['--require-auth'] : [], env);
 }
 
 async function startNode() {
   if (!hasNodeReference()) return null;
-  const port = await freePort();
-  const home = isolatedHome();
-  const daemon = spawnDaemon(process.execPath, [nodeEntry, '--port', String(port)], { home, port });
-  const health = await waitForHealth(port);
-  return {
-    engine: 'node',
-    port,
-    home,
-    base: `http://127.0.0.1:${port}`,
-    health,
-    output: daemon.output,
-    async stop() {
-      daemon.child.kill('SIGTERM');
-      await Promise.race([
-        daemon.exited,
-        new Promise((resolve) => setTimeout(() => { daemon.child.kill('SIGKILL'); resolve(); }, 5000)),
-      ]);
-      fs.rmSync(home, { recursive: true, force: true });
-    },
-  };
+  return startDaemon('node', process.execPath, [nodeEntry], {});
 }
 
 async function mcpInitialize(base, { streamed = false } = {}) {

@@ -12,13 +12,22 @@ const owner = 'c'.repeat(32);
 
 async function fixture(t, initialState = '') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-cursor-auth-'));
+  let daemon;
+  t.after(async () => {
+    // node:test runs after hooks in registration order and skips later hooks
+    // when one throws. Stop the owner before Windows tries to remove its cwd.
+    try {
+      await daemon?.stop();
+    } finally {
+      await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  });
   const workspace = path.join(directory, 'workspace');
   const state = path.join(directory, 'login-state');
   const failure = path.join(directory, 'failure');
   const log = path.join(directory, 'native.log');
   fs.mkdirSync(workspace);
   fs.writeFileSync(state, initialState);
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const absent = path.join(directory, 'absent-cli');
   const env = { KEEPWORK_CURSOR_PATH: cli, KEEPWORK_NODE_PATH: process.execPath,
     KEEPWORK_CURSOR_AUTH_FIXTURE_STATE: state, KEEPWORK_CURSOR_AUTH_FIXTURE_FAILURE: failure,
@@ -26,8 +35,7 @@ async function fixture(t, initialState = '') {
   for (const backend of ['CODEX', 'WORKBUDDY', 'COPILOT', 'CLAUDE', 'TRAE', 'QWEN', 'GEMINI', 'ANTIGRAVITY', 'KIMI', 'CODEBUDDY', 'OPENCODE', 'DEEPSEEK']) {
     env['KEEPWORK_' + backend + '_PATH'] = absent;
   }
-  const daemon = await h.startRust({ env });
-  t.after(() => daemon.stop());
+  daemon = await h.startRust({ env });
   const headers = { origin: daemon.base, 'x-agent-owner': owner, 'content-type': 'application/json' };
   const request = async (route, body) => {
     const response = await fetch(daemon.base + '/agents' + route, {
