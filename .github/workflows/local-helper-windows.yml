@@ -47,7 +47,7 @@ jobs:
           --coupled-path apps/local-model-runtime
           --output "$GITHUB_OUTPUT"
 
-  build-and-publish-windows-x64:
+  build-windows-x64:
     needs: release-gate
     if: needs.release-gate.outputs.publish == 'true'
     runs-on: windows-latest
@@ -158,7 +158,27 @@ jobs:
             apps/local-helper/release/latest.json
           if-no-files-found: error
 
+      - name: Remove private build configuration
+        if: ${{ always() }}
+        shell: pwsh
+        run: Remove-Item -Force -ErrorAction SilentlyContinue apps/local-helper/build.local.json
+
+  publish:
+    needs: [release-gate, build-windows-x64]
+    runs-on: ubuntu-latest
+    # Uploading the model-bearing installer must not share the build time budget.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: kp-local-helper-windows-x64-${{ needs.release-gate.outputs.version }}
+          path: apps/local-helper/release
       - name: Upload release to Qiniu and verify CDN
+        shell: bash
         env:
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
@@ -166,13 +186,8 @@ jobs:
         run: >-
           node apps/local-helper/scripts/publish-qiniu-release.cjs
           --release-dir apps/local-helper/release
-          --version "$env:RELEASE_VERSION"
-          --bucket "$env:KP_QINIU_BUCKET"
-          --prefix "$env:KP_QINIU_PREFIX"
-          --domain "$env:KP_QINIU_DOMAIN"
-          --upload-host "$env:KP_QINIU_UPLOAD_HOST"
-
-      - name: Remove private build configuration
-        if: ${{ always() }}
-        shell: pwsh
-        run: Remove-Item -Force -ErrorAction SilentlyContinue apps/local-helper/build.local.json
+          --version "$RELEASE_VERSION"
+          --bucket "$KP_QINIU_BUCKET"
+          --prefix "$KP_QINIU_PREFIX"
+          --domain "$KP_QINIU_DOMAIN"
+          --upload-host "$KP_QINIU_UPLOAD_HOST"

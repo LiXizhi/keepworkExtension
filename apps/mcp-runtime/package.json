@@ -1,6 +1,6 @@
 {
   "name": "keepwork-mcp-runtime",
-  "version": "0.1.62",
+  "version": "0.1.63",
   "private": false,
   "description": "Standalone Keepwork MCP runtime",
   "license": "MIT",

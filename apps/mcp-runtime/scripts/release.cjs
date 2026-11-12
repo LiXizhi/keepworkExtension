@@ -82,7 +82,11 @@ const cdnTransport = {
 // even if main advances during upload, so JSON is not deliberately left stale.
 async function publishRelease(config, release, isCurrent, transport = cdnTransport) {
   if (!await isCurrent()) return false;
-  for (const entry of release.archives) await transport.uploadEntry(config, entry);
+  // The three platform archives are independent. Drain every upload, including
+  // on failure, before releasing the publication lock or promoting metadata.
+  const uploads = await Promise.allSettled(release.archives.map(async (entry) => transport.uploadEntry(config, entry)));
+  const failed = uploads.find((result) => result.status === 'rejected');
+  if (failed) throw failed.reason;
   await transport.refreshUrls(config, release.archives.map((entry) => entry.url));
   await transport.verifyEntriesWithRetry(release.archives);
   for (const entry of release.descriptors) await transport.uploadEntry(config, entry);

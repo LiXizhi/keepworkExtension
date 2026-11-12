@@ -113,6 +113,84 @@ test('uploads exactly six files and verifies ZIPs before publishing matching JSO
   ]);
 });
 
+function deferredUpload() {
+  let resolve;
+  let reject;
+  const promise = new Promise((accept, fail) => { resolve = accept; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+test('uploads all ZIPs concurrently but waits for the slowest before refreshing or publishing JSON', async (t) => {
+  const release = collectRelease(fixture(t), identity, prefix, domain);
+  const calls = [];
+  const uploads = release.archives.map(() => deferredUpload());
+  const transport = {
+    ...fakeTransport(calls),
+    async uploadEntry(config, entry) {
+      calls.push(`upload:${entry.remoteKey}`);
+      const index = release.archives.indexOf(entry);
+      if (index !== -1) await uploads[index].promise;
+    },
+  };
+  let settled = false;
+  const outcome = publishRelease({}, release, () => true, transport).then(
+    (value) => { settled = true; return { value }; },
+    (error) => { settled = true; return { error }; },
+  );
+  t.after(async () => { uploads.forEach((upload) => upload.resolve()); await outcome; });
+  await new Promise(setImmediate);
+  const archiveCalls = TARGETS.map((target) => `upload:${prefix}${target}.zip`);
+  assert.deepEqual(calls, archiveCalls, 'all uploads start before any upload completes');
+
+  uploads[2].resolve();
+  uploads[0].resolve();
+  await new Promise(setImmediate);
+  assert.equal(settled, false);
+  assert.deepEqual(calls, archiveCalls, 'a pending ZIP blocks refresh and metadata publication');
+
+  uploads[1].resolve();
+  assert.deepEqual(await outcome, { value: true });
+  assert.deepEqual(calls, [
+    ...archiveCalls, 'refresh:3', 'verify:3',
+    ...TARGETS.map((target) => `upload:${prefix}${target}.json`),
+    'refresh:3', 'verify:3',
+  ]);
+});
+
+test('a failed ZIP waits for other active uploads to finish and prevents refresh or JSON publication', async (t) => {
+  const release = collectRelease(fixture(t), identity, prefix, domain);
+  const calls = [];
+  const uploads = release.archives.map(() => deferredUpload());
+  const transport = {
+    ...fakeTransport(calls),
+    async uploadEntry(config, entry) {
+      calls.push(`upload:${entry.remoteKey}`);
+      const index = release.archives.indexOf(entry);
+      if (index !== -1) await uploads[index].promise;
+    },
+  };
+  let settled = false;
+  const outcome = publishRelease({}, release, () => true, transport).then(
+    (value) => { settled = true; return { value }; },
+    (error) => { settled = true; return { error }; },
+  );
+  t.after(async () => { uploads.forEach((upload) => upload.resolve()); await outcome; });
+  await new Promise(setImmediate);
+  const archiveCalls = TARGETS.map((target) => `upload:${prefix}${target}.zip`);
+  assert.deepEqual(calls, archiveCalls);
+
+  const failure = new Error('archive upload failed');
+  uploads[0].reject(failure);
+  uploads[2].resolve();
+  await new Promise(setImmediate);
+  assert.equal(settled, false, 'publication cannot release its lock while another upload is active');
+  assert.deepEqual(calls, archiveCalls);
+
+  uploads[1].resolve();
+  assert.deepEqual(await outcome, { error: failure });
+  assert.deepEqual(calls, archiveCalls, 'failed archives must never refresh or publish metadata');
+});
+
 test('failed ZIP verification prevents publishing JSON for an unverified package', async (t) => {
   const release = collectRelease(fixture(t), identity, prefix, domain);
   const calls = [];

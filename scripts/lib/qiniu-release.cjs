@@ -225,14 +225,23 @@ async function uploadPart(config, entry, createToken, uploadId, part, totalParts
 async function mapConcurrent(values, concurrency, task) {
   const results = new Array(values.length);
   let nextIndex = 0;
+  let stopped = false;
   async function worker() {
-    while (nextIndex < values.length) {
+    while (!stopped && nextIndex < values.length) {
       const index = nextIndex;
       nextIndex += 1;
-      results[index] = await task(values[index], index);
+      try {
+        results[index] = await task(values[index], index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  // Do not delete the multipart upload while another worker still writes to it.
+  const workers = await Promise.allSettled(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  const failed = workers.find((result) => result.status === 'rejected');
+  if (failed) throw failed.reason;
   return results;
 }
 
