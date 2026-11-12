@@ -123,7 +123,7 @@ async function killOwnedTree(child) {
   }
 }
 
-async function stopDaemon(daemon, { home, port, ownsEndpoint }) {
+async function stopDaemon(daemon, { home, port, ownsEndpoint, removeHome }) {
   const { child } = daemon;
   try {
     if (running(child) && ownsEndpoint) {
@@ -147,16 +147,18 @@ async function stopDaemon(daemon, { home, port, ownsEndpoint }) {
       throw new Error(`test daemon ${child.pid} left stdio open`);
     }
   } finally {
-    await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    if (removeHome) await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
 
-async function startDaemon(engine, command, extraArgs, env) {
-  const port = await freePort();
-  const home = isolatedHome();
+async function startDaemon(engine, command, extraArgs, env, { home: providedHome, port: providedPort } = {}) {
+  const port = providedPort ?? await freePort();
+  // A caller-provided fixture profile survives stop/restart. Its caller owns
+  // final deletion; the harness only deletes HOME directories it allocated.
+  const home = providedHome ?? isolatedHome();
   const daemon = spawnDaemon(command, [...extraArgs, '--port', String(port)], { home, port, env });
   let ownsEndpoint = false, stopping;
-  const stop = () => stopping ||= stopDaemon(daemon, { home, port, ownsEndpoint });
+  const stop = () => stopping ||= stopDaemon(daemon, { home, port, ownsEndpoint, removeHome: providedHome === undefined });
   const controller = new AbortController();
   let health;
   try {
@@ -182,8 +184,8 @@ async function startDaemon(engine, command, extraArgs, env) {
   };
 }
 
-async function startRust({ requireAuth = false, env = {} } = {}) {
-  return startDaemon('rust', rustBinary(), requireAuth ? ['--require-auth'] : [], env);
+async function startRust({ requireAuth = false, env = {}, home, port } = {}) {
+  return startDaemon('rust', rustBinary(), requireAuth ? ['--require-auth'] : [], env, { home, port });
 }
 
 async function startNode() {

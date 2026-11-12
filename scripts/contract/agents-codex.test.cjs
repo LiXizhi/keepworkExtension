@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const h = require('./harness.cjs');
 
@@ -246,33 +245,34 @@ async function legacyDaemon(t) {
   }));
   fs.writeFileSync(registry, JSON.stringify(rows), { mode: 0o600 });
   const rpcLog = path.join(isolated, 'rpc.log');
-  const env = { ...process.env, HOME: profile, USERPROFILE: profile,
-    KEEPWORK_MCP_ROOT: workspace, KEEPWORK_MCP_PORT: String(port), KEEPWORK_MCP_REQUIRE_AUTH: '0',
+  const env = {
+    KEEPWORK_MCP_ROOT: workspace, KEEPWORK_MCP_REQUIRE_AUTH: '0',
     KEEPWORK_MCP_HOST_KIND: 'standalone', KEEPWORK_CODEX_PATH: fixture, KEEPWORK_AGENT_FIXTURE_LOG: rpcLog,
   };
-  const launch = () => spawn(h.rustBinary(), ['--port', String(port), '--root', workspace], {
-    cwd: h.repoRoot, env, stdio: ['ignore', 'ignore', 'ignore'],
+  const launch = () => h.startRust({ home: profile, port, env });
+  let daemon;
+  const calls = () => fs.existsSync(rpcLog) ? fs.readFileSync(rpcLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+  const stop = async () => {
+    await daemon?.stop();
+    for (const pid of new Set(calls().map(row => row.pid))) {
+      // Only fixture PIDs journaled in this test's private RPC log are probed.
+      assert.ok(Number.isInteger(pid) && pid > 1 && pid !== process.pid);
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `owned Codex fixture ${pid} survived daemon stop`);
+    }
+  };
+  t.after(async () => {
+    await stop();
+    await fs.promises.rm(isolated, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
-  let child = launch();
-  let exited = new Promise((resolve) => child.once('exit', resolve));
-  async function stop() {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    child.kill('SIGTERM'); let timer;
-    const stopped = await Promise.race([exited.then(() => true), new Promise((resolve) => { timer = setTimeout(() => resolve(false), 5000); })]);
-    clearTimeout(timer); if (!stopped) { child.kill('SIGKILL'); await exited; }
-  }
-  t.after(async () => { await stop(); fs.rmSync(isolated, { recursive: true, force: true }); });
-  await h.waitForHealth(port);
+  daemon = await launch();
   return {
     stop,
     async restart() {
       await stop();
-      child = launch();
-      exited = new Promise((resolve) => child.once('exit', resolve));
-      await h.waitForHealth(port);
+      daemon = await launch();
     },
     saved: () => JSON.parse(fs.readFileSync(registry, 'utf8')),
-    calls: () => fs.existsSync(rpcLog) ? fs.readFileSync(rpcLog, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [],
+    calls,
     async readRoute(route) {
       const response = await fetch(base + '/agents/' + route, {
         headers: { origin: base, 'x-agent-owner': ownerKey }, signal: AbortSignal.timeout(10_000),

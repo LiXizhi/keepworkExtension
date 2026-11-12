@@ -223,18 +223,21 @@ mod platform {
                 BluetoothLEDevice::GetDeviceSelectorFromBluetoothAddress(value).map_err(error)?;
             selector = format!("({selector}) AND ({address_selector})");
         }
-        let properties: windows_collections::IIterable<HSTRING> = vec![
-            HSTRING::from("System.Devices.Aep.DeviceAddress"),
-            HSTRING::from("System.Devices.Aep.IsConnected"),
-        ]
-        .into();
-        let devices = DeviceInformation::FindAllAsyncAqsFilterAndAdditionalProperties(
-            &HSTRING::from(selector),
-            &properties,
-        )
-        .map_err(error)?
-        .await
-        .map_err(error)?;
+        let query = {
+            // IIterable is not Send. Release it before suspending so the
+            // paired-device monitor can run on Tauri's multithreaded runtime.
+            let properties: windows_collections::IIterable<HSTRING> = vec![
+                HSTRING::from("System.Devices.Aep.DeviceAddress"),
+                HSTRING::from("System.Devices.Aep.IsConnected"),
+            ]
+            .into();
+            DeviceInformation::FindAllAsyncAqsFilterAndAdditionalProperties(
+                &HSTRING::from(selector),
+                &properties,
+            )
+            .map_err(error)?
+        };
+        let devices = query.await.map_err(error)?;
         let count = devices.Size().map_err(error)?;
         if count > 256 {
             return Err("已配对设备列表过长，请指定遥控器设备 ID。".into());
@@ -295,6 +298,12 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paired_probe_future_can_move_between_runtime_threads() {
+        fn assert_send<T: Send>(_: T) {}
+        // Constructing the future does not query Bluetooth or start input.
+        assert_send(paired_remote(""));
+    }
     fn remote(id: Option<&str>, hardware: Option<&str>) -> PairedRemote {
         PairedRemote {
             name: "Xiaomi Bluetooth Remote 2 Pro".into(),

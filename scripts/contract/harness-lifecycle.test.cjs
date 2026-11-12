@@ -123,3 +123,36 @@ test('daemon spawn failure rejects and removes its isolated HOME', async t => {
   assert.equal(homes.length, 1, 'spawn failure must occur after HOME allocation');
   assert.equal(fs.existsSync(homes[0].directory), false, 'startup failure must remove the allocated HOME');
 });
+
+test('caller-owned profile survives repeatable stop and restart on the same port', async t => {
+  const { result, output, records } = await subprocess(t, ['-e', `
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const h = require(${JSON.stringify(harness)});
+    (async () => {
+      const home = h.isolatedHome(), port = await h.freePort();
+      const sentinel = path.join(home, 'legacy-registry.json');
+      fs.writeFileSync(sentinel, '{"legacy":true}');
+      let daemon;
+      try {
+        daemon = await h.startRust({ home, port });
+        const pid = daemon.health.pid, base = daemon.base;
+        await Promise.all([daemon.stop(), daemon.stop()]);
+        assert.equal(fs.readFileSync(sentinel, 'utf8'), '{"legacy":true}');
+        daemon = await h.startRust({ home, port });
+        assert.equal(daemon.base, base);
+        assert.notEqual(daemon.health.pid, pid);
+        assert.equal(fs.readFileSync(sentinel, 'utf8'), '{"legacy":true}');
+      } finally {
+        await daemon?.stop();
+        await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      }
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `]);
+  assert.equal(result.status, 0, output);
+  assert.equal(records.filter(row => row.kind === 'directory').length, 1, 'only the caller allocates the profile');
+  assert.equal(records.filter(row => row.kind === 'process').length, 2, 'the fixture must restart its daemon');
+  for (const pid of observedPids(records)) assert.equal(alive(pid), false, `test daemon ${pid} survived stop/restart`);
+  for (const row of records.filter(row => row.kind === 'directory')) assert.equal(fs.existsSync(row.directory), false);
+});

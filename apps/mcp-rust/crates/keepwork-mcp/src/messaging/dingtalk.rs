@@ -126,11 +126,16 @@ pub(crate) async fn wait_listener_ready(
             }
             Ok(size) => {
                 diagnostics.push_str(&String::from_utf8_lossy(&buffer[..size]));
-                let keep_from = diagnostics.len().saturating_sub(4000);
-                diagnostics = diagnostics.split_off(keep_from);
+                // A single read can contain ready followed by a full log burst.
+                // Observe the marker before bounding the diagnostic tail.
                 if diagnostics.contains("[event] ready") {
                     return Ok(());
                 }
+                let mut keep_from = diagnostics.len().saturating_sub(4000);
+                while !diagnostics.is_char_boundary(keep_from) {
+                    keep_from += 1;
+                }
+                diagnostics = diagnostics.split_off(keep_from);
             }
             Err(_) => {
                 return Err(DwsError::rejected("DWS listener could not start"));
