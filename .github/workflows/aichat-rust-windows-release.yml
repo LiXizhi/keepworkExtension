@@ -1,4 +1,4 @@
-name: AIChat Rust Windows release packages
+name: AIChat Rust release packages
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: aichat-rust-windows-release-${{ github.ref }}
+  group: aichat-rust-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -160,3 +160,92 @@ jobs:
           name: aichat-rust-windows-${{ matrix.arch }}-rust
           path: release-packages/*
           if-no-files-found: error
+
+  build-macos:
+    name: macOS Rust (universal)
+    runs-on: macos-latest
+    env:
+      AICHAT_MCP_ENGINE: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/aichat-rust/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-release-universal
+          workspaces: |
+            apps/mcp-rust -> target
+            apps/aichat-rust/src-tauri -> target
+      - name: Install frontend dependencies and check types
+        working-directory: apps/aichat-rust
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+      - name: Build and stage the universal Rust MCP runtime
+        run: node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
+      - name: Build macOS universal app and DMG
+        working-directory: apps/aichat-rust
+        run: pnpm tauri build --ci --target universal-apple-darwin --bundles app,dmg
+      - name: Verify the universal binary and its bundled runtime
+        working-directory: apps/aichat-rust
+        run: |
+          APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app"
+          ARCHS=$(lipo -archs "$APP/Contents/MacOS/Keepwork")
+          echo "Detected architectures: $ARCHS"
+          echo "$ARCHS" | grep -q "x86_64"
+          echo "$ARCHS" | grep -q "arm64"
+          for slice in arm64 x64; do
+            test -f "$APP/Contents/Resources/resources/mcp-runtime/$slice/runtime.json"
+            test -x "$APP/Contents/Resources/resources/mcp-runtime/$slice/bin/keepwork-mcp"
+          done
+          for dmg in src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg; do
+            hdiutil verify "$dmg"
+          done
+      - name: Collect release packages
+        run: |
+          mkdir -p release-packages
+          cp apps/aichat-rust/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg release-packages/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aichat-rust-macos-universal-rust
+          path: release-packages/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: [build, build-macos]
+    if: startsWith(github.ref, 'refs/tags/aichat-rust-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Collect assets and checksums
+        run: |
+          version="${GITHUB_REF_NAME#aichat-rust-v}"
+          ls -l dist
+          (cd dist && shasum -a 256 *.exe *.dmg) > "SHA256SUMS-${version}.txt"
+          cat "SHA256SUMS-${version}.txt"
+      - name: Upload assets to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#aichat-rust-v}"
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft \
+              --title "KeepWork 第二大脑 ${version}（Windows / macOS）" --generate-notes
+          fi
+          gh release upload "$TAG" dist/*.exe dist/*.dmg "SHA256SUMS-${version}.txt" --clobber
