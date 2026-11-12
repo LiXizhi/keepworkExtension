@@ -7,6 +7,7 @@
 - 本轮修改前原生夹具失败：逻辑 1280×800、显示区域 640×400，实际整页转换到父视图仍为 1280×800，证明仍在裁切。日志 `/private/tmp/keepwork-browser-fit-before.log`。
 - 原生专项 **2/2**：1280×800 整页转换后为 640×400，四边均在 visibleRect 内；原生 NSEvent 点击逻辑右下角按钮、聚焦输入并键入成功。2×应用缩放叠加 0.25×适配仍保持 1280×800、显示 640×400，原生点击命中正确。没有用 DOM click 替代缩放输入验收。旧视口、权限隔离、导航及销毁回归继续通过。日志 `/private/tmp/keepwork-browser-fit-native-input.log`。
 - 百度实测 **2/2**：innerWidth/clientWidth=1280、innerHeight/clientHeight=800、documentWidth=1280，整页完整可见，搜索输入和提交按钮都位于视口内。原生页快照按已验证的 640×400 显示尺寸导出，截图 `/private/tmp/keepwork-native-baidu-fit.png` 已查看；日志 `/private/tmp/keepwork-browser-fit-baidu.log`。这是隔离原生视图和输入测试，不是用户当前桌面窗口的截图或真人鼠标验收。
+- `pnpm --prefix apps/aichat-rust check` 最终通过 TypeScript、前端构建、Rust **118通过/1忽略/0失败**、Node **283通过/4平台跳过/0失败**，包含并行遥控器语音模块的测试。日志 `/private/tmp/keepwork-browser-fit-full-final.log`。`npm run check:shared` 和 `cargo build --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 也通过，日志 `/private/tmp/keepwork-browser-fit-{shared,build}.log`。
 
 网页完整显示、四角截图像素、旧能力兼容及宿主消息回归见 AIChat `tests/README.md`。需要新桌面进程及更新后的网页源码；未发布安装包。
 
