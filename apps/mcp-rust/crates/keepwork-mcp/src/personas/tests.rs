@@ -283,8 +283,9 @@ fn admin_snapshot_distinguishes_owner_groups_without_exposing_owner_keys() {
     let dir = std::env::temp_dir().join(format!("kp-persona-admin-{}", uuid::Uuid::new_v4()));
     let brain = dir.join("brain");
     std::fs::create_dir_all(&brain).unwrap();
-    let root = std::fs::canonicalize(&brain).unwrap();
-    let root = root.to_str().unwrap();
+    // The store records roots in their normalized form, which drops the
+    // Windows verbatim prefix that `fs::canonicalize` adds.
+    let root = canonical_root(brain.to_str().unwrap()).unwrap();
     let store = PersonaStore::open(dir.join("personas"));
     let presence = PresenceState::new();
     let request_owner = "48ee1a39-7015-4dfd-97db-12c656379f83";
@@ -292,14 +293,14 @@ fn admin_snapshot_distinguishes_owner_groups_without_exposing_owner_keys() {
     let origin_b = "https://keepwork.com";
     let owner_a = sha256_hex(&[origin_a.as_bytes(), b"\0", request_owner.as_bytes()]);
     let owner_b = sha256_hex(&[origin_b.as_bytes(), b"\0", request_owner.as_bytes()]);
-    let config = json!({"id":"default-persona", "name":"我的分身", "root":root});
+    let config = json!({"id":"default-persona", "name":"我的分身", "root":root.clone()});
     store.upsert(&presence, &owner_a, &config).unwrap();
     store.upsert(&presence, &owner_b, &config).unwrap();
     store
         .upsert(
             &presence,
             &owner_a,
-            &json!({"id":"bot", "name":"BOT1", "root":root}),
+            &json!({"id":"bot", "name":"BOT1", "root":root.clone()}),
         )
         .unwrap();
 
@@ -439,7 +440,11 @@ fn loading_unchanged_records_does_not_rewrite_them() {
     let path = dir.join(format!("{}.json", file_key(&owner, "default-persona")));
     let bytes = std::fs::read(&path).unwrap();
     let modified = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(60);
-    std::fs::File::open(&path)
+    // Windows requires FILE_WRITE_ATTRIBUTES to change a timestamp, so the
+    // handle has to be opened for writing rather than read-only.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(modified)
         .unwrap();
