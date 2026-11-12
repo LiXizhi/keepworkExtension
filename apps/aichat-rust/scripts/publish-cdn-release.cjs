@@ -68,6 +68,22 @@ async function uploadMissing(config, entries) {
   return pending;
 }
 
+function writeStepSummary(version, entries) {
+  const target = process.env.GITHUB_STEP_SUMMARY;
+  if (!target) return;
+  const rows = entries.map((entry) => (
+    `| ${entry.platform} | ${entry.arch} | [${entry.name}](${entry.url}) | ${(entry.size / 1024 / 1024).toFixed(1)} MB | \`${entry.sha256}\` |`
+  ));
+  fs.appendFileSync(target, [
+    `### CDN copy: ${version}`,
+    '',
+    '| Platform | Arch | Installer | Size | SHA-256 |',
+    '| --- | --- | --- | --- | --- |',
+    ...rows,
+    '',
+  ].join('\n'));
+}
+
 async function main() {
   const args = readArgs(process.argv.slice(2));
   const version = normalizeVersion(args.version);
@@ -89,6 +105,7 @@ async function main() {
   const uploaded = await uploadMissing(config, entries);
   if (uploaded.length) await qiniu.refreshUrls(config, uploaded.map((entry) => entry.url));
   await qiniu.verifyEntriesWithRetry(entries);
+  writeStepSummary(version, entries);
   process.stdout.write(`CDN copy verified for ${version}:\n${entries.map((entry) => entry.url).join('\n')}\n`);
 }
 
@@ -99,4 +116,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { collectInstallers };
+module.exports = { collectInstallers, writeStepSummary };

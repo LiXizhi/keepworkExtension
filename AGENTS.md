@@ -243,6 +243,7 @@ Commands: `keepwork.openMcpWorkspace`, `keepwork.changeMcpWorkspace`, `keepwork.
 - `.github/workflows/aichat-rust-windows-release.yml` builds Windows x64 + arm64 and the macOS universal DMG. The `publish` job attaches them to the GitHub release on an `aichat-rust-v*` tag; the `publish-cdn` job copies the same three installers to the CDN after both builds finish, on dispatch and on tags.
 - `apps/aichat-rust/scripts/publish-cdn-release.cjs` uploads exactly `Keepwork_<version>_x64-setup.exe`, `Keepwork_<version>_arm64-setup.exe` and the single `Keepwork_<version>_*.dmg` to `keepwork/aichat-rust/<version>/`. The path is immutable: identical bytes are skipped, different bytes at the same key are an error, so republishing changed installers requires a new version. Never build or repack inside the publisher, and never write installers under `keepwork/aichat-desktop/`, `keepwork/mcp-stable/` or `keepwork/aichat-cef/`.
 - The CDN copy is skipped with a warning only when the Qiniu secrets are absent; unsigned builds are copied too, matching the GitHub release, which has no signing gate (the Windows build job warns instead).
+- After verification the script writes a linked table to `$GITHUB_STEP_SUMMARY`, so the run page shows the three CDN URLs without opening the job log.
 - Validate publisher changes with `node --test apps/aichat-rust/tests/cdn-release.test.cjs` plus a `--dry-run` against a downloaded artifact directory.
 
 ### Rust MCP daemon (`apps/mcp-rust`)

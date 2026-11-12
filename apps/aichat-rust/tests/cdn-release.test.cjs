@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { collectInstallers } = require('../scripts/publish-cdn-release.cjs');
+const { collectInstallers, writeStepSummary } = require('../scripts/publish-cdn-release.cjs');
 
 const appRoot = path.resolve(__dirname, '..');
 const version = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).version;
@@ -36,6 +36,27 @@ test('collects the three installers under one immutable version path', (t) => {
     assert.equal(entry.size, fs.statSync(entry.filePath).size);
     assert.equal(entry.sha256, crypto.createHash('sha256').update(fs.readFileSync(entry.filePath)).digest('hex'));
   }
+});
+
+test('writes a linked summary only when the runner asks for one', (t) => {
+  const dir = fixture(t);
+  const entries = collectInstallers(dir, version, 'keepwork/aichat-rust/', 'https://cdn.keepwork.com');
+  const summary = path.join(dir, 'job-summary.md');
+  const previous = process.env.GITHUB_STEP_SUMMARY;
+  t.after(() => {
+    if (previous === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+    else process.env.GITHUB_STEP_SUMMARY = previous;
+  });
+
+  writeStepSummary(version, entries);
+  assert.equal(fs.existsSync(summary), false);
+
+  process.env.GITHUB_STEP_SUMMARY = summary;
+  writeStepSummary(version, entries);
+  const text = fs.readFileSync(summary, 'utf8');
+  assert.ok(text.includes(`### CDN copy: ${version}`));
+  for (const entry of entries) assert.ok(text.includes(`[${entry.name}](${entry.url})`), entry.url);
+  assert.ok(text.includes(entries[0].sha256));
 });
 
 test('rejects a missing installer', (t) => {
