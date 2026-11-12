@@ -53,6 +53,8 @@ pub struct AgentManager {
     creation: AsyncMutex<()>,
     load_error: Option<String>,
     closing: AtomicBool,
+    #[cfg(test)]
+    persist_calls: AtomicUsize,
     pub context: Arc<context::ContextManager>,
 }
 
@@ -358,11 +360,15 @@ impl AgentManager {
             creation: AsyncMutex::new(()),
             load_error,
             closing: AtomicBool::new(false),
+            #[cfg(test)]
+            persist_calls: AtomicUsize::new(0),
             context: Arc::new(context::ContextManager::new()),
         })
     }
 
     fn persist(&self, sessions: &HashMap<String, Session>) -> Result<(), String> {
+        #[cfg(test)]
+        self.persist_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(error) = &self.load_error {
             return Err(error.clone());
         }

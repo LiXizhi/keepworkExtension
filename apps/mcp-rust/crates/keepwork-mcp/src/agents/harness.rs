@@ -784,40 +784,43 @@ pub fn normalize_models(session: &Value) -> Vec<Value> {
 }
 
 #[cfg(test)]
+pub(super) struct FixtureFile(std::path::PathBuf);
+#[cfg(test)]
+impl Drop for FixtureFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn fixture(source: &str, protocol: Protocol) -> (Arc<Harness>, FixtureFile) {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "keepwork-native-harness-{}-{}.cjs",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&path, source).unwrap();
+    let node = super::discovery::search_dirs()
+        .into_iter()
+        .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+        .find(|path| path.is_file())
+        .expect("Node.js is required for the isolated native CLI fixture");
+    let launch = CliLaunch {
+        executable: node,
+        args: vec![path.to_string_lossy().into_owned()],
+        path: path.clone(),
+        source: "fixture".to_string(),
+    };
+    let harness = Harness::start_launch("fixture", protocol, launch, &std::env::temp_dir())
+        .await
+        .unwrap();
+    (harness, FixtureFile(path))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    struct FixtureFile(std::path::PathBuf);
-    impl Drop for FixtureFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    async fn fixture(source: &str, protocol: Protocol) -> (Arc<Harness>, FixtureFile) {
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "keepwork-native-harness-{}-{}.cjs",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&path, source).unwrap();
-        let node = super::super::discovery::search_dirs()
-            .into_iter()
-            .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
-            .find(|path| path.is_file())
-            .expect("Node.js is required for the isolated native CLI fixture");
-        let launch = CliLaunch {
-            executable: node,
-            args: vec![path.to_string_lossy().into_owned()],
-            path: path.clone(),
-            source: "fixture".to_string(),
-        };
-        let harness = Harness::start_launch("fixture", protocol, launch, &std::env::temp_dir())
-            .await
-            .unwrap();
-        (harness, FixtureFile(path))
-    }
 
     #[tokio::test]
     async fn native_process_stream_permissions_cancel_and_shutdown() {
