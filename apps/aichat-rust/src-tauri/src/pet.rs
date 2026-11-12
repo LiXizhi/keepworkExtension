@@ -6,6 +6,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -15,6 +16,33 @@ use uuid::Uuid;
 pub const MAX_PET_INPUT_CHARS: usize = 32_000;
 pub const MAX_PET_IMAGE_DATA_BYTES: usize = 8 * 1024 * 1024;
 pub const ALLOWED_SCALES: &[f64] = &[0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
+
+/// A native pet click is delivered to the retained main page. On macOS that
+/// page must be visible before WebKit will start a new microphone request.
+pub fn starts_media_capture(snapshot: &Value, action: &str) -> bool {
+    if snapshot["ready"].as_bool() != Some(true) {
+        return false;
+    }
+    let dictating = snapshot["dictating"].as_bool() == Some(true);
+    let calling = snapshot["voice"]["active"].as_bool() == Some(true);
+    let recording = snapshot["classroomRecording"]["enabled"].as_bool() == Some(true);
+    match action {
+        "dictation" => {
+            !dictating && !calling && !recording && snapshot["richDraft"].as_bool() != Some(true)
+        }
+        "call" => !calling && !dictating && snapshot["canCall"].as_bool() == Some(true),
+        "voice-start" => {
+            !calling
+                && !dictating
+                && snapshot["canCall"].as_bool() == Some(true)
+                && snapshot["compactVoice"].as_bool() == Some(true)
+        }
+        "record-start" => {
+            !recording && !calling && !dictating && snapshot["classroomRecording"].is_object()
+        }
+        _ => false,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -201,6 +229,15 @@ fn contains_point(area: WorkArea, x: i32, y: i32) -> bool {
 }
 
 pub fn monitor_at(monitors: &[WorkArea], x: i32, y: i32) -> Option<WorkArea> {
+    monitor_at_preferred(monitors, x, y, None)
+}
+
+fn monitor_at_preferred(
+    monitors: &[WorkArea],
+    x: i32,
+    y: i32,
+    preferred: Option<WorkArea>,
+) -> Option<WorkArea> {
     if let Some(hit) = monitors
         .iter()
         .copied()
@@ -209,11 +246,15 @@ pub fn monitor_at(monitors: &[WorkArea], x: i32, y: i32) -> Option<WorkArea> {
         return Some(hit);
     }
     monitors.iter().copied().min_by_key(|area| {
-        let cx = area.x as i64 + area.width as i64 / 2;
-        let cy = area.y as i64 + area.height as i64 / 2;
-        let dx = cx - x as i64;
-        let dy = cy - y as i64;
-        dx * dx + dy * dy
+        let x = x as i128;
+        let y = y as i128;
+        let dx = (area.x as i128 - x)
+            .max(0)
+            .max(x - (area.x as i128 + area.width as i128));
+        let dy = (area.y as i128 - y)
+            .max(0)
+            .max(y - (area.y as i128 + area.height as i128));
+        (dx * dx + dy * dy, preferred != Some(*area))
     })
 }
 
@@ -228,11 +269,24 @@ pub fn place_dragged_pet(
     scale: f64,
 ) -> Option<(WorkArea, i32, i32)> {
     let monitor = monitor_at(monitors, cursor_x, cursor_y)?;
+    Some(place_pet_on_monitor(
+        monitor, cursor_x, cursor_y, grab_x, grab_y, scale,
+    ))
+}
+
+fn place_pet_on_monitor(
+    monitor: WorkArea,
+    cursor_x: i32,
+    cursor_y: i32,
+    grab_x: i32,
+    grab_y: i32,
+    scale: f64,
+) -> (WorkArea, i32, i32) {
     let pixels = compute_pet_pixels(scale, monitor);
     let local_x = sub_i32(sub_i32(cursor_x, grab_x), monitor.x);
     let local_y = sub_i32(sub_i32(cursor_y, grab_y), monitor.y);
     let (left, top) = clamp_pet_position(Some(local_x), Some(local_y), pixels, monitor);
-    Some((monitor, left, top))
+    (monitor, left, top)
 }
 
 pub fn is_valid_pet_data_image(raw: &str) -> bool {
@@ -491,6 +545,9 @@ enum DragOrigin {
     Global {
         grab_x: i32,
         grab_y: i32,
+        start_x: i32,
+        start_y: i32,
+        active: bool,
     },
     Viewport {
         start_x: i32,
@@ -532,6 +589,9 @@ pub struct PetController {
     exit_prompt: Mutex<Option<PetExitPrompt>>,
     permission_prompt: Mutex<Option<PetPermissionPrompt>>,
     drag_origin: Mutex<Option<DragOrigin>>,
+    drag_id: Mutex<Option<u64>>,
+    drag_moved: AtomicBool,
+    native_drag_tracking: AtomicBool,
     canvas_synced: Mutex<Option<WorkArea>>,
     pointer_state: Mutex<PetPointerState>,
 }
@@ -548,6 +608,9 @@ impl PetController {
             exit_prompt: Mutex::new(None),
             permission_prompt: Mutex::new(None),
             drag_origin: Mutex::new(None),
+            drag_id: Mutex::new(None),
+            drag_moved: AtomicBool::new(false),
+            native_drag_tracking: AtomicBool::new(false),
             canvas_synced: Mutex::new(None),
             pointer_state: Mutex::new(PetPointerState::default()),
         }
@@ -688,6 +751,25 @@ impl PetController {
         self.work_area.lock().map(|w| *w).unwrap_or_default()
     }
 
+    pub fn placement(&self) -> (WorkArea, Option<i32>, Option<i32>) {
+        let prefs = self.preferences();
+        (self.work_area(), prefs.left, prefs.top)
+    }
+
+    pub fn drag_id(&self) -> Option<u64> {
+        self.drag_id.lock().ok().and_then(|id| *id)
+    }
+
+    pub fn owns_drag(&self, id: Option<u64>) -> bool {
+        id.is_none() || self.drag_id() == id
+    }
+
+    pub fn set_drag_id(&self, id: Option<u64>) {
+        if let Ok(mut current) = self.drag_id.lock() {
+            *current = id;
+        }
+    }
+
     pub fn preferences(&self) -> PetPreferences {
         self.prefs
             .lock()
@@ -699,6 +781,14 @@ impl PetController {
         if let Ok(mut synced) = self.canvas_synced.lock() {
             *synced = Some(area);
         }
+    }
+
+    pub fn pending_canvas(&self) -> Option<WorkArea> {
+        let area = self.work_area();
+        self.canvas_synced
+            .lock()
+            .ok()
+            .and_then(|synced| (*synced != Some(area)).then_some(area))
     }
 
     pub fn is_dragging(&self) -> bool {
@@ -714,6 +804,14 @@ impl PetController {
             self.drag_origin.lock().ok().and_then(|guard| *guard),
             Some(DragOrigin::Global { .. })
         )
+    }
+
+    pub fn drag_moved(&self) -> bool {
+        self.drag_moved.load(Ordering::Relaxed)
+    }
+
+    pub fn native_drag_tracking(&self) -> bool {
+        self.native_drag_tracking.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> Value {
@@ -870,6 +968,9 @@ impl PetController {
     }
 
     pub fn start_drag(&self, cursor_x: i32, cursor_y: i32) {
+        self.drag_moved.store(false, Ordering::Relaxed);
+        self.native_drag_tracking.store(false, Ordering::Relaxed);
+        self.set_drag_id(None);
         let snap = self.snapshot();
         let pet_left = snap["petLeft"].as_i64().unwrap_or(0) as i32;
         let pet_top = snap["petTop"].as_i64().unwrap_or(0) as i32;
@@ -884,6 +985,12 @@ impl PetController {
     }
 
     pub fn begin_global_drag(&self, cursor_x: i32, cursor_y: i32) {
+        self.begin_global_drag_with_id(cursor_x, cursor_y, None);
+    }
+
+    pub fn begin_global_drag_with_id(&self, cursor_x: i32, cursor_y: i32, id: Option<u64>) {
+        self.drag_moved.store(false, Ordering::Relaxed);
+        self.native_drag_tracking.store(true, Ordering::Relaxed);
         let area = self.work_area();
         let snap = self.snapshot();
         let left = snap["petLeft"].as_i64().unwrap_or(0) as i32;
@@ -891,7 +998,14 @@ impl PetController {
         let grab_x = sub_i32(cursor_x, add_i32(area.x, left));
         let grab_y = sub_i32(cursor_y, add_i32(area.y, top));
         if let Ok(mut drag) = self.drag_origin.lock() {
-            *drag = Some(DragOrigin::Global { grab_x, grab_y });
+            self.set_drag_id(id);
+            *drag = Some(DragOrigin::Global {
+                grab_x,
+                grab_y,
+                start_x: cursor_x,
+                start_y: cursor_y,
+                active: false,
+            });
         }
     }
 
@@ -904,9 +1018,26 @@ impl PetController {
         cursor_y: i32,
         monitors: &[WorkArea],
     ) -> Option<WorkArea> {
-        let _drag_guard = self.drag_origin.lock().ok()?;
-        let (grab_x, grab_y) = match *_drag_guard {
-            Some(DragOrigin::Global { grab_x, grab_y }) => (grab_x, grab_y),
+        let mut drag_guard = self.drag_origin.lock().ok()?;
+        let (grab_x, grab_y) = match drag_guard.as_mut() {
+            Some(DragOrigin::Global {
+                grab_x,
+                grab_y,
+                start_x,
+                start_y,
+                active,
+            }) => {
+                if !*active {
+                    let dx = cursor_x as i64 - *start_x as i64;
+                    let dy = cursor_y as i64 - *start_y as i64;
+                    if (dx as i128 * dx as i128 + dy as i128 * dy as i128) <= 16 {
+                        return None;
+                    }
+                    *active = true;
+                    self.drag_moved.store(true, Ordering::Relaxed);
+                }
+                (*grab_x, *grab_y)
+            }
             _ => return None,
         };
         let scale = self
@@ -915,14 +1046,15 @@ impl PetController {
             .ok()
             .map(|prefs| prefs.scale)
             .unwrap_or(1.0);
-        let Some((monitor, left, top)) =
-            place_dragged_pet(monitors, cursor_x, cursor_y, grab_x, grab_y, scale)
-        else {
-            return None;
-        };
-        self.clear_hit_regions();
-        self.set_work_area(monitor);
+        let previous = self.work_area();
+        let monitor = monitor_at_preferred(monitors, cursor_x, cursor_y, Some(previous))?;
+        let (_, left, top) =
+            place_pet_on_monitor(monitor, cursor_x, cursor_y, grab_x, grab_y, scale);
         if let Ok(mut prefs) = self.prefs.lock() {
+            if previous != monitor || prefs.left != Some(left) || prefs.top != Some(top) {
+                self.clear_hit_regions();
+                self.set_work_area(monitor);
+            }
             prefs.left = Some(left);
             prefs.top = Some(top);
             prefs.monitor_x = Some(monitor.x);
@@ -934,7 +1066,6 @@ impl PetController {
             .map(|current| *current != Some(monitor))
             .unwrap_or(true);
         if changed {
-            self.note_canvas(monitor);
             Some(monitor)
         } else {
             None
@@ -1128,6 +1259,61 @@ mod tests {
         );
         controller.update_raw_state(json!({ "context": "alice", "ready": true }));
         controller
+    }
+
+    #[test]
+    fn only_new_media_capture_actions_need_a_visible_owner_page() {
+        let ready = json!({
+            "ready": true, "canCall": true, "compactVoice": true,
+            "classroomRecording": { "enabled": false }
+        });
+        for action in ["dictation", "call", "voice-start", "record-start"] {
+            assert!(starts_media_capture(&ready, action), "{action}");
+            let mut offline = ready.clone();
+            offline["ready"] = json!(false);
+            assert!(!starts_media_capture(&offline, action), "offline {action}");
+        }
+        for action in [
+            "input",
+            "send",
+            "stop",
+            "mute",
+            "hide",
+            "state",
+            "voice-stop",
+            "record-stop",
+            "toggle-target",
+            "exit-info",
+        ] {
+            assert!(!starts_media_capture(&ready, action), "{action}");
+        }
+        let mut dictating = ready.clone();
+        dictating["dictating"] = json!(true);
+        let mut calling = ready.clone();
+        calling["voice"] = json!({ "active": true });
+        for action in ["dictation", "call", "voice-start", "record-start"] {
+            assert!(
+                !starts_media_capture(&dictating, action),
+                "dictating {action}"
+            );
+            assert!(!starts_media_capture(&calling, action), "calling {action}");
+        }
+        let mut recording = ready.clone();
+        recording["classroomRecording"]["enabled"] = json!(true);
+        assert!(!starts_media_capture(&recording, "record-start"));
+        assert!(!starts_media_capture(&recording, "dictation"));
+        assert!(
+            starts_media_capture(&json!({ "ready": true }), "dictation"),
+            "legacy plain dictation remains available"
+        );
+        assert!(!starts_media_capture(&json!({ "ready": true }), "call"));
+        assert!(!starts_media_capture(
+            &json!({ "ready": true }),
+            "record-start"
+        ));
+        let mut rich = ready.clone();
+        rich["richDraft"] = json!(true);
+        assert!(!starts_media_capture(&rich, "dictation"));
     }
 
     #[test]
@@ -1480,6 +1666,98 @@ mod tests {
     }
 
     #[test]
+    fn native_drag_preserves_click_threshold_and_ignores_old_owners() {
+        let controller = command_controller();
+        let primary = WorkArea {
+            x: 0,
+            y: 0,
+            width: 1710,
+            height: 1107,
+        };
+        let upper = WorkArea {
+            x: -458,
+            y: -1080,
+            width: 1920,
+            height: 1080,
+        };
+        controller.set_work_area(primary);
+        controller.note_canvas(primary);
+        {
+            let mut prefs = controller.prefs.lock().unwrap();
+            prefs.left = Some(100);
+            prefs.top = Some(100);
+        }
+        controller.begin_global_drag_with_id(156, 156, Some(1));
+        let before = controller.placement();
+        assert_eq!(controller.drag_global(160, 156, &[primary, upper]), None);
+        assert_eq!(controller.placement(), before);
+        assert!(!controller.drag_moved());
+        controller.drag_global(161, 156, &[primary, upper]);
+        assert!(controller.drag_moved());
+        assert_eq!(controller.placement(), (primary, Some(105), Some(100)));
+        assert_eq!(
+            controller.drag_global(500, -200, &[primary, upper]),
+            Some(upper)
+        );
+        controller.note_canvas(upper);
+        let placed = controller.placement();
+        let epoch = controller.hit_regions_epoch();
+        assert_eq!(controller.drag_global(500, -200, &[primary, upper]), None);
+        assert_eq!(controller.placement(), placed);
+        assert_eq!(
+            controller.hit_regions_epoch(),
+            epoch,
+            "stationary frames keep the current hit regions"
+        );
+        controller.end_drag();
+        assert!(
+            controller.drag_moved(),
+            "the release frame remembers movement even without DOM pointermove"
+        );
+        assert!(controller.native_drag_tracking());
+        assert_eq!(controller.drag_id(), Some(1));
+        controller.begin_global_drag_with_id(500, -200, Some(2));
+        assert!(
+            !controller.owns_drag(Some(1)),
+            "old drag/end requests cannot finish a new press"
+        );
+        assert!(controller.owns_drag(Some(2)));
+        assert!(
+            controller.owns_drag(None),
+            "legacy renderers keep their historical request shape"
+        );
+        assert!(!controller.drag_moved());
+        controller.end_drag();
+    }
+
+    #[test]
+    fn monitor_gaps_choose_the_nearest_edge_and_keep_the_current_monitor_on_ties() {
+        let wide = WorkArea {
+            x: 0,
+            y: 0,
+            width: 4000,
+            height: 1000,
+        };
+        let right = WorkArea {
+            x: 4100,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        assert_eq!(monitor_at(&[wide, right], 4010, 100), Some(wide));
+        assert_eq!(
+            monitor_at_preferred(&[wide, right], 4050, 100, Some(wide)),
+            Some(wide)
+        );
+        assert_eq!(
+            monitor_at_preferred(&[wide, right], 4050, 100, Some(right)),
+            Some(right)
+        );
+        assert_eq!(monitor_at(&[wide, right], 4090, 100), Some(right));
+        assert_eq!(monitor_at(&[], 0, 0), None);
+    }
+
+    #[test]
     fn dragged_pet_crosses_onto_the_monitor_under_the_cursor() {
         let lower = WorkArea {
             x: 0,
@@ -1524,7 +1802,13 @@ mod tests {
         let pet_top = snap["petTop"].as_i64().unwrap();
         assert!(pet_left >= 8 && pet_left < upper.width as i64);
         assert!(pet_top >= 8 && pet_top < upper.height as i64);
-        assert_eq!(controller.drag_global(820, -140, &monitors), None);
+        // A failed native commit must be retried, then a successful commit
+        // allows subsequent same-monitor moves without another canvas resize.
+        assert_eq!(controller.drag_global(820, -140, &monitors), Some(upper));
+        assert_eq!(controller.pending_canvas(), Some(upper));
+        controller.note_canvas(upper);
+        assert_eq!(controller.pending_canvas(), None);
+        assert_eq!(controller.drag_global(830, -150, &monitors), None);
         controller.end_drag();
         assert!(!controller.is_dragging());
         let saved = fs::read_to_string(root.join("pet-prefs.json")).unwrap();

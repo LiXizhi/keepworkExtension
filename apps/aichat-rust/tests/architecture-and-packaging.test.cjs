@@ -70,9 +70,28 @@ test("versions across package.json, Cargo.toml, Cargo.lock, and tauri.conf.json 
   assert.equal(tauriWinConf.productName, "Keepwork");
 });
 
+test("maintained desktop sources stay within 2000 lines per module", () => {
+  const sourceExtensions = new Set([".rs", ".ts", ".tsx", ".js", ".jsx", ".cjs", ".mjs", ".css", ".html", ".swift"]);
+  const excludedDirectories = new Set(["node_modules", "target", "dist", "vendor", "generated"]);
+  const oversized = [];
+  function inspect(directory) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory() && !excludedDirectories.has(entry.name)) inspect(file);
+      if (!entry.isFile() || !sourceExtensions.has(path.extname(entry.name))) continue;
+      const source = fs.readFileSync(file, "utf8");
+      const lines = source.split(/\r\n|\r|\n/).length - (/[\r\n]$/.test(source) ? 1 : 0);
+      if (lines > 2000) oversized.push(`${path.relative(appRoot, file)} (${lines} lines)`);
+    }
+  }
+  inspect(path.join(appRoot, "src"));
+  inspect(path.join(appRoot, "src-tauri", "src"));
+  assert.deepEqual(oversized, [], "split growing modules by responsibility before exceeding 2000 lines");
+});
+
 test("main window navigation accepts same-origin tool iframes", () => {
   const lib = fs.readFileSync(
-    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    path.join(appRoot, "src-tauri", "src", "app", "startup.rs"),
     "utf8"
   );
   const security = fs.readFileSync(
@@ -97,7 +116,7 @@ test("main window navigation accepts same-origin tool iframes", () => {
 
 test("iframe navigation cannot clear pet voice readiness or close workspace terminals", () => {
   const lib = fs.readFileSync(
-    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    path.join(appRoot, "src-tauri", "src", "app", "startup.rs"),
     "utf8"
   );
   const navigation = lib.match(/\.on_navigation\(move\s+\|[^|]*\|\s*\{([\s\S]*?)\n\s*\}\)/)?.[1];
@@ -121,7 +140,7 @@ test("iframe navigation cannot clear pet voice readiness or close workspace term
 
 test("main window opens login providers as in-app popups and external links in browser", () => {
   const lib = fs.readFileSync(
-    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    path.join(appRoot, "src-tauri", "src", "app", "startup.rs"),
     "utf8"
   );
   const security = fs.readFileSync(
@@ -137,11 +156,11 @@ test("main window opens login providers as in-app popups and external links in b
 
 test("MCP runtime bootstraps from bundle or launcher and follows published feed names", () => {
   const lib = fs.readFileSync(
-    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    path.join(appRoot, "src-tauri", "src", "app", "startup.rs"),
     "utf8"
   );
   const runtime = fs.readFileSync(
-    path.join(appRoot, "src-tauri", "src", "runtime.rs"),
+    path.join(appRoot, "src-tauri", "src", "runtime", "manifest.rs"),
     "utf8"
   );
   assert.match(runtime, /pub fn mcp_feed_platform\(/);

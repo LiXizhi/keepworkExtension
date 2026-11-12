@@ -26,8 +26,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
   window.__AICHAT_DESKTOP_BOOTSTRAP__ = bootstrap;
 
   // Native desktop chrome should not be text-selectable. Inputs, the composer
-  // and message bodies stay selectable for copy/paste; message copy is the
-  // only intentional long-press selection.
+  // and ordinary/persona messages stay selectable for native copy/paste.
   const mountInputGuard = () => {{
     if (document.getElementById("keepwork-desktop-input-guard")) return;
     const guardStyle = document.createElement("style");
@@ -38,6 +37,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
       body [contenteditable]:not([contenteditable="false"]),
       body [contenteditable]:not([contenteditable="false"]) *,
       body .chat-msg-bubble, body .chat-msg-bubble *,
+      body .persona-message, body .persona-message *,
       body .md-body, body .md-body *,
       body pre, body pre *, body code {{
         -webkit-user-select: text !important; user-select: text !important;
@@ -55,7 +55,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
   document.addEventListener("contextmenu", (event) => {{
     const target = event.target;
     if (target && target.closest
-        && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .chat-msg-bubble, .md-body, pre, code')) return;
+        && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), .chat-msg-bubble, .persona-message, .md-body, pre, code')) return;
     event.preventDefault();
   }}, true);
 
@@ -67,6 +67,9 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
   }};
 
   const petListeners = new Set();
+  const petAudioListeners = new Set();
+  const petAudioDocument = globalThis.crypto?.randomUUID?.() || "";
+  Object.defineProperty(window, "__AICHAT_PET_AUDIO_DOCUMENT__", {{ value: petAudioDocument }});
   const updateListeners = new Set();
   const folderListeners = new Set();
 
@@ -74,6 +77,8 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     const detail = e.detail || {{}};
     if (detail.event === "pet-command") {{
       for (const cb of petListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
+    }} else if (detail.event === "pet-audio") {{
+      for (const cb of petAudioListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
     }} else if (detail.event === "update-status") {{
       for (const cb of updateListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
     }} else if (detail.event === "folder-selected") {{
@@ -90,6 +95,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     defaultBrainFolder: true,
     gitSetup: true,
     floatingPet: true,
+    petDictationAudioVersion: 1,
     startupSignIn: true,
   }});
 
@@ -98,8 +104,14 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
       version: 1,
       capabilities,
       reportStartupSignIn: (signedIn) => invoke("desktop_report_startup_signin", {{ signedIn: !!signedIn }}),
-      publishPetState: (state) => invoke("desktop_publish_pet_state", {{ state: state || {{}} }}),
+      publishPetState: (state) => invoke("desktop_publish_pet_state", {{ state: state || {{}}, document: petAudioDocument }}),
       petResult: (result) => invoke("desktop_pet_result", {{ result: result || {{}} }}),
+      petAudio: (op, id, seq) => invoke("desktop_pet_audio", {{ op: String(op || ""), id: String(id || ""), ...(seq == null ? {{}} : {{ seq }}), document: petAudioDocument }}),
+      onPetAudio: (cb) => {{
+        if (typeof cb !== "function") return () => {{}};
+        petAudioListeners.add(cb);
+        return () => petAudioListeners.delete(cb);
+      }},
       onPetCommand: (cb) => {{
         if (typeof cb !== "function") return () => {{}};
         petListeners.add(cb);

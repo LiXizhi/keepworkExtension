@@ -128,6 +128,28 @@ for (const implementation of ["typescript", "rust-init-script"]) {
         assert.equal(bar.fire(bar.document.body, "contextmenu").defaultPrevented, true, "chrome selection guard remains active");
         const input = bar.child(bar.document.body, "input");
         assert.equal(bar.fire(input, "contextmenu").defaultPrevented, false, "composer edit menu remains available");
+        for (const role of ["from-user", "from-agent"]) {
+          const message = bar.child(bar.document.body, "article");
+          message.className = `persona-message ${role}`;
+          const sender = bar.child(message, "small");
+          const body = bar.child(message, "div");
+          body.className = "persona-message-body";
+          const content = bar.child(body, "div");
+          content.className = "persona-body-content";
+          const inlineText = bar.child(content, "strong");
+          const receipt = bar.child(body, "details");
+          const summary = bar.child(receipt, "summary");
+          const execution = bar.child(receipt, "div");
+          execution.className = "persona-execution";
+          for (const target of [message, sender, body, content, inlineText, summary, execution]) {
+            assert.equal(bar.fire(target, "contextmenu").defaultPrevented, false,
+              `${role} message text keeps its native copy menu (${target.className || target.tagName})`);
+          }
+        }
+        const navigation = bar.child(bar.document.body, "nav");
+        const button = bar.child(navigation, "button");
+        assert.equal(bar.fire(button, "contextmenu").defaultPrevented, true, "navigation remains app chrome");
+        assert.equal(bar.fire(bar.host, "contextmenu").defaultPrevented, true, "titlebar remains app chrome");
       }
     });
   }

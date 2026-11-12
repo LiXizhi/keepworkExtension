@@ -178,6 +178,145 @@ pub(crate) fn spawn_listener_child(
         .map_err(|_| MessageError::bad("DWS listener could not start"))
 }
 
+async fn listener_stopped(stop: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*stop.borrow() {
+        if stop.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+pub(crate) async fn reap_listener_children(mut children: Vec<Child>) {
+    for child in &mut children {
+        let _ = child.start_kill();
+    }
+    for child in &mut children {
+        let _ = child.wait().await;
+    }
+}
+
+/// Every child stays owned through ready and is reaped on partial failure.
+pub(crate) async fn start_listener_children(
+    program: &Path,
+    sets: &[Vec<String>],
+    profile: &str,
+    root: &str,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<Vec<Child>, MessageError> {
+    let mut children = Vec::new();
+    let outcome = async {
+        for args in sets {
+            if *stop.borrow() {
+                return Err(MessageError::bad("Start cancelled"));
+            }
+            children.push(spawn_listener_child(program, args, profile, root)?);
+            let child = children.last_mut().unwrap();
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| MessageError::bad("DWS listener could not start"))?;
+            let ready = tokio::select! {
+                biased;
+                _ = listener_stopped(stop) => Err(DwsError::rejected("Start cancelled")),
+                ready = wait_listener_ready(&mut stderr, child) => ready,
+            };
+            // Keep draining the same pipe after ready; taking it a second time
+            // would lose it and eventually block the CLI on its own logs.
+            child.stderr = Some(stderr);
+            ready.map_err(|error| MessageError::bad(error.message))?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = outcome {
+        reap_listener_children(children).await;
+        return Err(error);
+    }
+    Ok(children)
+}
+
+async fn read_listener_events(
+    service: &Arc<MessagingService>,
+    id: &str,
+    generation: u64,
+    mut stdout: tokio::process::ChildStdout,
+) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stdout.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(size) => {
+                buffer.extend_from_slice(&chunk[..size]);
+                if buffer.len() > 1_000_000 {
+                    break;
+                }
+                while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = buffer.drain(..=end).collect();
+                    if let Ok(event) = serde_json::from_slice::<Value>(&line) {
+                        service.receive_event(id, generation, event).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn supervise_listeners(
+    service: Arc<MessagingService>,
+    id: String,
+    generation: u64,
+    children: Vec<Child>,
+    stop: tokio::sync::watch::Sender<bool>,
+    done: tokio::sync::watch::Sender<bool>,
+) {
+    let mut tasks = tokio::task::JoinSet::new();
+    for mut child in children {
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let mut cancelled = stop.subscribe();
+        let service = Arc::clone(&service);
+        let id = id.clone();
+        tasks.spawn(async move {
+            let events = async {
+                if let Some(stdout) = stdout {
+                    read_listener_events(&service, &id, generation, stdout).await;
+                }
+            };
+            let diagnostics = async {
+                if let Some(stderr) = stderr {
+                    discard_stream(stderr).await;
+                }
+                std::future::pending::<()>().await;
+            };
+            let unexpected = tokio::select! {
+                biased;
+                _ = listener_stopped(&mut cancelled) => false,
+                _ = child.wait() => true,
+                _ = events => true,
+                _ = diagnostics => unreachable!(),
+            };
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            unexpected
+        });
+    }
+    let mut unexpected = false;
+    while let Some(result) = tasks.join_next().await {
+        if !matches!(result, Ok(false)) {
+            unexpected = true;
+            stop.send_replace(true);
+        }
+    }
+    // Waiters may create the replacement only after every owned PID is gone.
+    let _ = done.send(true);
+    if unexpected {
+        service
+            .disconnected_generation(&id, "Listener disconnected", Some(generation))
+            .await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Feishu helpers
 // ---------------------------------------------------------------------------

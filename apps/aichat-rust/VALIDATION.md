@@ -1,5 +1,67 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-12：超长源码按职责拆分（0.2.59）
+
+`lib.rs` 从 3240 行降至 31 行，保留公开模块与 API 重导出；窗口装配、状态、IPC、发送者验证、菜单托盘和平台操作移入 `app/`。`app/pet_audio_host.rs` 独立承担文档绑定的录音 IPC、私有音频投递与采集生命周期，消除主窗口与宠物窗口的循环依赖；11 个实现模块的显式同级依赖检查通过。`runtime.rs` 从 2124 行降至 769 行，保留进程监管，清单验证、归档、更新暂存和测试拆入 `runtime/`。原有公开 API、29 条命令的注册顺序及安全验证保持不变。
+
+仓库维护源码复查后均不超过 2000 行（不计锁文件、文档、构建产物和第三方依赖）。新增架构检查约束本应用 `src/` 与 `src-tauri/src/` 的源码行数；模块职责见 README。
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过，Rust **85/85**，Node **257 通过、4 个平台用例跳过、0 失败**。日志 `/private/tmp/keepwork-refactor-check.log`。
+- 录音模块拆分后的首轮完整检查遇到既有代理夹具的 `UnexpectedMessage`；保持夹具和生产代码不变，单项隔离 **1/1** 与完整复跑均通过。保留失败日志 `/private/tmp/keepwork-refactor-check-proxy-failure.log` 和隔离复验日志 `/private/tmp/keepwork-refactor-proxy-test.log`。
+- `pnpm --prefix apps/aichat-rust smoke`：五个 Rust 冒烟套件全部通过。日志 `/private/tmp/keepwork-refactor-smoke.log`。
+- 本轮 Rust 模块定向 `rustfmt` 检查通过，日志 `/private/tmp/keepwork-refactor-fmt.log`；`npm run check:shared` 通过，日志 `/private/tmp/keepwork-decoupling-shared-check.log`。
+
+已同步四处版本至 0.2.59。本轮为结构重构，未执行原生交互窗口或真实麦克风验收，未发布安装包。
+
+## 2026-11-12：宠物原生右键菜单（0.2.58）
+
+定位到renderer已发出 `menu` 请求，但原生分派缺少该分支，静默返回snapshot。现在为受验证的pet窗口构造真实原生菜单并注册一次选择事件处理：六档大小、跟随AIChat/抱抱龙、固定哈奇换宠链接、打开桌面、隐藏和完全退出确认。选择项只接受固定ID，当前偏好显示勾选，复用持久偏好和现有退出nonce。菜单打开/取消保留草稿及语音状态；隐藏/打开沿用语音清理，退出必须进入确认气泡。
+
+macOS Control点按和右键不会进入左键拖动/展开路径；菜单显示失败捕获为宠物错误和徽标提示，只有再次右键才重试。原生菜单跟踪期间保持交互，结束后按实际光标恢复命中检测，不长期拦截透明桌面区域。本地操作不要求登录、网络、AIChat新页面或MCP更新。
+
+- `node --test apps/aichat-rust/tests/pet-renderer.test.cjs`：**43/43**，包括四个新增右键场景及所有原有点击/拖动/语音回归。实际本轮修改前源码 `/private/tmp/pet-context-menu-before.ts` 对照新增四项有三项失败，复现Control点按拖动、事件传播与未捕获菜单拒绝。日志 `/private/tmp/pet-context-menu-renderer-qa-{before-proof,final}.log`。
+- Rust `pet_menu::tests`：**3/3**，覆盖所有本地选项/六档缩放与外观勾选、离线标题、固定ID白名单与退出只请求确认、菜单跟踪状态释放。Tauri本地源码已确认未设置窗口菜单也会分发popup选择事件。
+- `pnpm --prefix apps/aichat-rust check`：TypeScript/前端构建、Rust **85/85**、Node **256通过、4个平台用例跳过**；`npm run check:shared`通过。日志 `/private/tmp/pet-context-menu-final-check.log` 和 `/private/tmp/pet-context-menu-shared-check.log`。首轮既有loopback代理健康用例出现一次UnexpectedMessage；单项隔离复验通过后完整复跑。菜单修复未修改该用例或运行时实现。
+
+已同步四处版本至0.2.58。未执行用户桌面的真实鼠标右键、Esc/外点关闭、跨屏子菜单及Windows/Linux实机验收；自动化事件、菜单规格和源码检查不替代这些结论。未发布安装包。
+
+## 2026-11-12：宠物云端听写保持主窗口隐藏（0.2.57）
+
+新增可选 `petDictationAudioVersion: 1`。可见宠物在原生一次性 lease 内采集16kHz单声道PCM，隐藏主页面继续使用原 SDK ASR、设置及草稿。lease 绑定受验证的宠物点击、context 与主文档 UUID；音频仅私有投递给该主文档，不能进入全局事件广播。claim/ready/active 确认、有序分块、累计ACK、16块未确认上限及2秒/10秒watchdog保证失联后停止。停止点击原生撤销lease并直接确认，避免后续toggle重新开始。停止、隐藏、打开主窗口、导航/销毁、账号或目标变化释放采集；迟到权限和旧数据不能重新启动。采集模块还保持跨回调的连续重采样相位。
+
+旧宿主/页面未协商该能力时保留现有行为；仅云端听写启用，不切换用户引擎。通话与课堂录音维持原路径；首次系统麦克风授权仍会正常显示，新路径失败不会弹主窗口。无需更新MCP服务。
+
+- `pnpm --prefix apps/aichat-rust check`：最终源码TypeScript/前端构建通过，Rust **82/82**，Node **252通过、4个现有平台用例跳过**。包含9项lease测试、16项capture测试及39项宠物拖动/renderer回归。日志 `/private/tmp/pet-audio-native-final-check.log`。
+- `npm run check:shared`：共享类型、布局及AIChat runtime副本检查通过。日志 `/private/tmp/pet-audio-shared-check.log`。
+- AIChat基础包 **1.0.41**、official-personas **1.0.10**：Node定向 **97/97**，Chrome新链路 **8/8**、旧宠物及普通主聊天 **6/6**。真实修改前recognition源码对照因主页面创建AudioContext而失败；修复后主页面麦克风/AudioContext/focus计数均0。浏览器使用隔离host/SDK/PCM夹具，不等同原生隐藏窗口实测。日志和命令见AIChat `tests/README.md`。
+- `scripts/wk-pet-capture.swift` 编译通过。真实WKWebView确认 `tauri://localhost/pet.html` 为安全上下文且mediaDevices可用、mainVisible=false。当前系统锁屏且不在console，脚本明确退出 **77/BLOCKED**，没有将可见宠物非零PCM和原生停止清理计为通过。日志 `/private/tmp/pet-audio-wk-packaged.log`。解锁后按README中的独立命令复跑；保留WebKit焦点保护，仅用模拟麦克风，不加载账号或云服务。
+
+只读检查确认当前3001的Keepwork进程映射本轮二进制（inode匹配，并含文档绑定的音频桥接）；前端开发页面使用当前模块。真实用户麦克风、线上ASR、解锁后原生宠物采集和Windows/Linux尚待实机验证。未发布安装包，未改动共享MCP运行方式。
+
+## 2026-11-12：跨屏拖动、原生画布与异步轮次（0.2.56）
+
+定位到三个缺口：macOS 先定位再调整尺寸会保持旧底边，令画布顶边偏移；所谓全局跟踪仍依赖网页 rAF 发起调用，切屏暂停渲染时无法持续移动；旧轮拖动的异步响应和结束请求可能干扰新一轮。画布在调用成功前被记为已同步，还会使一次失败后的重试失效。
+
+新增 `pet_canvas.rs`，macOS 主线程一次 `setFrame:display:` 设置完整逻辑范围，成功后才确认同步；原生 16ms 采样负责超过 4px 阈值后的移动和松手最终采样。新增宿主返回可选 `nativeDragTracking`、`dragId`、`dragMoved`，匹配的新 renderer 使用原生广播，旧宿主保留轮询。原生物理按钮仍按下时拒绝合成 pointerup 的结束请求，前端等待确认后区分拖动和单击。旧轮请求/响应不能结束新轮；静止帧不重复广播，屏幕空隙按最近矩形边界选屏，等距保持当前屏。
+
+- 原生：`node apps/aichat-rust/scripts/pet-canvas-native-smoke.cjs` 在实际内屏 `(0,0,1710,1107)/2×` 与上屏 `(-458,-1080,1920,1080)/1×` 间完成 8 次切换，位置、尺寸、归属屏及缩放均准确匹配，退出 0。隔离空白窗口始终隐藏；不操作用户窗口、鼠标、账号或 MCP。旧顺序 `--baseline` 在第一轮上屏时实际 y 为 `-1053` 而目标为 `-1080`，按预期退出 1。日志 `/private/tmp/pet-canvas-native-{baseline,fixed}.log`。
+- Rust 控制器覆盖阈值、松手标记、旧轮所有权、空隙选屏、目标屏保存和失败后重试；renderer 覆盖旧轮迟到结果、合成松手、无 DOM move 的原生拖动、原生结束广播、旧宿主降级及单击/双击行为。真实修改前 renderer 快照通过新增回归注入，旧实现按预期失败。日志 `/private/tmp/pet-cross-monitor-renderer-{baseline,fixed}.log`。
+- 完整检查：`pnpm --prefix apps/aichat-rust check` 通过 TypeScript、前端构建、Rust **73/73**、Node **236 通过/4 平台跳过/0 失败**（其中 renderer **39/39**）；`npm run check:shared` 也通过。结果及日志见 `/private/tmp/pet-cross-screen-full-check.log`、`/private/tmp/pet-cross-screen-shared-check.log`。首次完整检查仅一条旧源码正则不接受新增可选参数，更新为允许附加字段后复验通过，未放宽行为回归。另对原生异步释放下的双击补测，修复前实际快照有 1/3 用例漏掉合法双击，修复后通过；迟到确认只提供相邻点击事实，不能修改新轮位置或切换其面板。
+
+本轮未自动执行真人跨屏鼠标拖动；显示器拔除、运行中重排、Windows/Linux 与所有屏幕布局的实机验收尚未覆盖。原生几何与隔离事件测试不能替代这些结论。保持单屏固定画布，不修改聊天、草稿、语音、截图权限、MCP 引擎或所有权规则；未发布安装包。
+
+## 2026-11-12：宠物语音启动与隐藏主页面（0.2.55）
+
+实际 macOS WebKit 日志显示，点击宠物语音后主页面仍为 hidden，AudioContext 已运行，但 AudioCapture 始终为 0。WebKit 的 `getUserMediaRequiresFocus` 分支会在页面可见后才开始麦克风请求，因此只恢复 AudioContext 无法解除这层等待。
+
+原生转发现在先验证原 context/readiness，仅对开始新的听写、通话或课堂录音显示、取消最小化并聚焦主窗口，然后以原请求 ID 转发一次。宠物和草稿保留；停止、静音、重复开始及普通文字操作不抢焦点。显示失败清理 pending 并返回可操作错误，不批准系统权限，也不修改 WebKit 的可见性保护。
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过，Rust **71/71**，Node **218 通过、4 个平台用例跳过**。首次沙箱运行有 20 个本机端口测试被阻止；允许隔离 loopback 测试后完整复跑通过。日志 `/private/tmp/aichat-native-voice-check.log`。
+- `npm run check:shared`：共享类型、应用布局及 AIChat runtime 副本检查通过。日志 `/private/tmp/aichat-native-voice-shared-check.log`。
+- `scripts/wk-capture-visibility.swift`：真实系统 WKWebView **2/2、退出码 0**。隐藏主窗口时请求 pending 且无 PCM；显示后获取模拟音轨并输出非零 PCM；透明整屏宠物窗口覆盖时主页面仍 visible，采集正常；最终音轨 ended、上下文 closed。使用非持久数据与隔离配置的 WebKit 测试麦克风，保留焦点保护，不访问真实麦克风、账号或云 ASR。日志 `/private/tmp/aichat-wk-capture-visibility.log`。
+
+本机开发监听器已自动重建并重启；只读检查确认当前 `3001` 的 Keepwork 进程映射到包含新窗口处理的二进制，映射 inode 与构建文件相同。它的行为需原生版本生效，单独刷新旧客户端网页不足以加载本修复。真实用户麦克风到线上转写仍待用户录音验证；未发布安装包，未改动运行中的 MCP 引擎。
+
 ## 1. 自动化验证套件
 
 1. **TypeScript 类型检查与多页面构建**：

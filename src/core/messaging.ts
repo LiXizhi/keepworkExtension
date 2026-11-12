@@ -1092,7 +1092,9 @@ export class MessagingService {
         } catch(error) {
             const sending = receipt.state === 'sending';
             receipt.state = sending ? 'unknown' : signal.aborted ? 'cancelled' : 'error'; receipt.reason = (error as Error).message;
-            r.error = receipt.reason || 'Task failed';
+            // halt() clears channel errors before cancelling work. A late task
+            // rejection must not overwrite stopped/restarted listener state.
+            if (!signal.aborted) r.error = receipt.reason || 'Task failed';
         } finally { if(workKey){const count=(this.agentWorkCounts.get(workKey)||1)-1;if(count)this.agentWorkCounts.set(workKey,count);else this.agentWorkCounts.delete(workKey);}this.persist(r); }
     }
     close() { this.circles.close(); this.closed = true; clearInterval(this.coordinationTimer);for(const c of this.coordinators.values())c.close(); clearTimeout(this.replyTimer); for (const end of this.watchers.values()) end(); this.watchers.clear(); for (const r of this.runs.values()) { clearTimeout(r.retry); r.historyStop?.(); r.historyStop = undefined; r.pollAbort?.abort(); r.stop?.(); for (const c of r.active.values()) c.abort(); } this.workers.close(); }

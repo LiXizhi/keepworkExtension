@@ -408,6 +408,7 @@ impl MessagingService {
         view["needsRepair"] = json!(run.status == "error");
         view["accountConnected"] = json!(!run.identity.is_empty());
         view["listening"] = json!(run.status == "listening");
+        view["autoReply"] = json!(run.binding.enabled);
         let _ = inner;
         view
     }
@@ -453,6 +454,8 @@ impl MessagingService {
             since: now_ms(),
             subscriptions: String::new(),
             stop: None,
+            generation: 0,
+            listener_done: None,
             retrying: false,
             next_retry_at: None,
             starting: false,
@@ -858,10 +861,27 @@ impl MessagingService {
     // -----------------------------------------------------------------------
 
     pub async fn start(self: &Arc<Self>, id: &str) -> Result<(), MessageError> {
-        {
+        self.start_generation(id, None).await
+    }
+
+    async fn start_generation(
+        self: &Arc<Self>,
+        id: &str,
+        expected: Option<u64>,
+    ) -> Result<(), MessageError> {
+        // A replacement must wait for the previous consumers to be reaped.
+        // stop() remains synchronous and can cancel a start waiting for ready.
+        let _start = self.start_gate.lock().await;
+        let (generation, previous) = {
             let mut inner = self.lock();
+            if inner.closed {
+                return Err(MessageError::bad("Service closed"));
+            }
             let (channel, root) = match inner.runs.get(id) {
                 Some(run) => {
+                    if expected.is_some_and(|generation| generation != run.generation) {
+                        return Ok(());
+                    }
                     if run.starting || run.status == "listening" {
                         return Ok(());
                     }
@@ -886,23 +906,74 @@ impl MessagingService {
                 self.persist_bindings(&inner);
                 return Err(MessageError::occupied(conflict));
             }
-            if let Some(run) = inner.runs.get_mut(id) {
+            let (generation, previous) = if let Some(run) = inner.runs.get_mut(id) {
+                run.generation = run.generation.wrapping_add(1);
                 run.retrying = false;
                 run.next_retry_at = None;
                 run.binding.enabled = true;
                 run.starting = true;
-            }
+                run.status = "connecting".into();
+                run.error = String::new();
+                (run.generation, run.listener_done.take())
+            } else {
+                unreachable!()
+            };
+            let mut completions: Vec<_> = inner
+                .runs
+                .values()
+                .filter(|run| run.binding.channel == channel)
+                .filter_map(|run| run.listener_done.clone())
+                .collect();
+            completions.extend(previous);
             self.persist_bindings(&inner);
+            (generation, completions)
+        };
+        for mut done in previous {
+            loop {
+                let finished = *done.borrow();
+                if finished || done.changed().await.is_err() {
+                    break;
+                }
+            }
         }
         self.persist_all_snapshot();
-        let result = self.start_run(id).await;
+        let result = self.start_run(id, generation).await;
         let mut inner = self.lock();
         if let Some(run) = inner.runs.get_mut(id) {
+            if run.generation != generation {
+                run.starting = false;
+                return Ok(());
+            }
             run.starting = false;
         }
         if let Err(error) = result {
+            let closed = inner.closed;
+            let needs_repair = needs_repair_text(&error.message)
+                || inner.runs.get(id).is_some_and(|run| {
+                    read_rules(&run.binding.root, run.binding.rules_dir.as_deref()).is_err()
+                });
+            let mut released = None;
             if let Some(run) = inner.runs.get_mut(id) {
+                if !run.binding.enabled || closed {
+                    return Ok(());
+                }
+                if run.owns_identity {
+                    released = Some(run.identity.clone());
+                }
+                run.identity = String::new();
+                run.owns_identity = false;
                 run.error = error.message.clone();
+                if needs_repair {
+                    run.status = "error".into();
+                }
+            }
+            if let Some(identity) = released {
+                inner.identities.remove(&identity);
+            }
+            if !needs_repair {
+                drop(inner);
+                self.schedule_reconnect(id);
+                return Err(error);
             }
             let owners = self.persist_run_and_notify(&mut inner, id);
             drop(inner);
@@ -920,17 +991,24 @@ impl MessagingService {
         self.persist_bindings(&inner);
     }
 
-    pub(crate) async fn start_run(self: &Arc<Self>, id: &str) -> Result<(), MessageError> {
+    pub(crate) async fn start_run(
+        self: &Arc<Self>,
+        id: &str,
+        generation: u64,
+    ) -> Result<(), MessageError> {
         let (binding, rules) = {
             let inner = self.lock();
             Self::assert_exists(&inner, id)?;
             let run = inner.runs.get(id).unwrap();
-            if inner.closed || !run.binding.enabled {
+            if inner.closed || !run.binding.enabled || run.generation != generation {
                 return Ok(());
             }
             (
                 run.binding.clone(),
-                read_rules(&run.binding.root, run.binding.rules_dir.as_deref()).ok(),
+                Some(read_rules(
+                    &run.binding.root,
+                    run.binding.rules_dir.as_deref(),
+                )?),
             )
         };
         let binding_id = binding.id.clone();
@@ -941,7 +1019,7 @@ impl MessagingService {
             {
                 let mut inner = self.lock();
                 let run = inner.runs.get(&binding_id).unwrap();
-                if !run.binding.enabled || inner.closed {
+                if !run.binding.enabled || inner.closed || run.generation != generation {
                     return Ok(());
                 }
                 let identity_key = format!("feishu:{identity}");
@@ -1009,7 +1087,7 @@ impl MessagingService {
             let mut guard = self.lock();
             let inner: &mut Inner = &mut guard;
             let run = inner.runs.get(&binding_id).unwrap();
-            if !run.binding.enabled || inner.closed {
+            if !run.binding.enabled || inner.closed || run.generation != generation {
                 return Ok(());
             }
             if inner.identities.contains(&binding.profile) {
@@ -1029,22 +1107,35 @@ impl MessagingService {
         let config = rules.map(|(config, _prompt)| config).unwrap_or_default();
         let program = resolve_dws().map_err(|error| MessageError::bad(error.message.clone()))?;
         let sets = listener_args(&config, all_groups);
-        let mut children: Vec<Child> = Vec::new();
-        for set in &sets {
-            let mut child = spawn_listener_child(&program, set, &binding.profile, &binding.root)?;
-            let mut stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| MessageError::bad("DWS listener could not start"))?;
-            if let Err(error) = wait_listener_ready(&mut stderr, &mut child).await {
-                drop(child);
-                return Err(MessageError::bad(error.message));
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+        {
+            let mut inner = self.lock();
+            if inner.closed {
+                return Ok(());
             }
-            if let Some(stderr) = child.stderr.take() {
-                tokio::spawn(discard_stream(stderr));
+            let run = inner.runs.get_mut(id).unwrap();
+            if run.generation != generation || !run.binding.enabled {
+                return Ok(());
             }
-            children.push(child);
+            run.stop = Some(stop_tx.clone());
+            run.listener_done = Some(done_rx);
         }
+        let children = match start_listener_children(
+            &program,
+            &sets,
+            &binding.profile,
+            &binding.root,
+            &mut stop_rx,
+        )
+        .await
+        {
+            Ok(children) => children,
+            Err(error) => {
+                let _ = done_tx.send(true);
+                return Err(error);
+            }
+        };
         {
             let outcome = {
                 let mut guard = self.lock();
@@ -1052,8 +1143,7 @@ impl MessagingService {
                 match inner.runs.get_mut(&binding_id) {
                     None => Some(()),
                     Some(run) => {
-                        if !run.binding.enabled || inner.closed {
-                            run.status = "stopped".into();
+                        if !run.binding.enabled || inner.closed || run.generation != generation {
                             Some(())
                         } else {
                             run.status = "listening".into();
@@ -1065,9 +1155,8 @@ impl MessagingService {
                 }
             };
             if let Some(()) = outcome {
-                for mut child in children {
-                    let _ = child.kill().await;
-                }
+                reap_listener_children(children).await;
+                let _ = done_tx.send(true);
                 return Ok(());
             }
         }
@@ -1076,44 +1165,14 @@ impl MessagingService {
             self.persist_run_and_notify(&mut inner, &binding_id)
         };
         self.bump_owners(owners);
-        for mut child in children {
-            let mut stdout = child.stdout.take();
-            let service = Arc::clone(self);
-            let watched = binding_id.clone();
-            tokio::spawn(async move {
-                let Some(mut stdout) = stdout.take() else {
-                    return;
-                };
-                let mut buffer = String::new();
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match stdout.read(&mut chunk).await {
-                        Ok(0) => break,
-                        Ok(size) => {
-                            buffer.push_str(&String::from_utf8_lossy(&chunk[..size]));
-                            while let Some(end) = buffer.find('\n') {
-                                let line: String = buffer.drain(..end + 1).collect();
-                                let trimmed = line.trim();
-                                if !trimmed.is_empty() {
-                                    if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
-                                        service.receive_event(&watched, event).await;
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-            let service = Arc::clone(self);
-            let watched = binding_id.clone();
-            tokio::spawn(async move {
-                let _ = child.wait().await;
-                service
-                    .disconnected(&watched, "Listener disconnected")
-                    .await;
-            });
-        }
+        tokio::spawn(supervise_listeners(
+            Arc::clone(self),
+            binding_id,
+            generation,
+            children,
+            stop_tx,
+            done_tx,
+        ));
         Ok(())
     }
 
@@ -1140,45 +1199,93 @@ impl MessagingService {
     }
 
     pub async fn disconnected(self: &Arc<Self>, id: &str, error: &str) {
-        let (enabled, closed) = {
+        self.disconnected_generation(id, error, None).await;
+    }
+
+    pub(crate) async fn disconnected_generation(
+        self: &Arc<Self>,
+        id: &str,
+        error: &str,
+        generation: Option<u64>,
+    ) {
+        let current_generation = {
             let mut guard = self.lock();
             let inner: &mut Inner = &mut guard;
+            if inner.closed {
+                return;
+            }
             let Some(run) = inner.runs.get_mut(id) else {
                 return;
             };
+            if !run.binding.enabled || generation.is_some_and(|value| value != run.generation) {
+                return;
+            }
             if run.owns_identity {
                 inner.identities.remove(&run.identity);
             }
-            run.stop = None;
+            if let Some(stop) = run.stop.take() {
+                stop.send_replace(true);
+            }
             run.identity = String::new();
             run.owns_identity = false;
             run.error = error.to_string();
-            (run.binding.enabled, inner.closed)
+            run.generation
         };
-        if !enabled || closed {
-            return;
+        self.schedule_reconnect_generation(id, Some(current_generation));
+    }
+
+    /// Shutdown preserves the saved auto-reply preference, while ensuring no
+    /// owned DingTalk consumer survives a graceful daemon exit.
+    pub async fn close(&self) {
+        {
+            let mut inner = self.lock();
+            inner.closed = true;
+            for run in inner.runs.values_mut() {
+                halt_runtime(run);
+            }
         }
-        self.schedule_reconnect(id);
+        let _start = self.start_gate.lock().await;
+        let completions: Vec<_> = self
+            .lock()
+            .runs
+            .values()
+            .filter_map(|run| run.listener_done.clone())
+            .collect();
+        for mut done in completions {
+            loop {
+                let finished = *done.borrow();
+                if finished || done.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
     }
 
     pub(crate) fn schedule_reconnect(self: &Arc<Self>, id: &str) {
-        let spawn = {
+        self.schedule_reconnect_generation(id, None);
+    }
+
+    fn schedule_reconnect_generation(self: &Arc<Self>, id: &str, expected: Option<u64>) {
+        let generation = {
             let mut inner = self.lock();
+            if inner.closed {
+                return;
+            }
             let Some(run) = inner.runs.get_mut(id) else {
                 return;
             };
-            if !run.binding.enabled || run.retrying {
+            if !run.binding.enabled
+                || run.retrying
+                || expected.is_some_and(|generation| generation != run.generation)
+            {
                 return;
             }
             run.retrying = true;
             run.status = "reconnecting".into();
             run.next_retry_at = Some(now_ms() + RECONNECT_DELAY);
-            true
+            run.generation
         };
-        if !spawn {
-            return;
-        }
-        tokio::spawn(reconnect_task(Arc::clone(self), id.to_string()));
+        tokio::spawn(reconnect_task(Arc::clone(self), id.to_string(), generation));
         let mut inner = self.lock();
         let owners = self.persist_run_and_notify(&mut inner, id);
         drop(inner);
@@ -1190,20 +1297,23 @@ impl MessagingService {
 // Background tasks: reconnect, Feishu polling, pump
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn reconnect_task(service: Arc<MessagingService>, id: String) {
+pub(crate) async fn reconnect_task(service: Arc<MessagingService>, id: String, generation: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_DELAY as u64)).await;
     {
         let mut inner = service.lock();
         let Some(run) = inner.runs.get_mut(&id) else {
             return;
         };
+        if run.generation != generation {
+            return;
+        }
         run.retrying = false;
         run.next_retry_at = None;
         if !run.binding.enabled {
             return;
         }
     }
-    let _ = service.start(&id).await;
+    let _ = service.start_generation(&id, Some(generation)).await;
 }
 
 pub(crate) fn channel_conflict(channel: &str, occupied: &str, root: String) -> Value {
@@ -1447,10 +1557,11 @@ pub(crate) async fn feishu_sweep(
 
 // Free function so `decide_incoming` can stop a run without borrowing `self`.
 pub(crate) fn halt_runtime(run: &mut Runtime) {
+    run.generation = run.generation.wrapping_add(1);
     run.retrying = false;
     run.next_retry_at = None;
     if let Some(stop) = run.stop.take() {
-        let _ = stop.send(true);
+        stop.send_replace(true);
         drop(stop);
     }
     for queue in run.queues.values_mut() {

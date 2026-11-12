@@ -25,18 +25,18 @@ const message = (id='1', conversation='dm', sender='sender') => ({type:'user_im_
 function fixture(t, channel = 'dingtalk') {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-messaging-test-'))); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
     const root=path.join(dir,'brain');fs.mkdirSync(path.join(root,'public'),{recursive:true});fs.writeFileSync(path.join(root,'public','lesson.md'),'课程学习计划：先读教材，再练习。');
-    const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let historyResponse={success:true,result:{conversationMessagesList:[],hasMore:false}}; let remoteRows=null, contextError=false, answerText='课程学习答案'; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0;
+    const logins=[], exits=[], events=[], sent=[], cards=[], updates=[], pending=[]; let historyResponse={success:true,result:{conversationMessagesList:[],hasMore:false}}; let remoteRows=null, contextError=false, answerText='课程学习答案'; let conflict=false, failure=false, active=0, max=0, connectionFailures=0, statusChecks=0, deferAbort=false, sendHook;
     class BeforeSubmission extends Error {}
     const serviceModule=load('messaging',{
         './messagingFeishu':{feishuContext:load('messagingFeishu').feishuContext,feishuConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},feishuIdentity:async()=>({id:'corp:user',self:'owner'}),pollFeishu:async(_r,_p,_f,event)=>{events.push(event);return()=>{};},FeishuDelivery:class{async create(){cards.push('created');return 'test-card';}async send(...args){sent.push(args);}}},
         './aichatPresence':{latestAichatClient:()=>null,latestAichatBrainRoot:()=>root},
-        './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{if(args[0]==='chat'&&args[1]==='message'&&args[2]==='list-all')return historyResponse;statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);}}},
-        './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal,_login,executeTool){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve(answerText);};pending.push({input,end,executeTool});signal.addEventListener('abort',()=>{active--;reject(Error('cancelled'));},{once:true});});}close(){}}},
+        './messagingDingtalk':{dingtalkConversation:async(_r,_p,target)=>{if(contextError)throw Error('history unavailable');return structuredClone(remoteRows || [target]);},loginDws:async(root,profile)=>{logins.push({root,profile});},dws:async(args)=>{if(args[0]==='chat'&&args[1]==='message'&&args[2]==='list-all')return historyResponse;statusChecks++;if(connectionFailures-->0)throw Error('temporary connection reset');if(args[0]==='profile')return {currentProfile:'corp:user',profiles:[{corpId:'corp',userId:'user'}]};return {identity:{corp_id:'corp',user_id:'user',open_dingtalk_id:'owner'},bus:{live:{consumers:conflict?[{}]:[]}}};},listenDws:async(_r,_p,_c,event,exit)=>{events.push(event);exits.push(exit);return()=>{};},DingTalkDelivery:class{async create(){cards.push('created');return 'test-card';}async update(...args){updates.push(args);}async send(...args){sent.push(args);await sendHook?.();}}},
+        './messagingExecutor':{BeforeSubmission,messagingExecutorChoice:()=>({backend:'copilot',model:''}),restrictedCliAnswer:async()=>{throw new BeforeSubmission();},MessagingWorkers:class{answer(input,signal,_login,executeTool){active++;max=Math.max(max,active);return new Promise((resolve,reject)=>{const end=()=>{active--;failure?reject(Error('unknown')):resolve(answerText);};const fail=error=>{active--;reject(error);};pending.push({input,end,fail,executeTool});signal.addEventListener('abort',()=>{if(!deferAbort)fail(Error('cancelled'));},{once:true});});}close(){}}},
     });
     const createService=()=>{const instance=new serviceModule.MessagingService(path.join(dir,'state'),8089);instance.nicknameReader=async()=>({nickname:'',name:'Owner'});t.after(()=>instance.close());return instance;};
     const service=createService();
     const binding=service.configure({channel,root,profile:'corp:user',config:{...policy.defaultMessageConfig(),knowledge:['public']},prompt:policy.DEFAULT_PROMPT});
-    return {set historyResponse(v){historyResponse=v;},set remoteRows(v){remoteRows=v;},set contextError(v){contextError=v;},set answerText(v){answerText=v;},service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
+    return {set historyResponse(v){historyResponse=v;},set remoteRows(v){remoteRows=v;},set contextError(v){contextError=v;},set answerText(v){answerText=v;},set deferAbort(v){deferAbort=v;},set sendHook(v){sendHook=v;},service,createService,binding,root,events,exits,logins,sent,pending,updates,cards,get statusChecks(){return statusChecks;},set connectionFailures(v){connectionFailures=v;},get max(){return max;},set conflict(v){conflict=v;},set failure(v){failure=v;}};
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
@@ -122,6 +122,47 @@ test('invalid manually edited rules pause reception; no prompt is run',async t=>
 test('uncertain model result is never replayed; restart preserves receipt only',async t=>{
     const f=fixture(t);await f.service.start(f.binding.id);f.events[0](message());await tick();f.failure=true;f.pending[0].end();await tick();f.events[0](message());await tick();assert.equal(f.pending.length,1);assert.equal(f.sent.length,0);
     const state=JSON.parse(fs.readFileSync(path.join(path.dirname(f.root),'state',f.binding.id+'.json'),'utf8'));assert.equal(state.receipts.length,1);assert.doesNotMatch(JSON.stringify(state),/课程/);
+});
+test('stopped channel stays error-free when an active reply cancellation settles',async t=>{
+    const f=fixture(t);f.service.bindAgent('qa-owner','default-persona',f.binding.id);await f.service.start(f.binding.id);
+    f.events[0](message('stop-active'));await tick();assert.equal(f.pending.length,1);
+    f.service.stop(f.binding.id);await tick();
+    const view=f.service.view(f.binding.id);
+    assert.equal(view.status,'stopped');assert.equal(view.autoReply,false);assert.equal(view.error,'');
+    assert.equal(view.recent[0].state,'cancelled');assert.equal(view.recent[0].reason,'cancelled');
+    assert.equal(f.service.inboxView('qa-owner','default-persona',f.binding.id).conversations.length,1,'stopping preserves already received conversations');
+    assert.equal(f.sent.length,0);
+});
+test('stopped channel keeps an uncertain send receipt without raising a connection error or replaying',async t=>{
+    const f=fixture(t);let failSend;
+    f.sendHook=()=>new Promise((_resolve,reject)=>{failSend=reject;});
+    await f.service.start(f.binding.id);f.events[0](message('stop-sending'));await tick();
+    f.pending[0].end();await tick();assert.equal(f.service.view(f.binding.id).recent[0].state,'sending');
+    f.service.stop(f.binding.id);failSend(Error('delivery outcome unavailable'));await tick();
+    const view=f.service.view(f.binding.id);
+    assert.equal(view.status,'stopped');assert.equal(view.error,'');
+    assert.equal(view.recent[0].state,'unknown');assert.equal(view.recent[0].reason,'delivery outcome unavailable');
+    assert.equal(f.sent.length,1);assert.equal(f.pending.length,1);
+    f.events[0](message('stop-sending'));await tick();assert.equal(f.sent.length,1);
+});
+test('late cancelled reply does not pollute a restarted listener connection state',async t=>{
+    const f=fixture(t);f.deferAbort=true;await f.service.start(f.binding.id);
+    f.events[0](message('old-reply'));await tick();f.service.stop(f.binding.id);
+    await f.service.start(f.binding.id);assert.equal(f.service.view(f.binding.id).status,'listening');
+    f.pending[0].fail(Error('old task late rejection'));await tick();
+    const view=f.service.view(f.binding.id);
+    assert.equal(view.status,'listening');assert.equal(view.error,'');assert.equal(view.autoReply,true);
+    assert.equal(view.recent[0].state,'cancelled');assert.equal(view.recent[0].reason,'old task late rejection');assert.equal(f.sent.length,0);
+});
+test('late cancelled reply preserves a current listener transport error',async t=>{
+    const f=fixture(t);f.deferAbort=true;await f.service.start(f.binding.id);
+    f.events[0](message('old-reply'));await tick();f.service.stop(f.binding.id);f.conflict=true;
+    await assert.rejects(f.service.start(f.binding.id),/已有个人消息桥/);
+    const transport=f.service.view(f.binding.id);assert.equal(transport.status,'reconnecting');assert.match(transport.error,/已有个人消息桥/);
+    f.pending[0].fail(Error('old task late rejection'));await tick();
+    const view=f.service.view(f.binding.id);
+    assert.equal(view.status,'reconnecting');assert.equal(view.error,transport.error);assert.equal(view.nextRetryAt,transport.nextRetryAt);
+    assert.equal(view.recent[0].state,'cancelled');assert.equal(f.sent.length,0);
 });
 test('DWS listener subscriptions do not subscribe all groups',()=>{
     const {listenerArgs}=load('messagingDingtalk');const c=policy.defaultMessageConfig();c.groups=['group'];assert.equal(listenerArgs(c).length,1);c.keywords=['名字'];assert.deepEqual(listenerArgs(c)[1],['event','consume','user_im_message_receive_group','--group','group','--flatten','-f','ndjson']);

@@ -5,7 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const ts = require("typescript");
 
-const source = fs.readFileSync(path.join(__dirname, "../src/pet.ts"), "utf8");
+const source = fs.readFileSync(process.env.AICHAT_PET_RENDERER_BASELINE || path.join(__dirname, "../src/pet.ts"), "utf8");
 const javascript = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
@@ -45,12 +45,15 @@ async function renderer(initial = snapshot()) {
   const calls = [];
   const regionCalls = [];
   const pointerHolds = [];
+  const captures = [];
+  const releasedCaptures = [];
+  const bodyClasses = new Set();
   function addListener(listeners, type, callback) {
     if (!listeners.has(type)) listeners.set(type, new Set());
     listeners.get(type).add(callback);
   }
   function dispatch(listeners, type, event = {}) {
-    for (const callback of listeners.get(type) || []) callback({ type, ...event });
+    for (const callback of listeners.get(type) || []) callback({ type, preventDefault() {}, stopPropagation() {}, ...event });
   }
   function visible(element) {
     for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
@@ -67,7 +70,10 @@ async function renderer(initial = snapshot()) {
   const document = {
     querySelectorAll: () => [],
     addEventListener(type, callback) { addListener(documentListeners, type, callback); },
-    body: { style: { setProperty() {} }, classList: { add() {}, remove() {} } },
+    body: { style: { setProperty() {} }, classList: {
+      add(...names) { for (const name of names) bodyClasses.add(name); },
+      remove(...names) { for (const name of names) bodyClasses.delete(name); },
+    } },
     getElementById(id) {
       if (!elements.has(id)) {
         const listeners = new Map();
@@ -80,6 +86,8 @@ async function renderer(initial = snapshot()) {
           setAttribute(key, value) { this[key] = value; },
           addEventListener(type, callback) { addListener(listeners, type, callback); },
           replaceChildren(...children) { this.children = children; },
+          setPointerCapture(id) { captures.push(id); },
+          releasePointerCapture(id) { releasedCaptures.push(id); },
           focus() { document.activeElement = this; },
           click() { if (!this.disabled) return this.onclick?.({}); },
           fire(type, event = {}) { return dispatch(listeners, type, { target: this, ...event }); },
@@ -119,7 +127,7 @@ async function renderer(initial = snapshot()) {
   };
   vm.runInNewContext(javascript, {
     exports: {},
-    require: () => ({}),
+    require: name => name === "./petAudio" ? { installPetAudioCapture() {} } : {},
     window: {
       desktopPet: api, innerWidth: 1000, innerHeight: 800,
       addEventListener(type, callback) { addListener(windowListeners, type, callback); },
@@ -134,12 +142,16 @@ async function renderer(initial = snapshot()) {
     cancelAnimationFrame(id) { frames.delete(id); },
   });
   await settle();
+  async function flushFrame() {
+    await settle();
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(performance.now());
+    await settle();
+  }
   async function flushLayout() {
     for (let i = 0; frames.size && i < 10; i++) {
-      const pending = [...frames.values()];
-      frames.clear();
-      for (const callback of pending) callback(performance.now());
-      await settle();
+      await flushFrame();
     }
   }
   await flushLayout();
@@ -148,6 +160,11 @@ async function renderer(initial = snapshot()) {
     calls,
     regionCalls,
     pointerHolds,
+    captures,
+    releasedCaptures,
+    bodyHasClass: name => bodyClasses.has(name),
+    flushFrame,
+    frameCount: () => frames.size,
     flushLayout,
     focusedId() { return document.activeElement?.id; },
     documentEvent(type, event) { dispatch(documentListeners, type, event); },
@@ -547,3 +564,401 @@ test("only a primary press beginning on visible UI holds interaction until relea
   pet.windowEvent("blur");
   assert.deepEqual(pet.pointerHolds.slice(-2), [{ active: true }, { active: false }]);
 });
+
+const dragState = (extra = {}) => snapshot({ ready: true, petLeft: 800, petTop: 650, ...extra });
+function pointer(pet, type, id, x = 100, y = 100, extra = {}) {
+  pet.element("pet").fire(type, { button: 0, pointerId: id, screenX: x, screenY: y, ...extra });
+}
+
+test("pet drag preserves the four-pixel threshold and click, double-click and menu actions", async () => {
+  const pet = await renderer(dragState());
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointermove", 1, 104, 100);
+  await pet.flushFrame();
+  assert.equal(pet.calls.some(call => call.name === "drag"), false);
+  pointer(pet, "pointerup", 1, 104, 100);
+  pet.element("pet").fire("click", { detail: 1 });
+  await settle();
+  assert.equal(pet.calls.filter(call => call.name === "expand").length, 1);
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointerup", 1);
+  pet.element("pet").fire("click", { detail: 2 });
+  await settle();
+  assert.equal(pet.calls.filter(call => call.name === "open").length, 1);
+  let prevented = 0;
+  pet.element("pet").fire("contextmenu", { preventDefault() { prevented++; } });
+  await settle();
+  assert.equal(prevented, 1);
+  assert.equal(pet.calls.at(-1).name, "menu");
+});
+
+for (const [label, button, ctrlKey] of [["secondary click", 2, false], ["Control-click", 0, true]]) {
+  test(`pet ${label} opens only its menu without beginning a drag or opening chat`, async () => {
+    const pet = await renderer(dragState({ draft: "保留的草稿", dictating: true }));
+    let prevented = 0, stopped = 0;
+    pointer(pet, "pointerdown", 10, 100, 100, { button, ctrlKey });
+    pointer(pet, "pointerup", 10, 100, 100, { button, ctrlKey });
+    pet.element("pet").fire("click", { detail: 1, button, ctrlKey });
+    pet.element("pet").fire("contextmenu", {
+      button, ctrlKey,
+      preventDefault() { prevented++; },
+      stopPropagation() { stopped++; },
+    });
+    await settle();
+    assert.equal(prevented, 1);
+    assert.equal(stopped, 1, "native menu owns this context request");
+    assert.deepEqual(pet.calls, [{ name: "menu", args: {} }]);
+    assert.deepEqual(pet.captures, []);
+    assert.equal(pet.bodyHasClass("dragging"), false);
+    assert.equal(pet.element("draft").value, "保留的草稿");
+    assert.equal(pet.element("dictation").textContent, "停止输入");
+  });
+}
+
+test("pet menu failures stay visible and an explicit successful retry clears them", async () => {
+  const pet = await renderer(dragState({ draft: "菜单失败也保留草稿" }));
+  let attempts = 0;
+  pet.handle(name => {
+    assert.equal(name, "menu");
+    if (++attempts === 1) throw Error("右键菜单暂时不可用，请重试");
+    return dragState({ draft: "菜单失败也保留草稿" });
+  });
+  pet.element("pet").fire("contextmenu");
+  await settle();
+  assert.match(pet.element("error").textContent, /右键菜单暂时不可用/);
+  pet.publish({ draft: "菜单失败也保留草稿" });
+  await settle();
+  assert.equal(attempts, 1, "refresh cannot replay a menu request");
+  assert.match(pet.element("error").textContent, /右键菜单暂时不可用/);
+  pet.element("pet").fire("contextmenu");
+  await settle();
+  assert.equal(attempts, 2);
+  assert.equal(pet.element("error").textContent, "");
+  assert.equal(pet.element("draft").value, "菜单失败也保留草稿");
+  assert.deepEqual(pet.calls, [{ name: "menu", args: {} }, { name: "menu", args: {} }]);
+});
+
+test("opening the pet context menu preserves the next ordinary left click", async () => {
+  const pet = await renderer(dragState());
+  pet.element("pet").fire("contextmenu");
+  await settle();
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointerup", 1);
+  pet.element("pet").fire("click", { detail: 1, button: 0 });
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["menu", "drag-start", "drag-end", "expand"]);
+  assert.equal(pet.bodyHasClass("dragging"), false);
+});
+
+test("synthetic pointerup during a cross-monitor drag does not end native tracking or open chat", async () => {
+  const pet = await renderer(dragState());
+  let drags = 0;
+  pet.handle(name => name === "drag" ? dragState({ dragging: ++drags < 2, petLeft: 100, petTop: 150 }) : dragState());
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointermove", 1, 105, 100);
+  await pet.flushFrame();
+  assert.deepEqual(pet.releasedCaptures, [1]);
+  pointer(pet, "pointerup", 1, 105, 100);
+  pet.element("pet").fire("click", { detail: 1 });
+  await pet.flushFrame();
+  assert.equal(drags, 2);
+  assert.equal(pet.calls.some(call => ["drag-end", "expand", "open"].includes(call.name)), false);
+  assert.equal(pet.element("pet").style.transform, "translate3d(100px, 150px, 0)");
+});
+
+for (const rejected of [false, true]) {
+  test(`a prior pet drag's late ${rejected ? "error" : "completion"} cannot move or end a new drag`, async () => {
+    const pet = await renderer(dragState()), requests = [];
+    pet.handle(name => name === "drag" ? new Promise((resolve, reject) => requests.push({ resolve, reject })) : dragState());
+    pointer(pet, "pointerdown", 1);
+    pointer(pet, "pointermove", 1, 110, 100);
+    await pet.flushFrame();
+    assert.equal(requests.length, 1);
+    pointer(pet, "pointerdown", 2, 200, 200);
+    pointer(pet, "pointermove", 2, 210, 200);
+    await pet.flushFrame();
+    assert.equal(requests.length, 2);
+    if (rejected) requests[0].reject(Error("late old window move"));
+    else requests[0].resolve(dragState({ dragging: false, petLeft: 333, petTop: 444 }));
+    await settle();
+    assert.equal(pet.element("pet").style.transform, "translate3d(800px, 650px, 0)");
+    await pet.flushFrame();
+    assert.equal(requests.length, 2, "a stale error must not schedule an extra tracker for the new pointer");
+    requests[1].resolve(dragState({ dragging: true, petLeft: 600, petTop: 500 }));
+    await settle();
+    assert.equal(pet.element("pet").style.transform, "translate3d(600px, 500px, 0)");
+    pointer(pet, "pointermove", 2, 230, 210);
+    await pet.flushFrame();
+    assert.equal(requests.length, 3, "the new drag must keep following its pointer");
+    requests[2].resolve(dragState({ dragging: false, petLeft: 620, petTop: 510 }));
+    await settle();
+  });
+}
+
+test("a released old press cannot end a new native drag when its startup acknowledgement arrives late", async () => {
+  const pet = await renderer(dragState());
+  let firstStart, starts = 0;
+  pet.handle(name => name === "drag-start" && ++starts === 1 ? new Promise(resolve => { firstStart = resolve; }) : dragState());
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointerup", 1);
+  pointer(pet, "pointerdown", 2, 200, 200);
+  await settle();
+  firstStart(dragState());
+  await settle();
+  assert.equal(pet.calls.filter(call => call.name === "drag-end").length, 0);
+  pointer(pet, "pointerup", 2, 200, 200);
+  await settle();
+  assert.equal(pet.calls.filter(call => call.name === "drag-end").length, 1);
+});
+
+test("native drag-end broadcasts release the matching renderer tracker while its RPC remains pending", async () => {
+  const pet = await renderer(dragState());
+  let resolveDrag;
+  pet.handle(name => name === "drag" ? new Promise(resolve => { resolveDrag = resolve; }) : dragState());
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointermove", 1, 110, 100);
+  await pet.flushFrame();
+  assert.equal(pet.calls.filter(call => call.name === "drag").length, 1);
+  pet.publish({ dragging: false, petLeft: 300, petTop: 250 });
+  await pet.flushFrame();
+  assert.equal(pet.element("pet").style.transform, "translate3d(300px, 250px, 0)");
+  resolveDrag(dragState({ dragging: true, petLeft: 50, petTop: 60 }));
+  await settle();
+  await pet.flushFrame();
+  assert.equal(pet.element("pet").style.transform, "translate3d(300px, 250px, 0)", "the pending RPC cannot rewind a completed native move");
+  assert.equal(pet.calls.filter(call => call.name === "drag").length, 1);
+});
+
+test("native drag tracking needs no renderer animation frame or drag RPC after threshold", async () => {
+  const pet = await renderer(dragState());
+  let confirmStart;
+  pet.handle((name, args) => {
+    if (name === "drag-start") return new Promise(resolve => {
+      confirmStart = () => resolve(dragState({ nativeDragTracking: true, dragging: true, dragId: args.dragId }));
+    });
+    if (name === "drag") throw Error("native tracking must not poll the renderer");
+    return dragState();
+  });
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointermove", 1, 110, 100);
+  await settle();
+  assert.equal(pet.frameCount(), 0, "pending startup must not require a renderer frame");
+  confirmStart();
+  await settle();
+  assert.equal(pet.frameCount(), 0, "native capability must not schedule a fallback frame");
+  const dragId = pet.calls.find(call => call.name === "drag-start").args.dragId;
+  assert.ok(Number.isInteger(dragId));
+  pet.publish({ nativeDragTracking: true, dragId, dragging: true, petLeft: 120, petTop: 240 });
+  assert.equal(pet.element("pet").style.transform, "translate3d(120px, 240px, 0)");
+  pointer(pet, "pointerup", 1, 110, 100);
+  await pet.flushLayout();
+  assert.equal(pet.calls.some(call => ["drag", "drag-end"].includes(call.name)), false);
+  pet.publish({ nativeDragTracking: true, dragId, dragging: false, petLeft: 180, petTop: 260 });
+  await pet.flushLayout();
+  assert.equal(pet.element("pet").style.transform, "translate3d(180px, 260px, 0)");
+  assert.deepEqual(pet.releasedCaptures, [1, 1]);
+  assert.equal(pet.calls.some(call => call.name === "drag"), false);
+});
+
+test("an old native drag ID cannot move or finish the next native drag", async () => {
+  const pet = await renderer(dragState());
+  pet.handle((name, args) => dragState({ nativeDragTracking: true, dragging: true, dragId: args.dragId }));
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointermove", 1, 110, 100);
+  await settle();
+  const firstId = pet.calls.at(-1).args.dragId;
+  pointer(pet, "pointerdown", 2, 200, 200);
+  pointer(pet, "pointermove", 2, 210, 200);
+  await settle();
+  const secondId = pet.calls.at(-1).args.dragId;
+  assert.notEqual(firstId, secondId);
+  pet.publish({ nativeDragTracking: true, dragId: secondId, dragging: true, petLeft: 600, petTop: 500 });
+  pet.publish({ nativeDragTracking: true, dragId: firstId, dragging: false, petLeft: 1, petTop: 2 });
+  assert.equal(pet.element("pet").style.transform, "translate3d(600px, 500px, 0)");
+  assert.deepEqual(pet.releasedCaptures, [1, 2], "old completion must leave the new pointer tracking");
+  pet.publish({ nativeDragTracking: true, dragId: secondId, dragging: false, petLeft: 620, petTop: 520 });
+  assert.deepEqual(pet.releasedCaptures, [1, 2, 2]);
+  assert.equal(pet.element("pet").style.transform, "translate3d(620px, 520px, 0)");
+});
+
+test("a matching native drag-end can arrive before the drag-start acknowledgement", async () => {
+  const pet = await renderer(dragState());
+  let confirmStart;
+  pet.handle((name, args) => name === "drag-start" ? new Promise(resolve => {
+    confirmStart = () => resolve(dragState({ nativeDragTracking: true, dragging: true, dragId: args.dragId }));
+  }) : dragState());
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointermove", 1, 110, 100);
+  const dragId = pet.calls.at(-1).args.dragId;
+  pet.publish({ nativeDragTracking: true, dragId, dragging: false, petLeft: 500, petTop: 400 });
+  confirmStart();
+  await settle();
+  await pet.flushLayout();
+  assert.deepEqual(pet.releasedCaptures, [1, 1]);
+  assert.equal(pet.calls.some(call => call.name === "drag"), false);
+  assert.equal(pet.element("pet").style.transform, "translate3d(500px, 400px, 0)");
+});
+
+test("legacy host drag polling carries an optional ID and ends with its own matching ID", async () => {
+  const pet = await renderer(dragState());
+  let finishDrag;
+  pet.handle((name, args) => name === "drag" ? new Promise(resolve => { finishDrag = resolve; }) : dragState());
+  pointer(pet, "pointerdown", 1);
+  pointer(pet, "pointermove", 1, 110, 100);
+  await pet.flushFrame();
+  const start = pet.calls.find(call => call.name === "drag-start"), drag = pet.calls.find(call => call.name === "drag");
+  assert.ok(start && drag, "a host without nativeDragTracking keeps the fallback");
+  assert.equal(start.args.dragId, drag.args.dragId);
+  finishDrag(dragState({ dragging: false }));
+  await settle();
+  pointer(pet, "pointerdown", 2, 200, 200);
+  pointer(pet, "pointerup", 2, 200, 200);
+  await settle();
+  const secondStart = pet.calls.filter(call => call.name === "drag-start").at(-1);
+  assert.equal(pet.calls.at(-1).name, "drag-end");
+  assert.equal(pet.calls.at(-1).args.dragId, secondStart.args.dragId);
+  assert.notEqual(secondStart.args.dragId, start.args.dragId);
+});
+
+test("native movement without a DOM pointermove still excludes synthetic clicks and drag-end", async () => {
+  const pet = await renderer(dragState());
+  pet.handle((name, args) => dragState({ nativeDragTracking: true, dragging: true, dragId: args.dragId }));
+  pointer(pet, "pointerdown", 1);
+  await settle();
+  const dragId = pet.calls.at(-1).args.dragId;
+  pet.publish({ nativeDragTracking: true, dragId, dragMoved: true, dragging: true, petLeft: 200, petTop: 300 });
+  assert.deepEqual(pet.releasedCaptures, [1]);
+  pointer(pet, "pointerup", 1);
+  pet.element("pet").fire("click", { detail: 1 });
+  await pet.flushLayout();
+  assert.equal(pet.calls.some(call => ["drag", "drag-end", "expand", "open"].includes(call.name)), false);
+  pet.publish({ nativeDragTracking: true, dragId, dragMoved: true, dragging: false, petLeft: 220, petTop: 320 });
+  assert.deepEqual(pet.releasedCaptures, [1, 1]);
+  assert.equal(pet.element("pet").style.transform, "translate3d(220px, 320px, 0)");
+});
+
+test("native startup can report movement without rewinding newer native geometry", async () => {
+  const pet = await renderer(dragState());
+  let confirmStart;
+  pet.handle((name, args) => name === "drag-start" ? new Promise(resolve => {
+    confirmStart = () => resolve(dragState({ nativeDragTracking: true, dragId: args.dragId, dragMoved: true, dragging: true, petLeft: 1, petTop: 2 }));
+  }) : dragState());
+  pointer(pet, "pointerdown", 1);
+  const dragId = pet.calls.at(-1).args.dragId;
+  pet.publish({ nativeDragTracking: true, dragId, dragging: true, petLeft: 500, petTop: 400 });
+  confirmStart();
+  await settle();
+  assert.equal(pet.element("pet").style.transform, "translate3d(500px, 400px, 0)");
+  assert.deepEqual(pet.releasedCaptures, [1]);
+  pointer(pet, "pointerup", 1);
+  await settle();
+  assert.equal(pet.calls.some(call => call.name === "drag-end"), false);
+  pet.publish({ nativeDragTracking: true, dragId, dragMoved: true, dragging: false });
+});
+
+test("a fast native drag with only its final snapshot can never become a click", async () => {
+  const pet = await renderer(dragState());
+  pet.handle((name, args) => dragState({ nativeDragTracking: true, dragId: args.dragId, dragging: true }));
+  pointer(pet, "pointerdown", 1);
+  await settle();
+  const dragId = pet.calls.at(-1).args.dragId;
+  pet.publish({ nativeDragTracking: true, dragId, dragMoved: true, dragging: false, petLeft: 150, petTop: 250 });
+  pointer(pet, "pointerup", 1);
+  pet.element("pet").fire("click", { detail: 1 });
+  await pet.flushLayout();
+  assert.equal(pet.calls.some(call => ["drag", "drag-end", "expand", "open"].includes(call.name)), false);
+  assert.deepEqual(pet.releasedCaptures, [1, 1]);
+  assert.equal(pet.element("pet").style.transform, "translate3d(150px, 250px, 0)");
+});
+
+test("a synthetic native pointerup waits for physical release confirmation before allowing clicks", async () => {
+  const pet = await renderer(dragState());
+  const releases = [];
+  pet.handle((name, args) => name === "drag-end"
+    ? new Promise(resolve => releases.push(() => resolve(dragState({ nativeDragTracking: true, dragId: args.dragId, dragging: releases.length === 1, dragMoved: false }))))
+    : dragState({ nativeDragTracking: true, dragId: args.dragId, dragging: true }));
+  pointer(pet, "pointerdown", 1);
+  await settle();
+  const dragId = pet.calls.at(-1).args.dragId;
+  pointer(pet, "pointerup", 1);
+  pet.element("pet").fire("click", { detail: 1 });
+  await settle();
+  assert.equal(releases.length, 1);
+  assert.equal(pet.calls.some(call => call.name === "expand"), false, "an unconfirmed up is never a tap");
+  releases[0]();
+  await settle();
+  assert.equal(pet.calls.some(call => call.name === "expand"), false, "button-still-down response rejects the synthetic click");
+  pet.publish({ nativeDragTracking: true, dragId, dragging: true, dragMoved: true, petLeft: 300, petTop: 350 });
+  assert.equal(pet.element("pet").style.transform, "translate3d(300px, 350px, 0)");
+  pet.publish({ nativeDragTracking: true, dragId, dragging: false, dragMoved: true });
+  assert.equal(pet.calls.some(call => call.name === "expand"), false);
+
+  pointer(pet, "pointerdown", 2, 200, 200);
+  await settle();
+  pointer(pet, "pointerup", 2, 200, 200);
+  pet.element("pet").fire("click", { detail: 1 });
+  await settle();
+  assert.equal(releases.length, 2);
+  assert.equal(pet.calls.some(call => call.name === "expand"), false);
+  releases[1]();
+  await settle();
+  assert.equal(pet.calls.filter(call => call.name === "expand").length, 1, "a confirmed unmoved release retains normal tap behavior");
+});
+
+test("a pending native release cannot turn its delayed click into an action in the next press", async () => {
+  const pet = await renderer(dragState());
+  let confirmRelease;
+  pet.handle((name, args) => name === "drag-end" ? new Promise(resolve => {
+    confirmRelease = () => resolve(dragState({ nativeDragTracking: true, dragId: args.dragId, dragging: false, dragMoved: false }));
+  }) : dragState({ nativeDragTracking: true, dragId: args.dragId, dragging: true }));
+  pointer(pet, "pointerdown", 1);
+  await settle();
+  pointer(pet, "pointerup", 1);
+  pet.element("pet").fire("click", { detail: 1 });
+  await settle();
+  pointer(pet, "pointerdown", 2, 200, 200);
+  confirmRelease();
+  await settle();
+  assert.equal(pet.calls.some(call => ["expand", "open"].includes(call.name)), false);
+});
+
+test("normal native taps preserve single-click expansion and double-click opening", async () => {
+  const pet = await renderer(dragState());
+  pet.handle((name, args) => dragState({ nativeDragTracking: true, dragId: args.dragId, dragging: name !== "drag-end", dragMoved: false }));
+  for (const detail of [1, 2]) {
+    pointer(pet, "pointerdown", detail);
+    await settle();
+    pointer(pet, "pointerup", detail);
+    pet.element("pet").fire("click", { detail });
+    await settle();
+  }
+  assert.equal(pet.calls.filter(call => call.name === "expand").length, 1);
+  assert.equal(pet.calls.filter(call => call.name === "open").length, 1);
+});
+
+for (const firstMoved of [false, true]) {
+  test(`delayed native first-release confirmation ${firstMoved ? "rejects a dragged double-click" : "preserves a valid double-click"}`, async () => {
+    const pet = await renderer(dragState());
+    let firstRelease, ends = 0;
+    pet.handle((name, args) => {
+      const result = dragState({ nativeDragTracking: true, dragId: args.dragId, dragging: name !== "drag-end", dragMoved: name === "drag-end" && ends === 0 && firstMoved });
+      if (name === "drag-end" && ends++ === 0) return new Promise(resolve => { firstRelease = () => resolve(result); });
+      return result;
+    });
+    pointer(pet, "pointerdown", 1);
+    await settle();
+    pointer(pet, "pointerup", 1);
+    pet.element("pet").fire("click", { detail: 1 });
+    await settle();
+    pointer(pet, "pointerdown", 2);
+    await settle();
+    pointer(pet, "pointerup", 2);
+    pet.element("pet").fire("click", { detail: 2 });
+    await settle();
+    assert.equal(pet.calls.some(call => ["expand", "open"].includes(call.name)), false, "unconfirmed first click cannot act in the second press");
+    firstRelease();
+    await settle();
+    assert.equal(pet.calls.filter(call => call.name === "expand").length, 0, "the superseded single click must never toggle the panel");
+    assert.equal(pet.calls.filter(call => call.name === "open").length, firstMoved ? 0 : 1);
+  });
+}

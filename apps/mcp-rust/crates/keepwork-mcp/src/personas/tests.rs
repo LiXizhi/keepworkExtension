@@ -277,3 +277,179 @@ fn upsert_round_trips_without_the_owner_field() {
     assert!(saved);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn admin_snapshot_distinguishes_owner_groups_without_exposing_owner_keys() {
+    let dir = std::env::temp_dir().join(format!("kp-persona-admin-{}", uuid::Uuid::new_v4()));
+    let brain = dir.join("brain");
+    std::fs::create_dir_all(&brain).unwrap();
+    let root = std::fs::canonicalize(&brain).unwrap();
+    let root = root.to_str().unwrap();
+    let store = PersonaStore::open(dir.join("personas"));
+    let presence = PresenceState::new();
+    let request_owner = "48ee1a39-7015-4dfd-97db-12c656379f83";
+    let origin_a = "http://127.0.0.1:3001";
+    let origin_b = "https://keepwork.com";
+    let owner_a = sha256_hex(&[origin_a.as_bytes(), b"\0", request_owner.as_bytes()]);
+    let owner_b = sha256_hex(&[origin_b.as_bytes(), b"\0", request_owner.as_bytes()]);
+    let config = json!({"id":"default-persona", "name":"我的分身", "root":root});
+    store.upsert(&presence, &owner_a, &config).unwrap();
+    store.upsert(&presence, &owner_b, &config).unwrap();
+    store
+        .upsert(
+            &presence,
+            &owner_a,
+            &json!({"id":"bot", "name":"BOT1", "root":root}),
+        )
+        .unwrap();
+
+    let snapshot = store.admin_snapshot();
+    assert_eq!(snapshot["stats"]["total"], 3);
+    assert_eq!(snapshot["stats"]["ownerGroups"], 2);
+    let rows = snapshot["personas"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    for (owner, id) in [
+        (&owner_a, "default-persona"),
+        (&owner_b, "default-persona"),
+        (&owner_a, "bot"),
+    ] {
+        let key = file_key(owner, id);
+        let row = rows.iter().find(|row| row["key"] == key).unwrap();
+        assert_eq!(row["id"], id);
+        assert_eq!(row["ownerGroup"], sha256_hex(&[owner.as_bytes()]));
+        assert_eq!(row["root"], root);
+        assert!(row.get("owner").is_none());
+        for legacy in [
+            "name",
+            "state",
+            "executor",
+            "messages",
+            "unread",
+            "enabledSchedules",
+            "schedules",
+            "channels",
+        ] {
+            assert!(
+                row.get(legacy).is_some(),
+                "legacy field {legacy} is retained"
+            );
+        }
+    }
+    let serialized = snapshot.to_string();
+    for private in [&owner_a[..], &owner_b[..], request_owner] {
+        assert!(!serialized.contains(private));
+    }
+
+    let reloaded = PersonaStore::open(dir.join("personas"));
+    let reloaded = reloaded.admin_snapshot();
+    assert_eq!(reloaded["stats"]["total"], 3);
+    assert_eq!(reloaded["stats"]["ownerGroups"], 2);
+    let reloaded_rows = reloaded["personas"].as_array().unwrap();
+    for row in rows {
+        let restored = reloaded_rows
+            .iter()
+            .find(|restored| restored["key"] == row["key"])
+            .unwrap();
+        assert_eq!(restored["ownerGroup"], row["ownerGroup"]);
+        assert_eq!(restored["root"], row["root"]);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn repeated_upserts_and_reload_preserve_history_and_owner_isolation() {
+    let dir = std::env::temp_dir().join(format!("kp-persona-repeat-{}", uuid::Uuid::new_v4()));
+    let store = PersonaStore::open(dir.clone());
+    let presence = PresenceState::new();
+    let owner_a = "ab".repeat(32);
+    let owner_b = "cd".repeat(32);
+    let config = json!({"id":"default-persona", "name":"我的分身", "root":""});
+    store.upsert(&presence, &owner_a, &config).unwrap();
+    let key = file_key(&owner_a, "default-persona");
+    let messages = json!([
+        {"id":"saved-request", "role":"user", "text":"saved question", "time":1},
+        {"id":"saved-answer", "role":"assistant", "text":"saved answer", "time":2},
+    ]);
+    let receipts = json!({"saved-request":"done"});
+    {
+        let mut inner = store.lock();
+        let row = inner.rows.get_mut(&key).unwrap();
+        row["messages"] = messages.clone();
+        row["requests"] = receipts.clone();
+        store.save(&inner, &key);
+    }
+
+    for _ in 0..3 {
+        store.upsert(&presence, &owner_a, &config).unwrap();
+    }
+    store.upsert(&presence, &owner_b, &config).unwrap();
+    assert_eq!(store.lock().rows.len(), 2);
+    for owner in [&owner_a, &owner_b] {
+        assert_eq!(store.list(owner)["agents"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(
+        store.read(&owner_a, "default-persona", i64::MAX).unwrap()["messages"],
+        messages
+    );
+    assert!(
+        store.read(&owner_b, "default-persona", i64::MAX).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store
+        .read(&"ef".repeat(32), "default-persona", i64::MAX)
+        .is_err());
+    drop(store);
+
+    let reloaded = PersonaStore::open(dir.clone());
+    reloaded.upsert(&presence, &owner_a, &config).unwrap();
+    reloaded.upsert(&presence, &owner_b, &config).unwrap();
+    assert_eq!(reloaded.lock().rows.len(), 2);
+    assert_eq!(
+        reloaded
+            .read(&owner_a, "default-persona", i64::MAX)
+            .unwrap()["messages"],
+        messages
+    );
+    assert_eq!(reloaded.lock().rows[&key]["requests"], receipts);
+    let file_count = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .count();
+    assert_eq!(file_count, 2);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn loading_unchanged_records_does_not_rewrite_them() {
+    let dir = std::env::temp_dir().join(format!("kp-persona-reload-{}", uuid::Uuid::new_v4()));
+    let owner = "ef".repeat(32);
+    let store = PersonaStore::open(dir.clone());
+    store
+        .upsert(
+            &PresenceState::new(),
+            &owner,
+            &json!({
+                "id":"default-persona", "name":"My persona", "root":"",
+            }),
+        )
+        .unwrap();
+    let path = dir.join(format!("{}.json", file_key(&owner, "default-persona")));
+    let bytes = std::fs::read(&path).unwrap();
+    let modified = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    drop(store);
+    let reloaded = PersonaStore::open(dir.clone());
+    assert_eq!(reloaded.list(&owner)["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -26,11 +26,41 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 - **双本地 Runtime 守护进程监管**：
   - 监管 MCP（`127.0.0.1:8089`，默认 Rust）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检。MCP 引擎选择不改变外部 VS Code / Local Helper 实例的所有权保护，也不放宽 Origin、鉴权、路径和任务执行边界。
 - **透明置顶桌面宠物窗口（`pet.html`）**：
+  - 跨屏拖动使用原生光标跟踪；切屏时网页暂停动画也能继续移动。macOS 在一次主线程调用中设置目标屏幕的画布位置与尺寸，避免不同屏幕高度导致偏移。超过 4px 才开始拖动，松手提交最终位置；旧轮响应不会移动或结束新一轮。旧宿主缺少原生跟踪标记时仍使用兼容轮询。
+  - 右键或 macOS Control 点按宠物显示原生菜单：六档大小（0.5×–4×）、跟随 AIChat/抱抱龙外观、哈奇换宠入口、打开桌面、隐藏宠物和「完全退出…」。菜单不依赖登录或网络；缩放与外观持久保存，完全退出仍需确认气泡授权。打开或取消菜单保留当前草稿和语音状态，不触发左键展开或拖动；菜单显示失败在宠物中提示，可再次右键重试。
+  - 宠物云端听写支持可选 `petDictationAudioVersion: 1`：可见宠物采集 16kHz 单声道 PCM，隐藏主页面保留 SDK 识别、配置和草稿，开始听写不弹出主窗口。一次采集绑定原生点击、账号/目标 context 和主页面文档，音频仅在内存中按序传递并确认；停止、隐藏、打开主窗口、导航或账号/目标变化立即释放。权限失败和拥塞在宠物显示错误，首次系统麦克风授权仍正常出现。旧页面、未声明能力的宿主及其他引擎保持原采集方式；macOS 通话、课堂录音或旧路径仍需显示主窗口以满足 WebKit 可见性要求。
   - 固定工作区画布尺寸（`DESKTOP-PET-CLICK-STABILITY-001`），支持 `0.5×`–`4×` 缩放、抱抱龙/跟随 AIChat 宠物外观、快捷回复、语音听写/通话、完全退出分身/通道确认气泡（`#exit-bubble`）以及主屏截图权限审批气泡（`#permission-bubble`，连接 `~/.keepwork-mcp/pet-permission-bridge.json`，点击后先隐藏窗口再返回授权结果以确保气泡不入镜）。
 - **本地文件夹授权、工作区文件读写与直连 PTY 终端**：
   - `src-tauri/src/files.rs`：管理 `folder-grants.json`、路径边界校验、软链接/目录联接安全规则与文件大小上限（PPT/PPTX 500 MiB、PDF 100 MiB、通用 1024 MiB）。
   - `src-tauri/src/brain_folder.rs`：管理 `<Documents>/MyBrain` 默认第二大脑文件夹预览与初始化授权。
   - `src-tauri/src/terminal.rs`：基于原生 PTY（Unix `libc::openpty` / Windows Shell）提供 `desktop:<id>` 会话、游标增量输出、窗口尺寸同步与中断控制。
+
+### Rust 源码模块
+
+`src-tauri/src/lib.rs` 仅声明公共领域模块并重导出桌面入口、状态类型与窗口操作，保留原有 crate 根路径的公开 API。Tauri 应用装配集中在私有 `app/` 模块，业务领域模块不依赖窗口装配层。
+
+以下路径均相对 `src-tauri/src/`：
+
+| 模块 | 职责 |
+| --- | --- |
+| `app/state.rs` | 应用共享状态、配置目录与桌面状态快照 |
+| `app/startup.rs` | 运行时资源发现、应用启动、窗口创建与命令注册 |
+| `app/sender.rs` | 主窗口、宠物和更新窗口的 IPC 发送者验证 |
+| `app/events.rs` | 主页面事件分发 |
+| `app/commands.rs` | 文件、终端、菜单、标题栏与主题 IPC |
+| `app/main_window.rs` | 主文档生命周期、连接恢复、本地源码切换与缩放 |
+| `app/host_menu.rs` | 原生命令执行、系统菜单、托盘与退出流程 |
+| `app/pet_host.rs` | 宠物窗口、原生拖动跟踪、菜单操作与页面命令编排 |
+| `app/pet_audio_host.rs` | 文档绑定的录音 IPC、私有音频投递、采集停止与超时监控 |
+| `app/platform.rs` | 系统浏览器、文件管理器与平台调用 |
+| `app/updates_window.rs` | 更新窗口、更新 IPC 与状态通知 |
+| `runtime.rs` | 运行时进程监管、所有权、重试、激活和回退；重导出原有运行时 API |
+| `runtime/manifest.rs` | 清单类型、平台名称、版本比较与兼容性验证 |
+| `runtime/archive.rs` | 受限路径 ZIP 解压、归档生成与摘要 |
+| `runtime/staged_update.rs` | 下载、完整性校验与更新暂存 |
+| `runtime/tests.rs` | 运行时单元测试与隔离回归测试 |
+
+`app/` 内实现模块沿单向依赖组织；主窗口和宠物窗口共用独立的录音宿主，避免相互依赖。`tests/architecture-and-packaging.test.cjs` 随 `pnpm check` 检查 `src/` 与 `src-tauri/src/` 中维护的源码，每个文件不得超过 2000 行；增长时按职责继续拆分，生成文件和依赖不计入。
 
 ### 断网与页面连接恢复
 
@@ -85,6 +115,32 @@ pnpm check
 # 自带 Rust MCP 运行时（从仓库根目录执行）
 node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
 ```
+
+### macOS 原生语音采集回归
+
+宠物独立采集与打包页面检查（隐藏主窗口，WebKit 模拟麦克风）：
+
+```bash
+xcrun swiftc -parse-as-library -module-cache-path /private/tmp/wk-pet-module-cache apps/aichat-rust/scripts/wk-pet-capture.swift -o /private/tmp/wk-pet-capture -framework Cocoa -framework WebKit
+/private/tmp/wk-pet-capture
+```
+
+脚本不加载账号、不连接云识别、不读取真实麦克风，保留 WebKit 焦点保护。检查 `tauri://localhost` 安全上下文、主窗口持续隐藏、可见宠物产生非零16kHz PCM，以及停止后音轨/context释放且不再输出PCM。锁屏或非console会话明确退出77并显示 `BLOCKED`；本轮环境处于该状态，只确认了安全上下文与mediaDevices，尚未完成原生可见采集实测。
+
+macOS 原生采集可见性回归可单独运行，需 Xcode 命令行工具与桌面会话：
+
+```bash
+xcrun swiftc -parse-as-library -module-cache-path /private/tmp/aichat-wk-module-cache apps/aichat-rust/scripts/wk-capture-visibility.swift -o /private/tmp/aichat-wk-capture-visibility -framework Cocoa -framework WebKit
+/private/tmp/aichat-wk-capture-visibility
+```
+
+该隔离测试使用非持久 WKWebView 与 WebKit 生成的模拟麦克风，不加载 AIChat 账号、不连接云识别，也不读取真实麦克风。测试专用私有 API 仅启用模拟设备，保留 `getUserMediaRequiresFocus=true`。它验证隐藏主窗口时请求保持等待，按原生取消最小化、显示、聚焦顺序恢复窗口后取得流与非零 PCM，并检查整屏透明置顶宠物画布不会遮蔽主页面的可见性；结束时音轨为 `ended`、AudioContext 为 `closed`，输出 `PASS` 后退出。它不代表真实设备、系统权限或线上 ASR 验收。
+
+### 原生多屏窗口几何回归
+
+从仓库根目录执行 `node apps/aichat-rust/scripts/pet-canvas-native-smoke.cjs`。测试创建隔离、隐藏的空白 Tauri 窗口，在当前连接屏幕间往返，直接检查原生位置、尺寸、屏幕归属和缩放；不启动 MCP、不打开用户页面、不移动鼠标。少于两块屏幕时以退出码 77 明确跳过。`--baseline` 使用旧的先定位、后改尺寸顺序作对照，可能按预期失败。
+
+本轮在 2× 内屏与 1× 上方副屏的 8 次切换通过，旧路径会产生 27px 偏移。这是原生窗口几何验证；连续真人拖动、显示器拔除/重排和其他系统仍需分别验收。
 
 ## 多平台打包矩阵
 

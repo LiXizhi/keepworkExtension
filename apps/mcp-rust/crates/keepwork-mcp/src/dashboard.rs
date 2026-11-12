@@ -163,7 +163,7 @@ body.chat-view #view-title,body.chat-view #notice:empty{display:none}body.chat-v
 <h2>服务信息</h2><dl id="meta"><dt>Status</dt><dd>Connecting...</dd></dl>
 <h2>Clients</h2><div id="overview-clients" class="scroll"></div></section>
 <section class="view" id="view-clients" hidden><div id="clients" class="scroll"></div></section>
-<section class="view" id="view-personas" hidden><div id="personas" class="scroll"></div></section>
+<section class="view" id="view-personas" hidden><p id="persona-summary" role="status"></p><p>这里列出本机保存的全部身份记录，包含历史身份；空闲（idle）表示当前没有任务。网页来源地址或浏览器存储变化后，同一分身配置可能保留多份记录。</p><div id="personas" class="scroll"></div></section>
 <section class="view" id="view-history" hidden><div id="history" class="scroll"></div>
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div></section>
 <section class="view" id="view-api-docs" hidden><p>HTTP APIs, authentication, parameters and JavaScript fetch examples.</p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
@@ -195,6 +195,15 @@ function metadata(values) {
   Object.entries(values).forEach(([k, v]) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = String(v); byId('meta').append(dt, dd); });
 }
 function displayDate(v) { const d = v ? new Date(v) : null; return d && Number.isFinite(d.getTime()) ? d.toLocaleString() : 'Unknown / 未提供'; }
+function renderPersonas(data) {
+  const personas = data.personas || [];
+  const groups = new Set(personas.map(p => p.ownerGroup).filter(Boolean));
+  const allGroupsKnown = personas.every(p => p.ownerGroup);
+  const groupCount = Number.isInteger(data.stats?.ownerGroups) ? data.stats.ownerGroups : allGroupsKnown ? groups.size : null;
+  byId('persona-summary').textContent = '本机保存 ' + personas.length + ' 条分身记录' + (groupCount === null ? '；身份组数未提供' : '，属于 ' + groupCount + ' 组浏览器身份') + '。这些记录不代表在线分身数量。';
+  const rows = [...personas].sort((a, b) => String(a.ownerGroup || '').localeCompare(String(b.ownerGroup || '')) || String(a.id || '').localeCompare(String(b.id || ''))).map(p => [p.name, p.ownerGroup ? p.ownerGroup.slice(0, 12) : '未提供', p.id, p.root === undefined ? '未提供' : p.root || '未绑定', p.state, p.executor, p.messages, p.unread, (p.enabledSchedules || 0) + '/' + (p.schedules || 0)]);
+  table('personas', ['Name', '身份组', '分身 ID', '第二大脑', 'State', 'Executor', 'Messages', 'Unread', 'Schedules'], rows, 'No personas. / 还没有分身');
+}
 function serverMetadata(status) {
   const unknown = 'Unknown / 未提供';
   return {
@@ -262,8 +271,7 @@ async function refresh() {
     for (const t of ['clients', 'overview-clients']) table(t, ['Session', 'Origin', 'Connected', 'Last seen', 'Calls'], clientRows, 'No connected AIChat sessions.');
     if (requestedView === 'personas') {
       const data = await request('/admin/personas');
-      const rows = (data.personas || []).map(p => [p.name, p.state, p.executor, p.messages, p.unread, (p.enabledSchedules || 0) + '/' + (p.schedules || 0)]);
-      table('personas', ['Name', 'State', 'Executor', 'Messages', 'Unread', 'Schedules'], rows, 'No personas. / 还没有分身');
+      renderPersonas(data);
     }
     if (requestedView === 'history') {
       let page = await request('/admin/history?offset=' + offset + '&limit=' + limit);

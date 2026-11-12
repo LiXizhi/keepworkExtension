@@ -36,6 +36,17 @@ service and a local second-brain folder are connected. This does not complete P2
   Requests require an allowed explicit `Origin`, `X-Agent-Owner` and daemon
   authentication when enabled. Model requests use only that owner's registered
   AIChat login; tokens stay in memory and never fall back to another owner.
+- The dashboard lists all persisted browser identities, including historical
+  ones. A record is keyed by the request Origin, browser owner key and persona
+  ID; ordinary refreshes reuse it. Changing the source port or browser storage
+  creates a separate identity whose profile may contain the same persona IDs.
+  Older desktop source servers used random ports, leaving historical copies.
+  The dashboard shows identity-group fingerprints, IDs, brain paths and record
+  and identity counts to distinguish these copies from active work. Additive
+  `/admin/personas` fields are `key`, `ownerGroup`, `root` and
+  `stats.ownerGroups`; fingerprints never expose request owner keys. Historical
+  records are retained, including empty conversations, and are never merged
+  across identities.
 - Replies come from a real HTTPS Keepwork `/core/v0/gpt/chat` request. This
   runtime uses Keepwork rather than native CLI executors. It can include the
   persona's bounded conversation history and confined `AGENTS.md` instructions;
@@ -53,7 +64,57 @@ service and a local second-brain folder are connected. This does not complete P2
   sales automation and native CLI execution are not provided; unsupported actions
   return feature-specific errors and their optional capabilities are not advertised.
 
+## DingTalk listener lifecycle
+
+The runtime owns only the DWS listener children it starts. Stopping the binding,
+a partial startup failure, a listener disconnect or graceful daemon shutdown
+cleans up those children; a replacement waits for the previous children to exit.
+Events and exit callbacks from an older listener generation cannot affect its
+replacement. External consumers and subscriptions remain protected: the runtime
+waits for their occupancy to clear and never stops or deletes them. Historical
+orphan processes without verified ownership are not automatically adopted or
+terminated. Stopping a binding preserves its cached messages and read state, so
+history remains readable with automatic replies disabled.
+
 ## Commands
+
+### Historical persona maintenance
+
+Persona data survives restarts. Source origins and owner keys remain separate;
+the daemon never automatically deletes, merges or migrates old identities.
+To remove confirmed empty copies left by older random-port source servers, use
+the explicit offline maintenance utility:
+
+```bash
+node apps/mcp-rust/scripts/archive-personas.cjs plan /absolute/path/.keepwork-mcp selection.json > plan.json
+node apps/mcp-rust/scripts/archive-personas.cjs apply plan.json
+node apps/mcp-rust/scripts/archive-personas.cjs restore /absolute/path/.keepwork-mcp/persona-archives/<archive>
+node --test apps/mcp-rust/scripts/archive-personas.test.cjs
+```
+
+`selection.json` contains `obsoleteOwnerGroups` and `protectedOwnerGroups`, both
+arrays of full `ownerGroup` fingerprints. Only mark identities obsolete after
+verifying their old source; an idle state or zero messages is insufficient.
+Planning is read-only. A selected record is eligible only when an equivalent
+configuration remains, with no messages, receipts, summary, schedules, job,
+authorization, nonempty group configuration, direct/peer binding reference or
+unknown persisted state. Protected and unclassified identities stay intact.
+
+Stop the desktop host's MCP supervision and the daemon before apply/restore.
+The utility rejects a live recorded PID or an occupied default/configured port,
+reserves the ports, holds `persona-maintenance.lock`, and rechecks the complete
+persona/binding hashes before mutation. Updated Rust startups check the lock
+and bind before loading data; an attaching process never rewrites persona files.
+Older runtimes do not honor this lock, so stop their hosts before maintenance.
+Unchanged records are no longer rewritten merely because the daemon restarts.
+
+Archives live outside the scanned store in `persona-archives/<archive>/files`,
+with exact original bytes, SHA-256 hashes and a private recovery manifest.
+Every selected file is backed up before any source is removed. Restore leaves
+already identical files intact and rejects conflicting files without overwriting
+them. The utility does not print owner keys, prompts or transcript contents.
+
+### Runtime checks
 
 ```bash
 cargo fmt --all --check
@@ -64,6 +125,7 @@ cargo build --release          # target/release/keepwork-mcp (~0.7 MB in P0)
 node scripts/smoke.cjs                                  # spawn + handshake + /admin/stop
 # from the repository root
 node --test scripts/contract/*.test.cjs                  # contract suite (Node reference when built)
+node --test apps/mcp-rust/scripts/dashboard-personas.test.cjs # isolated browser fixtures; installed Chrome
 ```
 
 Contract tests run the same assertions against this binary and, when a local

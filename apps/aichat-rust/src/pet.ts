@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DesktopPetBridge } from "./types";
+import { installPetAudioCapture } from "./petAudio";
 
 interface PetOption {
   icon?: string;
@@ -41,6 +42,9 @@ interface PetSnapshot {
   petPixels?: number;
   hitRegionsEpoch?: number;
   dragging?: boolean;
+  dragId?: number;
+  dragMoved?: boolean;
+  nativeDragTracking?: boolean;
   preferences?: { appearance?: string; scale?: number };
   pet?: {
     name?: string;
@@ -106,6 +110,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 }
 
 (() => {
+  installPetAudioCapture();
   const api = ensureDesktopPetBridge();
   const $ = <T extends HTMLElement = HTMLElement>(id: string): T =>
     document.getElementById(id) as T;
@@ -125,9 +130,15 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     screenY: number;
     moved: boolean;
     tracking: boolean;
+    acknowledged: boolean;
+    dragId: number;
+    nativeTracking: boolean;
     ready: Promise<unknown>;
   } | null = null;
   let dragEpoch = 0;
+  let pendingRelease: { epoch: number; done: Promise<boolean> } | null = null;
+  let lastRelease: { epoch: number; done: Promise<boolean> } | null = null;
+  let previousRelease: { epoch: number; done: Promise<boolean> } | null = null;
   let releasedTap = false;
   let firstTap = false;
   let renderedMessages = "";
@@ -192,9 +203,26 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     scheduleHitRegions();
   }
 
+  function adoptNativeDrag(snapshot: PetSnapshot): void {
+    const current = pointer;
+    if (!current || snapshot.nativeDragTracking !== true || snapshot.dragId !== current.dragId || snapshot.dragMoved !== true) return;
+    current.nativeTracking = true;
+    current.moved = true;
+    if (!current.tracking) {
+      current.tracking = true;
+      releaseCapture(current.id);
+    }
+  }
+
   function render(raw: Record<string, unknown> | null): void {
-    const next = (raw || {}) as PetSnapshot;
+    let next = (raw || {}) as PetSnapshot;
     if (!next || next.version !== 1) return;
+    const staleDrag = pointer && typeof next.dragId === "number" && next.dragId !== pointer.dragId;
+    if (staleDrag) {
+      // The native thread may have queued a last snapshot before this press.
+      // Keep ordinary chat state current without rewinding the new drag.
+      next = { ...next, petLeft: state.petLeft, petTop: state.petTop };
+    }
     const openingExit = !!next.exitPrompt && !state.exitPrompt;
     const closingExit = !next.exitPrompt && !!state.exitPrompt;
     const draftEl = $<HTMLTextAreaElement>("draft");
@@ -217,7 +245,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     setArtStyle("backgroundSize", image ? pet.bgSize || "400% 400%" : "");
     setArtStyle("backgroundPosition", image ? pet.bgPos || "0% 0%" : "");
     document.body.style.setProperty("--pet-pixels", `${state.petPixels || 112}px`);
-    $("pet").title = `${pet.name || "宠物"} · 单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动`;
+    $("pet").title = `${pet.name || "宠物"}${localError ? ` · ${localError}` : ""} · 单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动`;
 
     const title = state.target === "persona" ? state.title || "我的分身" : `会话 · ${state.title || "AIChat"}`;
     $("target-title").textContent = `${title} ⇄`;
@@ -232,7 +260,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }\n点击切换到${state.target === "persona" ? "聊天会话" : "我的分身"}`;
     targetBtn.disabled =
       !state.canSwitchTarget || !!state.dictating || !!state.voice?.active || !!edits || unsynced;
-    $("badge").hidden = !(state.busy || state.voice?.active || state.attention || state.error);
+    $("badge").hidden = !(state.busy || state.voice?.active || state.attention || state.error || localError);
 
     if (!edits && !unsynced) draftEl.value = state.draft || "";
     draftEl.disabled = !!state.richDraft || !!state.dictating;
@@ -413,6 +441,11 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
         ? compactVoiceStateMap[state.voice?.state || ""] || (state.voice?.muted ? "语音已静音" : "语音中")
         : recPhaseMap[rec?.phase || ""] || "");
 
+    adoptNativeDrag(next);
+    if (next.dragging === false && pointer?.tracking && !staleDrag &&
+        (typeof next.dragId === "number" ? next.dragId === pointer.dragId : pointer.acknowledged)) {
+      finishDrag(pointer.id);
+    }
     positionLayers();
     scheduleHitRegions();
   }
@@ -617,8 +650,11 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   };
 
   $("pet").addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || event.ctrlKey) return;
     dragEpoch += 1;
+    previousRelease = lastRelease?.epoch === dragEpoch - 1 ? lastRelease : null;
+    pendingRelease = null;
+    releasedTap = false;
     document.body.classList.add("dragging");
     pointer = {
       id: event.pointerId,
@@ -628,13 +664,31 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       screenY: event.screenY,
       moved: false,
       tracking: false,
-      ready: api.action("drag-start", { screenX: event.screenX, screenY: event.screenY }),
+      acknowledged: false,
+      dragId: dragEpoch,
+      nativeTracking: false,
+      ready: api.action("drag-start", { screenX: event.screenX, screenY: event.screenY, dragId: dragEpoch }),
     };
+    const current = pointer;
+    void current.ready.then((raw) => {
+      if (pointer !== current) return;
+      current.acknowledged = true;
+      current.nativeTracking = !!raw && typeof raw === "object" && (raw as PetSnapshot).nativeDragTracking === true;
+      if (current.nativeTracking) {
+        const snapshot = raw as PetSnapshot;
+        // Only the native event stream updates geometry; an acknowledgement
+        // can arrive after a newer cursor snapshot.
+        adoptNativeDrag(snapshot);
+        if (snapshot.dragId === current.dragId && snapshot.dragging === false && current.tracking) finishDrag(current.id);
+      }
+    }, () => {
+      if (pointer === current) finishDrag(current.id);
+    });
     $("pet").setPointerCapture(event.pointerId);
   });
 
   $("pet").addEventListener("pointermove", (event) => {
-    if (!pointer) return;
+    if (!pointer || event.pointerId !== pointer.id) return;
     pointer.screenX = event.screenX;
     pointer.screenY = event.screenY;
     if (Math.hypot(event.screenX - pointer.x, event.screenY - pointer.y) > 4) {
@@ -647,13 +701,16 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     // Global cursor tracking takes over. Holding capture across a window move
     // sticks the button so later clicks never arrive.
     releaseCapture(event.pointerId);
+    const current = pointer;
     const step = () => {
-      const current = pointer;
-      if (!current?.tracking) return;
+      if (pointer !== current || !current.tracking || current.nativeTracking) return;
       void current.ready
-        .then(() => api.action("drag", { screenX: current.screenX, screenY: current.screenY }))
+        .then(() => {
+          if (pointer !== current || !current.tracking || current.nativeTracking) return null;
+          return api.action("drag", { screenX: current.screenX, screenY: current.screenY, dragId: current.dragId });
+        })
         .then((snap) => {
-          if (!pointer?.tracking) return;
+          if (pointer !== current || !current.tracking) return;
           if (!snap || typeof snap !== "object") {
             requestAnimationFrame(step);
             return;
@@ -661,52 +718,113 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
           state = { ...state, ...(snap as PetSnapshot) };
           positionLayers();
           if ((snap as PetSnapshot).dragging === false) {
-            finishDrag(pointer?.id);
+            finishDrag(current.id);
             return;
           }
           requestAnimationFrame(step);
         })
         .catch(() => {
-          if (pointer?.tracking) requestAnimationFrame(step);
+          if (pointer === current && current.tracking) requestAnimationFrame(step);
         });
     };
-    requestAnimationFrame(step);
+    // New hosts continue on the native cursor timer even if this WebView stops
+    // rendering while it crosses a monitor. Keep polling only for older hosts.
+    void current.ready.then(() => {
+      if (pointer === current && current.tracking && !current.nativeTracking) requestAnimationFrame(step);
+    }, () => {});
   });
 
-  const release = async (event: PointerEvent): Promise<void> => {
+  const release = async (event: PointerEvent): Promise<boolean> => {
     const current = pointer;
-    pointer = null;
-    document.body.classList.remove("dragging");
-    if (current) releaseCapture(current.id);
-    if (!current) return;
-    releasedTap = !current.moved && event.type === "pointerup";
-    if (!releasedTap) firstTap = false;
-    await current.ready;
-    await api.action("drag-end");
+    if (!current || event.pointerId !== current.id) return false;
+    const epoch = dragEpoch;
+    const commitRelease = (moved: boolean) => {
+      pointer = null;
+      document.body.classList.remove("dragging");
+      releasedTap = !moved && event.type === "pointerup";
+      if (!releasedTap) firstTap = false;
+      return releasedTap;
+    };
+    releaseCapture(current.id);
+    const legacy = current.acknowledged && !current.nativeTracking;
+    // Legacy hosts keep their immediate tap behavior.
+    let tap = legacy ? commitRelease(current.moved) : false;
+    if (!legacy) releasedTap = false;
+    try {
+      await current.ready;
+      if (epoch !== dragEpoch) return false;
+      if (!current.nativeTracking) {
+        if (!legacy && pointer === current) tap = commitRelease(current.moved);
+        void api.action("drag-end", { dragId: current.dragId }).catch(() => {});
+        return tap;
+      }
+      const raw = await api.action("drag-end", { dragId: current.dragId });
+      const snapshot = (raw || {}) as PetSnapshot;
+      if (snapshot.dragId !== current.dragId) return false;
+      tap = snapshot.dragging === false && !current.moved && snapshot.dragMoved !== true && event.type === "pointerup";
+      // A valid old confirmation may establish the first tap of a double click,
+      // but cannot toggle the panel or mutate a newer pointer by itself.
+      if (epoch !== dragEpoch || pointer !== current) return tap;
+      if (snapshot.dragging === true) {
+        // WKWebView can synthesize pointerup while the physical button is down.
+        // Keep this press owned by the native tracker and reject its click.
+        adoptNativeDrag(snapshot);
+        releasedTap = false;
+      } else if (snapshot.dragging === false) {
+        commitRelease(current.moved || snapshot.dragMoved === true);
+      }
+      return tap;
+    } catch {
+      // A failed or superseded start must not end a newer native drag.
+      if (epoch === dragEpoch && pointer === current) finishDrag(current.id);
+      return false;
+    }
   };
 
   // Crossing monitors moves this window and WKWebView often synthesizes pointerup
   // while the button is still held. Keep the tracker running; the host ends it
   // when the button is actually up.
   $("pet").addEventListener("pointerup", (event) => {
+    if (pointer && event.pointerId !== pointer.id) return;
     if (pointer?.tracking) {
       releasedTap = false;
       firstTap = false;
       return;
     }
-    void release(event);
+    if (pendingRelease?.epoch === dragEpoch) return;
+    const waitForNative = !!pointer && (!pointer.acknowledged || pointer.nativeTracking);
+    const done = release(event);
+    if (waitForNative) {
+      const owned = { epoch: dragEpoch, done };
+      pendingRelease = owned;
+      lastRelease = owned;
+      void done.finally(() => {
+        if (pendingRelease === owned) pendingRelease = null;
+      });
+    }
   });
 
-  $("pet").addEventListener("click", (event) => {
+  $("pet").addEventListener("click", async (event) => {
+    if (event.ctrlKey || event.button > 0) return;
     if (event.detail === 0) {
       void expand(!expanded);
       return;
     }
-    if (!releasedTap) return;
+    const epoch = dragEpoch;
+    const waiting = pendingRelease;
+    const previous = previousRelease;
+    let confirmedTap = releasedTap;
+    if (waiting) {
+      confirmedTap = await waiting.done;
+      if (waiting.epoch !== dragEpoch) return;
+    }
+    if (!confirmedTap) return;
     releasedTap = false;
-    if (event.detail === 2 && firstTap) {
+    if (event.detail === 2) {
+      const precededByTap = previous?.epoch === epoch - 1 ? await previous.done : firstTap;
+      if (epoch !== dragEpoch) return;
       firstTap = false;
-      if (!state.exitPrompt && !state.permission) void api.action("open");
+      if (precededByTap && !state.exitPrompt && !state.permission) void api.action("open");
     } else {
       firstTap = event.detail === 1;
       if (firstTap) void expand(!expanded);
@@ -715,7 +833,17 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
   $("pet").addEventListener("contextmenu", (event) => {
     event.preventDefault();
-    void api.action("menu");
+    event.stopPropagation();
+    const context = state.context;
+    void api.action("menu").then(() => {
+      if (context !== state.context) return;
+      localError = "";
+      render(state as unknown as Record<string, unknown>);
+    }, (error: unknown) => {
+      if (context !== state.context) return;
+      localError = error instanceof Error ? error.message : String(error);
+      render(state as unknown as Record<string, unknown>);
+    });
   });
 
   window.addEventListener("resize", () => {
@@ -732,7 +860,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   document.addEventListener("animationend", scheduleHitRegions, true);
   document.addEventListener("transitionend", scheduleHitRegions, true);
   document.addEventListener("pointerdown", (event) => {
-    if (event.button === 0 && (event.target as HTMLElement | null)?.closest(hitSurfaceSelector)) {
+    if (event.button === 0 && !event.ctrlKey && (event.target as HTMLElement | null)?.closest(hitSurfaceSelector)) {
       void api.action("pointer-hold", { active: true });
     }
   }, true);

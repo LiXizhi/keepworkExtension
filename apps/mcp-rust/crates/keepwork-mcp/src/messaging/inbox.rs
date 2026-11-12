@@ -195,11 +195,17 @@ pub(crate) fn decide_incoming(
 }
 
 impl MessagingService {
-    pub(crate) async fn receive_event(self: &Arc<Self>, binding_id: &str, event: Value) {
+    pub(crate) async fn receive_event(
+        self: &Arc<Self>,
+        binding_id: &str,
+        generation: u64,
+        event: Value,
+    ) {
         let Some(message) = incoming_from_event(&event) else {
             return;
         };
-        self.handle_incoming(binding_id, message, false).await;
+        self.handle_incoming_generation(binding_id, message, false, Some(generation))
+            .await;
     }
 
     pub(crate) async fn handle_incoming(
@@ -207,6 +213,17 @@ impl MessagingService {
         binding_id: &str,
         message: Incoming,
         recovered: bool,
+    ) {
+        self.handle_incoming_generation(binding_id, message, recovered, None)
+            .await;
+    }
+
+    async fn handle_incoming_generation(
+        self: &Arc<Self>,
+        binding_id: &str,
+        message: Incoming,
+        recovered: bool,
+        generation: Option<u64>,
     ) {
         let mut message = message;
         message.recovered = recovered;
@@ -222,6 +239,14 @@ impl MessagingService {
         };
         let decision = {
             let mut inner = self.lock();
+            if generation.is_some_and(|value| {
+                inner
+                    .runs
+                    .get(binding_id)
+                    .is_none_or(|run| run.generation != value)
+            }) {
+                return;
+            }
             decide_incoming(&mut inner, binding_id, &message, recovered, all_groups)
         };
         match decision {

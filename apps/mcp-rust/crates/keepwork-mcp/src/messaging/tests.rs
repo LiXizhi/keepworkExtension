@@ -246,3 +246,210 @@ fn conflict_message_matches_node_wording() {
         );
     assert_eq!(same["confirmationRequired"], false);
 }
+
+struct LifecycleFixture {
+    home: PathBuf,
+    service: Arc<MessagingService>,
+}
+
+#[cfg(unix)]
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+impl LifecycleFixture {
+    fn new() -> Self {
+        let home = std::env::temp_dir().join(format!("kp-messaging-{}", uuid::Uuid::new_v4()));
+        let root = home.join("brain");
+        std::fs::create_dir_all(&root).unwrap();
+        let rules = root.join(RULE_DIR);
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("config.json"), default_config().to_string()).unwrap();
+        std::fs::write(rules.join("SKILL.md"), DEFAULT_PROMPT).unwrap();
+        let service = MessagingService::open(
+            home.join("messaging"),
+            PersonaStore::open(home.join("personas")),
+            Arc::new(PresenceState::new()),
+        );
+        let mut run = MessagingService::new_runtime(super::service::Binding {
+            id: "binding".into(),
+            channel: "dingtalk".into(),
+            root: root.to_string_lossy().into_owned(),
+            profile: "corp:user".into(),
+            enabled: true,
+            ..Default::default()
+        });
+        run.status = "listening".into();
+        run.identity = "corp:user".into();
+        run.owns_identity = true;
+        {
+            let mut inner = service.lock();
+            inner.identities.insert(run.identity.clone());
+            inner.runs.insert("binding".into(), run);
+        }
+        Self { home, service }
+    }
+}
+
+impl Drop for LifecycleFixture {
+    fn drop(&mut self) {
+        self.service.lock().closed = true;
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+#[tokio::test]
+async fn disconnected_after_stop_preserves_the_stopped_state() {
+    let f = LifecycleFixture::new();
+    f.service.stop("binding");
+    f.service
+        .disconnected("binding", "Listener disconnected")
+        .await;
+    let view = f.service.view("binding").unwrap();
+    assert_eq!(view["status"], "stopped");
+    assert_eq!(view["autoReply"], false);
+    assert_eq!(view["error"], "");
+    assert_eq!(view["nextRetryAt"], Value::Null);
+    assert!(f.service.lock().identities.is_empty());
+}
+
+#[tokio::test]
+async fn disconnected_after_close_does_not_modify_runtime_state() {
+    let f = LifecycleFixture::new();
+    f.service.lock().closed = true;
+    f.service
+        .disconnected("binding", "Listener disconnected")
+        .await;
+    let inner = f.service.lock();
+    let run = &inner.runs["binding"];
+    assert_eq!(run.error, "");
+    assert_eq!(run.identity, "corp:user");
+    assert!(run.owns_identity);
+    assert!(!run.retrying);
+}
+
+#[tokio::test]
+async fn disconnected_while_listening_schedules_recovery() {
+    let f = LifecycleFixture::new();
+    f.service
+        .disconnected("binding", "Listener disconnected")
+        .await;
+    let view = f.service.view("binding").unwrap();
+    assert_eq!(view["status"], "reconnecting");
+    assert_eq!(view["error"], "Listener disconnected");
+    assert!(view["nextRetryAt"].as_i64().unwrap() > now_ms());
+    assert!(f.service.lock().identities.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn start_failures_classify_occupied_and_invalid_identities_without_live_cli() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = ENV_LOCK.lock().await;
+    struct CliOverride(Option<std::ffi::OsString>);
+    impl Drop for CliOverride {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("KEEPWORK_DWS_PATH", value),
+                None => std::env::remove_var("KEEPWORK_DWS_PATH"),
+            }
+        }
+    }
+    let _restore = CliOverride(std::env::var_os("KEEPWORK_DWS_PATH"));
+    for (name, response, expected) in [
+        (
+            "occupied",
+            json!({"identity":{"corp_id":"corp","user_id":"user"},"bus":{"live":{"consumers":[{"id":"other-listener"}]}}}),
+            "reconnecting",
+        ),
+        (
+            "invalid-identity",
+            json!({"identity":{"corp_id":"another-corp","user_id":"user"}}),
+            "error",
+        ),
+        (
+            "listener-subscription-failure",
+            json!({"identity":{"corp_id":"corp","user_id":"user"}}),
+            "error",
+        ),
+        (
+            "listener-transient-failure",
+            json!({"identity":{"corp_id":"corp","user_id":"user"}}),
+            "reconnecting",
+        ),
+        (
+            "invalid-rules",
+            json!({"identity":{"corp_id":"corp","user_id":"user"}}),
+            "error",
+        ),
+    ] {
+        let f = LifecycleFixture::new();
+        f.service.stop("binding");
+        let cli = f.home.join(name);
+        let diagnostics = if name == "listener-transient-failure" {
+            "temporary connection loss"
+        } else {
+            "unsupported event"
+        };
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nif [ \"$2\" != status ]; then printf '%s\\n' '{}' >&2; exit 1; fi\nprintf '%s\\n' '{}'\n",
+                diagnostics, response
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var("KEEPWORK_DWS_PATH", &cli);
+        if name == "invalid-rules" {
+            std::fs::write(f.home.join("brain").join(RULE_DIR).join("config.json"), "{").unwrap();
+        }
+
+        let error = f.service.start("binding").await.unwrap_err();
+        assert!(!error.message.is_empty());
+        let view = f.service.view("binding").unwrap();
+        assert_eq!(view["status"], expected, "{name}: {view}");
+        assert_eq!(view["autoReply"], true);
+        assert_eq!(view["needsRepair"], expected == "error");
+        assert_eq!(view["nextRetryAt"].is_number(), expected == "reconnecting");
+        assert!(!view["error"].as_str().unwrap().is_empty());
+        assert!(f.service.lock().identities.is_empty());
+    }
+
+    for stopped in [true, false] {
+        let f = LifecycleFixture::new();
+        f.service.stop("binding");
+        let root = f.home.join("brain");
+        let cli = f.home.join("delayed-status");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh\nprintf ready > ready\nwhile [ ! -f release ]; do sleep 0.01; done\nprintf '%s\\n' '{\"identity\":{\"corp_id\":\"another-corp\",\"user_id\":\"user\"}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var("KEEPWORK_DWS_PATH", &cli);
+        let service = Arc::clone(&f.service);
+        let pending = tokio::spawn(async move { service.start("binding").await });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !root.join("ready").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if stopped {
+            f.service.stop("binding");
+        } else {
+            f.service.lock().closed = true;
+        }
+        std::fs::write(root.join("release"), "").unwrap();
+        pending.await.unwrap().unwrap();
+        let view = f.service.view("binding").unwrap();
+        assert_eq!(view["error"], "");
+        assert_eq!(view["nextRetryAt"], Value::Null);
+        if stopped {
+            assert_eq!(view["status"], "stopped");
+            assert_eq!(view["autoReply"], false);
+        }
+        assert!(f.service.lock().identities.is_empty());
+    }
+}

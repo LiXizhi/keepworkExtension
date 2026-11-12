@@ -48,14 +48,6 @@ async fn run(args: cli::Args) -> i32 {
         std::env::var("KEEPWORK_MCP_HOST_VERSION").ok(),
     );
     let started_at = http::now_iso();
-    let state = Arc::new(AppState::new(
-        port,
-        root.clone(),
-        require_auth,
-        token,
-        identity,
-    ));
-
     let listener = match tokio::net::TcpListener::bind((config::BIND_HOST, port)).await {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
@@ -67,6 +59,23 @@ async fn run(args: cli::Args) -> i32 {
             return 1;
         }
     };
+
+    // An attaching process must not load/rewrite user data. Offline persona
+    // maintenance reserves this port and leaves a lock before touching files.
+    if config::mcp_home_dir()
+        .join("persona-maintenance.lock")
+        .exists()
+    {
+        eprintln!("keepwork-mcp: persona maintenance is in progress; retry after it finishes");
+        return 1;
+    }
+    let state = Arc::new(AppState::new(
+        port,
+        root.clone(),
+        require_auth,
+        token,
+        identity,
+    ));
 
     let _ = config::write_instance(&InstanceInfo {
         pid: std::process::id(),
@@ -114,8 +123,13 @@ async fn run(args: cli::Args) -> i32 {
         Arc::clone(&state.messaging),
     ));
 
+    let messaging = Arc::clone(&state.messaging);
     let app = http::router(state);
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    let shutdown_messaging = Arc::clone(&messaging);
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown_messaging.close().await;
+    });
     let code = match server.await {
         Ok(()) => 0,
         Err(error) => {
@@ -123,6 +137,7 @@ async fn run(args: cli::Args) -> i32 {
             1
         }
     };
+    messaging.close().await;
     config::clear_instance();
     code
 }

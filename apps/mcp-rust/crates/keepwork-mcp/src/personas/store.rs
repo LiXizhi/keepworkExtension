@@ -116,6 +116,7 @@ impl PersonaStore {
             let Ok(mut row) = serde_json::from_slice::<Value>(&bytes) else {
                 continue;
             };
+            let original = row.clone();
             let Some(owner) = row["owner"].as_str().map(str::to_string) else {
                 continue;
             };
@@ -136,7 +137,9 @@ impl PersonaStore {
                 }
             }
             normalize_loaded(&mut row);
-            self.write_file(&key, &row);
+            if row != original {
+                self.write_file(&key, &row);
+            }
             inner.rows.insert(key, row);
         }
     }
@@ -1156,6 +1159,11 @@ impl PersonaStore {
 
     pub fn admin_snapshot(&self) -> Value {
         let inner = self.lock();
+        let owner_groups: HashSet<&str> = inner
+            .rows
+            .values()
+            .filter_map(|row| row["owner"].as_str())
+            .collect();
         let personas: Vec<Value> = inner
             .rows
             .values()
@@ -1173,8 +1181,12 @@ impl PersonaStore {
                     })
                     .unwrap_or(0);
                 json!({
+                    "key": file_key(row["owner"].as_str().unwrap_or(""), row["id"].as_str().unwrap_or("")),
+                    // Hash again for display: never expose an owner capability.
+                    "ownerGroup": sha256_hex(&[row["owner"].as_str().unwrap_or("").as_bytes()]),
                     "id": row["id"].as_str().unwrap_or(""),
                     "name": row["name"].as_str().unwrap_or(""),
+                    "root": row["root"].as_str().unwrap_or(""),
                     "state": row["job"]["state"].as_str().unwrap_or("idle"),
                     "executor": "keepwork",
                     "messages": messages,
@@ -1221,6 +1233,7 @@ impl PersonaStore {
         json!({
             "stats": {
                 "total": personas.len(),
+                "ownerGroups": owner_groups.len(),
                 "active": active,
                 "messages": message_total,
                 "enabledSchedules": enabled_total,

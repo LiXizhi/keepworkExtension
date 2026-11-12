@@ -78,6 +78,8 @@ pub(crate) struct Runtime {
     pub(crate) since: i64,
     pub(crate) subscriptions: String,
     pub(crate) stop: Option<tokio::sync::watch::Sender<bool>>,
+    pub(crate) generation: u64,
+    pub(crate) listener_done: Option<tokio::sync::watch::Receiver<bool>>,
     pub(crate) retrying: bool,
     pub(crate) next_retry_at: Option<i64>,
     pub(crate) starting: bool,
@@ -191,6 +193,7 @@ pub struct MessagingService {
     pub(crate) presence: Arc<PresenceState>,
     pub(crate) inner: Mutex<Inner>,
     pub(crate) login_gate: tokio::sync::Mutex<()>,
+    pub(crate) start_gate: tokio::sync::Mutex<()>,
     /// Bumped on every persistence write; `/messaging/events` frames full
     /// views per change like Node's `persist()` watcher fan-out.
     pub(crate) events: tokio::sync::watch::Sender<u64>,
@@ -273,6 +276,8 @@ impl MessagingService {
                                 since: now_ms(),
                                 subscriptions: String::new(),
                                 stop: None,
+                                generation: 0,
+                                listener_done: None,
                                 retrying: false,
                                 next_retry_at: None,
                                 starting: false,
@@ -339,6 +344,7 @@ impl MessagingService {
                 sender_names: HashMap::new(),
             }),
             login_gate: tokio::sync::Mutex::new(()),
+            start_gate: tokio::sync::Mutex::new(()),
             events: tokio::sync::watch::channel(0u64).0,
         });
         service.persist_all();

@@ -609,8 +609,10 @@ pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Respo
                 }
                 ("POST", "/admin/stop") => {
                     state.terminals.close_all();
-                    tokio::spawn(async {
+                    let messaging = Arc::clone(&state.messaging);
+                    tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        messaging.close().await;
                         std::process::exit(0);
                     });
                     json_response(

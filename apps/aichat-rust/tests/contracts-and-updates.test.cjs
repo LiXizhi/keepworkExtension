@@ -65,7 +65,7 @@ test("desktop menu protocol matches aichat-desktop page/host command routing", (
     "utf8"
   );
   const libRs = fs.readFileSync(
-    path.join(appRoot, "src-tauri", "src", "lib.rs"),
+    path.join(appRoot, "src-tauri", "src", "app", "commands.rs"),
     "utf8"
   );
   const bridgeRs = fs.readFileSync(
@@ -117,11 +117,12 @@ test("desktop menu protocol matches aichat-desktop page/host command routing", (
   assert.ok(runCommand.includes("Unsupported menu command"));
 
   // 未知 id 不再兜底广播。
-  assert.ok(libRs.includes('Err(format!("Unsupported menu command: {other}"))'));
+  const hostMenu = fs.readFileSync(path.join(appRoot, "src-tauri/src/app/host_menu.rs"), "utf8");
+  assert.ok(hostMenu.includes('Err(format!("Unsupported menu command: {other}"))'));
 });
 
 test("shell-owned menus return the shared payload while omitted render mode preserves legacy callers", () => {
-  const lib = fs.readFileSync(path.join(appRoot, "src-tauri/src/lib.rs"), "utf8");
+  const lib = fs.readFileSync(path.join(appRoot, "src-tauri/src/app/commands.rs"), "utf8");
   const openMenu = lib.slice(lib.indexOf("async fn desktop_open_menu"), lib.indexOf("fn desktop_titlebar_action"));
   assert.ok(openMenu.includes("verify_main_sender(&window, &state)?"));
   assert.ok(openMenu.includes("render_mode: Option<String>"));
@@ -143,8 +144,9 @@ test("shell-owned menus return the shared payload while omitted render mode pres
   assert.ok(renderer.includes('renderMode: "shell"'));
   assert.ok(renderer.includes('invoke("desktop_run_menu_command", { id })'));
   assert.ok(!renderer.includes("window.postMessage"), "rows use the host command gateway for exactly-once dispatch");
-  assert.ok(lib.includes("main_builder.decorations(false)"));
-  assert.ok(!lib.includes("main_win.set_menu("), "Windows no longer adds a second OS menu bar");
+  const startup = fs.readFileSync(path.join(appRoot, "src-tauri/src/app/startup.rs"), "utf8");
+  assert.ok(startup.includes("main_builder.decorations(false)"));
+  assert.ok(!startup.includes("main_win.set_menu("), "Windows no longer adds a second OS menu bar");
 });
 
 test("self-update and automatic update flows are preserved for both MCP and Desktop app", () => {
@@ -152,6 +154,9 @@ test("self-update and automatic update flows are preserved for both MCP and Desk
     path.join(appRoot, "src-tauri", "src", "runtime.rs"),
     "utf8"
   );
+  const manifest = fs.readFileSync(path.join(appRoot, "src-tauri/src/runtime/manifest.rs"), "utf8");
+  const archive = fs.readFileSync(path.join(appRoot, "src-tauri/src/runtime/archive.rs"), "utf8");
+  const stagedUpdate = fs.readFileSync(path.join(appRoot, "src-tauri/src/runtime/staged_update.rs"), "utf8");
   const updatesRs = fs.readFileSync(
     path.join(appRoot, "src-tauri", "src", "updates.rs"),
     "utf8"
@@ -161,8 +166,10 @@ test("self-update and automatic update flows are preserved for both MCP and Desk
 
   // MCP runtime self-update checks
   assert.ok(runtimeRs.includes("https://cdn.keepwork.com/keepwork/mcp-stable"));
-  assert.ok(runtimeRs.includes("validate_update_manifest"));
-  assert.ok(runtimeRs.includes("extract_zip_archive"));
+  assert.ok(stagedUpdate.includes("validate_update_manifest"));
+  assert.ok(manifest.includes("fn validate_update_manifest"));
+  assert.ok(stagedUpdate.includes("extract_zip_archive"));
+  assert.ok(archive.includes("fn extract_zip_archive"));
   assert.ok(runtimeRs.includes("apply_staged_update"));
 
   // Desktop self-update checks
@@ -201,15 +208,15 @@ test("floating pet window preserves click stability, screenshot permission bubbl
   assert.ok(petTs.includes("exit-confirm"));
   assert.match(
     petTs,
-    /api\.action\("drag-start", \{ screenX: event\.screenX, screenY: event\.screenY \}\)/
+    /api\.action\("drag-start", \{ screenX: event\.screenX, screenY: event\.screenY(?:, [^}]+)? \}\)/
   );
   assert.match(petTs, /state = \{ \.\.\.state, \.\.\.\(snap as PetSnapshot\) \}/);
   assert.match(petTs, /requestAnimationFrame\(step\)/);
   assert.doesNotMatch(petTs, /pointercancel", \(event\) => void release/);
   assert.match(petTs, /if \(pointer\?\.tracking\)/);
   assert.match(petTs, /releasePointerCapture/);
-  const libRs = fs.readFileSync(path.join(appRoot, "src-tauri", "src", "lib.rs"), "utf8");
-  assert.match(libRs, /\.shadow\(false\)/);
+  const petHost = fs.readFileSync(path.join(appRoot, "src-tauri/src/app/pet_host.rs"), "utf8");
+  assert.match(petHost, /\.shadow\(false\)/);
   assert.ok(petRs.includes("run_permission_bridge_session"));
   assert.ok(petRs.includes("sanitize_pet_state"));
 });

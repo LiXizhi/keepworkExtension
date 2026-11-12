@@ -4,6 +4,7 @@ export interface DesktopCapabilities {
   readonly defaultBrainFolder: true;
   readonly gitSetup: true;
   readonly floatingPet: true;
+  readonly petDictationAudioVersion?: 1;
   readonly startupSignIn: true;
 }
 
@@ -104,6 +105,8 @@ export interface AIChatDesktopBridge {
   reportStartupSignIn(signedIn: boolean): Promise<boolean>;
   publishPetState(state: Record<string, unknown>): Promise<boolean>;
   petResult(result: Record<string, unknown>): Promise<boolean>;
+  petAudio?(op: "start" | "activate" | "stop" | "ack", id: string, seq?: number): Promise<Record<string, unknown>>;
+  onPetAudio?(callback: (payload: Record<string, unknown>) => void): () => void;
   onPetCommand(callback: (payload: Record<string, unknown>) => void): () => void;
   checkGit(): Promise<GitStatus>;
   installGit(): Promise<GitInstallResult>;

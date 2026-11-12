@@ -9,6 +9,8 @@ commands.allow = [
   "desktop_report_startup_signin",
   "desktop_publish_pet_state",
   "desktop_pet_result",
+  "desktop_pet_audio",
+  "desktop_pet_audio_event",
   "desktop_check_git",
   "desktop_install_git",
   "desktop_roots",
