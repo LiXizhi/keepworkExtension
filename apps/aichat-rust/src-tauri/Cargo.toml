@@ -1,10 +1,10 @@
 [package]
 name = "aichat-rust"
-version = "0.2.50"
+version = "0.2.52"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
-default-run = "aichat-rust"
+default-run = "Keepwork"
 
 [lib]
 name = "aichat_rust_lib"
@@ -14,6 +14,11 @@ doctest = false
 [features]
 default = []
 dev-bins = []
+
+[[bin]]
+# macOS uses the executable name for the Dock label during unbundled development.
+name = "Keepwork"
+path = "src/main.rs"
 
 [[bin]]
 name = "desktop-smoke"

@@ -1,5 +1,6 @@
 import { installAIChatDesktopBridge } from "./bridge";
 import { mountDesktopTitlebar } from "./titlebar";
+import type { DesktopStatus, PageConnectionSnapshot } from "./types";
 
 const DEFAULT_MENUS = [
   { id: "file", label: "文件" },
@@ -21,10 +22,68 @@ const updatesBtn = document.getElementById("updates");
 const headline = document.getElementById("headline");
 const summary = document.getElementById("summary");
 const detail = document.getElementById("detail");
+const retryStatus = document.getElementById("retry-status");
+const recovery = window.__AICHAT_PAGE_CONNECTION__;
+let connection: PageConnectionSnapshot | undefined;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let pending = false;
+let disposed = false;
 
-if (reloadBtn && bridge) {
+function clearRetry(): void {
+  if (retryTimer !== undefined) clearTimeout(retryTimer);
+  retryTimer = undefined;
+}
+
+function render(status: DesktopStatus): void {
+  connection = status.pageConnection;
+  const failed = connection?.phase === "unavailable";
+  if (headline) headline.textContent = failed ? "暂时无法打开 AIChat" : "正在打开 AIChat…";
+  if (summary) {
+    summary.textContent = connection?.localEntry
+      ? "正在连接本地页面服务。若无法打开，请检查本地源码服务后重试。"
+      : "请检查网络连接或页面服务。恢复连接后会自动尝试重新打开。";
+  }
+  // Display only the host-sanitized origin, never an entry query or fragment.
+  if (detail) {
+    const running = ["running", "attached"].includes(status.mcp.state);
+    detail.textContent = `页面地址：${connection?.entryOrigin || "已配置的入口"}\n本机服务：${running ? "运行中" : "未就绪"}（${status.mcp.port}）${failed && connection?.error ? `\n${connection.error}` : ""}`;
+  }
+  if (reloadBtn) reloadBtn.textContent = failed ? "立即重试" : "正在连接…";
+  if (failed && connection && recovery) {
+    if (connection.autoRetries < connection.maxAutoRetries) {
+      const delay = [5, 15, 30][connection.autoRetries] || 30;
+      if (retryStatus) retryStatus.textContent = `${delay} 秒后自动重试（${connection.autoRetries + 1}/${connection.maxAutoRetries}），也可立即重试。`;
+      retryTimer = setTimeout(() => { void retry(true); }, delay * 1000);
+    } else if (retryStatus) {
+      retryStatus.textContent = "自动重试已暂停。连接恢复后，请点击“立即重试”。";
+    }
+  }
+}
+
+async function retry(automatic = false): Promise<void> {
+  if (!recovery || pending || disposed) return;
+  if (automatic && (connection?.phase !== "unavailable" || connection.autoRetries >= connection.maxAutoRetries)) return;
+  clearRetry();
+  pending = true;
+  if (reloadBtn) (reloadBtn as HTMLButtonElement).disabled = true;
+  if (headline) headline.textContent = "正在打开 AIChat…";
+  if (retryStatus) retryStatus.textContent = "正在连接页面，最多等待 20 秒…";
+  try {
+    await recovery.retry(automatic);
+    // Keep the button locked until navigation replaces this document. Native
+    // recovery owns the timeout; online events cannot start a parallel attempt.
+  } catch {
+    pending = false;
+    if (reloadBtn) (reloadBtn as HTMLButtonElement).disabled = false;
+    if (headline) headline.textContent = "暂时无法打开 AIChat";
+    if (retryStatus) retryStatus.textContent = "无法重试，请通过应用菜单重新加载。";
+  }
+}
+
+if (reloadBtn) {
   reloadBtn.addEventListener("click", () => {
-    void bridge.runMenuCommand("reload");
+    if (recovery) void retry();
+    else if (bridge) void bridge.runMenuCommand("reload");
   });
 }
 
@@ -34,18 +93,32 @@ if (updatesBtn && bridge) {
   });
 }
 
-if (bridge) {
-  void bridge
-    .status()
+if (recovery || bridge) {
+  void (recovery ? recovery.status() : bridge!.status())
     .then((status) => {
-      if (headline) headline.textContent = "无法打开 AIChat";
-      if (summary) summary.textContent = "请检查网络连接，或重新加载聊天窗口。";
-      if (detail) {
-        detail.textContent = `入口：${status.entryUrl} · MCP (${status.mcp.port})：${status.mcp.state}`;
+      if (disposed) return;
+      render(status);
+      if (connection?.phase === "idle") {
+        retryTimer = setTimeout(() => { void retry(); }, 0);
       }
     })
     .catch(() => {
-      if (headline) headline.textContent = "无法打开 AIChat";
-      if (summary) summary.textContent = "请重新加载聊天窗口。";
+      if (headline) headline.textContent = "暂时无法打开 AIChat";
+      if (summary) summary.textContent = "请通过应用菜单重新加载聊天窗口。";
     });
 }
+
+// This module runs only in the local connection page. A loaded chat has no
+// connectivity-triggered navigation, keeping drafts, terminals and tasks intact.
+window.addEventListener("online", () => { void retry(true); });
+window.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r") {
+    event.preventDefault();
+    if (recovery) void retry();
+    else if (bridge) void bridge.runMenuCommand("reload");
+  }
+});
+window.addEventListener("pagehide", () => {
+  disposed = true;
+  clearRetry();
+}, { once: true });

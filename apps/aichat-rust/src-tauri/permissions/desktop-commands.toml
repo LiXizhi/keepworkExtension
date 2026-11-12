@@ -2,6 +2,10 @@
 identifier = "allow-desktop-commands"
 description = "Allows the trusted Keepwork main, pet and updates windows to use the desktop bridge commands."
 commands.allow = [
+  "desktop_page_connection_status",
+  "desktop_retry_page_connection",
+  "desktop_page_connection_attempt",
+  "desktop_main_document_ready",
   "desktop_report_startup_signin",
   "desktop_publish_pet_state",
   "desktop_pet_result",

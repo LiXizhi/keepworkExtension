@@ -86,6 +86,16 @@ export interface DesktopStatus {
   mcp: RuntimeStatusSnapshot;
   localModel: RuntimeStatusSnapshot;
   updates: UpdatesSnapshot;
+  pageConnection?: PageConnectionSnapshot;
+}
+
+export interface PageConnectionSnapshot {
+  phase: "idle" | "connecting" | "unavailable" | "ready";
+  entryOrigin: string;
+  localEntry: boolean;
+  autoRetries: number;
+  maxAutoRetries: number;
+  error: string;
 }
 
 export interface AIChatDesktopBridge {
@@ -126,6 +136,10 @@ export interface UpdatesWindowBridge {
 
 declare global {
   interface Window {
+    __AICHAT_PAGE_CONNECTION__?: {
+      status(): Promise<DesktopStatus>;
+      retry(automatic?: boolean): Promise<void>;
+    };
     aichatDesktop?: AIChatDesktopBridge;
     desktopPet?: DesktopPetBridge;
     updates?: UpdatesWindowBridge;

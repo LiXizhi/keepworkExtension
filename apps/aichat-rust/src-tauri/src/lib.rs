@@ -9,6 +9,7 @@ pub mod git_setup;
 pub mod installer_stop;
 pub mod login_startup;
 pub mod menu;
+pub mod page_connection;
 pub mod permissions;
 pub mod pet;
 pub mod runtime;
@@ -30,6 +31,7 @@ use crate::menu::{
     canonical_host_command, is_allowed_host_command, is_allowed_page_command, menu_payload,
     MenuContextState,
 };
+use crate::page_connection::{PageConnection, Phase, LOAD_TIMEOUT_SECONDS};
 use crate::permissions::MediaGrants;
 use crate::pet::{PetController, WorkArea};
 use crate::runtime::{
@@ -91,6 +93,7 @@ pub struct DesktopStatus {
     pub mcp: RuntimeStatusSnapshot,
     pub local_model: RuntimeStatusSnapshot,
     pub updates: UpdatesSnapshot,
+    pub page_connection: page_connection::ConnectionSnapshot,
 }
 
 pub struct AppCore {
@@ -114,6 +117,7 @@ pub struct AppCore {
     pub quitting: AtomicBool,
     pub channels: Mutex<Vec<ChannelStatus>>,
     pub lock: Mutex<Option<DesktopLock>>,
+    pub page_connection: Mutex<PageConnection>,
 }
 
 impl AppCore {
@@ -153,11 +157,12 @@ impl AppCore {
             version: APP_VERSION.to_string(),
             platform: current_runtime_platform().to_string(),
             arch: current_runtime_arch().to_string(),
-            entry_url,
+            entry_url: entry_url.clone(),
             local_source: self.local_source_enabled.load(Ordering::Relaxed),
             mcp,
             local_model,
             updates,
+            page_connection: self.page_connection.lock().unwrap().snapshot(&entry_url),
         }
     }
 }
@@ -357,6 +362,17 @@ pub fn reveal_path_in_os(target: &Path, mode: &str) -> Result<(), String> {
 
 fn verify_main_sender(window: &WebviewWindow, core: &AppCore) -> Result<(), String> {
     let url = window.url().map(|u| u.to_string()).unwrap_or_default();
+    if window.label() == "main"
+        && core
+            .page_connection
+            .lock()
+            .unwrap()
+            .shell_url
+            .as_ref()
+            .is_some_and(|shell| shell.as_str() == url)
+    {
+        return Ok(());
+    }
     let dev_url = core.current_dev_url();
     assert_sender(window.label(), "main", true, &url, dev_url.as_deref())
 }
@@ -1341,16 +1357,184 @@ fn current_entry_url(core: &Arc<AppCore>) -> String {
         .unwrap_or_else(|_| ENTRY.to_string())
 }
 
-fn reload_main_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.eval("window.location.reload()");
+fn reload_main_window(app: &AppHandle, core: &Arc<AppCore>) {
+    let ready = core.page_connection.lock().unwrap().snapshot("").phase == Phase::Ready;
+    let target = if ready {
+        if let Some(window) = app.get_webview_window("main") {
+            if let Ok(url) = window.url() {
+                // Same-origin documents outside the chat entry retain their
+                // historical explicit-refresh behavior, without recovery IPC.
+                if !security::trusted_page(url.as_str(), core.current_dev_url().as_deref()) {
+                    let _ = window.reload();
+                    return;
+                }
+                Some(url.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        let connection = core.page_connection.lock().unwrap();
+        (!connection.target().is_empty()).then(|| connection.target().to_string())
+    }
+    .unwrap_or_else(|| current_entry_url(core));
+    start_page_connection(app, core, &target, false);
+}
+
+fn navigate_main_window(app: &AppHandle, core: &Arc<AppCore>, url: &str) {
+    start_page_connection(app, core, url, false);
+}
+
+fn show_connection_failure(app: &AppHandle, core: &AppCore, generation: u64, reason: &str) {
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
+    }
+    let shell = {
+        let mut connection = core.page_connection.lock().unwrap();
+        if !connection.fail(generation, reason) {
+            return;
+        }
+        connection.shell_url.clone()
+    };
+    if let (Some(window), Some(shell)) = (app.get_webview_window("main"), shell) {
+        let _ = window.navigate(shell);
     }
 }
 
-fn navigate_main_window(app: &AppHandle, url: &str) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.eval(&format!("window.location.replace({})", json!(url)));
+fn start_page_connection(app: &AppHandle, core: &Arc<AppCore>, target: &str, automatic: bool) {
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
     }
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Some(generation) = core
+        .page_connection
+        .lock()
+        .unwrap()
+        .begin(target, automatic)
+    else {
+        return;
+    };
+    // The URL is always chosen by the host; recovery IPC cannot supply a URL.
+    let url = target
+        .parse::<tauri::Url>()
+        .ok()
+        .filter(|_| security::trusted_page(target, core.current_dev_url().as_deref()));
+    let Some(url) = url else {
+        show_connection_failure(
+            app,
+            core,
+            generation,
+            "配置的页面地址不可用，请检查入口设置或重新选择本地源码目录。",
+        );
+        return;
+    };
+    if window.navigate(url).is_err() {
+        show_connection_failure(
+            app,
+            core,
+            generation,
+            "无法打开页面，请检查网络连接或页面服务后重试。",
+        );
+        return;
+    }
+    let app = app.clone();
+    let core = Arc::clone(core);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(LOAD_TIMEOUT_SECONDS)).await;
+        let dispatcher = app.clone();
+        let _ = dispatcher.run_on_main_thread(move || {
+            show_connection_failure(
+                &app,
+                &core,
+                generation,
+                "页面未在 20 秒内就绪，请检查网络连接或页面服务后重试。",
+            );
+        });
+    });
+}
+
+fn verify_connection_token(
+    window: &WebviewWindow,
+    core: &AppCore,
+    token: &str,
+    shell_only: bool,
+) -> Result<tauri::Url, String> {
+    verify_main_sender(window, core)?;
+    let url = window.url().map_err(|_| "无法确认页面地址")?;
+    let connection = core.page_connection.lock().unwrap();
+    if connection.token != token || (shell_only && !connection.is_shell(&url)) {
+        return Err("Unauthorized connection page".to_string());
+    }
+    Ok(url)
+}
+
+#[tauri::command]
+fn desktop_page_connection_status(
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    token: String,
+) -> Result<DesktopStatus, String> {
+    verify_connection_token(&window, &state, &token, true)?;
+    Ok(state.status_snapshot())
+}
+
+#[tauri::command]
+fn desktop_retry_page_connection(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    token: String,
+    automatic: bool,
+) -> Result<(), String> {
+    verify_connection_token(&window, &state, &token, true)?;
+    let target = {
+        let connection = state.page_connection.lock().unwrap();
+        connection.target().to_string()
+    };
+    let target = if target.is_empty() {
+        current_entry_url(&state)
+    } else {
+        target
+    };
+    start_page_connection(&app, &state, &target, automatic);
+    Ok(())
+}
+
+#[tauri::command]
+fn desktop_page_connection_attempt(
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    token: String,
+    url: String,
+) -> Result<Option<u64>, String> {
+    let actual = verify_connection_token(&window, &state, &token, false)?;
+    if actual.as_str() != url {
+        return Ok(None);
+    }
+    Ok(state.page_connection.lock().unwrap().attempt(&actual))
+}
+
+#[tauri::command]
+fn desktop_main_document_ready(
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    token: String,
+    url: String,
+    generation: u64,
+) -> Result<bool, String> {
+    let actual = verify_connection_token(&window, &state, &token, false)?;
+    if actual.as_str() != url {
+        return Ok(false);
+    }
+    Ok(state
+        .page_connection
+        .lock()
+        .unwrap()
+        .document_ready(generation, &actual))
 }
 
 /// 按比例步进缩放（Tauri 2.12 无 zoom 读取接口，用 `AppCore::zoom` 记账）。
@@ -1415,7 +1599,7 @@ fn start_local_source(app: &AppHandle, core: &Arc<AppCore>) -> Result<(), String
         *entry = url.clone();
     }
     core.local_source_enabled.store(true, Ordering::Relaxed);
-    navigate_main_window(app, &url);
+    navigate_main_window(app, core, &url);
     Ok(())
 }
 
@@ -1430,7 +1614,7 @@ fn use_published_site(app: &AppHandle, core: &Arc<AppCore>) {
         *entry = ENTRY.to_string();
     }
     core.local_source_enabled.store(false, Ordering::Relaxed);
-    navigate_main_window(app, ENTRY);
+    navigate_main_window(app, core, ENTRY);
 }
 
 /// 读取本机 MCP `/admin/status`（2 秒超时）；服务未运行时返回 None。
@@ -1559,7 +1743,7 @@ pub async fn execute_host_command(
                 }
             }
         }
-        "reload" => reload_main_window(app),
+        "reload" => reload_main_window(app, core),
         "fullscreen" => {
             if let Some(win) = app.get_webview_window("main") {
                 let cur = win.is_fullscreen().unwrap_or(false);
@@ -2117,8 +2301,12 @@ pub fn run() {
             exe_path
         }
     };
-    let login_startup =
-        LoginStartup::new(settings_path.clone(), launch_agents_dir, login_exe, packaged);
+    let login_startup = LoginStartup::new(
+        settings_path.clone(),
+        launch_agents_dir,
+        login_exe,
+        packaged,
+    );
     let _ = login_startup.ensure_default();
 
     let mut initial_entry = std::env::var("AICHAT_DESKTOP_DEV_URL")
@@ -2131,10 +2319,17 @@ pub fn run() {
 
     if std::env::var("AICHAT_DESKTOP_LOCAL_SOURCE").ok().as_deref() == Some("1") {
         if let Some(src_dir) = resolve_local_aichat_source_dir() {
-            match DevServer::start(&src_dir, "AIChat.html", &profile_dir.join("source-ports.json")) {
+            match DevServer::start(
+                &src_dir,
+                "AIChat.html",
+                &profile_dir.join("source-ports.json"),
+            ) {
                 Ok(srv) => {
                     initial_entry = srv.url();
-                    eprintln!("[desktop] Local AIChat source: {} -> {initial_entry}", src_dir.display());
+                    eprintln!(
+                        "[desktop] Local AIChat source: {} -> {initial_entry}",
+                        src_dir.display()
+                    );
                     initial_dev_srv = Some(srv);
                     initial_local_source = true;
                 }
@@ -2156,7 +2351,10 @@ pub fn run() {
         );
     }
     if let Some(error) = initial_local_source_error.as_deref() {
-        eprintln!("[desktop] {}", local_source_startup_warning(error, &initial_entry));
+        eprintln!(
+            "[desktop] {}",
+            local_source_startup_warning(error, &initial_entry)
+        );
     }
 
     let core = Arc::new(AppCore {
@@ -2179,6 +2377,7 @@ pub fn run() {
         quitting: AtomicBool::new(false),
         channels: Mutex::new(channel_states(&Value::Null)),
         lock: Mutex::new(None),
+        page_connection: Mutex::new(PageConnection::default()),
     });
 
     let icon_b64 =
@@ -2251,24 +2450,37 @@ pub fn run() {
             let core_for_nav = Arc::clone(&core_for_setup);
             let core_for_page_load = Arc::clone(&core_for_setup);
             let core_for_popup = Arc::clone(&core_for_setup);
-            let parsed_entry: tauri::Url = entry_target
-                .parse()
-                .unwrap_or_else(|_| ENTRY.parse().unwrap());
+            // Use the same WebView/storage for the local connection UI and chat.
+            // The local page initiates the first attempt after it has rendered.
+            let shell_url = if tauri::is_dev() {
+                app.config().build.dev_url.clone()
+            } else { None }.unwrap_or_else(|| {
+                if cfg!(target_os = "windows") { "http://tauri.localhost/" } else { "tauri://localhost/" }.parse().unwrap()
+            });
+            let connection_script = {
+                let mut connection = core_for_setup.page_connection.lock().unwrap();
+                connection.shell_url = Some(shell_url.clone());
+                let script = include_str!("../../src/pageConnection.js").replacen("export function", "function", 1);
+                format!("{script}\ninstallPageConnection({}, {});", json!(connection.token), json!(shell_url.as_str()))
+            };
             let mut main_builder = WebviewWindowBuilder::new(
                 app,
                 "main",
-                WebviewUrl::External(parsed_entry),
+                // Keep the requested URL identical to the script/native shell
+                // identity; App("index.html") strips '/' on custom schemes.
+                WebviewUrl::External(shell_url.clone()),
             )
             .title("KeepWork 第二大脑")
             .inner_size(1360.0, 900.0)
             .min_inner_size(640.0, 480.0)
             .resizable(true)
             .visible(!background_launch)
+            .initialization_script(&connection_script)
             .initialization_script(&init_script)
             .on_navigation(move |nav_url| {
                 let dev_url = core_for_nav.current_dev_url();
                 let url_str = nav_url.as_str();
-                if allowed_navigation(url_str, dev_url.as_deref()) {
+                if core_for_nav.page_connection.lock().unwrap().is_shell(nav_url) || allowed_navigation(url_str, dev_url.as_deref()) {
                     return true;
                 }
                 if let Err(err) = open_in_system_browser(url_str) {
@@ -2411,6 +2623,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            desktop_page_connection_status,
+            desktop_retry_page_connection,
+            desktop_page_connection_attempt,
+            desktop_main_document_ready,
             desktop_report_startup_signin,
             desktop_publish_pet_state,
             desktop_pet_result,
@@ -2441,7 +2657,11 @@ pub fn run() {
         eprintln!("error while running KeepWork 第二大脑 (aichat-rust): {error}");
         // Only window initialization failure authorizes the native launcher's one-time CEF fallback.
         // Page/network failures and arbitrary process crashes never use this exit code.
-        std::process::exit(if webview_failed.load(Ordering::Relaxed) { 86 } else { 2 });
+        std::process::exit(if webview_failed.load(Ordering::Relaxed) {
+            86
+        } else {
+            2
+        });
     }
     #[cfg(not(windows))]
     finish_tauri_run(result);
@@ -2466,7 +2686,10 @@ fn signal_launcher_webview_ready() {
             .find(|arg| arg == "--webview-ready-event")
             .and_then(|_| args.next());
         if let Some(event) = event {
-            if !event.to_string_lossy().starts_with("Local\\Keepwork.WebView.Ready.") {
+            if !event
+                .to_string_lossy()
+                .starts_with("Local\\Keepwork.WebView.Ready.")
+            {
                 return;
             }
             let name: Vec<u16> = event.encode_wide().chain(Some(0)).collect();

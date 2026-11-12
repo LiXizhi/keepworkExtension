@@ -54,7 +54,7 @@ test('Windows installer stops bundled MCP executables while preserving another i
   function cleanup() {
     const result = spawnSync('cargo', [
       'run', '--quiet', '--manifest-path', path.join(tauriRoot, 'Cargo.toml'),
-      '--bin', 'aichat-rust', '--', '--stop-mcp', install,
+      '--bin', 'Keepwork', '--', '--stop-mcp', install,
     ], { encoding: 'utf8', windowsHide: true, timeout: 150000 });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stdout + result.stderr);

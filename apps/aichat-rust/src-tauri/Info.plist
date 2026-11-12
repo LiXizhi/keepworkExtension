@@ -5,7 +5,7 @@
   <key>CFBundleName</key>
   <string>Keepwork</string>
   <key>CFBundleDisplayName</key>
-  <string>KeepWork 第二大脑</string>
+  <string>Keepwork</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>KeepWork 第二大脑需要访问麦克风以用于语音输入、实时通话和课堂录音。</string>
   <key>NSCameraUsageDescription</key>

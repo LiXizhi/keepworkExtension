@@ -50,7 +50,7 @@ jobs:
       - name: Verify Universal binary architectures and DMG
         working-directory: apps/aichat-rust
         run: |
-          APP_BIN="src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app/Contents/MacOS/aichat-rust"
+          APP_BIN="src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app/Contents/MacOS/Keepwork"
           ARCHS=$(lipo -archs "$APP_BIN")
           echo "Detected architectures: $ARCHS"
           echo "$ARCHS" | grep -q "x86_64"

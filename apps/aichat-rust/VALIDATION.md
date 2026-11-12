@@ -28,7 +28,7 @@
 - **macOS Universal**：
   - `hdiutil verify` 校验 DMG 镜像完整性。
   - `defaults read <Keepwork.app>/Contents/Info.plist CFBundleShortVersionString` 核对版本号。
-  - `lipo -archs <Keepwork.app>/Contents/MacOS/aichat-rust` 确认同时包含 `x86_64` 与 `arm64`。
+  - `lipo -archs <Keepwork.app>/Contents/MacOS/Keepwork` 确认同时包含 `x86_64` 与 `arm64`。
 - **Windows x64 / ARM64**：
   - 核对 `x86_64-pc-windows-msvc` 与 `aarch64-pc-windows-msvc` 目标配置及 NSIS 安装包生成。
 
