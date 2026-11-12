@@ -230,10 +230,20 @@ async fn refresh_persists_pagination_and_reports_incomplete_fixed_window_honestl
         json!({"0":f.page(vec![f.row("page-one","peer",f.now-20_000)],"next-page"),
         "next-page":f.page(vec![f.row("page-two","peer",f.now-10_000)],"")}),
     );
+    // A completed historical window still needs to catch up to now. Fix its
+    // endpoint so crossing a wall-clock second cannot change the expected status.
+    let end = f.now - 5000;
+    std::fs::write(
+        f.state.join(format!("{BINDING}.refresh-cursor.json")),
+        json!({"since":f.now-60_000,"pending":{"start":f.now-60_000,"end":end,"cursor":"0","visited":[]}}).to_string(),
+    )
+    .unwrap();
     assert_eq!(f.refresh().await.unwrap()["status"], "syncing");
     let pending = f.cursor()["pending"].clone();
     assert_eq!(pending["cursor"], "next-page");
-    assert_eq!(f.refresh().await.unwrap()["status"], "current");
+    let completed = f.refresh().await.unwrap();
+    assert_eq!(completed["status"], "syncing");
+    assert_eq!(completed["since"], end);
     assert!(f.cursor()["pending"].is_null());
     let calls: Vec<_> = f
         .calls()
