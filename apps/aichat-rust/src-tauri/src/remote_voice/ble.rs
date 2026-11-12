@@ -1,7 +1,6 @@
 //! Native BLE transport. Retrieving already connected peripherals is required:
 //! paired HID remotes often stop advertising while the OS owns their keyboard.
 use super::atvv::{Action, Caps, Ptt, AUDIO, CONTROL, GET_CAPS, SERVICE, TX};
-use super::native_input::{NativeInput, Target};
 use super::{asr, cancelled, RemoteVoice, VoiceConfig};
 use btleplug::api::{
     Central, CentralEvent, CentralState, Characteristic, Manager as _, Peripheral as _,
@@ -11,11 +10,13 @@ use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures_util::{future::pending, StreamExt};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
+
+pub(super) const BLUETOOTH_OFF: &str = "没有已开启的 BLE 蓝牙适配器，请开启系统蓝牙后重试。";
+pub(super) const NO_ADAPTER: &str = "没有可用的 BLE 蓝牙适配器，请开启蓝牙后重试。";
 
 struct Failure {
     message: String,
@@ -41,7 +42,7 @@ fn bluetooth_error(error: btleplug::Error) -> Failure {
             Failure::permanent("系统拒绝了蓝牙访问，请在系统设置允许 Keepwork 使用蓝牙后重试。")
         }
         btleplug::Error::NoAdapterAvailable => {
-            Failure::permanent("没有可用的 BLE 蓝牙适配器，请开启蓝牙后重试。")
+            Failure::permanent(NO_ADAPTER)
         }
         other => {
             let message = other.to_string().to_lowercase();
@@ -195,7 +196,6 @@ pub(super) async fn run(
     service: &RemoteVoice,
     generation: u64,
     config: VoiceConfig,
-    native: Arc<NativeInput>,
     cancel: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let manager = operation(&cancel, Manager::new(), 15)
@@ -215,7 +215,7 @@ pub(super) async fn run(
             break;
         }
     }
-    let adapter = selected.ok_or("没有已开启的 BLE 蓝牙适配器，请开启系统蓝牙后重试。")?;
+    let adapter = selected.ok_or(BLUETOOTH_OFF)?;
     let mut delay = 2;
     while service.current(generation) {
         service.update(generation, "scanning", "", None);
@@ -227,8 +227,7 @@ pub(super) async fn run(
                 "",
                 Some(peripheral.id().to_string()),
             );
-            let result =
-                connection(service, generation, &adapter, &peripheral, &native, &cancel).await;
+            let result = connection(service, generation, &adapter, &peripheral, &cancel).await;
             service.disarm(generation);
             // No audio request survives this attempt. Release this client's
             // GATT subscriptions, never OS pairing or another app's connection.
@@ -259,7 +258,13 @@ pub(super) async fn run(
     Ok(())
 }
 
-type Recognition = Pin<Box<dyn Future<Output = (Option<Target>, Result<String, String>)> + Send>>;
+type Recognition = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+fn cancel_utterance(ptt: &mut Ptt, recognition: &mut Option<Recognition>) {
+    // The future owns the connection/audio and is never spawned: dropping it
+    // makes even a late transcript or voice-send command impossible to deliver.
+    *recognition = None;
+    ptt.cancel_current();
+}
 async fn write(
     peripheral: &Peripheral,
     tx: &Characteristic,
@@ -278,7 +283,6 @@ async fn connection(
     generation: u64,
     adapter: &Adapter,
     peripheral: &Peripheral,
-    native: &NativeInput,
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), Failure> {
     let mut events = operation(cancel, adapter.events(), 5).await?;
@@ -322,12 +326,16 @@ async fn connection(
         retry: false,
     })?;
     service.update(generation, "ready", "", None);
-    let mut ptt = Ptt::<Target>::new(caps);
+    let mut ptt = Ptt::new(caps);
     let mut recognition: Option<Recognition> = None;
-    let mut heartbeat = tokio::time::interval(Duration::from_millis(250));
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(50));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut health_ticks = 0;
     loop {
+        if service.poll_clear(generation) {
+            cancel_utterance(&mut ptt, &mut recognition);
+            service.clear(generation);
+        }
         let mut stop = cancel.clone();
         tokio::select! {
             biased;
@@ -338,11 +346,22 @@ async fn connection(
                 None=>return Err(Failure::temporary("蓝牙状态连接已结束。")),
                 _=>{},
             },
+            _=heartbeat.tick()=>{
+                if service.poll_clear(generation) {
+                    cancel_utterance(&mut ptt,&mut recognition);
+                    service.clear(generation);
+                }
+                if ptt.expired() {
+                    let close=ptt.abort(); write(peripheral,&tx,&close,cancel).await?;
+                    return Err(Failure::temporary("单次语音输入不能超过 60 秒，正在重新连接语音通道；请松开语音键后重试。"));
+                }
+                health_ticks+=1;
+                if health_ticks%20==0 && !operation(cancel,peripheral.is_connected(),3).await? { return Err(Failure::temporary("遥控器连接已断开。")); }
+            },
             notification=notifications.next()=>{
                 let Some(notification)=notification else { return Err(Failure::temporary("遥控器音频连接已结束。")); };
                 let actions=if notification.uuid==CONTROL {
-                    let target=if matches!(notification.value.first(),Some(0x04|0x11)) { native.target() } else { None };
-                    ptt.control(&notification.value,target)
+                    ptt.control(&notification.value)
                 } else if notification.uuid==AUDIO { ptt.audio(&notification.value).map(|_|vec![]) } else { Ok(vec![]) };
                 let actions=match actions {
                     Ok(actions)=>actions,
@@ -358,10 +377,10 @@ async fn connection(
                     match action {
                         Action::Write(data)=>write(peripheral,&tx,&data,cancel).await?,
                         Action::State(state)=>service.update(generation,state,"",None),
-                        Action::Recognize{samples,target}=>{
+                        Action::Recognize{samples}=>{
                             service.update(generation,"transcribing","",None);
                             let cancel=cancel.clone();
-                            recognition=Some(Box::pin(async move { let result=asr::transcribe(&samples,cancel).await; (target,result) }));
+                            recognition=Some(Box::pin(async move { asr::transcribe(&samples,cancel).await }));
                         }
                     }
                 }
@@ -369,20 +388,17 @@ async fn connection(
             result=async { if let Some(work)=recognition.as_mut() { work.await } else { pending().await } }=>{
                 recognition=None; ptt.busy=false;
                 if !operation(cancel,peripheral.is_connected(),5).await? { return Err(Failure::temporary("识别结束前蓝牙已断开，本段结果已丢弃。")); }
+                if service.poll_clear(generation) {
+                    cancel_utterance(&mut ptt,&mut recognition);
+                    service.clear(generation);
+                    continue;
+                }
                 match result {
-                    (_,Ok(text)) if text.trim().is_empty()=>service.update(generation,"ready","",None),
-                    (target,Ok(text))=>service.deliver(generation,&text,&target),
-                    (_,Err(error))=>service.update(generation,"cloud-error",&error,None),
+                    Ok(text) if text.trim().is_empty()=>service.update(generation,"ready","",None),
+                    Ok(text)=>service.deliver(generation,&text),
+                    Err(error)=>service.update(generation,"cloud-error",&error,None),
                 }
             },
-            _=heartbeat.tick()=>{
-                if ptt.expired() {
-                    let close=ptt.abort(); write(peripheral,&tx,&close,cancel).await?;
-                    return Err(Failure::temporary("单次语音输入不能超过 60 秒，正在重新连接语音通道；请松开语音键后重试。"));
-                }
-                health_ticks+=1;
-                if health_ticks%4==0 && !operation(cancel,peripheral.is_connected(),3).await? { return Err(Failure::temporary("遥控器连接已断开。")); }
-            }
         }
     }
 }
@@ -390,6 +406,7 @@ async fn connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     #[test]
     fn invalid_identifiers_and_permission_errors_are_bounded() {
         assert!(requested_id("invalid").is_err());
@@ -397,5 +414,53 @@ mod tests {
         assert!(bluetooth_error(btleplug::Error::NotConnected).retry);
         assert!(remote_name("Xiaomi Bluetooth Remote 2 Pro"));
         assert!(!remote_name("普通键盘"));
+    }
+
+    #[test]
+    fn clear_drops_a_pending_recognition_so_late_text_and_voice_send_cannot_complete() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll};
+        for text in ["late private transcript", "发送提示词。"] {
+            let mut ptt = Ptt::new(Caps { version: 0x100, frame_size: 120 });
+            ptt.busy = true;
+            let completed = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&completed);
+            let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
+            let mut recognition: Option<Recognition> = Some(Box::pin(async move {
+                let result = receiver.await.map_err(|_| "cancelled".to_string())?;
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(result)
+            }));
+            let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+            assert!(matches!(recognition.as_mut().unwrap().as_mut().poll(&mut context), Poll::Pending));
+            cancel_utterance(&mut ptt, &mut recognition);
+            assert!(recognition.is_none());
+            assert!(!ptt.busy);
+            assert!(sender.send(text.to_string()).is_err(), "the revoked utterance must have no receiver");
+            assert_eq!(completed.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_wins_over_an_already_ready_result_without_poisoning_the_next_utterance() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for text in ["already ready transcript", "发送提示词"] {
+            let mut ptt = Ptt::new(Caps { version: 0x100, frame_size: 120 });
+            ptt.busy = true;
+            let completed = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&completed);
+            let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
+            let mut recognition: Option<Recognition> = Some(Box::pin(async move {
+                let result = receiver.await.map_err(|_| "cancelled".to_string())?;
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(result)
+            }));
+            sender.send(text.to_string()).unwrap();
+            cancel_utterance(&mut ptt, &mut recognition);
+            assert!(recognition.is_none());
+            assert_eq!(completed.load(Ordering::SeqCst), 0);
+            let next: Recognition = Box::pin(async { Ok("fresh next utterance".into()) });
+            assert_eq!(next.await.unwrap(), "fresh next utterance");
+        }
     }
 }

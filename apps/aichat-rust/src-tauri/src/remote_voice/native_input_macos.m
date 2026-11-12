@@ -142,42 +142,6 @@ void keepwork_voice_input_stop(void) {
     pthread_mutex_unlock(&lifecycle);
 }
 
-bool keepwork_voice_input_target(uint64_t *out) {
-    if (!out || !AXIsProcessTrusted()) return false;
-    memset(out, 0, sizeof(uint64_t) * 12);
-    AXUIElementRef system = AXUIElementCreateSystemWide();
-    AXUIElementSetMessagingTimeout(system, 0.2f);
-    AXUIElementRef app = NULL;
-    AXUIElementRef focus = NULL;
-    AXUIElementRef window = NULL;
-    CFTypeRef selected = NULL;
-    bool success = false;
-    if (AXUIElementCopyAttributeValue(system, kAXFocusedApplicationAttribute, (CFTypeRef *)&app) != kAXErrorSuccess || !app) goto cleanup;
-    AXUIElementSetMessagingTimeout(app, 0.2f);
-    if (AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute, (CFTypeRef *)&focus) != kAXErrorSuccess || !focus) goto cleanup;
-    AXUIElementSetMessagingTimeout(focus, 0.2f);
-    pid_t pid;
-    if (AXUIElementGetPid(app, &pid) != kAXErrorSuccess) goto cleanup;
-    out[0] = (uint64_t)pid;
-    out[1] = CFHash(focus);
-    if (AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute, (CFTypeRef *)&window) != kAXErrorSuccess || !window) goto cleanup;
-    out[2] = CFHash(window);
-    if (AXUIElementCopyAttributeValue(focus, kAXSelectedTextRangeAttribute, &selected) != kAXErrorSuccess || !selected || CFGetTypeID(selected) != AXValueGetTypeID()) goto cleanup;
-    CFRange range;
-    if (!AXValueGetValue((AXValueRef)selected, kAXValueCFRangeType, &range) || range.location < 0 || range.length < 0) goto cleanup;
-    out[3] = 1;
-    out[4] = (uint64_t)range.location;
-    out[5] = (uint64_t)range.length;
-    success = true;
-cleanup:
-    if (selected) CFRelease(selected);
-    if (window) CFRelease(window);
-    if (focus) CFRelease(focus);
-    if (app) CFRelease(app);
-    CFRelease(system);
-    return success;
-}
-
 bool keepwork_voice_input_modifiers(void) {
     CGEventFlags flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
     return (flags & (kCGEventFlagMaskCommand | kCGEventFlagMaskControl | kCGEventFlagMaskAlternate | kCGEventFlagMaskShift)) != 0;
@@ -193,20 +157,76 @@ bool keepwork_voice_input_copy(const char *bytes, size_t length) {
     }
 }
 
-bool keepwork_voice_input_paste(void) {
+static bool postKeyboardPair(CGKeyCode key, CGEventFlags flags) {
     if (!AXIsProcessTrusted()) return false;
-    CGEventRef down = CGEventCreateKeyboardEvent(NULL, 9, true);
-    CGEventRef up = CGEventCreateKeyboardEvent(NULL, 9, false);
+    CGEventRef down = CGEventCreateKeyboardEvent(NULL, key, true);
+    CGEventRef up = CGEventCreateKeyboardEvent(NULL, key, false);
     if (!down || !up) {
         if (down) CFRelease(down);
         if (up) CFRelease(up);
         return false;
     }
-    CGEventSetFlags(down, kCGEventFlagMaskCommand);
-    CGEventSetFlags(up, kCGEventFlagMaskCommand);
+    CGEventSetFlags(down, flags);
+    CGEventSetFlags(up, flags);
     CGEventPost(kCGHIDEventTap, down);
     CGEventPost(kCGHIDEventTap, up);
     CFRelease(down);
     CFRelease(up);
     return true;
+}
+
+bool keepwork_voice_input_paste(void) {
+    return postKeyboardPair(9, kCGEventFlagMaskCommand);
+}
+
+bool keepwork_voice_input_submit(void) {
+    return postKeyboardPair(36, 0);
+}
+
+// Clear alone inspects current role/editability. Dictation and Return never
+// need an AX range/value snapshot, and no accessibility text is read here.
+int keepwork_voice_input_clear(void) {
+    if (!AXIsProcessTrusted()) return 2;
+    AXUIElementRef system = AXUIElementCreateSystemWide();
+    if (!system) return 1;
+    AXUIElementSetMessagingTimeout(system, 0.5);
+    CFTypeRef focus = NULL, role = NULL, subrole = NULL, enabled = NULL;
+    bool editable = false;
+    if (AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute, &focus) == kAXErrorSuccess
+        && focus && CFGetTypeID(focus) == AXUIElementGetTypeID()) {
+        AXUIElementRef input = (AXUIElementRef)focus;
+        AXUIElementSetMessagingTimeout(input, 0.5);
+        if (AXUIElementCopyAttributeValue(input, kAXRoleAttribute, &role) == kAXErrorSuccess && role
+            && (CFEqual(role, kAXTextFieldRole) || CFEqual(role, kAXTextAreaRole))) {
+            Boolean settable = false;
+            AXUIElementCopyAttributeValue(input, kAXSubroleAttribute, &subrole);
+            bool secure = subrole && CFEqual(subrole, kAXSecureTextFieldSubrole);
+            editable = !secure
+                && AXUIElementCopyAttributeValue(input, kAXEnabledAttribute, &enabled) == kAXErrorSuccess
+                && enabled && CFEqual(enabled, kCFBooleanTrue)
+                && AXUIElementIsAttributeSettable(input, kAXValueAttribute, &settable) == kAXErrorSuccess
+                && settable;
+        }
+    }
+    if (enabled) CFRelease(enabled);
+    if (subrole) CFRelease(subrole);
+    if (role) CFRelease(role);
+    if (focus) CFRelease(focus);
+    CFRelease(system);
+    if (!editable) return 1;
+    if (keepwork_voice_input_modifiers()) return 2;
+    // Create every event before posting the first, so allocation failure cannot
+    // leave a destructive half sequence. Do not retry an uncertain mutation.
+    CGKeyCode keys[] = {0, 0, 51, 51};
+    CGEventRef events[4] = {NULL};
+    for (int i = 0; i < 4; i++) {
+        events[i] = CGEventCreateKeyboardEvent(NULL, keys[i], i % 2 == 0);
+        if (!events[i]) {
+            for (int j = 0; j < i; j++) CFRelease(events[j]);
+            return 2;
+        }
+        CGEventSetFlags(events[i], i < 2 ? kCGEventFlagMaskCommand : 0);
+    }
+    for (int i = 0; i < 4; i++) { CGEventPost(kCGHIDEventTap, events[i]); CFRelease(events[i]); }
+    return 0;
 }

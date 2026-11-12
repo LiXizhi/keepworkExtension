@@ -152,23 +152,20 @@ impl AudioBuffer {
         Ok(self.samples)
     }
 }
-pub enum Action<T> {
+pub enum Action {
     Write(Vec<u8>),
     State(&'static str),
-    Recognize {
-        samples: Vec<i16>,
-        target: Option<T>,
-    },
+    Recognize { samples: Vec<i16> },
 }
-pub struct Ptt<T> {
+pub struct Ptt {
     caps: Caps,
-    capture: Option<(AudioBuffer, Option<T>, Instant)>,
+    capture: Option<(AudioBuffer, Instant)>,
     stream: u8,
     open_pending: bool,
     discarding: bool,
     pub busy: bool,
 }
-impl<T> Ptt<T> {
+impl Ptt {
     pub fn new(caps: Caps) -> Self {
         Self {
             caps,
@@ -179,7 +176,7 @@ impl<T> Ptt<T> {
             busy: false,
         }
     }
-    pub fn control(&mut self, data: &[u8], target: Option<T>) -> Result<Vec<Action<T>>, String> {
+    pub fn control(&mut self, data: &[u8]) -> Result<Vec<Action>, String> {
         if data.is_empty() || data.len() > 256 {
             return Ok(vec![]);
         }
@@ -215,7 +212,7 @@ impl<T> Ptt<T> {
                 if data[2] != 2 {
                     return Err("遥控器选择了不支持的音频编码。".into());
                 }
-                self.capture = Some((AudioBuffer::new(self.caps), target, Instant::now()));
+                self.capture = Some((AudioBuffer::new(self.caps), Instant::now()));
                 Ok(vec![Action::State("recording")])
             }
             0x00 | 0x13 => {
@@ -223,7 +220,7 @@ impl<T> Ptt<T> {
                 if std::mem::take(&mut self.discarding) {
                     return Ok(vec![]);
                 }
-                let Some((capture, target, _)) = self.capture.take() else {
+                let Some((capture, _)) = self.capture.take() else {
                     return Ok(vec![]);
                 };
                 let samples = capture.finish()?;
@@ -231,10 +228,10 @@ impl<T> Ptt<T> {
                     return Ok(vec![Action::State("ready")]);
                 }
                 self.busy = true;
-                Ok(vec![Action::Recognize { samples, target }])
+                Ok(vec![Action::Recognize { samples }])
             }
             0x0a | 0x12 => {
-                if let Some((capture, _, _)) = &mut self.capture {
+                if let Some((capture, _)) = &mut self.capture {
                     if data.len() < 7 {
                         return Err("ATVV 音频同步通知不完整。".into());
                     }
@@ -246,7 +243,7 @@ impl<T> Ptt<T> {
         }
     }
     pub fn audio(&mut self, data: &[u8]) -> Result<(), String> {
-        if let Some((capture, _, _)) = &mut self.capture {
+        if let Some((capture, _)) = &mut self.capture {
             capture.append(data)?;
         }
         Ok(())
@@ -254,7 +251,15 @@ impl<T> Ptt<T> {
     pub fn expired(&self) -> bool {
         self.capture
             .as_ref()
-            .is_some_and(|(_, _, started)| started.elapsed() >= Duration::from_secs(60))
+            .is_some_and(|(_, started)| started.elapsed() >= Duration::from_secs(60))
+    }
+    /// Cancel this utterance without MIC_CLOSE (which breaks Notify on some
+    /// firmware). If PTT is held, ignore its tail until the physical release.
+    pub fn cancel_current(&mut self) {
+        self.discarding |= self.capture.is_some() || self.open_pending;
+        self.capture = None;
+        self.open_pending = false;
+        self.busy = false;
     }
     pub fn abort(&mut self) -> Vec<u8> {
         self.capture = None;
@@ -337,69 +342,65 @@ mod tests {
     }
     #[test]
     fn ptt_only_opens_on_remote_request_and_releases_once_without_extra_close() {
-        let mut p = Ptt::<u8>::new(caps(0x100, 120));
-        assert!(matches!(&p.control(&[8],None).unwrap()[0],Action::Write(w) if w == &[12,0]));
-        assert!(p.control(&[8], None).unwrap().is_empty());
+        let mut p = Ptt::new(caps(0x100, 120));
+        assert!(matches!(&p.control(&[8]).unwrap()[0],Action::Write(w) if w == &[12,0]));
+        assert!(p.control(&[8]).unwrap().is_empty());
         assert!(matches!(
-            &p.control(&[4, 0, 2, 1], Some(7)).unwrap()[0],
+            &p.control(&[4, 0, 2, 1]).unwrap()[0],
             Action::State("recording")
         ));
         p.audio(&[0x77; 1200]).unwrap();
-        assert!(p.control(&[4, 0, 2, 1], Some(8)).unwrap().is_empty());
+        assert!(p.control(&[4, 0, 2, 1]).unwrap().is_empty());
         assert!(matches!(
-            &p.control(&[0, 2], None).unwrap()[0],
-            Action::Recognize {
-                target: Some(7),
-                ..
-            }
+            &p.control(&[0, 2]).unwrap()[0],
+            Action::Recognize { .. }
         ));
-        assert!(p.control(&[0, 0], None).unwrap().is_empty());
+        assert!(p.control(&[0, 0]).unwrap().is_empty());
         assert!(matches!(
-            &p.control(&[4, 0, 2, 2], None).unwrap()[0],
+            &p.control(&[4, 0, 2, 2]).unwrap()[0],
             Action::State("busy")
         ));
     }
     #[test]
     fn aborted_or_silent_recordings_never_create_cloud_work() {
-        let mut p = Ptt::<()>::new(caps(0x100, 120));
-        p.control(&[4, 0, 2, 1], None).unwrap();
+        let mut p = Ptt::new(caps(0x100, 120));
+        p.control(&[4, 0, 2, 1]).unwrap();
         p.audio(&[0; 1200]).unwrap();
         assert!(matches!(
-            &p.control(&[0], None).unwrap()[0],
+            &p.control(&[0]).unwrap()[0],
             Action::State("ready")
         ));
-        p.control(&[4, 0, 2, 2], None).unwrap();
+        p.control(&[4, 0, 2, 2]).unwrap();
         p.audio(&[0x77; 1200]).unwrap();
         p.abort();
-        assert!(p.control(&[0], None).unwrap().is_empty());
-        p.control(&[4, 0, 2, 3], None).unwrap();
+        assert!(p.control(&[0]).unwrap().is_empty());
+        p.control(&[4, 0, 2, 3]).unwrap();
         p.audio(&[1]).unwrap();
-        assert!(p.control(&[0], None).is_err());
+        assert!(p.control(&[0]).is_err());
     }
 
     #[test]
     fn busy_ptt_is_dropped_without_closing_or_replacing_the_existing_recognition() {
-        let mut p = Ptt::<u8>::new(caps(0x100, 120));
-        p.control(&[4, 0, 2, 1], Some(7)).unwrap();
+        let mut p = Ptt::new(caps(0x100, 120));
+        p.control(&[4, 0, 2, 1]).unwrap();
         p.audio(&[0x77; 1200]).unwrap();
-        let old = p.control(&[0], None).unwrap().pop().unwrap();
+        let old = p.control(&[0]).unwrap().pop().unwrap();
         assert!(p.busy);
 
         // A new physical session must not write MIC_CLOSE on firmware 2671,
         // create queued audio, or cancel/replace the already released request.
-        assert!(p.control(&[8], None).unwrap().is_empty());
-        let busy = p.control(&[4, 0, 2, 2], Some(8)).unwrap();
+        assert!(p.control(&[8]).unwrap().is_empty());
+        let busy = p.control(&[4, 0, 2, 2]).unwrap();
         assert_eq!(busy.len(), 1);
         assert!(matches!(busy[0], Action::State("busy")));
         p.audio(&[0x77; 8193]).unwrap(); // No recording buffer accepts this data.
-        assert!(p.control(&[0], None).unwrap().is_empty());
+        assert!(p.control(&[0]).unwrap().is_empty());
         assert!(
             p.busy,
             "releasing the discarded session cannot complete the old ASR"
         );
         match old {
-            Action::Recognize { samples, target } => {
-                assert_eq!(target, Some(7));
+            Action::Recognize { samples } => {
                 assert_eq!(samples.len(), 2400);
             }
             _ => panic!("the original released recording must remain independent"),
@@ -407,43 +408,100 @@ mod tests {
 
         p.busy = false;
         assert!(matches!(
-            p.control(&[4, 0, 2, 3], Some(9)).unwrap()[0],
+            p.control(&[4, 0, 2, 3]).unwrap()[0],
             Action::State("recording")
         ));
         p.audio(&[0x77; 1200]).unwrap();
         assert!(matches!(
-            p.control(&[0], None).unwrap()[0],
-            Action::Recognize {
-                target: Some(9),
-                ..
-            }
+            p.control(&[0]).unwrap()[0],
+            Action::Recognize { .. }
         ));
     }
 
     #[test]
     fn discarded_busy_session_stays_discarded_until_release_even_when_old_asr_completes() {
-        let mut p = Ptt::<u8>::new(caps(0x100, 120));
+        let mut p = Ptt::new(caps(0x100, 120));
         p.busy = true;
         assert!(matches!(
-            p.control(&[4, 0, 2, 2], Some(8)).unwrap()[0],
+            p.control(&[4, 0, 2, 2]).unwrap()[0],
             Action::State("busy")
         ));
         p.busy = false; // The old request completes while this key is still held.
-        assert!(p.control(&[8], None).unwrap().is_empty());
-        assert!(p.control(&[4, 0, 2, 2], Some(8)).unwrap().is_empty());
-        assert!(p.control(&[0x11, 0, 2, 2], Some(8)).unwrap().is_empty());
+        assert!(p.control(&[8]).unwrap().is_empty());
+        assert!(p.control(&[4, 0, 2, 2]).unwrap().is_empty());
+        assert!(p.control(&[0x11, 0, 2, 2]).unwrap().is_empty());
         p.audio(&[0x77; 1200]).unwrap();
         assert!(
-            p.control(&[0x13], None).unwrap().is_empty(),
+            p.control(&[0x13]).unwrap().is_empty(),
             "never recognize only the tail of a discarded utterance"
         );
+        assert!(matches!(p.control(&[8]).unwrap()[0], Action::Write(_)));
         assert!(matches!(
-            p.control(&[8], None).unwrap()[0],
-            Action::Write(_)
-        ));
-        assert!(matches!(
-            p.control(&[4, 0, 2, 3], Some(9)).unwrap()[0],
+            p.control(&[4, 0, 2, 3]).unwrap()[0],
             Action::State("recording")
         ));
+    }
+
+    #[test]
+    fn clear_during_capture_discards_its_audio_and_duplicate_starts_until_physical_release() {
+        let mut p = Ptt::new(caps(0x100, 120));
+        p.control(&[4, 0, 2, 1]).unwrap();
+        p.audio(&[0x77; 1200]).unwrap();
+        p.audio(&[1]).unwrap(); // Even a partial frame must be discarded, not finalized.
+        p.cancel_current();
+        p.cancel_current();
+        assert!(!p.busy && !p.expired());
+        assert!(p.control(&[8]).unwrap().is_empty());
+        assert!(p.control(&[4, 0, 2, 1]).unwrap().is_empty());
+        p.audio(&[0x77; 8193]).unwrap(); // There is no buffer to accept the tail.
+        assert!(p.control(&[0]).unwrap().is_empty());
+        assert!(p.control(&[0]).unwrap().is_empty());
+        assert!(matches!(p.control(&[4, 0, 2, 2]).unwrap()[0], Action::State("recording")));
+        p.audio(&[0x77; 1200]).unwrap();
+        assert!(matches!(p.control(&[0]).unwrap()[0], Action::Recognize { .. }));
+    }
+
+    #[test]
+    fn clear_while_mic_open_is_pending_ignores_the_delayed_session_until_release() {
+        let mut p = Ptt::new(caps(0x100, 120));
+        assert!(matches!(&p.control(&[8]).unwrap()[0], Action::Write(bytes) if bytes == &[12, 0]));
+        p.cancel_current();
+        assert!(p.control(&[8]).unwrap().is_empty());
+        assert!(p.control(&[0x11, 0, 2, 1]).unwrap().is_empty());
+        p.audio(&[0x77; 1200]).unwrap();
+        assert!(p.control(&[0x13]).unwrap().is_empty());
+        assert!(matches!(&p.control(&[8]).unwrap()[0], Action::Write(bytes) if bytes == &[12, 0]));
+        assert!(matches!(p.control(&[4, 0, 2, 2]).unwrap()[0], Action::State("recording")));
+    }
+
+    #[test]
+    fn clear_while_only_asr_is_pending_does_not_drop_the_next_fresh_ptt() {
+        let mut p = Ptt::new(caps(0x100, 120));
+        p.control(&[4, 0, 2, 1]).unwrap();
+        p.audio(&[0x77; 1200]).unwrap();
+        assert!(matches!(p.control(&[0]).unwrap()[0], Action::Recognize { .. }));
+        assert!(p.busy);
+        p.cancel_current();
+        assert!(!p.busy);
+        assert!(matches!(p.control(&[4, 0, 2, 2]).unwrap()[0], Action::State("recording")));
+        p.audio(&[0x77; 1200]).unwrap();
+        assert!(matches!(p.control(&[0]).unwrap()[0], Action::Recognize { .. }));
+        let mut idle = Ptt::new(caps(0x100, 120));
+        idle.cancel_current();
+        assert!(matches!(idle.control(&[4, 0, 2, 1]).unwrap()[0], Action::State("recording")));
+    }
+
+    #[test]
+    fn clear_keeps_an_already_discarded_busy_ptt_blocked_until_its_release() {
+        let mut p = Ptt::new(caps(0x100, 120));
+        p.busy = true;
+        assert!(matches!(p.control(&[4, 0, 2, 2]).unwrap()[0], Action::State("busy")));
+        p.cancel_current();
+        assert!(!p.busy);
+        assert!(p.control(&[8]).unwrap().is_empty());
+        assert!(p.control(&[4, 0, 2, 2]).unwrap().is_empty());
+        p.audio(&[0x77; 1200]).unwrap();
+        assert!(p.control(&[0]).unwrap().is_empty());
+        assert!(matches!(p.control(&[4, 0, 2, 3]).unwrap()[0], Action::State("recording")));
     }
 }

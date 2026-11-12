@@ -30,7 +30,7 @@ use tauri::{
 /// 退出桌面端：关闭原生终端、停止两个受管 Runtime 后退出进程
 /// （托盘「完全退出」与菜单「退出」共用）。
 fn quit_desktop(app: &AppHandle, core: &Arc<AppCore>) {
-    core.remote_voice.stop();
+    core.remote_voice.shutdown();
     stop_pet_audio(app, core, None, "应用正在退出", false);
     core.quitting.store(true, Ordering::Relaxed);
     core.terminals.close_all();

@@ -10,18 +10,36 @@
 <body>
   <main>
     <h1>遥控器语音输入</h1>
-    <p>小米遥控器 2 / 2 Pro（RC001 / RC003）：按住语音键说话，松手后交给 Keepwork 语音识别，粘贴到当前光标。不会自动按回车。</p>
+    <p class="intro">小米遥控器 2 / 2 Pro · Keepwork 云端识别，无需本地模型。</p>
     <div id="status" role="status" aria-live="polite">正在读取状态…</div>
     <p id="error" role="alert"></p>
-    <fieldset id="configuration">
-      <label for="device">蓝牙设备 ID（可选）</label>
-      <input id="device" type="text" spellcheck="false" placeholder="留空自动查找；Windows 可填蓝牙地址，macOS 可填设备 UUID">
-    </fieldset>
-    <div class="actions"><button id="start" type="button">启动语音输入</button><button id="stop" type="button" disabled>停止</button></div>
-    <p class="hint">蓝牙接收与解码已内置，直接启动即可。每段录音只在松手后发送给 Keepwork 云端语音识别，需要联网；客户端不保存录音，不使用本地模型。识别完成后再录下一段。失败不会自动重传，请重新按住语音键录制。</p>
-    <p class="hint">先在系统蓝牙设置中配对遥控器，并断开电视或其他桥接软件。macOS 需允许 Keepwork 使用蓝牙、辅助功能及输入监控。权限不足会给出错误提示。</p>
-    <p class="hint">就绪期间会全局预留 F5，普通键盘的 F5 也会被拦截；停止或断连后恢复。请启动后切回输入框再按住语音键。切换前台目标时只复制识别文字，请手动粘贴。识别结果会覆盖系统剪贴板。</p>
-    <p class="hint">默认关闭，重启后需手动启动。关闭此设置窗口会继续语音输入；可从托盘重新打开并停止。</p>
+    <ol class="controls" aria-label="遥控器操作">
+      <li><kbd>语音键</kbd><strong>按住说话，松手输入</strong><span>普通口述只输入文字，不会自动按回车。</span></li>
+      <li><kbd id="clear-key">返回键</kbd><strong>清空当前输入框</strong><span id="clear-help">正在检查清除键…</span></li>
+      <li><kbd>OK 键</kbd><strong>短按发送</strong><span>等识别完成后再按。也可单独说“发送提示词”。</span></li>
+    </ol>
+    <p id="key-status" class="hint" role="status" aria-live="polite"></p>
+    <div class="actions">
+      <button id="start" type="button">启动语音输入</button>
+      <button id="begin" type="button" disabled>就绪，开始输入</button>
+      <button id="stop" type="button" disabled>停止</button>
+    </div>
+    <label class="auto-option" for="auto-start"><input id="auto-start" type="checkbox" checked> 配对后自动开启</label>
+    <p class="hint auto-hint">发现已配对的小米遥控器后自动连接。关闭此选项会停止输入；点“停止”只暂停本次运行。</p>
+    <details>
+      <summary>设备与使用说明</summary>
+      <fieldset id="configuration">
+        <label for="device">蓝牙设备 ID（可选）</label>
+        <input id="device" type="text" spellcheck="false" placeholder="留空自动查找；Windows 填蓝牙地址，macOS 填设备 UUID">
+      </fieldset>
+      <p id="connected-device" class="hint"></p>
+      <p class="hint">先在系统蓝牙设置配对遥控器，并断开电视或其他遥控软件。默认在检测到支持的已配对遥控器后开启，无需每次手动启动；没有设备时只等待。macOS 需允许 Keepwork 使用蓝牙、辅助功能及输入监控；权限未就绪时可手动启动重试。</p>
+      <p class="hint">蓝牙接收与解码已内置，无需安装环境或本地模型。松开语音键后，录音发送给 Keepwork 云端识别，需要联网；客户端不保存录音。失败请重新录制，不会自动重传。</p>
+      <p class="hint">macOS 已确认的单只小米 HID 遥控器支持返回键清空，取消当前录音或识别，直到松开语音键才接收下一段。无法确认设备、出现多只遥控器或 Windows 系统时，请单独说“清除提示词”；语音清除需等本段识别成功。清除只处理可编辑输入框。</p>
+      <p class="hint">OK 保留系统原生回车，不额外发送第二次；识别中请等待。请在 AIChat 回复结束后发送，生成中回车会按现有规则停止回复，其他应用依自身回车规则处理。“发送提示词”和“清除提示词”整句口令只执行动作，口令文字不会填入，也不改动剪贴板。</p>
+      <p class="hint">就绪期间全局预留 F5，普通键盘的 F5 也会被拦截；停止或断连后恢复。普通口述输入到当前光标，会覆盖系统剪贴板。请先松开 Ctrl、Alt、Shift、Command 或 Win 修饰键。</p>
+      <p class="hint">“就绪，开始输入”返回 AIChat 并聚焦输入框。也可自行切换到其他应用输入；关闭设置窗口会继续运行，可从托盘重新打开并停止。</p>
+    </details>
   </main>
   <script type="module" src="/src/remote-voice.ts"></script>
 </body>

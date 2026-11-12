@@ -204,6 +204,16 @@ async fn transcribe_to(
 }
 
 #[cfg(test)]
+pub(super) async fn transcribe_fixture(
+    pcm: &[i16], cancel: watch::Receiver<bool>, endpoint: &str,
+) -> Result<String, String> {
+    transcribe_to(pcm, cancel, endpoint, Deadlines {
+        connect: Duration::from_secs(2), ready: Duration::from_secs(2),
+        upload: Duration::from_secs(2), result: Duration::from_secs(2),
+    }).await
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};

@@ -79,6 +79,34 @@ pub(super) fn remote_voice_stop(
     Ok(state.remote_voice.stop())
 }
 
+#[tauri::command]
+pub(super) fn remote_voice_set_auto_start(
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    enabled: bool,
+) -> Result<VoiceSnapshot, String> {
+    verify(&window)?;
+    state.remote_voice.set_auto_start(enabled)
+}
+
+/// Explicit settings action: bring the chat back without replaying a key or
+/// attempting to restore a previously observed application/selection.
+#[tauri::command]
+pub(super) fn remote_voice_begin_input(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppCore>>,
+) -> Result<(), String> {
+    verify(&window)?;
+    super::main_window::show_main_window(&app, &state);
+    if let Some(main) = app.get_webview_window("main") {
+        if main.url().is_ok_and(|url| crate::security::trusted_page(url.as_str(), state.current_dev_url().as_deref())) {
+            main.eval("document.getElementById('chatInput')?.focus();").map_err(|e| e.to_string())?;
+        }
+    }
+    window.hide().map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,11 +11,15 @@ fn main() {
             .file("src/navigation_macos.m")
             .file("src/browser_surface_macos.m")
             .file("src/remote_voice/native_input_macos.m")
+            .file("src/remote_voice/buttons_macos.m")
+            .file("src/remote_voice/paired_macos.m")
             .flag("-fobjc-arc")
             .compile("keepwork_frame_navigation");
         println!("cargo:rerun-if-changed=src/navigation_macos.m");
         println!("cargo:rerun-if-changed=src/browser_surface_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/native_input_macos.m");
+        println!("cargo:rerun-if-changed=src/remote_voice/buttons_macos.m");
+        println!("cargo:rerun-if-changed=src/remote_voice/paired_macos.m");
     }
     #[cfg(windows)]
     if std::env::var("PROFILE").as_deref() == Ok("debug") {

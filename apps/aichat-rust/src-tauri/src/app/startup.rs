@@ -365,6 +365,7 @@ pub fn run() {
             );
 
             let _ = setup_native_menu_and_tray(&app_handle, &core_for_setup);
+            core_for_setup.remote_voice.start_automatic();
 
             // Configure main window navigation guard, close-to-tray, and initialization script
             let entry_target = core_for_setup
@@ -600,13 +601,15 @@ pub fn run() {
             super::remote_voice_host::remote_voice_status,
             super::remote_voice_host::remote_voice_start,
             super::remote_voice_host::remote_voice_stop,
+            super::remote_voice_host::remote_voice_begin_input,
+            super::remote_voice_host::remote_voice_set_auto_start,
         ])
         .build(tauri::generate_context!())
         .map(|app| {
             let voice = Arc::clone(&core.remote_voice);
             app.run(move |_, event| {
                 if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
-                    voice.stop();
+                    voice.shutdown();
                 }
             });
         });

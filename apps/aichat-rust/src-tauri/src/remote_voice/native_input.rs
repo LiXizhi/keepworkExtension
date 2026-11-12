@@ -2,18 +2,97 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Target {
-    native: [u64; 12],
-    control: Vec<i32>,
-    selection: Option<(i32, i32)>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Delivery {
     Pasted,
-    Copied,
+    Submitted,
+    Cleared,
+    NotEditable,
     Cancelled,
+    ModifiersHeld,
+}
+
+/// Paste and Enter use current focus without an accessibility snapshot.
+/// Clear alone must confirm that current focus is an editable text control.
+pub(crate) trait DeliveryBackend {
+    fn modifiers_down(&self) -> bool;
+    fn copy(&self, text: &str) -> Result<(), String>;
+    fn paste(&self) -> Result<(), String>;
+    fn submit(&self) -> Result<(), String>;
+    fn clear(&self) -> Result<bool, String>;
+}
+
+pub(crate) fn is_submit_command(text: &str) -> bool {
+    is_command(text, "发送提示词")
+}
+fn is_command(text: &str, command: &str) -> bool {
+    text.trim().trim_end_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '。' | '．' | '.' | '！' | '!' | '？' | '?')
+    }) == command
+}
+
+pub(crate) fn clear_current(
+    enabled: &AtomicBool,
+    backend: &impl DeliveryBackend,
+) -> Result<Delivery, String> {
+    if !enabled.load(Ordering::Acquire) {
+        return Ok(Delivery::Cancelled);
+    }
+    if backend.modifiers_down() {
+        return Ok(Delivery::ModifiersHeld);
+    }
+    if !enabled.load(Ordering::Acquire) {
+        return Ok(Delivery::Cancelled);
+    }
+    Ok(if backend.clear()? { Delivery::Cleared } else { Delivery::NotEditable })
+}
+
+pub(crate) fn deliver_current(
+    enabled: &AtomicBool,
+    backend: &impl DeliveryBackend,
+    text: &str,
+) -> Result<Delivery, String> {
+    if !enabled.load(Ordering::Acquire) || text.trim().is_empty() {
+        return Ok(Delivery::Cancelled);
+    }
+    if text.len() > 64_000 || text.contains('\0') {
+        return Err("识别文字超出长度限制或包含无效字符".into());
+    }
+    if backend.modifiers_down() {
+        return Ok(Delivery::ModifiersHeld);
+    }
+    if !enabled.load(Ordering::Acquire) {
+        return Ok(Delivery::Cancelled);
+    }
+    if is_command(text, "清除提示词") {
+        return clear_current(enabled, backend);
+    }
+    // Only the complete final utterance is a command. Quotes and embedded or
+    // suffixed occurrences remain ordinary dictation, without any submission.
+    if is_submit_command(text) {
+        if backend.modifiers_down() {
+            return Ok(Delivery::ModifiersHeld);
+        }
+        if !enabled.load(Ordering::Acquire) {
+            return Ok(Delivery::Cancelled);
+        }
+        backend.submit()?;
+        return Ok(Delivery::Submitted);
+    }
+    backend.copy(text)?;
+    if !enabled.load(Ordering::Acquire) {
+        return Ok(Delivery::Cancelled);
+    }
+    // A modifier may have been pressed while acquiring the clipboard. Do not
+    // combine it with the paste gesture or replay an uncertain mutation.
+    if backend.modifiers_down() {
+        return Ok(Delivery::ModifiersHeld);
+    }
+    if !enabled.load(Ordering::Acquire) {
+        return Ok(Delivery::Cancelled);
+    }
+    backend.paste()?;
+    Ok(Delivery::Pasted)
 }
 
 pub struct NativeInput {
@@ -51,45 +130,13 @@ impl NativeInput {
         }
     }
 
-    pub fn target(&self) -> Option<Target> {
-        self.platform.target()
-    }
-
-    pub fn deliver(&self, text: &str, target: &Option<Target>) -> Result<Delivery, String> {
+    pub fn deliver(&self, text: &str) -> Result<Delivery, String> {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
-        if !self.enabled.load(Ordering::Acquire) {
-            return Ok(Delivery::Cancelled);
-        }
-        if text.trim().is_empty() {
-            return Ok(Delivery::Cancelled);
-        }
-        if text.len() > 64_000 || text.contains('\0') {
-            return Err("识别文字超出长度限制或包含无效字符".into());
-        }
-        self.platform.copy(text)?;
-        if !self.enabled.load(Ordering::Acquire) {
-            return Ok(Delivery::Cancelled);
-        }
-        if !may_paste(
-            target,
-            &self.platform.target(),
-            self.platform.modifiers_down(),
-        ) {
-            return Ok(Delivery::Copied);
-        }
-        // Recheck after writing the clipboard, immediately before the only
-        // injection. Never activate a window, move its caret or press Enter.
-        if !self.enabled.load(Ordering::Acquire)
-            || !may_paste(
-                target,
-                &self.platform.target(),
-                self.platform.modifiers_down(),
-            )
-        {
-            return Ok(Delivery::Copied);
-        }
-        self.platform.paste()?;
-        Ok(Delivery::Pasted)
+        deliver_current(&self.enabled, &self.platform, text)
+    }
+    pub fn clear(&self) -> Result<Delivery, String> {
+        let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
+        clear_current(&self.enabled, &self.platform)
     }
 }
 
@@ -99,13 +146,26 @@ impl Drop for NativeInput {
     }
 }
 
-fn may_paste(expected: &Option<Target>, actual: &Option<Target>, modifiers: bool) -> bool {
-    expected.is_some() && expected == actual && !modifiers
+impl DeliveryBackend for platform::Input {
+    fn modifiers_down(&self) -> bool {
+        self.modifiers_down()
+    }
+    fn copy(&self, text: &str) -> Result<(), String> {
+        self.copy(text)
+    }
+    fn paste(&self) -> Result<(), String> {
+        self.paste()
+    }
+    fn submit(&self) -> Result<(), String> {
+        self.submit()
+    }
+    fn clear(&self) -> Result<bool, String> {
+        self.clear()
+    }
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::Target;
     use std::ffi::c_char;
     use std::sync::Mutex;
 
@@ -114,10 +174,11 @@ mod platform {
     extern "C" {
         fn keepwork_voice_input_start() -> i32;
         fn keepwork_voice_input_stop();
-        fn keepwork_voice_input_target(out: *mut u64) -> bool;
         fn keepwork_voice_input_modifiers() -> bool;
         fn keepwork_voice_input_copy(bytes: *const c_char, len: usize) -> bool;
         fn keepwork_voice_input_paste() -> bool;
+        fn keepwork_voice_input_submit() -> bool;
+        fn keepwork_voice_input_clear() -> i32;
     }
 
     // The native event tap is process-wide; only the owning object may stop it.
@@ -156,16 +217,6 @@ mod platform {
                 }
             }
         }
-        pub fn target(&self) -> Option<Target> {
-            let mut out = [0; 12];
-            unsafe {
-                keepwork_voice_input_target(out.as_mut_ptr()).then_some(Target {
-                    native: out,
-                    control: Vec::new(),
-                    selection: None,
-                })
-            }
-        }
         pub fn modifiers_down(&self) -> bool {
             unsafe { keepwork_voice_input_modifiers() }
         }
@@ -183,14 +234,27 @@ mod platform {
                 Err("无法发送系统粘贴，请检查辅助功能权限；不会自动重试".into())
             }
         }
+        pub fn submit(&self) -> Result<(), String> {
+            if unsafe { keepwork_voice_input_submit() } {
+                Ok(())
+            } else {
+                Err("无法发送回车，请检查辅助功能权限；不会自动重试".into())
+            }
+        }
+        pub fn clear(&self) -> Result<bool, String> {
+            match unsafe { keepwork_voice_input_clear() } {
+                0 => Ok(true),
+                1 => Ok(false),
+                _ => Err("无法发送清空指令，请检查辅助功能权限；不会自动重试".into()),
+            }
+        }
     }
 }
 
 #[cfg(windows)]
 mod platform {
-    use super::Target;
     use std::ptr::{null, null_mut};
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
@@ -205,18 +269,29 @@ mod platform {
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-        VK_CONTROL, VK_F5,
+        VK_BACK, VK_CONTROL, VK_F5, VK_RETURN,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, CreateWindowExW, DestroyWindow, GetForegroundWindow, GetGUIThreadInfo,
-        GetMessageW, GetWindowThreadProcessId, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-        UnhookWindowsHookEx, GUITHREADINFO, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, PM_NOREMOVE,
-        WH_KEYBOARD_LL, WM_QUIT,
+        CallNextHookEx, CreateWindowExW, DestroyWindow, GetMessageW, PeekMessageW,
+        PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HWND_MESSAGE, KBDLLHOOKSTRUCT,
+        MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
     };
 
     static RESERVED: AtomicBool = AtomicBool::new(false);
     static CLAIMED: AtomicBool = AtomicBool::new(false);
-    static SNAPSHOTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn keyboard_event(vk: u16, up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                    ..Default::default()
+                },
+            },
+        }
+    }
 
     unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0
@@ -236,150 +311,6 @@ mod platform {
     }
     pub struct Input {
         hook: Mutex<Option<Hook>>,
-    }
-
-    unsafe fn runtime_id(
-        element: &windows::Win32::UI::Accessibility::IUIAutomationElement,
-    ) -> Option<Vec<i32>> {
-        use windows::Win32::System::Com::SAFEARRAY;
-        use windows::Win32::System::Ole::{
-            SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetLBound,
-            SafeArrayGetUBound, SafeArrayUnaccessData,
-        };
-        struct Array(*mut SAFEARRAY);
-        impl Drop for Array {
-            fn drop(&mut self) {
-                unsafe {
-                    let _ = SafeArrayDestroy(self.0);
-                }
-            }
-        }
-        let array = Array(element.GetRuntimeId().ok()?);
-        if array.0.is_null() || SafeArrayGetDim(array.0) != 1 {
-            return None;
-        }
-        let start = SafeArrayGetLBound(array.0, 1).ok()?;
-        let end = SafeArrayGetUBound(array.0, 1).ok()?;
-        let count = end.checked_sub(start)?.checked_add(1)?;
-        if !(1..=64).contains(&count) {
-            return None;
-        }
-        let mut data = null_mut();
-        SafeArrayAccessData(array.0, &mut data).ok()?;
-        let result = if data.is_null() {
-            None
-        } else {
-            Some(std::slice::from_raw_parts(data.cast::<i32>(), count as usize).to_vec())
-        };
-        SafeArrayUnaccessData(array.0).ok()?;
-        result
-    }
-
-    unsafe fn uia_target() -> Option<Target> {
-        use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-            COINIT_MULTITHREADED,
-        };
-        use windows::Win32::UI::Accessibility::{
-            CUIAutomation8, IUIAutomation2, IUIAutomationTextPattern, TextPatternRangeEndpoint_End,
-            TextPatternRangeEndpoint_Start, TextUnit_Character, UIA_TextPatternId,
-        };
-        CoInitializeEx(None, COINIT_MULTITHREADED).ok().ok()?;
-        struct Com;
-        impl Drop for Com {
-            fn drop(&mut self) {
-                unsafe {
-                    CoUninitialize();
-                }
-            }
-        }
-        let _com = Com;
-        let window = GetForegroundWindow();
-        if window.is_null() {
-            return None;
-        }
-        let mut process_id = 0;
-        let thread_id = GetWindowThreadProcessId(window, &mut process_id);
-        let mut info = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        if GetGUIThreadInfo(thread_id, &mut info) == 0 || info.hwndFocus.is_null() {
-            return None;
-        }
-        let automation: IUIAutomation2 =
-            CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER).ok()?;
-        automation.SetConnectionTimeout(200).ok()?;
-        automation.SetTransactionTimeout(200).ok()?;
-        let element = automation.GetFocusedElement().ok()?;
-        if element.CurrentProcessId().ok()? as u32 != process_id
-            || !element.CurrentHasKeyboardFocus().ok()?.as_bool()
-        {
-            return None;
-        }
-        let control = runtime_id(&element)?;
-        // Runtime IDs distinguish individual HTML input controls sharing one
-        // Chromium render HWND. Require a text selection contract as well;
-        // unsupported providers get copy-only rather than a false guarantee.
-        let pattern: IUIAutomationTextPattern =
-            element.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
-        let ranges = pattern.GetSelection().ok()?;
-        if ranges.Length().ok()? != 1 {
-            return None;
-        }
-        let selection = ranges.GetElement(0).ok()?;
-        let start = selection.Clone().ok()?;
-        start
-            .MoveEndpointByRange(
-                TextPatternRangeEndpoint_End,
-                &selection,
-                TextPatternRangeEndpoint_Start,
-            )
-            .ok()?;
-        let end = selection.Clone().ok()?;
-        end.MoveEndpointByRange(
-            TextPatternRangeEndpoint_Start,
-            &selection,
-            TextPatternRangeEndpoint_End,
-        )
-        .ok()?;
-        // Moving each collapsed endpoint to document start measures its offset
-        // without reading, retaining or logging any existing application text.
-        const LIMIT: i32 = -1_000_000;
-        let start_offset = start
-            .MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, LIMIT)
-            .ok()?;
-        let end_offset = end
-            .MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, LIMIT)
-            .ok()?;
-        if start_offset == LIMIT || end_offset == LIMIT || start_offset > 0 || end_offset > 0 {
-            return None;
-        }
-        if GetForegroundWindow() != window {
-            return None;
-        }
-        let last_focused = automation.GetFocusedElement().ok()?;
-        if runtime_id(&last_focused)? != control {
-            return None;
-        }
-        Some(Target {
-            native: [
-                window as u64,
-                process_id as u64,
-                thread_id as u64,
-                info.hwndFocus as u64,
-                info.hwndCaret as u64,
-                info.rcCaret.left as u64,
-                info.rcCaret.top as u64,
-                info.rcCaret.right as u64,
-                info.rcCaret.bottom as u64,
-                0,
-                0,
-                0,
-            ],
-            control,
-            selection: Some((-start_offset, -end_offset)),
-        })
     }
 
     impl Input {
@@ -463,36 +394,6 @@ mod platform {
                 }
             }
         }
-        pub fn target(&self) -> Option<Target> {
-            // UIA providers can be unresponsive. Bound both caller latency and
-            // the number of background queries; failure means copy-only.
-            if SNAPSHOTS.fetch_add(1, Ordering::AcqRel) >= 2 {
-                SNAPSHOTS.fetch_sub(1, Ordering::AcqRel);
-                return None;
-            }
-            let (sender, receiver) = mpsc::sync_channel(1);
-            if thread::Builder::new()
-                .name("voice-focus".into())
-                .spawn(move || {
-                    struct CountGuard;
-                    impl Drop for CountGuard {
-                        fn drop(&mut self) {
-                            SNAPSHOTS.fetch_sub(1, Ordering::AcqRel);
-                        }
-                    }
-                    let _count = CountGuard;
-                    let _ = sender.send(unsafe { uia_target() });
-                })
-                .is_err()
-            {
-                SNAPSHOTS.fetch_sub(1, Ordering::AcqRel);
-                return None;
-            }
-            receiver
-                .recv_timeout(Duration::from_millis(800))
-                .ok()
-                .flatten()
-        }
         pub fn modifiers_down(&self) -> bool {
             [0x10, 0x11, 0x12, 0x5B, 0x5C]
                 .iter()
@@ -555,23 +456,11 @@ mod platform {
             Ok(())
         }
         pub fn paste(&self) -> Result<(), String> {
-            fn key(vk: u16, up: bool) -> INPUT {
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: vk,
-                            dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
-                            ..Default::default()
-                        },
-                    },
-                }
-            }
             let keys = [
-                key(VK_CONTROL, false),
-                key(b'V' as u16, false),
-                key(b'V' as u16, true),
-                key(VK_CONTROL, true),
+                keyboard_event(VK_CONTROL, false),
+                keyboard_event(b'V' as u16, false),
+                keyboard_event(b'V' as u16, true),
+                keyboard_event(VK_CONTROL, true),
             ];
             if unsafe {
                 SendInput(
@@ -582,7 +471,10 @@ mod platform {
             } != keys.len() as u32
             {
                 // Release any injected held keys, but never retry the mutation.
-                let releases = [key(b'V' as u16, true), key(VK_CONTROL, true)];
+                let releases = [
+                    keyboard_event(b'V' as u16, true),
+                    keyboard_event(VK_CONTROL, true),
+                ];
                 unsafe {
                     SendInput(
                         releases.len() as u32,
@@ -594,12 +486,73 @@ mod platform {
             }
             Ok(())
         }
+        pub fn submit(&self) -> Result<(), String> {
+            let keys = [
+                keyboard_event(VK_RETURN, false),
+                keyboard_event(VK_RETURN, true),
+            ];
+            if unsafe {
+                SendInput(
+                    keys.len() as u32,
+                    keys.as_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            } != keys.len() as u32
+            {
+                // The key-down might already have submitted. Only release the
+                // key; never retry it or fall back to pasting command text.
+                let release = [keyboard_event(VK_RETURN, true)];
+                unsafe {
+                    SendInput(1, release.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+                }
+                return Err("系统未完整接收回车，发送结果未知；不会自动重试".into());
+            }
+            Ok(())
+        }
+        pub fn clear(&self) -> Result<bool, String> {
+            if !editable_focus() { return Ok(false); }
+            if self.modifiers_down() { return Err("请先松开修饰键，再清空输入框。".into()); }
+            let keys = [
+                keyboard_event(VK_CONTROL, false), keyboard_event(b'A' as u16, false),
+                keyboard_event(b'A' as u16, true), keyboard_event(VK_CONTROL, true),
+                keyboard_event(VK_BACK, false), keyboard_event(VK_BACK, true),
+            ];
+            if unsafe { SendInput(keys.len() as u32, keys.as_ptr(), std::mem::size_of::<INPUT>() as i32) } != keys.len() as u32 {
+                let releases = [keyboard_event(b'A' as u16, true), keyboard_event(VK_CONTROL, true), keyboard_event(VK_BACK, true)];
+                unsafe { SendInput(releases.len() as u32, releases.as_ptr(), std::mem::size_of::<INPUT>() as i32); }
+                return Err("系统未完整接收清空按键，结果未知；不会自动重试".into());
+            }
+            Ok(true)
+        }
+    }
+
+    // Read only role/flags, never the value or selection. UIA timeouts keep an
+    // unresponsive provider from indefinitely blocking the BLE event loop.
+    fn editable_focus() -> bool {
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+        use windows::Win32::UI::Accessibility::{CUIAutomation8, IUIAutomation2, IUIAutomationValuePattern, UIA_EditControlTypeId, UIA_ValuePatternId};
+        unsafe {
+            if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() { return false; }
+            let result = (|| -> windows::core::Result<bool> {
+                let automation: IUIAutomation2 = CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
+                automation.SetConnectionTimeout(500)?;
+                automation.SetTransactionTimeout(500)?;
+                let focus = automation.GetFocusedElement()?;
+                if focus.CurrentControlType()? != UIA_EditControlTypeId
+                    || !focus.CurrentHasKeyboardFocus()?.as_bool()
+                    || !focus.CurrentIsEnabled()?.as_bool()
+                    || focus.CurrentIsPassword()?.as_bool() { return Ok(false); }
+                let value: IUIAutomationValuePattern = focus.GetCurrentPatternAs(UIA_ValuePatternId)?;
+                Ok(!value.CurrentIsReadOnly()?.as_bool())
+            })().unwrap_or(false);
+            CoUninitialize();
+            result
+        }
     }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
-    use super::Target;
     pub struct Input;
     impl Input {
         pub fn new() -> Result<Self, String> {
@@ -609,9 +562,6 @@ mod platform {
             Err("当前平台不支持系统语音输入".into())
         }
         pub fn stop(&self) {}
-        pub fn target(&self) -> Option<Target> {
-            None
-        }
         pub fn modifiers_down(&self) -> bool {
             true
         }
@@ -621,49 +571,426 @@ mod platform {
         pub fn paste(&self) -> Result<(), String> {
             Err("当前平台不支持系统粘贴".into())
         }
+        pub fn submit(&self) -> Result<(), String> {
+            Err("当前平台不支持系统回车输入".into())
+        }
+        pub fn clear(&self) -> Result<bool, String> {
+            Err("当前平台不支持清空输入框".into())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn target(value: u64) -> Target {
-        Target {
-            native: [value; 12],
-            control: vec![value as i32],
-            selection: Some((1, 1)),
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+
+    struct FakeBackend<'a> {
+        enabled: &'a AtomicBool,
+        clipboard: RefCell<Vec<String>>,
+        paste_attempts: Cell<usize>,
+        submit_attempts: Cell<usize>,
+        clear_attempts: Cell<usize>,
+        editable: Cell<bool>,
+        clear_error: bool,
+        modifiers: RefCell<VecDeque<bool>>,
+        modifier_checks: Cell<usize>,
+        stop_on_check: Option<usize>,
+        stop_on_copy: bool,
+        copy_error: bool,
+        paste_error: bool,
+        submit_error: bool,
+        current_focus: Cell<u8>,
+        delivered_to: RefCell<Vec<u8>>,
+        submitted_to: RefCell<Vec<u8>>,
+    }
+    impl<'a> FakeBackend<'a> {
+        fn new(enabled: &'a AtomicBool) -> Self {
+            Self {
+                enabled,
+                clipboard: RefCell::new(vec![]),
+                paste_attempts: Cell::new(0),
+                submit_attempts: Cell::new(0),
+                clear_attempts: Cell::new(0),
+                editable: Cell::new(true),
+                clear_error: false,
+                modifiers: RefCell::new(VecDeque::from([false, false])),
+                modifier_checks: Cell::new(0),
+                stop_on_check: None,
+                stop_on_copy: false,
+                copy_error: false,
+                paste_error: false,
+                submit_error: false,
+                current_focus: Cell::new(1),
+                delivered_to: RefCell::new(vec![]),
+                submitted_to: RefCell::new(vec![]),
+            }
+        }
+        fn assert_no_side_effects(&self) {
+            assert!(self.clipboard.borrow().is_empty());
+            assert_eq!(self.paste_attempts.get(), 0);
+            assert_eq!(self.submit_attempts.get(), 0);
+            assert_eq!(self.clear_attempts.get(), 0);
+            assert!(self.delivered_to.borrow().is_empty());
+            assert!(self.submitted_to.borrow().is_empty());
         }
     }
-    #[test]
-    fn paste_requires_same_known_target_and_released_modifiers() {
-        let expected = Some(target(42));
-        assert!(may_paste(&expected, &expected, false));
-        assert!(!may_paste(&None, &None, false));
-        assert!(!may_paste(&expected, &Some(target(43)), false));
-        assert!(!may_paste(&expected, &expected, true));
-        let mut changed_control = target(42);
-        changed_control.control = vec![999];
-        assert!(!may_paste(&expected, &Some(changed_control), false));
-        let mut moved_caret = target(42);
-        moved_caret.selection = Some((2, 2));
-        assert!(!may_paste(&expected, &Some(moved_caret), false));
+    impl DeliveryBackend for FakeBackend<'_> {
+        fn modifiers_down(&self) -> bool {
+            let check = self.modifier_checks.get() + 1;
+            self.modifier_checks.set(check);
+            if self.stop_on_check == Some(check) {
+                self.enabled.store(false, Ordering::Release);
+            }
+            self.modifiers.borrow_mut().pop_front().unwrap_or(false)
+        }
+        fn copy(&self, text: &str) -> Result<(), String> {
+            self.clipboard.borrow_mut().push(text.to_string());
+            if self.stop_on_copy {
+                self.enabled.store(false, Ordering::Release);
+            }
+            if self.copy_error {
+                return Err("clipboard unavailable".into());
+            }
+            Ok(())
+        }
+        fn paste(&self) -> Result<(), String> {
+            self.paste_attempts.set(self.paste_attempts.get() + 1);
+            self.delivered_to
+                .borrow_mut()
+                .push(self.current_focus.get());
+            if self.paste_error {
+                return Err("uncertain native paste".into());
+            }
+            Ok(())
+        }
+        fn submit(&self) -> Result<(), String> {
+            self.submit_attempts.set(self.submit_attempts.get() + 1);
+            self.submitted_to.borrow_mut().push(self.current_focus.get());
+            if self.submit_error { return Err("uncertain native submit".into()); }
+            Ok(())
+        }
+        fn clear(&self) -> Result<bool, String> {
+            self.clear_attempts.set(self.clear_attempts.get() + 1);
+            if self.clear_error { return Err("uncertain native clear".into()); }
+            Ok(self.editable.get())
+        }
     }
+
     #[test]
-    fn stopped_input_never_changes_the_system_clipboard_or_injects() {
+    fn current_focus_pastes_once_without_an_accessibility_selection_snapshot() {
+        let enabled = AtomicBool::new(true);
+        let backend = FakeBackend::new(&enabled);
+        backend.current_focus.set(2); // User selected this input during recognition.
+        assert_eq!(
+            deliver_current(&enabled, &backend, "当前输入框").unwrap(),
+            Delivery::Pasted
+        );
+        assert_eq!(&*backend.clipboard.borrow(), &["当前输入框"]);
+        assert_eq!(backend.paste_attempts.get(), 1);
+        assert_eq!(&*backend.delivered_to.borrow(), &[2]);
+        assert_eq!(backend.submit_attempts.get(), 0);
+    }
+
+    #[test]
+    fn disabled_empty_or_invalid_text_never_touches_clipboard_or_input() {
+        let disabled = AtomicBool::new(false);
+        let backend = FakeBackend::new(&disabled);
+        assert_eq!(
+            deliver_current(&disabled, &backend, "private transcript").unwrap(),
+            Delivery::Cancelled
+        );
+        backend.assert_no_side_effects();
+        for text in ["", " \n\t"] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            assert_eq!(
+                deliver_current(&enabled, &backend, text).unwrap(),
+                Delivery::Cancelled
+            );
+            backend.assert_no_side_effects();
+        }
+        for text in ["invalid\0text".to_string(), "x".repeat(64_001)] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            assert!(deliver_current(&enabled, &backend, &text).is_err());
+            backend.assert_no_side_effects();
+        }
+    }
+
+    #[test]
+    fn a_modifier_held_before_delivery_prevents_both_clipboard_write_and_paste() {
+        let enabled = AtomicBool::new(true);
+        let backend = FakeBackend::new(&enabled);
+        *backend.modifiers.borrow_mut() = VecDeque::from([true]);
+        assert_eq!(
+            deliver_current(&enabled, &backend, "text").unwrap(),
+            Delivery::ModifiersHeld
+        );
+        backend.assert_no_side_effects();
+    }
+
+    #[test]
+    fn stop_during_clipboard_acquisition_cannot_paste_or_retry() {
+        let enabled = AtomicBool::new(true);
+        let mut backend = FakeBackend::new(&enabled);
+        backend.stop_on_copy = true;
+        assert_eq!(
+            deliver_current(&enabled, &backend, "text").unwrap(),
+            Delivery::Cancelled
+        );
+        assert_eq!(backend.clipboard.borrow().len(), 1);
+        assert_eq!(backend.paste_attempts.get(), 0);
+        assert_eq!(
+            deliver_current(&enabled, &backend, "late result").unwrap(),
+            Delivery::Cancelled
+        );
+        assert_eq!(backend.clipboard.borrow().len(), 1);
+    }
+
+    #[test]
+    fn stop_during_either_modifier_check_prevents_the_next_mutation() {
+        for check in [1, 2] {
+            let enabled = AtomicBool::new(true);
+            let mut backend = FakeBackend::new(&enabled);
+            backend.stop_on_check = Some(check);
+            assert_eq!(
+                deliver_current(&enabled, &backend, "text").unwrap(),
+                Delivery::Cancelled
+            );
+            assert_eq!(backend.clipboard.borrow().len(), check - 1);
+            assert_eq!(backend.paste_attempts.get(), 0);
+        }
+    }
+
+    #[test]
+    fn modifier_pressed_during_copy_prevents_the_paste_and_is_reported_explicitly() {
+        let enabled = AtomicBool::new(true);
+        let backend = FakeBackend::new(&enabled);
+        *backend.modifiers.borrow_mut() = VecDeque::from([false, true]);
+        assert_eq!(
+            deliver_current(&enabled, &backend, "text").unwrap(),
+            Delivery::ModifiersHeld
+        );
+        assert_eq!(backend.clipboard.borrow().len(), 1);
+        assert_eq!(backend.paste_attempts.get(), 0);
+    }
+
+    #[test]
+    fn clipboard_and_uncertain_paste_failures_are_never_retried() {
+        let enabled = AtomicBool::new(true);
+        let mut clipboard_failure = FakeBackend::new(&enabled);
+        clipboard_failure.copy_error = true;
+        assert!(deliver_current(&enabled, &clipboard_failure, "text").is_err());
+        assert_eq!(clipboard_failure.clipboard.borrow().len(), 1);
+        assert_eq!(clipboard_failure.paste_attempts.get(), 0);
+        let mut paste_failure = FakeBackend::new(&enabled);
+        paste_failure.paste_error = true;
+        assert!(deliver_current(&enabled, &paste_failure, "text").is_err());
+        assert_eq!(paste_failure.clipboard.borrow().len(), 1);
+        assert_eq!(paste_failure.paste_attempts.get(), 1);
+        assert_eq!(paste_failure.delivered_to.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_stopped_native_instance_has_no_system_side_effects() {
         #[cfg(any(target_os = "macos", windows))]
         {
             let input = NativeInput::new().unwrap();
             assert_eq!(
-                input.deliver("private transcript", &None).unwrap(),
+                input.deliver("private transcript").unwrap(),
                 Delivery::Cancelled
             );
             input.stop();
             assert_eq!(
-                input
-                    .deliver("another transcript", &Some(target(1)))
-                    .unwrap(),
+                input.deliver("late transcript").unwrap(),
                 Delivery::Cancelled
             );
+            assert_eq!(input.deliver("发送提示词").unwrap(), Delivery::Cancelled);
         }
+    }
+
+    #[test]
+    fn exact_send_command_with_only_allowed_terminal_punctuation_submits_once_without_copy_or_paste() {
+        for command in ["发送提示词", " 发送提示词 \n", "\u{3000}发送提示词。\u{3000}",
+            "发送提示词．", "发送提示词.", "发送提示词！", "发送提示词!", "发送提示词？", "发送提示词?",
+            "发送提示词？！", "发送提示词...", "发送提示词 。 \n"] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            backend.current_focus.set(3);
+            assert_eq!(deliver_current(&enabled, &backend, command).unwrap(), Delivery::Submitted, "{command:?}");
+            assert!(backend.clipboard.borrow().is_empty());
+            assert_eq!(backend.paste_attempts.get(), 0);
+            assert_eq!(backend.submit_attempts.get(), 1);
+            assert_eq!(&*backend.submitted_to.borrow(), &[3]);
+        }
+    }
+
+    #[test]
+    fn embedded_command_quotes_internal_spaces_and_nonterminal_punctuation_remain_plain_dictation() {
+        for text in ["不要发送提示词", "请把发送提示词写下来", "发送提示词以后再修改", "发送 提示词",
+            "。发送提示词", "“发送提示词”", "\"发送提示词\"", "发送提示词…", "发送提示词，",
+            "发送提示词,", "发送提示词；", "发送提示词;", "发送提示词：", "发送提示词:", "发送提示词\n再修改"] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            assert_eq!(deliver_current(&enabled, &backend, text).unwrap(), Delivery::Pasted, "{text:?}");
+            assert_eq!(&*backend.clipboard.borrow(), &[text]);
+            assert_eq!(backend.paste_attempts.get(), 1);
+            assert_eq!(backend.submit_attempts.get(), 0);
+        }
+    }
+
+    #[test]
+    fn stopped_invalid_or_modifier_held_commands_never_touch_clipboard_or_submit() {
+        let enabled = AtomicBool::new(false);
+        let backend = FakeBackend::new(&enabled);
+        assert_eq!(deliver_current(&enabled, &backend, "发送提示词").unwrap(), Delivery::Cancelled);
+        backend.assert_no_side_effects();
+        for text in ["发送提示词\0".to_string(), "发送提示词".repeat(20_000)] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            assert!(deliver_current(&enabled, &backend, &text).is_err());
+            backend.assert_no_side_effects();
+        }
+        for checks in [VecDeque::from([true]), VecDeque::from([false, true])] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            *backend.modifiers.borrow_mut() = checks;
+            assert_eq!(deliver_current(&enabled, &backend, "发送提示词").unwrap(), Delivery::ModifiersHeld);
+            backend.assert_no_side_effects();
+        }
+    }
+
+    #[test]
+    fn stop_during_either_command_guard_prevents_submission_and_any_fallback_paste() {
+        for check in [1, 2] {
+            let enabled = AtomicBool::new(true);
+            let mut backend = FakeBackend::new(&enabled);
+            backend.stop_on_check = Some(check);
+            assert_eq!(deliver_current(&enabled, &backend, "发送提示词").unwrap(), Delivery::Cancelled);
+            backend.assert_no_side_effects();
+        }
+    }
+
+    #[test]
+    fn uncertain_submit_failure_is_attempted_once_without_retry_or_dictation_fallback() {
+        let enabled = AtomicBool::new(true);
+        let mut backend = FakeBackend::new(&enabled);
+        backend.submit_error = true;
+        assert!(deliver_current(&enabled, &backend, "发送提示词。").is_err());
+        assert_eq!(backend.submit_attempts.get(), 1);
+        assert_eq!(backend.submitted_to.borrow().len(), 1);
+        assert!(backend.clipboard.borrow().is_empty());
+        assert_eq!(backend.paste_attempts.get(), 0);
+    }
+
+    #[test]
+    fn clear_command_only_clears_the_current_editable_input_without_clipboard_or_return() {
+        for text in ["清除提示词", " 清除提示词。 ", "清除提示词？！", "\u{3000}清除提示词\n"] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            assert_eq!(deliver_current(&enabled, &backend, text).unwrap(), Delivery::Cleared);
+            assert_eq!(backend.clear_attempts.get(), 1);
+            assert!(backend.clipboard.borrow().is_empty());
+            assert_eq!(backend.submit_attempts.get(), 0);
+            assert_eq!(backend.paste_attempts.get(), 0);
+        }
+        for text in ["不要清除提示词", "“清除提示词”", "清除 提示词", "清除提示词，", "清除提示词后重写"] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            assert_eq!(deliver_current(&enabled, &backend, text).unwrap(), Delivery::Pasted);
+            assert_eq!(backend.clear_attempts.get(), 0);
+        }
+    }
+
+    #[test]
+    fn clear_respects_stop_modifiers_editability_and_never_retries_uncertain_deletion() {
+        let enabled = AtomicBool::new(false);
+        let backend = FakeBackend::new(&enabled);
+        assert_eq!(clear_current(&enabled, &backend).unwrap(), Delivery::Cancelled);
+        backend.assert_no_side_effects();
+        enabled.store(true, Ordering::Release);
+        *backend.modifiers.borrow_mut() = VecDeque::from([true]);
+        assert_eq!(clear_current(&enabled, &backend).unwrap(), Delivery::ModifiersHeld);
+        backend.assert_no_side_effects();
+        backend.editable.set(false);
+        assert_eq!(clear_current(&enabled, &backend).unwrap(), Delivery::NotEditable);
+        assert_eq!(backend.clear_attempts.get(), 1);
+        assert!(backend.clipboard.borrow().is_empty());
+        assert_eq!(backend.submit_attempts.get(), 0);
+        assert_eq!(backend.paste_attempts.get(), 0);
+        let mut failure = FakeBackend::new(&enabled);
+        failure.clear_error = true;
+        assert!(clear_current(&enabled, &failure).is_err());
+        assert_eq!(failure.clear_attempts.get(), 1);
+        assert!(failure.clipboard.borrow().is_empty());
+        assert_eq!(failure.submit_attempts.get(), 0);
+        assert_eq!(failure.paste_attempts.get(), 0);
+    }
+
+    async fn final_asr_text_fixture(partial: &'static str, final_text: &'static str, text_in_done: bool) -> String {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::watch;
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}/speech?asr_format=pcm&asr_rate=16000", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.send(Message::Text(r#"{"type":"ready"}"#.into())).await.unwrap();
+            while let Some(message) = socket.next().await {
+                if let Message::Text(text) = message.unwrap() {
+                    assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["type"], "asr_end");
+                    break;
+                }
+            }
+            socket.send(Message::Text(serde_json::json!({"type":"asr", "event":"result", "text":partial}).to_string())).await.unwrap();
+            if text_in_done {
+                socket.send(Message::Text(serde_json::json!({"type":"asr", "event":"done", "text":final_text}).to_string())).await.unwrap();
+            } else {
+                socket.send(Message::Text(serde_json::json!({"type":"asr", "event":"result", "text":final_text}).to_string())).await.unwrap();
+                socket.send(Message::Text(r#"{"type":"asr","event":"done"}"#.into())).await.unwrap();
+            }
+        });
+        let (_owner, cancel) = watch::channel(false);
+        let text = super::super::asr::transcribe_fixture(&[16, -16], cancel, &endpoint).await.unwrap();
+        peer.await.unwrap();
+        text
+    }
+
+    #[tokio::test]
+    async fn partial_asr_command_followed_by_a_long_final_sentence_pastes_without_submitting() {
+        let text = final_asr_text_fixture("发送提示词", "请把发送提示词写下来", false).await;
+        assert_eq!(text, "请把发送提示词写下来");
+        let enabled = AtomicBool::new(true);
+        let backend = FakeBackend::new(&enabled);
+        assert_eq!(deliver_current(&enabled, &backend, &text).unwrap(), Delivery::Pasted);
+        assert_eq!(&*backend.clipboard.borrow(), &[text]);
+        assert_eq!(backend.paste_attempts.get(), 1);
+        assert_eq!(backend.submit_attempts.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn only_the_final_asr_command_submits_once_without_copy_or_paste() {
+        let text = final_asr_text_fixture("请先等一下", "发送提示词！", true).await;
+        let enabled = AtomicBool::new(true);
+        let backend = FakeBackend::new(&enabled);
+        assert_eq!(deliver_current(&enabled, &backend, &text).unwrap(), Delivery::Submitted);
+        assert!(backend.clipboard.borrow().is_empty());
+        assert_eq!(backend.paste_attempts.get(), 0);
+        assert_eq!(backend.submit_attempts.get(), 1);
+    }
+
+    #[test]
+    fn two_independent_completed_commands_are_not_text_deduplicated() {
+        let enabled = AtomicBool::new(true);
+        let backend = FakeBackend::new(&enabled);
+        assert_eq!(deliver_current(&enabled, &backend, "发送提示词").unwrap(), Delivery::Submitted);
+        assert_eq!(deliver_current(&enabled, &backend, "发送提示词").unwrap(), Delivery::Submitted);
+        assert_eq!(backend.submit_attempts.get(), 2);
+        assert!(backend.clipboard.borrow().is_empty());
+        assert_eq!(backend.paste_attempts.get(), 0);
     }
 }

@@ -1,84 +1,211 @@
-// Compile the real snapshot implementation against fake Accessibility calls.
-// This fixture never starts an event tap, touches the clipboard or posts input.
-#define AXIsProcessTrusted fixtureTrusted
-#define AXUIElementCreateSystemWide fixtureSystemWide
-#define AXUIElementSetMessagingTimeout fixtureTimeout
-#define AXUIElementCopyAttributeValue fixtureAttribute
-#define AXUIElementGetPid fixturePid
-#include "../../src-tauri/src/remote_voice/native_input_macos.m"
+// Compile the real native copy/paste functions with isolated OS boundaries.
+// CGEventPost and the general pasteboard are replaced below. This executable
+// cannot send keys to the user's foreground application or read its clipboard.
+#import <AppKit/AppKit.h>
+#import <ApplicationServices/ApplicationServices.h>
 #include <assert.h>
 #include <stdio.h>
 
-static bool trusted = true;
-static bool missingWindow;
-static bool missingRange;
-static bool invalidRange;
-static bool negativeRange;
-static bool wrongValueType;
-static CFIndex caret = 7;
+@interface FixturePasteboard : NSObject
++ (instancetype)generalPasteboard;
+- (NSInteger)clearContents;
+- (BOOL)setString:(NSString *)text forType:(NSPasteboardType)type;
+@end
 
-Boolean fixtureTrusted(void) { return trusted; }
-AXUIElementRef fixtureSystemWide(void) { return (AXUIElementRef)CFRetain(CFSTR("fixture-system")); }
-AXError fixtureTimeout(AXUIElementRef element, float seconds) {
-    (void)element;
-    assert(seconds > 0 && seconds <= 0.2f);
-    return kAXErrorSuccess;
+static Boolean fixtureTrusted(void);
+static void fixturePost(CGEventTapLocation location, CGEventRef event);
+static CGEventFlags fixtureFlags(CGEventSourceStateID state);
+static AXError fixtureAttribute(AXUIElementRef element, CFStringRef attribute, CFTypeRef *value);
+static AXUIElementRef fixtureSystem(void);
+static CFTypeID fixtureAXType(void);
+static AXError fixtureTimeout(AXUIElementRef element, float seconds);
+static AXError fixtureSettable(AXUIElementRef element, CFStringRef attribute, Boolean *settable);
+static CGEventRef fixtureCreateKeyboardEvent(CGEventSourceRef source, CGKeyCode key, bool down);
+static void fixtureSetFlags(CGEventRef event, CGEventFlags flags);
+static int64_t fixtureGetInteger(CGEventRef event, CGEventField field);
+#define NSPasteboard FixturePasteboard
+#define AXIsProcessTrusted fixtureTrusted
+#define CGEventPost fixturePost
+#define CGEventSourceFlagsState fixtureFlags
+#define AXUIElementCopyAttributeValue fixtureAttribute
+#define AXUIElementCreateSystemWide fixtureSystem
+#define AXUIElementGetTypeID fixtureAXType
+#define AXUIElementSetMessagingTimeout fixtureTimeout
+#define AXUIElementIsAttributeSettable fixtureSettable
+#define CGEventCreateKeyboardEvent fixtureCreateKeyboardEvent
+#define CGEventSetFlags fixtureSetFlags
+#define CGEventGetIntegerValueField fixtureGetInteger
+#include "../../src-tauri/src/remote_voice/native_input_macos.m"
+#undef NSPasteboard
+#undef AXIsProcessTrusted
+#undef CGEventPost
+#undef CGEventSourceFlagsState
+#undef AXUIElementCopyAttributeValue
+#undef AXUIElementCreateSystemWide
+#undef AXUIElementGetTypeID
+#undef AXUIElementSetMessagingTimeout
+#undef AXUIElementIsAttributeSettable
+#undef CGEventCreateKeyboardEvent
+#undef CGEventSetFlags
+#undef CGEventGetIntegerValueField
+
+static bool trusted = true;
+static bool clipboardAllowed = true;
+static NSString *clipboardText;
+static NSMutableString *focusedInput;
+static NSUInteger caret;
+static NSUInteger posts;
+static NSUInteger copies;
+static NSUInteger submissions;
+static NSString *submittedInput;
+static NSUInteger metadataRequests;
+static CGEventFlags heldFlags;
+static bool editable = true, secure = false, controlEnabled = true, allSelected = false;
+static CFStringRef focusedRole;
+typedef struct { CGKeyCode key; bool down; CGEventFlags flags; } FixtureEvent;
+static FixtureEvent *keyboardEvent(CGEventRef event) {
+    return (FixtureEvent *)CFDataGetMutableBytePtr((CFMutableDataRef)event);
 }
-AXError fixturePid(AXUIElementRef element, pid_t *pid) {
-    (void)element;
-    *pid = 4242;
-    return kAXErrorSuccess;
+static CGEventRef fixtureCreateKeyboardEvent(CGEventSourceRef source, CGKeyCode key, bool down) {
+    assert(source == NULL);
+    CFMutableDataRef event = CFDataCreateMutable(NULL, sizeof(FixtureEvent));
+    CFDataSetLength(event, sizeof(FixtureEvent));
+    *keyboardEvent((CGEventRef)event) = (FixtureEvent){.key = key, .down = down, .flags = 0};
+    return (CGEventRef)event;
 }
-AXError fixtureAttribute(AXUIElementRef element, CFStringRef attribute, CFTypeRef *value) {
+static void fixtureSetFlags(CGEventRef event, CGEventFlags flags) { keyboardEvent(event)->flags = flags; }
+static int64_t fixtureGetInteger(CGEventRef event, CGEventField field) {
+    assert(field == kCGKeyboardEventKeycode);
+    return keyboardEvent(event)->key;
+}
+
+@implementation FixturePasteboard
++ (instancetype)generalPasteboard {
+    static FixturePasteboard *clipboard;
+    if (!clipboard) clipboard = [FixturePasteboard new];
+    return clipboard;
+}
+- (NSInteger)clearContents { clipboardText = nil; return 1; }
+- (BOOL)setString:(NSString *)text forType:(NSPasteboardType)type {
+    assert([type isEqualToString:NSPasteboardTypeString]);
+    copies++;
+    if (!clipboardAllowed) return NO;
+    clipboardText = [text copy];
+    return YES;
+}
+@end
+
+static Boolean fixtureTrusted(void) { return trusted; }
+static CGEventFlags fixtureFlags(CGEventSourceStateID state) {
+    assert(state == kCGEventSourceStateHIDSystemState);
+    return heldFlags;
+}
+static AXError fixtureAttribute(AXUIElementRef element, CFStringRef attribute, CFTypeRef *value) {
     (void)element;
+    metadataRequests++;
     *value = NULL;
-    if (CFEqual(attribute, kAXFocusedApplicationAttribute)) *value = CFRetain(CFSTR("fixture-app"));
-    else if (CFEqual(attribute, kAXFocusedUIElementAttribute)) *value = CFRetain(CFSTR("fixture-control"));
-    else if (CFEqual(attribute, kAXFocusedWindowAttribute)) {
-        if (missingWindow) return kAXErrorAttributeUnsupported;
-        *value = CFRetain(CFSTR("fixture-window"));
-    } else if (CFEqual(attribute, kAXSelectedTextRangeAttribute)) {
-        if (missingRange) return kAXErrorAttributeUnsupported;
-        if (invalidRange) *value = CFRetain(CFSTR("not-an-AXValue"));
-        else if (wrongValueType) {
-            CGPoint point = CGPointMake(1, 2);
-            *value = AXValueCreate(kAXValueCGPointType, &point);
-        } else {
-            CFRange range = CFRangeMake(negativeRange ? -1 : caret, 0);
-            *value = AXValueCreate(kAXValueCFRangeType, &range);
-        }
-    } else return kAXErrorAttributeUnsupported;
+    if (CFEqual(attribute, kAXFocusedUIElementAttribute)) {
+        if (!focusedInput) return kAXErrorNoValue;
+        *value = (CFTypeRef)fixtureSystem();
+    } else if (CFEqual(attribute, kAXRoleAttribute)) *value = CFRetain(focusedRole ?: kAXTextAreaRole);
+    else if (CFEqual(attribute, kAXSubroleAttribute)) *value = CFRetain(secure ? kAXSecureTextFieldSubrole : CFSTR("AXStandardTextField"));
+    else if (CFEqual(attribute, kAXEnabledAttribute)) *value = CFRetain(controlEnabled ? kCFBooleanTrue : kCFBooleanFalse);
+    else {
+        // Value and selection must never be read, even for clear.
+        assert(!CFEqual(attribute, kAXValueAttribute));
+        assert(!CFEqual(attribute, kAXSelectedTextRangeAttribute));
+        return kAXErrorAttributeUnsupported;
+    }
     return kAXErrorSuccess;
+}
+static AXUIElementRef fixtureSystem(void) { return (AXUIElementRef)CFDictionaryCreate(NULL, NULL, NULL, 0, NULL, NULL); }
+static CFTypeID fixtureAXType(void) { return CFDictionaryGetTypeID(); }
+static AXError fixtureTimeout(AXUIElementRef element, float seconds) { (void)element; assert(seconds <= 0.5); return kAXErrorSuccess; }
+static AXError fixtureSettable(AXUIElementRef element, CFStringRef attribute, Boolean *settable) {
+    (void)element; assert(CFEqual(attribute, kAXValueAttribute)); *settable = editable; return kAXErrorSuccess;
+}
+static void fixturePost(CGEventTapLocation location, CGEventRef event) {
+    assert(location == kCGHIDEventTap);
+    FixtureEvent *keyboard = keyboardEvent(event);
+    assert(keyboard->key == 9 || keyboard->key == 36 || keyboard->key == 0 || keyboard->key == 51);
+    assert(keyboard->flags == (keyboard->key == 9 || keyboard->key == 0 ? kCGEventFlagMaskCommand : 0));
+    CGEventType type = keyboard->down ? kCGEventKeyDown : kCGEventKeyUp;
+    assert(type == (posts % 2 ? kCGEventKeyUp : kCGEventKeyDown));
+    posts++;
+    if (type == kCGEventKeyDown && keyboard->key == 9 && focusedInput) {
+        assert(clipboardText != nil && caret <= focusedInput.length);
+        [focusedInput insertString:clipboardText atIndex:caret];
+        caret += clipboardText.length;
+    } else if (type == kCGEventKeyDown && keyboard->key == 36) {
+        submissions++;
+        submittedInput = [focusedInput copy];
+    } else if (type == kCGEventKeyDown && keyboard->key == 0) {
+        allSelected = true;
+    } else if (type == kCGEventKeyDown && keyboard->key == 51) {
+        assert(allSelected && focusedInput);
+        [focusedInput setString:@""]; caret = 0; allSelected = false;
+    }
 }
 
 int main(void) {
-    uint64_t original[12], current[12];
-    assert(keepwork_voice_input_target(original));
-    assert(original[0] == 4242 && original[2] != 0 && original[3] == 1);
-    assert(original[4] == 7 && original[5] == 0);
-    assert(keepwork_voice_input_target(current));
-    assert(memcmp(original, current, sizeof(original)) == 0);
-    caret = 8;
-    assert(keepwork_voice_input_target(current));
-    assert(memcmp(original, current, sizeof(original)) != 0);
-    missingWindow = true;
-    assert(!keepwork_voice_input_target(current));
-    missingWindow = false;
-    missingRange = true;
-    assert(!keepwork_voice_input_target(current));
-    missingRange = false;
-    invalidRange = true;
-    assert(!keepwork_voice_input_target(current));
-    invalidRange = false;
-    negativeRange = true;
-    assert(!keepwork_voice_input_target(current));
-    negativeRange = false;
-    wrongValueType = true;
-    assert(!keepwork_voice_input_target(current));
-    wrongValueType = false;
-    trusted = false;
-    assert(!keepwork_voice_input_target(current));
-    assert(!keepwork_voice_input_target(NULL));
-    puts("native voice input focus snapshots passed");
-    return 0;
+    @autoreleasepool {
+        NSMutableString *original = [@"original:" mutableCopy];
+        NSMutableString *current = [@"current:tail" mutableCopy];
+        focusedInput = original;
+        caret = original.length;
+        const char *text = "你好，当前输入框";
+        assert(keepwork_voice_input_copy(text, strlen(text)));
+        // Focus/caret changes while recognition runs: the native Cmd+V must go
+        // to the input selected now, even with no AXSelectedTextRange support.
+        focusedInput = current;
+        caret = [@"current:" length];
+        assert(keepwork_voice_input_paste());
+        assert([original isEqualToString:@"original:"]);
+        assert([current isEqualToString:@"current:你好，当前输入框tail"]);
+        assert(posts == 2 && copies == 1 && metadataRequests == 0);
+        NSString *clipboardBeforeSubmit = [clipboardText copy];
+        assert(keepwork_voice_input_submit());
+        assert(posts == 4 && copies == 1 && submissions == 1 && metadataRequests == 0);
+        assert([submittedInput isEqualToString:@"current:你好，当前输入框tail"]);
+        assert([current isEqualToString:submittedInput]); // Return never inserts command text or a newline.
+        assert([clipboardText isEqualToString:clipboardBeforeSubmit]);
+        assert(!keepwork_voice_input_modifiers());
+        for (int index = 0; index < 4; index++) {
+            heldFlags = (CGEventFlags[]){kCGEventFlagMaskCommand, kCGEventFlagMaskControl,
+                kCGEventFlagMaskAlternate, kCGEventFlagMaskShift}[index];
+            assert(keepwork_voice_input_modifiers());
+        }
+        heldFlags = 0;
+        trusted = false;
+        assert(!keepwork_voice_input_paste());
+        assert(!keepwork_voice_input_submit());
+        assert(posts == 4 && submissions == 1); // Permission failure cannot post an event or retry.
+        clipboardAllowed = false;
+        assert(!keepwork_voice_input_copy("test", 4));
+        assert(posts == 4 && metadataRequests == 0);
+        trusted = true;
+        clipboardAllowed = true;
+        clipboardText = @"keep this clipboard unchanged";
+        NSString *beforeClear = [clipboardText copy];
+        assert(keepwork_voice_input_clear() == 0);
+        assert(current.length == 0 && [original isEqualToString:@"original:"]);
+        assert(posts == 8 && submissions == 1 && copies == 2);
+        assert(clipboardText == beforeClear || [clipboardText isEqualToString:beforeClear]);
+        assert(metadataRequests > 0);
+        [current setString:@"preserve"];
+        for (int mode = 0; mode < 5; mode++) {
+            editable = mode != 0; focusedRole = mode == 1 ? kAXButtonRole : kAXTextAreaRole;
+            secure = mode == 2; controlEnabled = mode != 3;
+            focusedInput = mode == 4 ? nil : current;
+            assert(keepwork_voice_input_clear() == 1);
+            assert(posts == 8 && [current isEqualToString:@"preserve"]);
+        }
+        focusedInput = current; editable = true; secure = false; controlEnabled = true;
+        heldFlags = kCGEventFlagMaskShift;
+        assert(keepwork_voice_input_clear() == 2 && posts == 8);
+        heldFlags = 0; trusted = false;
+        assert(keepwork_voice_input_clear() == 2 && posts == 8);
+        puts("native current-focus paste and explicit Return passed with isolated clipboard and event hook");
+        return 0;
+    }
 }

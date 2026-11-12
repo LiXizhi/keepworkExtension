@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aichat-rust"
-version = "0.2.72"
+version = "0.2.76"
 dependencies = [
  "base64 0.22.1",
  "btleplug",
@@ -45,6 +45,7 @@ dependencies = [
  "url",
  "uuid",
  "windows",
+ "windows-collections",
  "windows-sys 0.61.2",
  "zip",
 ]
