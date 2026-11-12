@@ -32,11 +32,11 @@ const incoming = (conversation = 'group', kind = 'group', sender = 'peer') => ({
 function fixture(t, channel = 'dingtalk', fileSystem = fs) {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-image-test-'))), root = path.join(dir, 'brain'), home = path.join(dir, 'state');
     fs.mkdirSync(root);
-    const calls = []; let hook = () => ({ result: { openTaskId: 'task-receipt' } });
+    const calls = [], taskCalls = []; let hook = () => ({ result: { openTaskId: 'task-receipt' } }), taskHook = () => ({});
     const actual = load('core/messagingDingtalk');
     const { MessagingService } = load('core/messaging', {
         'node:fs': fileSystem,
-        './messagingDingtalk': { ...actual, DwsError, dws: async (args, cwd) => { calls.push({ args, cwd }); return hook(args, cwd); } },
+        './messagingDingtalk': { ...actual, DwsError, dws: async (args, cwd) => { if(args[2]==='query-send-status'){taskCalls.push({args,cwd});return taskHook(args,cwd);}calls.push({ args, cwd }); return hook(args, cwd); } },
         './messagingExecutor': { messagingExecutorChoice: () => ({ backend: 'copilot', model: '' }), MessagingWorkers: class { close() {} } },
         './aichatPresence': { latestAichatClient: () => null, latestAichatBrainRoot: () => root },
     });
@@ -51,8 +51,70 @@ function fixture(t, channel = 'dingtalk', fileSystem = fs) {
     service.box(binding.id).messages.push(incoming(), incoming('dm', 'direct', 'open-peer'), incoming('other'));
     const reply = (id = 'send-image', conversation = 'group', input = image(), owner = 'owner', agent = 'default-persona') => service.manualImageReply(owner, agent, binding.id, conversation, id, input);
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-    return { dir, root, home, service, binding, runtime, calls, create, reply, set hook(value) { hook = value; } };
+    return { dir, root, home, service, binding, runtime, calls, taskCalls, create, reply, set hook(value) { hook = value; }, set taskHook(value) { taskHook = value; } };
 }
+
+test('image receipt correlation keeps task IDs separate and never merges different messages or senders', () => {
+    assert.deepEqual(images.imageReceiptIds({result:{openTaskId:'task'}},'group'),{remoteTaskId:'task'});
+    assert.deepEqual(images.imageReceiptIds({data:{result:{openMessageId:'remote',openConversationId:'group'}}},'group',true),{remoteMessageId:'remote'});
+    for(const value of [{openTaskId:'task'},{openMessageId:'remote'},{openMessageId:'remote',openConversationId:'other'},{arbitrary:{openMessageId:'remote',openConversationId:'group'}}])assert.equal(images.imageReceiptIds(value,'group',true).remoteMessageId,undefined);
+    for(const value of [{success:false,openMessageId:'remote'}, {error:{code:'rejected'},result:{openMessageId:'remote'}}, {result:{status:'pending',openMessageId:'remote'}}, {result:{state:'sending',openMessageId:'remote'}}, {status:'failed',result:{openMessageId:'remote'}}]) {
+        assert.equal(images.imageSendReceipt(value),false);
+        assert.deepEqual(images.imageReceiptIds(value,'group'),{});
+    }
+    const rows=[{id:'request',conversation:'group',direction:'out',image:{name:'image.png'},remoteMessageId:'remote'},
+        {id:'remote',conversation:'group',direction:'out',text:'[文件] image.png fileId: file',state:'synced'},
+        {id:'remote',conversation:'group',direction:'in',text:'other sender'},
+        {id:'remote',conversation:'other',direction:'out',text:'other conversation'},
+        {id:'second',conversation:'group',direction:'out',text:'[文件] image.png fileId: different-file'},
+        {id:'remote',conversation:'group',direction:'out',text:'independent local request ID',state:'sent'}];
+    assert.deepEqual(images.coalesceImageEchoes(rows),[rows[0],rows[2],rows[3],rows[4],rows[5]]);
+    assert.deepEqual(images.imageReceiptIds({openMessageId:'top',result:{openMessageId:'nested',openConversationId:'other-cid'}},'peer',false,0,true),{remoteMessageId:'top'});
+});
+
+test('legacy direct sender-key uses the exact send task to retain its actual remote conversation alias', async t => {
+    const f=fixture(t),box=f.service.box(f.binding.id);
+    box.messages.push(incoming('open-peer','direct','open-peer'));
+    f.taskHook=()=>({result:{openMessageId:'direct-image',openConversationId:'actual-direct-cid'}});
+    const sent=await f.reply('legacy-direct','open-peer');
+    assert.equal(sent.remoteMessageId,'direct-image');assert.equal(sent.remoteConversationId,'actual-direct-cid');
+    box.messages.push({id:'direct-image',conversation:'actual-direct-cid',direction:'out',sender:'self',kind:'direct',time:Date.now(),text:'[文件] image.png fileId: exact-file',remoteEvent:true});
+    await f.service.resolveImageTasks(f.runtime);
+    assert.equal(box.messages.some(row=>row.id==='direct-image'),false);
+    assert.equal(box.messages.find(row=>row.id==='legacy-direct').image.name,'截图.png');
+});
+
+test('send task resolves the exact remote message and refresh/self events preserve one image bubble across restart', async t => {
+    const f=fixture(t);
+    f.taskHook=()=>({result:{openMessageId:'remote-image',openConversationId:'group'}});
+    const sent=await f.reply();
+    assert.equal(sent.remoteTaskId,'task-receipt');assert.equal(sent.remoteMessageId,'remote-image');
+    assert.equal(f.taskCalls.length,1);assert.deepEqual(f.taskCalls[0].args.slice(0,5),['chat','message','query-send-status','--open-task-id','task-receipt']);
+    assert.equal(f.taskCalls[0].args[f.taskCalls[0].args.indexOf('--profile')+1],f.binding.profile);
+    const time=Date.now()-5;
+    f.hook=args=>args[0]==='event'?{identity:{corp_id:'real-corp',user_id:'real-user',open_dingtalk_id:'self'}}:
+        {success:true,result:{hasMore:false,conversationMessagesList:[{singleChat:false,openConversationId:'group',messages:[{openMessageId:'remote-image',senderOpenDingTalkId:'self',content:'[文件] image.png fileId: same-file',createTime:time}]}]}};
+    assert.equal((await f.service.refreshInbox('owner','default-persona',f.binding.id)).imported,0);
+    f.runtime.binding.enabled=true;f.runtime.self='self';
+    await f.service.receiveOne(f.runtime,{type:'user_im_message_receive_group_all',message_id:'remote-image',conversation_id:'group',sender_open_dingtalk_id:'self',content:'[文件] image.png fileId: same-file',create_time:time});
+    const restored=f.create(),rows=restored.inboxView('owner','default-persona',f.binding.id,'group').messages;
+    assert.equal(rows.filter(row=>row.image||row.id==='remote-image').length,1);
+    assert.equal(rows.find(row=>row.image).id,'send-image');
+    assert.equal((await restored.manualImageReply('owner','default-persona',f.binding.id,'group','send-image',image())).remoteMessageId,'remote-image');
+    assert.equal(f.calls.filter(call=>call.args[1]==='+messages-send').length,1);
+});
+
+test('late task metadata collapses an already synced echo while missing or mismatched metadata preserves sent state', async t => {
+    const f=fixture(t);f.taskHook=()=>({result:{openMessageId:'remote-image',openConversationId:'wrong-group'}});
+    const sent=await f.reply();assert.equal(sent.state,'sent');assert.equal(sent.remoteMessageId,undefined);
+    f.service.box(f.binding.id).messages.push({id:'remote-image',conversation:'group',direction:'out',sender:'self',kind:'group',time:Date.now(),text:'[文件] image.png fileId: same-file',state:'synced'});
+    f.taskHook=()=>({result:{openMessageId:'remote-image',openConversationId:'group'}});
+    await f.service.resolveImageTasks(f.runtime);
+    assert.equal(f.service.box(f.binding.id).messages.filter(row=>row.image||row.id==='remote-image').length,1);
+    assert.equal(f.service.box(f.binding.id).messages.find(row=>row.image).state,'sent');
+    const restored=f.create();assert.equal(restored.inboxView('owner','default-persona',f.binding.id,'group').messages.some(row=>row.id==='remote-image'),false);
+    assert.equal(f.calls.length,1,'only the original send is a mutation');
+});
 
 test('image bytes require strict base64, bounded size, safe display name and matching MIME signature', () => {
     const samples = [image(), image(Buffer.from('ffd8ffe0', 'hex'), 'photo.jpg', 'image/jpeg'), image(Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(7)]), 'a.gif', 'image/gif'), image(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.alloc(8)]), 'a.webp', 'image/webp')];

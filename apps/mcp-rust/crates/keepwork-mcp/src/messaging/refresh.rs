@@ -277,6 +277,7 @@ impl MessagingService {
             ));
         }
         let self_id = history_self(&binding.root, &binding.profile, &status).await?;
+        self.resolve_image_tasks(&binding).await;
         self.assert_agent_binding(owner, agent_id, id)?;
         let path = self.home.join(format!("{id}.refresh-cursor.json"));
         let now = now_ms() / 1000 * 1000;
@@ -353,6 +354,7 @@ impl MessagingService {
                 .map(|b| b.to_json())
                 .unwrap_or_else(|| json!({"messages":[],"paused":[],"read":{}}));
             let messages = box_value["messages"].as_array_mut().unwrap();
+            super::image_reply::coalesce_image_echoes(messages);
             let mut keys: HashSet<(String, String)> = messages
                 .iter()
                 .map(|row| {
@@ -362,24 +364,34 @@ impl MessagingService {
                     )
                 })
                 .collect();
-            imported = rows
-                .into_iter()
-                .filter(|row| {
-                    row["time"]
-                        .as_i64()
-                        .is_some_and(|time| time >= window.start && time <= window.end)
-                })
-                .filter(|row| {
-                    keys.insert((
-                        row["conversation"].as_str().unwrap().into(),
-                        row["id"].as_str().unwrap().into(),
-                    ))
-                })
-                .map(|row| {
+            let mut added = 0;
+            for row in rows {
+                if !row["time"]
+                    .as_i64()
+                    .is_some_and(|time| time >= window.start && time <= window.end)
+                {
+                    continue;
+                }
+                if row["direction"] == "out"
+                    && messages.iter().any(|local| {
+                        local["direction"] == "out"
+                            && local["image"].is_object()
+                            && (local["conversation"] == row["conversation"]
+                                || local["remoteConversationId"] == row["conversation"])
+                            && local["remoteMessageId"] == row["id"]
+                    })
+                {
+                    continue;
+                }
+                if keys.insert((
+                    row["conversation"].as_str().unwrap().into(),
+                    row["id"].as_str().unwrap().into(),
+                )) {
                     messages.push(row);
-                    1usize
-                })
-                .sum::<usize>();
+                    added += 1;
+                }
+            }
+            imported = added;
             messages.sort_by(|a, b| {
                 a["time"]
                     .as_i64()

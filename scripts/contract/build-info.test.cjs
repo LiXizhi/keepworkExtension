@@ -57,7 +57,7 @@ test('Rust --build-info reports compiled identity before parsing user config or 
   assert.ok(info.target.length > 0);
   assert.match(info.sourceHash, /^[a-f0-9]{64}$/);
   assert.equal(info.sourceHash, sourceFingerprint(rustRoot), 'the tested binary must contain the current source');
-  for (const capability of ['agentSessionApi', 'agentInventoryApi', 'agentContextApi', 'agentModeApi']) {
+  for (const capability of ['agentSessionApi', 'agentInventoryApi', 'agentContextApi', 'agentModeApi', 'agentImageTurnApi']) {
     assert.equal(info.capabilities[capability], 'v1');
   }
   assert.deepEqual(info, readBuildInfo(binary), 'executed and statically embedded build records must agree');

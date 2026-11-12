@@ -373,6 +373,9 @@ impl MessagingService {
                 continue;
             }
             let mut view = self.binding_status_view(&inner, run);
+            if run.binding.channel == "dingtalk" {
+                view["inboxReadVersion"] = json!(1);
+            }
             view["unreadScope"] = json!("all");
             view["groups"] = json!([]);
             view["unread"] = json!(inner

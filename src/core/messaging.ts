@@ -8,16 +8,17 @@ import { createHash } from 'node:crypto';
 import { configValue, confined, defaultMessageConfig, DEFAULT_PROMPT, digestMessage, incoming, Incoming, knowledgeContext, knowledgeDirectory, MessageConfig, readRules, RULE_DIR, trigger, conversationContext, automatedText } from './messagingPolicy';
 import { FeishuDelivery, feishuIdentity, pollFeishu, feishuConversation, feishuGroups, feishuNickname, setFeishuNickname, feishuGroupName, feishuSenderName } from './messagingFeishu';
 import { DingTalkDelivery, DwsError, dws, listenDws, loginDws, dingtalkConversation, dingtalkNickname, setDingtalkNickname, dingtalkGroupName, dingtalkSenderName } from './messagingDingtalk';
-import { replyImageCapability, ReplyImageMetadata, parseReplyImage, stageReplyImage, saveReplyImageLedger, imageSendReceipt } from './messagingImage';
+import { replyImageCapability, ReplyImageMetadata, parseReplyImage, stageReplyImage, saveReplyImageLedger, imageSendReceipt, imageReceiptIds, coalesceImageEchoes } from './messagingImage';
 import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
 import { MessagingNicknames, NicknameTarget, nicknameKey } from './messagingNicknames';
 import { MessageAgent, routeMessageAgents, agentNameMentioned, agentBrainInstructions, nicknameAgentNames, normalizedAgentName } from './personaMessaging';
 import { GroupWorkApproval, readGroupKnowledge } from './messagingAgentWork';
 import { AGENT_ROLE_WRITE_POLICY, roleApprovalProperties, roleNeedsApproval, roleToolTarget, executeRoleTool } from './agentRolePolicy';
 import { runTerminal } from './terminal';
+import { clearDingtalkRedPoint } from './messagingRead';
 
 interface Binding { channel?: 'dingtalk' | 'feishu'; id: string; root: string; profile: string; enabled: boolean; agentOwner?: string; agentId?: string; peers?: {owner:string;agentId:string}[]; rulesDir?: string; agentPrompt?: string }
-type InboxMessage = Incoming & { direction: string; state?: string; image?: ReplyImageMetadata; error?: string };
+type InboxMessage = Incoming & { direction: string; state?: string; image?: ReplyImageMetadata; error?: string; remoteTaskId?: string; remoteMessageId?: string; remoteConversationId?: string; remoteEvent?: boolean };
 interface Receipt { id: string; time: number; state: string; reason?: string; executor?: string; model?: string; server?: 'cli' | 'client' | 'headless'; card?: string; workKey?: string }
 interface RecentMessage { binding: string; channel: string; persona: string; profile: string; conversation: string; sender: string; direction: string; kind: string; relevant: boolean; text: string; reply: string; receipt: Receipt }
 interface Runtime { historyStop?: () => void; historySync?: { status: string; since?: number; error?: string }; admitting?: number; inbound?: Promise<void>; pollAbort?: AbortController; lastPollAt?: number; binding: Binding; status: string; error: string; identity: string; ownsIdentity?: boolean; self: string; since: number; stop?: () => void; starting?: Promise<void>; queues: Map<string, { message: Incoming; receipt: Receipt; agent?: MessageAgent }[]>; active: Map<string, AbortController>; receipts: Receipt[]; seen: string[]; history: Map<string, { role: string; content: string }[]>; subscriptions: string; retry?: NodeJS.Timeout; retries: number; nextRetryAt?: number }
@@ -430,6 +431,7 @@ export class MessagingService {
         return this.box(id).messages.filter(m=>scope===null||(m.kind!=='direct'&&scope.has(m.conversation)));
     }
     agentBindings(owner:string,agentId:string){return this.list().filter(b=>this.hasAgent(b,owner,agentId)).sort((a,b)=>(a.listening?0:a.enabled?1:2)-(b.listening?0:b.enabled?1:2)).map(b=>({...b,
+        ...((b.channel||'dingtalk')==='dingtalk'?{inboxReadVersion:1}:{}),
         unreadScope:agentId!=='default-persona'&&this.messageAgents?'assigned-groups':'all',
         groups:[...(this.inboxScope(owner,agentId,b.id)||[])].map(id=>({id,name:this.inboxName(owner,agentId,b.id,id)})),
         unread:this.scopedInbox(owner,agentId,b.id).filter(m=>this.inboxUnread(owner,agentId,b.id,m)).length}));}
@@ -458,6 +460,8 @@ export class MessagingService {
         if(!status.identity?.corp_id||!status.identity?.user_id||`${status.identity.corp_id}:${status.identity.user_id}`!==profile)throw Error('DWS identity does not match configured profile');
         const self=status.identity.open_dingtalk_id||await dingtalkHistorySelf(root,profile);
         requireActive();
+        await this.resolveImageTasks(r,requireActive);
+        requireActive();
         const now=Date.now();
         let imported=0;
         // The first manual page covers recent messages immediately. Full older
@@ -465,7 +469,8 @@ export class MessagingService {
         const sync=new DingTalkHistorySync(path.join(this.home,id+'.refresh-cursor.json'),now-86400000+600000,profile,root,self,async rows=>{
             requireActive();
             const box=this.box(id),keys=new Set(box.messages.map(m=>JSON.stringify([m.conversation,m.id])));
-            for(const row of rows){const key=JSON.stringify([row.conversation,row.id]);if(keys.has(key))continue;keys.add(key);box.messages.push({...row,state:'synced'});imported++;}
+            for(const row of rows){const key=JSON.stringify([row.conversation,row.id]);if(keys.has(key)||row.direction==='out'&&box.messages.some(m=>m.direction==='out'&&m.image&&(m.conversation===row.conversation||m.remoteConversationId===row.conversation)&&m.remoteMessageId===row.id))continue;keys.add(key);box.messages.push({...row,state:'synced'});imported++;}
+            box.messages=coalesceImageEchoes(box.messages);
             box.messages.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));
             this.saveInbox();
         });
@@ -560,6 +565,33 @@ export class MessagingService {
         if(conversation){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');const rows=messages.filter(m=>m.conversation===conversation&&m.time<before).slice(-50);return {name:this.inboxName(owner,agentId,id,conversation),messages:rows,before:rows.length===50?rows[0].time:null,paused:box.paused.includes(conversation),...((this.get(id).binding.channel||'dingtalk')==='dingtalk'?{replyImage:replyImageCapability}:{})};}
         const scope=this.inboxScope(owner,agentId,id);const ids=[...new Set([...(scope||[]),...messages.map(m=>m.conversation)])];return {conversations:ids.map(key=>({id:key,name:this.inboxName(owner,agentId,id,key),last:messages.filter(m=>m.conversation===key).at(-1),unread:messages.filter(m=>m.conversation===key&&this.inboxUnread(owner,agentId,id,m)).length,paused:box.paused.includes(key)}))};
     }
+    async inboxActionRequest(owner:string,agentId:string,id:string,conversation:string,action:string,syncRemote?:unknown) {
+        if(syncRemote!==undefined&&typeof syncRemote!=='boolean')throw Error('Invalid syncRemote');
+        if(syncRemote!==true)return this.inboxAction(owner,agentId,id,conversation,action);
+        if(action!=='read')throw Error('syncRemote requires the read action');
+        this.assertAgentBinding(owner,agentId,id);
+        const r=this.get(id),root=r.binding.root,profile=r.binding.profile;
+        if(r.binding.channel==='feishu')throw Object.assign(Error('当前渠道不支持同步钉钉红点'),{code:'UNSUPPORTED_FEATURE'});
+        if(typeof conversation!=='string'||!conversation||conversation.length>4096||conversation.includes('\0'))throw Error('Invalid conversation');
+        const check=()=>{
+            this.assertAgentBinding(owner,agentId,id);
+            if(this.closed||this.get(id)!==r||r.binding.root!==root||r.binding.profile!==profile||(r.binding.channel||'dingtalk')!=='dingtalk')throw Error('渠道已切换，请重新打开此会话');
+            const scope=this.inboxScope(owner,agentId,id);
+            if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');
+        };
+        check();
+        const box=this.box(id),rows=box.messages.filter(m=>m.conversation===conversation),target=rows.at(-1);
+        if(!target)throw Error('请选择已有会话');
+        const peer=target.kind==='direct'?[...rows].reverse().find(m=>m.direction==='in'&&m.kind==='direct')?.sender||'':'';
+        if(target.kind==='direct'&&!peer)throw Error('无法确认钉钉单聊对象，请同步对方消息后重试');
+        const now=Date.now(),key=this.readKey(owner,agentId,conversation),future=rows.filter(m=>m.direction==='in'&&m.time>now).map(m=>m.id);
+        await clearDingtalkRedPoint(root,profile,conversation,peer,check);
+        check();
+        box.read[key]=Math.max(box.read[key]||0,now);
+        (box.readFutureIds||={})[key]=[...new Set([...(box.readFutureIds[key]||[]),...future])];
+        this.saveInbox();this.persist(r);
+        return {ok:true,remoteSynced:true};
+    }
     inboxAction(owner:string,agentId:string,id:string,conversation:string,action:string){this.assertAgentBinding(owner,agentId,id);const box=this.box(id),r=this.get(id);if(['pause','resume'].includes(action)&&!this.gatewayAllowed(r))throw Error('Use the active messaging computer to change takeover state');if(action==='read'){const scope=this.inboxScope(owner,agentId,id);if(scope&&!scope.has(conversation))throw Error('群聊未分配给此智能体');const key=this.readKey(owner,agentId,conversation),now=Date.now();
             box.read[key]=Math.max(box.read[key]||0,now);
             // Upstream clocks may be ahead. Acknowledge those stored IDs without
@@ -628,7 +660,12 @@ export class MessagingService {
                 const result=await dws(['chat','+messages-send','--as','user',...(target.kind==='direct'?['--open-dingtalk-id',target.sender]:['--group',conversation]),
                     '--msg-type','file','--file',staged.relative,'--idempotency-key',`${requestId}-image`,'--profile',profile,'-f','json','--yes'],root);
                 row.state=imageSendReceipt(result)?'sent':'unknown';
+                Object.assign(row,imageReceiptIds(result,conversation,false,0,row.kind==='direct'&&conversation===row.sender));
             }catch(error){row.state=error instanceof DwsError&&!error.uncertain?'failed':'unknown';}
+            try{saveReplyImageLedger(this.home,this.inbox);}catch{/* the pre-send no-replay record remains durable */}
+            // Metadata lookup is read-only and bounded; an older CLI must not turn an accepted send into a failure.
+            if(row.remoteTaskId&&!row.remoteMessageId)await this.resolveImageTask(r,row);
+            box.messages=coalesceImageEchoes(box.messages);
             if(row.state==='failed')row.error='钉钉拒绝发送图片附件，请检查登录与权限后重试';
             else if(row.state==='unknown')row.error='发送结果未知，请在钉钉核实，勿重复发送';
             box.sends[requestId]=row.state;
@@ -637,6 +674,23 @@ export class MessagingService {
             try{this.persist(r);}catch{/* keep the image outcome even when unrelated status persistence fails */}
             return row;
         }finally{try{staged.cleanup();}catch{/* temporary paths and bytes never enter diagnostics */}}
+    }
+    private async resolveImageTask(r:Runtime,row:InboxMessage,check=()=>{}) {
+        const {root,profile}=r.binding,task=row.remoteTaskId;
+        if(!task||row.remoteMessageId)return;
+        try{
+            check();
+            const value=await dws(['chat','message','query-send-status','--open-task-id',task,'--profile',profile,'--format','json','--timeout','4'],root,5000);
+            check();
+            if(this.closed||r.binding.root!==root||r.binding.profile!==profile||r.binding.channel==='feishu'||!this.box(r.binding.id).messages.includes(row))return;
+            const receipt=imageReceiptIds(value,row.conversation,true,0,row.kind==='direct'&&row.conversation===row.sender);
+            if(receipt.remoteMessageId){row.remoteMessageId=receipt.remoteMessageId;if(receipt.remoteConversationId)row.remoteConversationId=receipt.remoteConversationId;}
+        }catch{/* Missing optional status metadata never resends or discards the image. */}
+    }
+    private async resolveImageTasks(r:Runtime,check=()=>{}) {
+        const box=this.box(r.binding.id),rows=box.messages.filter(row=>row.direction==='out'&&row.image&&row.remoteTaskId&&!row.remoteMessageId).slice(-4);
+        await Promise.all(rows.map(row=>this.resolveImageTask(r,row,check)));
+        check();box.messages=coalesceImageEchoes(box.messages);if(rows.length)this.saveInbox();
     }
     private runs = new Map<string, Runtime>();
     private identities = new Set<string>();
@@ -918,14 +972,17 @@ export class MessagingService {
                         if(!active())throw Error('History sync stopped');
                         const box=this.box(r.binding.id), keys=new Set(box.messages.map(m=>JSON.stringify([m.conversation,m.id])));
                         for(const row of rows){
-                            const key=JSON.stringify([row.conversation,row.id]);if(keys.has(key))continue;
+                            const key=JSON.stringify([row.conversation,row.id]);if(keys.has(key)||row.direction==='out'&&box.messages.some(m=>m.direction==='out'&&m.image&&(m.conversation===row.conversation||m.remoteConversationId===row.conversation)&&m.remoteMessageId===row.id))continue;
                             keys.add(key);box.messages.push({...row,state:'recovered'});
                         }
+                        box.messages=coalesceImageEchoes(box.messages);
                         box.messages.sort((a,b)=>a.time-b.time||a.id.localeCompare(b.id));
                         // Import a full window before considering private unanswered conversations.
                         this.saveInbox();
                     });
                 }
+                await this.resolveImageTasks(r,()=>{if(!active())throw Error('History sync stopped');});
+                if(!active())return;
                 more=await sync.step(Date.now(),active);
                 if(active()){
                     r.historySync={status:more?'syncing':'current',since:sync.state.since};
@@ -1001,6 +1058,7 @@ export class MessagingService {
     private async receiveOne(r: Runtime, event: any, recovered=false) {
         if (!this.canRun(r) || this.closed || !this.gatewayAllowed(r,true)) return;
         const message: Incoming | null = r.binding.channel==='feishu' ? event : incoming(event); if (!message) return;
+        if(r.binding.channel!=='feishu'&&message.sender===r.self&&this.box(r.binding.id).messages.some(m=>m.direction==='out'&&m.image&&(m.conversation===message.conversation||m.remoteConversationId===message.conversation)&&m.remoteMessageId===message.id))return;
         if (!recovered && this.box(r.binding.id).messages.some(m=>['recovered','recovery-claimed','synced'].includes(m.state||'')&&m.id===message.id&&m.conversation===message.conversation)) return;
         if(recovered)message.recovered=true;
         const id = digestMessage(r.identity, message); if (r.seen.includes(id) || r.seen.includes(id + ':' + message.kind)) return;
@@ -1026,7 +1084,7 @@ export class MessagingService {
             recent.relevant = receipt.reason === 'reply' || (message.kind !== 'group' && !['self','echo'].includes(receipt.reason));
             if(receipt.reason==='self') {
                 const box=this.box(r.binding.id);
-                if(!box.messages.some(m=>m.id===message.id&&m.conversation===message.conversation))box.messages.push({...message,direction:'out'});
+                if(!box.messages.some(m=>m.id===message.id&&m.conversation===message.conversation))box.messages.push({...message,direction:'out',remoteEvent:true});
                 this.saveInbox();
             }
             if(!['old','self','echo'].includes(receipt.reason)) { const box=this.box(r.binding.id);if(!box.messages.some(m=>m.id===message.id&&m.conversation===message.conversation&&m.direction==='in'))box.messages.push({...message,direction:'in'});this.saveInbox();if(box.paused.includes(message.conversation))receipt.reason='taken-over'; }

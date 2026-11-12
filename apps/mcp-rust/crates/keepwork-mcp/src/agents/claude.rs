@@ -748,11 +748,18 @@ impl Connection {
             .as_array()
             .filter(|input| {
                 !input.is_empty()
-                    && input
-                        .iter()
-                        .all(|part| part["type"] == "text" && part["text"].is_string())
+                    && input.iter().all(|part| {
+                        (part["type"] == "text" && part["text"].is_string())
+                            || (part["type"] == "image"
+                                && part["source"]["type"] == "base64"
+                                && matches!(
+                                    part["source"]["media_type"].as_str(),
+                                    Some("image/png" | "image/jpeg" | "image/webp" | "image/gif")
+                                )
+                                && part["source"]["data"].is_string())
+                    })
             })
-            .ok_or_else(|| rejected("Claude text input required"))?;
+            .ok_or_else(|| rejected("Claude text or base64 raster image input required"))?;
         let id = uuid::Uuid::new_v4().to_string();
         *self.run.lock().unwrap() = Some(Run {
             id: id.clone(),

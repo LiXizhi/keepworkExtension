@@ -179,6 +179,168 @@ test('large NDJSON snapshots keep streaming intermediate output and completion w
     assert.equal(fake.calls.filter(c=>c.method==='turn/interrupt').length,0);
 });
 
+test('Codex reasoning and answer deltas reach owned HTTP viewers before the turn completes',async t=>{
+    const {root,manager,fake}=setup(t),http=require('node:http');
+    const token='c'.repeat(32),owner=ownerKey('http://localhost',token);
+    const session=await manager.create(owner,{conversationId:'reasoning-stream',roots:[root]});
+    await manager.turn(session.id,owner,{requestId:'reasoning-request',text:'think and answer'});
+    const server=http.createServer((req,res)=>void handleAgentHttp(req,res,new URL(req.url,'http://localhost'),manager));
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    t.after(()=>{server.closeAllConnections();server.close();});
+    const base=`http://127.0.0.1:${server.address().port}/agents/sessions/${session.id}`;
+    const headers={Origin:'http://localhost','X-Agent-Owner':token};
+    const foreign=await fetch(base+'/events',{headers:{...headers,'X-Agent-Owner':'d'.repeat(32)}});
+    assert.equal(foreign.status,400);
+    assert.match((await foreign.json()).error,/not found/);
+    const abort=new AbortController();t.after(()=>abort.abort());
+    const response=await fetch(base+'/events',{headers,signal:AbortSignal.any([abort.signal,AbortSignal.timeout(10000)])});
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',cursor=-1;
+    const next=async()=>{
+        for(;;){
+            const end=buffer.indexOf('\n');
+            if(end>=0){
+                const line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(!line.trim())continue;
+                const event=JSON.parse(line);assert.ok(event.cursor>cursor);cursor=event.cursor;return event.session;
+            }
+            const chunk=await reader.read();assert.equal(chunk.done,false);buffer+=decoder.decode(chunk.value,{stream:true});
+        }
+    };
+    const notify=(method,params)=>fake.emit('notification',{method,params:{threadId:session.threadId,...params}});
+    const itemText=(view,id)=>view.items.find(item=>item.id===id)?.text;
+    assert.equal((await next()).status,'running');
+    notify('item/started',{item:{id:'thought',type:'reasoning',summary:[],content:[]}});
+    await next();
+    notify('item/reasoning/summaryPartAdded',{itemId:'thought',summaryIndex:0});
+    await next();
+    notify('item/reasoning/summaryTextDelta',{itemId:'thought',summaryIndex:0,delta:'先检查'});
+    let view=await next();
+    assert.equal(view.status,'running');assert.equal(itemText(view,'thought'),'先检查');
+    notify('item/reasoning/summaryTextDelta',{itemId:'thought',summaryIndex:0,delta:'中文 📅'});
+    view=await next();
+    assert.equal(view.status,'running');assert.equal(itemText(view,'thought'),'先检查中文 📅');
+    notify('item/reasoning/summaryPartAdded',{itemId:'thought',summaryIndex:1});
+    await next();
+    notify('item/reasoning/summaryTextDelta',{itemId:'thought',summaryIndex:1,delta:'再回复'});
+    view=await next();assert.equal(itemText(view,'thought'),'先检查中文 📅\n\n再回复');
+    notify('item/reasoning/textDelta',{itemId:'thought',contentIndex:0,delta:'原始思考'});
+    view=await next();assert.equal(itemText(view,'thought'),'先检查中文 📅\n\n再回复','summary remains the displayed reasoning when raw content arrives');
+    notify('item/completed',{item:{id:'thought',type:'reasoning',summary:['先检查中文 📅','再回复'],content:['原始思考']}});
+    view=await next();assert.equal(itemText(view,'thought'),'先检查中文 📅\n\n再回复');
+    assert.deepEqual(view.items.find(item=>item.id==='thought').summary,['先检查中文 📅','再回复']);
+    assert.deepEqual(view.items.find(item=>item.id==='thought').content,['原始思考']);
+    notify('item/started',{item:{id:'raw-thought',type:'reasoning',summary:[],content:[]}});await next();
+    notify('item/reasoning/textDelta',{itemId:'raw-thought',contentIndex:0,delta:'只有原文'});
+    view=await next();assert.equal(view.status,'running');assert.equal(itemText(view,'raw-thought'),'只有原文');
+    notify('item/reasoning/textDelta',{itemId:'raw-thought',contentIndex:1,delta:'第二段'});
+    view=await next();assert.equal(itemText(view,'raw-thought'),'只有原文\n\n第二段');
+    notify('item/started',{item:{id:'command',type:'commandExecution',aggregatedOutput:''}});await next();
+    notify('item/commandExecution/outputDelta',{itemId:'command',delta:'命令输出'});
+    view=await next();assert.equal(view.items.find(item=>item.id==='command').aggregatedOutput,'命令输出');
+    notify('item/started',{item:{id:'reply',type:'agentMessage',text:''}});await next();
+    notify('item/agentMessage/delta',{itemId:'reply',delta:'你好'});
+    view=await next();assert.equal(view.status,'running');assert.equal(itemText(view,'reply'),'你好');
+    notify('item/agentMessage/delta',{itemId:'reply',delta:'，我在。'});
+    view=await next();assert.equal(view.status,'running');assert.equal(itemText(view,'reply'),'你好，我在。');
+    notify('turn/completed',{turn:{status:'completed'}});
+    view=await next();assert.equal(view.status,'completed');assert.equal(itemText(view,'reply'),'你好，我在。');
+    assert.equal(fake.calls.filter(call=>call.method==='turn/start').length,1,'stream progress never resubmits execution');
+    assert.equal(fake.calls.filter(call=>call.method==='turn/interrupt').length,0);
+});
+
+test('Codex completed and restored reasoning preserves native fields with a readable legacy text projection',async t=>{
+    const {root,file,manager,fake,owner}=setup(t);
+    const session=await manager.create(owner,{conversationId:'reasoning-snapshots',roots:[root]});
+    const cases=[
+        {id:'summary',type:'reasoning',summary:['摘要一','摘要二'],content:['原文'],expected:'摘要一\n\n摘要二'},
+        {id:'content',type:'reasoning',summary:[],content:['原文一','原文二'],expected:'原文一\n\n原文二'},
+        {id:'legacy',type:'reasoning',text:'旧版思考',expected:'旧版思考'},
+        {id:'future',type:'reasoning',summary:['可读摘要'],futureOptional:{enabled:true},expected:'可读摘要'},
+        {id:'structured',type:'reasoning',summary:[{text:'结构化摘要'}],content:[{text:'结构化原文'}],expected:'结构化摘要'},
+    ];
+    for(const {expected,...item} of cases){
+        fake.emit('notification',{method:'item/completed',params:{threadId:session.threadId,item}});
+        const actual=(await manager.read(session.id,owner)).items.find(row=>row.id===item.id);
+        assert.equal(actual.text,expected);
+        for(const [key,value] of Object.entries(item))assert.deepEqual(actual[key],value);
+    }
+    const restoredFake=new Fake(),call=restoredFake.call.bind(restoredFake);
+    restoredFake.call=(method,params)=>method==='thread/resume'?Promise.resolve({thread:{turns:[{items:cases.map(({expected,...item})=>item)}]}}):call(method,params);
+    const restored=new AgentSessions(file,restoredFake);t.after(()=>restored.close());
+    const view=await restored.read(session.id,owner);
+    for(const {expected,...item} of cases){
+        const actual=view.items.find(row=>row.id===item.id);
+        assert.equal(actual.text,expected);
+        for(const [key,value] of Object.entries(item))assert.deepEqual(actual[key],value);
+    }
+    assert.equal(restoredFake.calls.some(call=>call.method==='turn/start'),false,'restoring history cannot execute a turn');
+});
+
+test('Codex known deltas tolerate a missing or late item start without replacing streamed text',async t=>{
+    const {root,manager,fake,owner}=setup(t);
+    const session=await manager.create(owner,{conversationId:'reasoning-late-start',roots:[root]});
+    await manager.turn(session.id,owner,{requestId:'late-start',text:'go'});
+    const notify=(method,params)=>fake.emit('notification',{method,params:{threadId:session.threadId,...params}});
+    notify('item/reasoning/summaryTextDelta',{itemId:'thought',summaryIndex:0,delta:'先收到思考'});
+    assert.equal((await manager.read(session.id,owner)).items.find(item=>item.id==='thought')?.text,'先收到思考');
+    notify('item/started',{item:{id:'thought',type:'reasoning',summary:[],content:[]}});
+    assert.equal((await manager.read(session.id,owner)).items.find(item=>item.id==='thought')?.text,'先收到思考');
+    notify('item/agentMessage/delta',{itemId:'reply',delta:'先收到正文'});
+    assert.equal((await manager.read(session.id,owner)).items.find(item=>item.id==='reply')?.text,'先收到正文');
+    notify('item/started',{item:{id:'reply',type:'agentMessage',text:''}});
+    assert.equal((await manager.read(session.id,owner)).items.find(item=>item.id==='reply')?.text,'先收到正文');
+    notify('item/futurePrivate/delta',{itemId:'unknown',delta:'未知数据'});
+    assert.equal((await manager.read(session.id,owner)).items.some(item=>item.id==='unknown'),false,'unknown delta methods cannot invent visible item types');
+});
+
+test('Codex empty completions retain streamed items while nonempty final revisions replace them',async t=>{
+    const {root,manager,fake,owner}=setup(t);
+    const session=await manager.create(owner,{conversationId:'reasoning-completion-revisions',roots:[root]});
+    await manager.turn(session.id,owner,{requestId:'completion-revisions',text:'go'});
+    const notify=(method,params)=>fake.emit('notification',{method,params:{threadId:session.threadId,...params}});
+    const read=async id=>(await manager.read(session.id,owner)).items.find(item=>item.id===id);
+    notify('item/reasoning/summaryTextDelta',{itemId:'thought',summaryIndex:0,delta:'流式摘要'});
+    notify('item/completed',{item:{id:'thought',type:'reasoning',summary:[],content:[],text:''}});
+    assert.equal((await read('thought')).text,'流式摘要','an empty final shell cannot erase delivered reasoning');
+    assert.deepEqual((await read('thought')).summary,['流式摘要']);
+    notify('item/completed',{item:{id:'thought',type:'reasoning'}});
+    assert.equal((await read('thought')).text,'流式摘要','omitted completion fields retain delivered reasoning');
+    notify('item/completed',{item:{id:'thought',type:'reasoning',summary:['完成时修订的摘要']}});
+    assert.equal((await read('thought')).text,'完成时修订的摘要','a nonempty final native summary is authoritative');
+    notify('item/completed',{item:{id:'thought',type:'reasoning',text:'旧契约的最终思考'}});
+    assert.equal((await read('thought')).text,'旧契约的最终思考','a legacy text-only completion must override the earlier native summary');
+    notify('item/reasoning/textDelta',{itemId:'raw-thought',contentIndex:0,delta:'流式原文'});
+    notify('item/completed',{item:{id:'raw-thought',type:'reasoning',content:[]}});
+    assert.equal((await read('raw-thought')).text,'流式原文');
+    notify('item/completed',{item:{id:'raw-thought',type:'reasoning',content:['最终原文']}});
+    assert.equal((await read('raw-thought')).text,'最终原文');
+    for(const {id,type,method,key} of [
+        {id:'plan',type:'plan',method:'item/plan/delta',key:'text'},
+        {id:'reply',type:'agentMessage',method:'item/agentMessage/delta',key:'text'},
+        {id:'command',type:'commandExecution',method:'item/commandExecution/outputDelta',key:'aggregatedOutput'},
+    ]){
+        notify(method,{itemId:id,delta:'流式草稿'});
+        notify('item/completed',{item:{id,type,[key]:''}});
+        assert.equal((await read(id))[key],'流式草稿',`${type} empty completion retains delivered output`);
+        notify('item/completed',{item:{id,type}});
+        assert.equal((await read(id))[key],'流式草稿',`${type} omitted completion fields retain delivered output`);
+        notify('item/completed',{item:{id,type,[key]:'完成时重写'}});
+        assert.equal((await read(id))[key],'完成时重写',`${type} nonempty final output replaces the draft`);
+    }
+});
+
+test('Codex multi-part reasoning stays bounded while retaining the newest Unicode part',async t=>{
+    const {root,manager,fake,owner}=setup(t);
+    const session=await manager.create(owner,{conversationId:'bounded-reasoning',roots:[root]});
+    const latest='末段🙂'.repeat(20000);
+    const notify=(summaryIndex,delta)=>fake.emit('notification',{method:'item/reasoning/summaryTextDelta',params:{threadId:session.threadId,itemId:'thought',summaryIndex,delta}});
+    notify(0,'a'.repeat(100000));notify(1,latest);
+    const item=(await manager.read(session.id,owner)).items.find(item=>item.id==='thought');
+    assert.ok(item.summary.reduce((size,text)=>size+text.length,0)<=131072);
+    assert.equal(item.summary[1],latest);
+    assert.equal(item.summary[0].length,131072-latest.length);
+    assert.ok(item.text.endsWith(latest));assert.ok(item.text.length<=131072);
+});
+
 test('slow event consumers coalesce to the latest snapshot and flush it on drain',async()=>{
     let push,unsubscribed=0;
     const manager={read:async()=>{},subscribe:(_id,_owner,listener)=>{push=listener;listener({cursor:1,session:{status:'running'}});return()=>unsubscribed++;}};

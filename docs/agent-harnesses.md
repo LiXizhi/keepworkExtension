@@ -14,7 +14,10 @@ Codex App Server and Claude bidirectional stream-json, owner-scoped text session
 request receipts, approval and
 interrupt handling, NDJSON snapshots and the current AIChat page-context bridge.
 See the [Rust contract](rust-runtime-migration.md#原生-cli-会话切片rust-运行时-0218)
-for the initial slice's limits. Antigravity execution, images, non-Codex native-history import,
+for the initial slice's limits. Rust 0.2.32 also implements the optional image
+contract above, including native Codex/Claude blocks and capability-gated ACP
+images (DeepSeek and other registered ACP providers). Inline image bytes are
+removed from daemon snapshots and cached history. Antigravity execution, non-Codex native-history import,
 the Copilot editor bridge and background cloud/Git file execution remain
 unsupported there; the fuller Node behavior described below is not a claim of
 Rust feature parity. Rust background local-file mutations require Craft;
@@ -195,7 +198,8 @@ blocks share transcript identities; tool approvals and AskUserQuestion use the
 existing pending-response API. Unknown controls are rejected, and native permission
 policy is preserved without bypass flags or global configuration changes. A
 process exit, timeout or reconnect never resubmits an uncertain prompt. Native
-history import and image turns remain unsupported in Rust.
+history import remains unsupported in Rust. Image turns use native base64 image
+blocks through the optional `agentImageTurnApi: "v1"` contract.
 
 Rust Claude regression uses deterministic native children and isolated HTTP
 listeners; those fixtures alone do not establish real model generation or account
@@ -258,6 +262,17 @@ while blocked. A reader that does not drain for 30 seconds is disconnected; clos
 removes its subscription and timers without stopping its Codex turn. The browser
 reconciles with a normal session GET on stream failure/EOF or a 45-second silence,
 then reconnects, so older runtime stream failures do not require clicking Stop.
+
+Codex reasoning `summaryTextDelta` and `textDelta` events update the corresponding
+summary/content part while the turn is running. Snapshots retain those native
+fields and expose a bounded `text` projection for existing AIChat clients, using
+nonempty summary parts before raw content parts. Known text deltas can arrive
+before `item/started`; a later empty item shell must not erase text already
+received. Completed native reasoning items use the same projection, so legacy
+clients do not need a new protocol version. Incremental display depends on the
+upstream CLI emitting partial messages: a provider that only sends complete
+items still updates on completion. Reconnecting reads the current snapshot and
+never replays the prompt to obtain missing deltas.
 
 All three adapters share automatic CLI discovery (see below). `KEEPWORK_CODEX_PATH`
 can explicitly select a native executable or JavaScript entry. Processes are hidden and shell-free.

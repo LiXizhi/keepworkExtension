@@ -6,6 +6,8 @@ pub mod discovery;
 mod events;
 pub mod harness;
 mod history;
+mod images;
+mod item_stream;
 mod native;
 mod sessions;
 
@@ -37,6 +39,7 @@ struct Session {
     viewers: Arc<AtomicUsize>,
     configuration: Arc<AsyncMutex<()>>,
     context_marker: Option<String>,
+    restoring: bool,
     needs_native_history: bool,
 }
 
@@ -205,6 +208,9 @@ fn snapshot(data: &Value) -> Value {
     scrub(&out, 0, &mut 2_500_000)
 }
 fn scrub(value: &Value, depth: usize, budget: &mut usize) -> Value {
+    if images::is_inline(value) {
+        return json!({"type":"image"});
+    }
     if depth > 24 || *budget < 16 {
         return Value::Null;
     }
@@ -327,6 +333,7 @@ impl AgentManager {
                     viewers: Arc::new(AtomicUsize::new(0)),
                     configuration: Arc::new(AsyncMutex::new(())),
                     context_marker: None,
+                    restoring: false,
                     needs_native_history,
                 },
             );
@@ -594,6 +601,8 @@ async fn handle_request(
             .handle(&owner, method, path, query, req)
             .await;
     }
+    let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let image_turn = matches!(parts.as_slice(), ["agents", "sessions", _, "image-turns"]);
     let input = if ["POST", "PATCH"].contains(&method) {
         if !headers
             .get(header::CONTENT_TYPE)
@@ -603,7 +612,8 @@ async fn handle_request(
         {
             return error_response("JSON required");
         }
-        match axum::body::to_bytes(req.into_body(), 2_000_000).await {
+        let limit = if image_turn { 7_000_000 } else { 2_000_000 };
+        match axum::body::to_bytes(req.into_body(), limit).await {
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(value) if value.is_object() => value,
                 _ => return error_response("JSON object required"),
@@ -613,7 +623,6 @@ async fn handle_request(
     } else {
         json!({})
     };
-    let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
     let result: Result<Value, String> = match (method, parts.as_slice()) {
         ("GET", ["agents", "backends"]) => manager.backends(&owner, query).await,
         ("GET", ["agents", "accounts"]) => Ok(manager.accounts()),
@@ -634,6 +643,13 @@ async fn handle_request(
         ("PATCH", ["agents", "sessions", session_id]) => manager.update(session_id, &owner, &input),
         ("POST", ["agents", "sessions", session_id, "turns"]) => {
             manager.turn(session_id, &owner, &input).await
+        }
+        ("POST", ["agents", "sessions", session_id, "image-turns"]) => {
+            if !input["images"].is_array() {
+                Err("Missing images".into())
+            } else {
+                manager.turn(session_id, &owner, &input).await
+            }
         }
         ("POST", ["agents", "sessions", session_id, "interrupt"]) => {
             manager.interrupt(session_id, &owner).await

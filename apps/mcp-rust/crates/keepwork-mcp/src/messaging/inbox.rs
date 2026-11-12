@@ -44,6 +44,18 @@ pub(crate) fn decide_incoming(
     // Disjoint-field borrows: `run` lives in inner.runs; the inbox map and the
     // identity set are sibling fields.
     let box_ = inner.inbox.entry(binding_id.to_string()).or_default();
+    if run.binding.channel == "dingtalk"
+        && message.sender == run.self_id
+        && box_.messages.iter().any(|row| {
+            row["direction"] == "out"
+                && row["image"].is_object()
+                && (row["conversation"] == message.conversation
+                    || row["remoteConversationId"] == message.conversation)
+                && row["remoteMessageId"] == message.id
+        })
+    {
+        return IncomingDecision::Done;
+    }
     if !recovered
         && box_.messages.iter().any(|row| {
             matches!(
@@ -85,7 +97,9 @@ pub(crate) fn decide_incoming(
                 && row["conversation"].as_str() == Some(message.conversation.as_str())
                 && row["direction"].as_str() == Some("out")
         }) {
-            box_.messages.push(message.to_row("out", Some("sent")));
+            let mut row = message.to_row("out", Some("sent"));
+            row["remoteEvent"] = json!(true);
+            box_.messages.push(row);
         }
         trim_inbox(box_);
         return IncomingDecision::Save;

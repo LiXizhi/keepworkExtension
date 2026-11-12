@@ -86,7 +86,7 @@ fn main() {
         println!("cargo:rustc-env=KEEPWORK_MCP_BUILD_COMMIT={commit}");
     }
     let document = format!(
-        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
+        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\",\"agentImageTurnApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
         std::env::var("CARGO_PKG_VERSION").unwrap(), commit.unwrap_or_default(),
         std::env::var("TARGET").unwrap(), source_hash
     );

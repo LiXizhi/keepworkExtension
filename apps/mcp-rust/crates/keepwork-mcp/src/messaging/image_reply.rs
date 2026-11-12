@@ -121,7 +121,7 @@ impl Drop for StagedImage {
 }
 
 fn receipt(value: &Value, depth: usize) -> bool {
-    if depth > 8 {
+    if depth > 8 || !receipt_confirmed(value) {
         return false;
     }
     if ["openTaskId", "openMessageId", "messageId"]
@@ -135,7 +135,209 @@ fn receipt(value: &Value, depth: usize) -> bool {
         .any(|key| value.get(key).is_some_and(|v| receipt(v, depth + 1)))
 }
 
+fn receipt_confirmed(value: &Value) -> bool {
+    value.is_object()
+        && value["success"] != false
+        && value.get("error").is_none_or(Value::is_null)
+        && ![
+            "pending",
+            "sending",
+            "queued",
+            "processing",
+            "failed",
+            "failure",
+            "cancelled",
+            "canceled",
+            "rejected",
+        ]
+        .contains(
+            &value["status"]
+                .as_str()
+                .or_else(|| value["state"].as_str())
+                .unwrap_or("")
+                .to_lowercase()
+                .as_str(),
+        )
+}
+
+/// The send task and remote message have different namespaces. Traverse only reviewed envelopes.
+fn receipt_ids(
+    value: &Value,
+    conversation: &str,
+    require_conversation: bool,
+    depth: usize,
+    allow_remote_conversation: bool,
+) -> (Option<String>, Option<String>, Option<String>) {
+    if depth > 8 || !receipt_confirmed(value) {
+        return (None, None, None);
+    }
+    let id = |key: &str| {
+        value[key]
+            .as_str()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 2048)
+            .map(str::to_string)
+    };
+    let mut task = id("openTaskId");
+    let cid = id("openConversationId").or_else(|| id("conversationId"));
+    if cid.as_deref().is_some_and(|cid| cid != conversation) && !allow_remote_conversation {
+        return (task, None, None);
+    }
+    let mut message = if !require_conversation || cid.is_some() {
+        id("openMessageId").or_else(|| id("messageId"))
+    } else {
+        None
+    };
+    let mut remote_conversation = message
+        .as_ref()
+        .and_then(|_| cid.filter(|cid| cid != conversation));
+    for key in ["result", "data"] {
+        let (nested_task, nested_message, nested_conversation) = receipt_ids(
+            &value[key],
+            conversation,
+            require_conversation,
+            depth + 1,
+            allow_remote_conversation,
+        );
+        task = task.or(nested_task);
+        if message.is_none() && nested_message.is_some() {
+            message = nested_message;
+            remote_conversation = nested_conversation;
+        }
+    }
+    (task, message, remote_conversation)
+}
+
+pub(crate) fn coalesce_image_echoes(messages: &mut Vec<Value>) {
+    let mut aliases: HashSet<(String, String)> = HashSet::new();
+    for row in messages
+        .iter()
+        .filter(|row| row["direction"] == "out" && row["image"].is_object())
+    {
+        if let Some(message) = row["remoteMessageId"].as_str() {
+            for key in ["conversation", "remoteConversationId"] {
+                if let Some(cid) = row[key].as_str() {
+                    aliases.insert((cid.into(), message.into()));
+                }
+            }
+        }
+    }
+    messages.retain(|row| {
+        row["direction"] != "out"
+            || row["image"].is_object()
+            || !(matches!(row["state"].as_str(), Some("synced" | "recovered"))
+                || row["remoteEvent"] == true)
+            || !aliases.contains(&(
+                row["conversation"].as_str().unwrap_or("").into(),
+                row["id"].as_str().unwrap_or("").into(),
+            ))
+    });
+}
+
+async fn task_message_id(
+    root: &str,
+    profile: &str,
+    task: &str,
+    conversation: &str,
+    allow_remote_conversation: bool,
+) -> Option<(String, Option<String>)> {
+    let args = vec![
+        "chat".into(),
+        "message".into(),
+        "query-send-status".into(),
+        "--open-task-id".into(),
+        task.into(),
+        "--profile".into(),
+        profile.into(),
+        "--format".into(),
+        "json".into(),
+        "--timeout".into(),
+        "4".into(),
+    ];
+    let value = tokio::time::timeout(std::time::Duration::from_secs(5), dws_call(&args, root))
+        .await
+        .ok()?
+        .ok()?;
+    let (_, message, cid) = receipt_ids(&value, conversation, true, 0, allow_remote_conversation);
+    Some((message?, cid))
+}
+
 impl MessagingService {
+    /// Optional read-only task metadata, capped at four concurrent lookups per refresh.
+    pub(crate) async fn resolve_image_tasks(&self, binding: &super::service::Binding) {
+        let rows: Vec<(String, String, String, bool)> = {
+            let inner = self.lock();
+            inner
+                .inbox
+                .get(&binding.id)
+                .into_iter()
+                .flat_map(|box_| box_.messages.iter().rev())
+                .filter(|row| {
+                    row["direction"] == "out"
+                        && row["image"].is_object()
+                        && row["remoteMessageId"].as_str().is_none()
+                })
+                .filter_map(|row| {
+                    Some((
+                        row["id"].as_str()?.into(),
+                        row["conversation"].as_str()?.into(),
+                        row["remoteTaskId"].as_str()?.into(),
+                        row["kind"] == "direct" && row["conversation"] == row["sender"],
+                    ))
+                })
+                .take(4)
+                .collect()
+        };
+        let mut lookups = tokio::task::JoinSet::new();
+        for (id, conversation, task, allow_remote_conversation) in rows {
+            let root = binding.root.clone();
+            let profile = binding.profile.clone();
+            lookups.spawn(async move {
+                let message = task_message_id(
+                    &root,
+                    &profile,
+                    &task,
+                    &conversation,
+                    allow_remote_conversation,
+                )
+                .await;
+                (id, conversation, task, message)
+            });
+        }
+        while let Some(outcome) = lookups.join_next().await {
+            let Ok((id, conversation, task, Some((message, cid)))) = outcome else {
+                continue;
+            };
+            let mut inner = self.lock();
+            if inner.closed
+                || !inner.runs.get(&binding.id).is_some_and(|run| {
+                    run.binding.root == binding.root
+                        && run.binding.profile == binding.profile
+                        && run.binding.channel == "dingtalk"
+                        && run.binding.agent_owner == binding.agent_owner
+                        && run.binding.agent_id == binding.agent_id
+                        && run.binding.peers == binding.peers
+                })
+            {
+                return;
+            }
+            if let Some(box_) = inner.inbox.get_mut(&binding.id) {
+                if let Some(row) = box_.messages.iter_mut().find(|row| {
+                    row["id"] == id
+                        && row["conversation"] == conversation
+                        && row["remoteTaskId"] == task
+                        && row["direction"] == "out"
+                        && row["image"].is_object()
+                }) {
+                    row["remoteMessageId"] = json!(message);
+                    if let Some(cid) = cid {
+                        row["remoteConversationId"] = json!(cid);
+                    }
+                }
+                coalesce_image_echoes(&mut box_.messages);
+            }
+            self.save_inbox(&inner);
+        }
+    }
     /// Persist the no-replay ledger before invoking any external mutation.
     fn save_image_ledger(&self, inner: &Inner) -> Result<(), MessageError> {
         let map: serde_json::Map<String, Value> = inner
@@ -341,15 +543,15 @@ impl MessagingService {
             "--idempotency-key".into(),
             format!("{request_id}-image"),
             "--profile".into(),
-            profile,
+            profile.clone(),
             "-f".into(),
             "json".into(),
             "--yes".into(),
         ];
         let outcome = dws_call(&args, &root).await;
         drop(staged);
-        let (state, error) = match outcome {
-            Ok(value) if receipt(&value, 0) => ("sent", None),
+        let (state, error) = match &outcome {
+            Ok(value) if receipt(value, 0) => ("sent", None),
             Err(error) if !error.uncertain => (
                 "failed",
                 Some("钉钉拒绝发送图片附件，请检查登录与权限后重试"),
@@ -358,8 +560,58 @@ impl MessagingService {
         };
         let mut result = initial;
         result["state"] = json!(state);
+        if let Ok(value) = &outcome {
+            let (task, message, cid) = receipt_ids(
+                value,
+                conversation,
+                false,
+                0,
+                result["kind"] == "direct" && result["sender"] == conversation,
+            );
+            if let Some(task) = task {
+                result["remoteTaskId"] = json!(task);
+            }
+            if let Some(message) = message {
+                result["remoteMessageId"] = json!(message);
+            }
+            if let Some(cid) = cid {
+                result["remoteConversationId"] = json!(cid);
+            }
+        }
         if let Some(error) = error {
             result["error"] = json!(error);
+        }
+        {
+            // Preserve the exact task before optional lookup so a restart can finish correlation without resending.
+            let mut inner = self.lock();
+            if let Some(box_) = inner.inbox.get_mut(id) {
+                if let Some(row) = box_
+                    .messages
+                    .iter_mut()
+                    .find(|row| row["id"] == request_id && row["direction"] == "out")
+                {
+                    *row = result.clone();
+                }
+            }
+            let _ = self.save_image_ledger(&inner);
+        }
+        if result["remoteMessageId"].as_str().is_none() {
+            if let Some(task) = result["remoteTaskId"].as_str() {
+                if let Some((message, cid)) = task_message_id(
+                    &root,
+                    &profile,
+                    task,
+                    conversation,
+                    result["kind"] == "direct" && result["sender"] == conversation,
+                )
+                .await
+                {
+                    result["remoteMessageId"] = json!(message);
+                    if let Some(cid) = cid {
+                        result["remoteConversationId"] = json!(cid);
+                    }
+                }
+            }
         }
         let mut inner = self.lock();
         let box_ = inner.inbox.entry(id.into()).or_default();
@@ -371,11 +623,65 @@ impl MessagingService {
         {
             *row = result.clone();
         }
+        coalesce_image_echoes(&mut box_.messages);
         // The pre-send unknown ledger remains safe even if this final save fails.
         self.save_inbox(&inner);
         let owners = self.persist_run_and_notify(&mut inner, id);
         drop(inner);
         self.bump_owners(owners);
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod correlation_tests {
+    use super::*;
+
+    #[test]
+    fn failed_or_pending_envelopes_never_identify_a_message_to_merge() {
+        for value in [
+            json!({"success":false,"openMessageId":"remote"}),
+            json!({"error":{"code":"failed"},"result":{"openMessageId":"remote"}}),
+            json!({"result":{"status":"pending","openMessageId":"remote"}}),
+            json!({"result":{"state":"sending","openMessageId":"remote"}}),
+        ] {
+            assert!(!receipt(&value, 0));
+            assert_eq!(
+                receipt_ids(&value, "group", false, 0, false),
+                (None, None, None)
+            );
+        }
+        assert_eq!(
+            receipt_ids(&json!({"openTaskId":"task"}), "group", false, 0, false),
+            (Some("task".into()), None, None)
+        );
+        assert_eq!(
+            receipt_ids(
+                &json!({"openMessageId":"remote","openConversationId":"wrong"}),
+                "group",
+                true,
+                0,
+                false
+            ),
+            (None, None, None)
+        );
+        assert_eq!(
+            receipt_ids(
+                &json!({"openMessageId":"top","result":{"openMessageId":"nested","openConversationId":"other-cid"}}),
+                "peer",
+                false,
+                0,
+                true
+            ),
+            (None, Some("top".into()), None)
+        );
+        let mut messages = vec![
+            json!({"id":"local-image","conversation":"group","direction":"out","image":{"name":"image.png"},"remoteMessageId":"remote"}),
+            json!({"id":"remote","conversation":"group","direction":"out","state":"synced"}),
+            json!({"id":"remote","conversation":"group","direction":"out","state":"sent","text":"independent local request"}),
+        ];
+        coalesce_image_echoes(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["text"], "independent local request");
     }
 }

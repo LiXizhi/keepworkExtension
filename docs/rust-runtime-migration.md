@@ -15,7 +15,7 @@
 | 令牌 | `~/.keepwork-mcp/token`，24 字节 hex，0600 |
 | 单实例文件 | `~/.keepwork-mcp/instance.json` `{pid,port,startedAt,name}` |
 
-`/health` 只声明已经实现的能力：当前返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`aichatPresenceApi`(`post-sse-v1`)、`personasApi`(`personas-v1`)、`messagingApi`(`messaging-v1`)、原生 CLI 的 `agentSessionApi` / `agentInventoryApi` / `agentContextApi` / `agentModeApi`（均为 `v1`）、`runtimeEngine`、`runtimeProduct`。`agentImageTurnApi`、`browserApi` 等未实现能力不出现；缺少可选字段表示不可用或未知，不能推断整个连接损坏，也不能要求客户端与服务端产品版本相同。
+`/health` 只声明已经实现的能力：当前返回 `requireAuth`、`workspaceRoot`、`fsApi`(`workspace`)、`folderBrowserApi`(`folders-v1`)、`terminalApi`(`pty-session-v1`)、`aichatPresenceApi`(`post-sse-v1`)、`personasApi`(`personas-v1`)、`messagingApi`(`messaging-v1`)、原生 CLI 的 `agentSessionApi` / `agentInventoryApi` / `agentContextApi` / `agentModeApi` / `agentImageTurnApi`（均为 `v1`）、`runtimeEngine`、`runtimeProduct`。`browserApi` 等未实现能力不出现；缺少可选字段表示不可用或未知，不能推断整个连接损坏，也不能要求客户端与服务端产品版本相同。
 
 ### 原生 CLI 会话切片（Rust 运行时 0.2.18）
 
@@ -26,7 +26,10 @@ Rust 自己实现 `/agents/backends`、只读可执行文件清单、owner 隔�
 - **发现与模式**：`probe=executable` 不启动原生进程；targeted backend 仅连接选中的 provider。ACP 无账户查询时返回 `authenticated:null / authState:unknown`。模型及 effort 来自原生目录，不能虚构。Craft 请求完整权限，Ask 保留交互审批，Plan 在 ACP 要求原生 planning mode 并拒绝修改审批；语义无法执行则在发言前返回明确错误。问题回答仍由用户决定。
 - **现行网页上下文**：实现 `/agents/contexts/:conversation`、`credentials`、SSE `events`、`result` 与 `revoke`，每轮注入已登记的指令及 revision。只向原 owner/conversation/pageId/generation 工具流派发；旧页或过期结果不能答复新页调用。同一 Rust executable 的私密 stdio 模式桥接 MCP，不需要 Node 代理。CLI 只得到可撤销的临时能力，得不到网页登录/Git 凭据。断流、超时、取消后明确记录已派发工具结果未知，不重放修改操作。
 - **空间操作边界**：背景 `workspace_file` 真正支持明确授权的本机空间，修改仅在 Craft，保留路径/符号链接限制及读后修改校验。远程、云端和 Git 文件操作使用原在线网页的已发现工具，页面离线时明确不可用。`credentials` 验证空间描述但不保存云端/Git token，并报告 `backendWorkspaceTypes:["local"]`；注入的上下文明确这项限制。Git `import/get/drop/ack` 持久化保留既有草稿及冲突；未验证 remote base 不标成功，后台 Git 编辑、远端 `check`、`stageValidatedDeck` 仍返回特定功能不支持。
-- **当前未覆盖**：Antigravity 原生 NDJSON、图片轮次、原生历史导入、Copilot VS Code 自定义模型桥与账户切换。Copilot ACP 不支持所需的 per-session MCP 工具桥合同，因此其 `contextVersion:1` 创建请求在发言前明确拒绝；清单/模型发现不代表当前 AIChat 上下文会话已可用，不静默丢失网页工具。保留 provider 清单，未实现协议明确不支持；不能因此宣称缺少 CLI、改用其他 provider 或阻止普通聊天。此实现不接通分身消息执行器的 CLI 路径。
+- **图片轮次（0.2.32）**：新增与 Node 相同的可选 `agentImageTurnApi: v1`，`POST /agents/sessions/:id/image-turns` 接受 1–4 张 PNG/JPEG/WebP/GIF 内联 data URL，合计解码不超过 4 MiB，请求体最多 7,000,000 字节。Codex/Claude 使用各自原生图片块；ACP（包括 DeepSeek）只在握手明确声明 `promptCapabilities.image: true` 时接收。普通 `turns` 请求保持原有 2,000,000 字节上限，不改变文本合同。daemon 快照和缓存只保留图片占位；未知提交仍不得重放。
+- **当前未覆盖**：Antigravity 原生 NDJSON、原生历史导入、Copilot VS Code 自定义模型桥与账户切换。Copilot ACP 不支持所需的 per-session MCP 工具桥合同，因此其 `contextVersion:1` 创建请求在发言前明确拒绝；清单/模型发现不代表当前 AIChat 上下文会话已可用，不静默丢失网页工具。保留 provider 清单，未实现协议明确不支持；不能因此宣称缺少 CLI、改用其他 provider 或阻止普通聊天。此实现不接通分身消息执行器的 CLI 路径。
+
+0.2.32 图片回归：`scripts/contract/agents-images.test.cjs` 与既有 agents、agents-codex、agents-claude-setup、health、build-info、deepseek-models 共 77 项通过；`RUST_MIN_STACK=8388608 cargo test --offline --manifest-path apps/mcp-rust/Cargo.toml` 共 217 项通过（1 项子进程 fixture 按设计忽略，生命周期验证需允许回环监听）。AIChat 既有 `tests/e2e/harness_image_paste.test.mjs` 在 Chrome 对新服务、缺少图片能力的旧服务及路由降级的 3 项场景通过；CLI 和网络使用隔离 fixture，不代表真实图片推理。真实本机 dsh 0.1.5-rc.2 的仅初始化探针报告 `promptCapabilities.image: false`，不能据此声称当前 DeepSeek 配置能看图。dsh 在初始化时按默认 provider/model 决定该能力；需要在其本机配置中选择已配置且支持图片的默认模型并重建 ACP 连接，仅切换 AIChat 会话模型可能不足。不覆盖这个否定声明，也不修改原生 CLI 配置。0.2.32 已生成并校验独立开发运行时，当前共享 8089 服务尚未替换。
 
 后续 Claude 适配器直接使用原生双向 stream-json，每个原生会话保留独立进程和 session ID，支持初始化模型目录、文字流、工具审批、问题回答、停止及原生恢复。多根目录通过 `--add-dir` 传入，网页工具使用进程级 MCP 配置；不绕过原生权限、不修改全局 CLI 配置、不自动重发不确定请求。`probe=executable` 仍不启动 CLI 或验证登录；完整状态用只读 `claude auth status` 区分已登录、未登录与未知，旧版命令不支持时不读取凭据文件代替检测。`protocolSupported` 为可选字段，旧运行时缺少该适配器时继续明确报告不支持，已找到 CLI 不能触发重复安装或隐式切换 Node。
 

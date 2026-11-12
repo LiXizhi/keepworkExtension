@@ -223,8 +223,22 @@ async fn post_action_inner(
             let binding = input["binding"].as_str().unwrap_or("");
             let conversation = input["conversation"].as_str().unwrap_or("");
             let inbox_action = input["action"].as_str().unwrap_or("");
+            if input
+                .get("syncRemote")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Err(PersonaError::bad("Invalid syncRemote"));
+            }
             messaging
-                .inbox_action(owner, id, binding, conversation, inbox_action)
+                .inbox_action_request(
+                    owner,
+                    id,
+                    binding,
+                    conversation,
+                    inbox_action,
+                    input["syncRemote"].as_bool().unwrap_or(false),
+                )
+                .await
                 .map_err(|error| error.into_persona_error())
         }
         "reply-image" => messaging

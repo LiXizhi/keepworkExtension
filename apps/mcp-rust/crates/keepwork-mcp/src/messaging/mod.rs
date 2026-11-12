@@ -27,6 +27,7 @@ mod image_reply;
 mod inbox;
 mod lifecycle;
 mod policy;
+mod read;
 mod refresh;
 mod service;
 #[cfg(test)]

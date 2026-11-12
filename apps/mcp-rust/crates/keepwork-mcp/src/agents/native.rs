@@ -56,6 +56,7 @@ pub(super) fn thread_items(thread: &Value, thread_id: &str) -> Result<Vec<Value>
         .into_iter()
         .map(|item| {
             let mut item = scrub(item, 0, &mut budget);
+            super::item_stream::visible_reasoning(&mut item);
             if item["type"] == "userMessage" {
                 if let Some(content) = item["content"].as_array_mut() {
                     for part in content {
@@ -233,6 +234,7 @@ impl AgentManager {
                     viewers: Arc::new(AtomicUsize::new(0)),
                     configuration: Arc::new(AsyncMutex::new(())),
                     context_marker: None,
+                    restoring: false,
                     needs_native_history: false,
                 },
             );

@@ -18,6 +18,18 @@ function logRows() {
   catch (error) { if (error.code === 'ENOENT') return []; throw error; }
 }
 function prompts() { return logRows().filter((row) => row.method === 'session/prompt'); }
+function replayOnLoad(session, options = {}) {
+  const file = logFile + '.load-replay.json';
+  const settings = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+  settings[session.threadId] = options;
+  fs.writeFileSync(file, JSON.stringify(settings));
+}
+async function registerReplayContext(conversationId, generation) {
+  const registered = await request(`/contexts/${conversationId}`, { method: 'POST', body: {
+    pageId: 'history-page', generation, instructions: 'Keep conversation history intact.', revision: generation, tools: [],
+  } });
+  assert.equal(registered.status, 200, JSON.stringify(registered.json));
+}
 function headers(owner = ownerA, extra = {}) {
   return { origin: `http://127.0.0.1:${port}`, 'x-agent-owner': owner, ...extra };
 }
@@ -466,6 +478,92 @@ test('rebinding the webpage restores tools on the same native session without re
   assert.notEqual(capability(reloaded.params.mcpServers[0]), capability(descriptorA));
   assert.equal(prompts().filter((row) => row.params.sessionId === session.threadId).length, 2,
     'only the two explicit requests may execute across a page reconnect');
+});
+
+test('ACP session/load history is isolated during page rebinding while another session stays live', async () => {
+  const conversationId = 'history-rebind';
+  await registerReplayContext(conversationId, 'history-generation-a');
+  const session = await create(conversationId, { contextVersion: 1, mode: 'ask' });
+  assert.equal((await turn(session, 'history-rebind-1', 'First question')).status, 200);
+  const first = await waitSession(session, (view) => view.status === 'completed');
+  const peer = await create('history-rebind-peer', { mode: 'ask' });
+  assert.equal((await turn(peer, 'history-peer-1', 'FIXTURE_SLOW')).status, 200);
+  await waitSession(peer, (view) => answerText(view).includes('中文 fixture'));
+  replayOnLoad(session, { permission: true, peerSessionId: peer.threadId });
+  await registerReplayContext(conversationId, 'history-generation-b');
+  try {
+    const sent = await turn(session, 'history-rebind-2', 'List the top-level project files');
+    assert.equal(sent.status, 200, JSON.stringify(sent.json));
+    const complete = await waitSession(session, (view) => view.status === 'completed');
+    assert.deepEqual(complete.items.slice(0, first.items.length), first.items, 'restoring native history must preserve the first turn');
+    assert.doesNotMatch(JSON.stringify(complete.items), /HISTORY_/, 'load replay must never enter a live turn');
+    assert.deepEqual(complete.items.filter((item) => item.type === 'agentMessage').map((item) => item.text),
+      ['中文 fixture answer', '中文 fixture answer']);
+    assert.equal(complete.items.filter((item) => item.type === 'userMessage').length, 2);
+    assert.deepEqual(complete.pending, [], 'historical permissions cannot become current approval prompts');
+    const response = logRows().find((row) => row.id === 'history-permission-' + session.threadId && !row.method);
+    assert.ok(response, 'history permission requests must receive a bounded rejection');
+    assert.ok(response.error || response.result?.outcome?.outcome === 'cancelled', 'history permissions cannot be approved');
+    const peerView = await waitSession(peer, (view) => answerText(view).includes('LIVE_DURING_RESTORE'));
+    assert.equal(peerView.status, 'running', 'a load guard belongs only to its own session');
+    const promptCount = prompts().filter((row) => row.params.sessionId === session.threadId).length;
+    assert.equal(promptCount, 2);
+    assert.equal((await turn(session, 'history-rebind-2', 'Do not repeat this request')).status, 200);
+    assert.equal(prompts().filter((row) => row.params.sessionId === session.threadId).length, promptCount);
+  } finally {
+    await request(`/sessions/${peer.id}/interrupt`, { method: 'POST', body: {} });
+    await waitSession(peer, (view) => view.status === 'interrupted');
+  }
+});
+
+test('ACP session/load failure preserves saved turns and a later explicit request can recover', async () => {
+  const conversationId = 'history-load-failure';
+  await registerReplayContext(conversationId, 'failure-generation-a');
+  const session = await create(conversationId, { contextVersion: 1, mode: 'ask' });
+  assert.equal((await turn(session, 'history-failure-1', 'First question')).status, 200);
+  const first = await waitSession(session, (view) => view.status === 'completed');
+  const count = prompts().filter((row) => row.params.sessionId === session.threadId).length;
+  replayOnLoad(session, { fail: true });
+  await registerReplayContext(conversationId, 'failure-generation-b');
+  const rejected = await turn(session, 'history-failure-2', 'Must not dispatch if restore fails');
+  assert.notEqual(rejected.status, 200);
+  assert.match(rejected.json.error, /history load failed/);
+  const failed = await request(`/sessions/${session.id}`);
+  assert.equal(failed.status, 200, JSON.stringify(failed.json));
+  assert.deepEqual(failed.json.items, first.items, 'failed restore cannot append any historical output');
+  assert.equal(failed.json.lastSubmission.state, 'rejected');
+  assert.equal(prompts().filter((row) => row.params.sessionId === session.threadId).length, count);
+  replayOnLoad(session);
+  const recovered = await turn(session, 'history-failure-3', 'A new explicit request after restoring the connection');
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.json));
+  const complete = await waitSession(session, (view) => view.status === 'completed');
+  assert.doesNotMatch(JSON.stringify(complete.items), /HISTORY_/);
+  assert.deepEqual(complete.items.slice(0, first.items.length), first.items);
+  assert.equal(complete.items.filter((item) => item.type === 'userMessage').length, 2);
+  assert.equal(prompts().filter((row) => row.params.sessionId === session.threadId).length, count + 1);
+});
+
+test('ACP session/load after daemon restart preserves history without adding replayed messages', async () => {
+  const session = await create('history-daemon-restart', { mode: 'ask' });
+  assert.equal((await turn(session, 'history-restart-1', 'First question')).status, 200);
+  const first = await waitSession(session, (view) => view.status === 'completed');
+  replayOnLoad(session);
+  const count = prompts().filter((row) => row.params.sessionId === session.threadId).length;
+  await stop(); await start();
+  const read = await request(`/sessions/${session.id}`);
+  assert.equal(read.status, 200, JSON.stringify(read.json));
+  assert.deepEqual(read.json.items, first.items, 'reading persisted history cannot start or replay native work');
+  assert.equal(prompts().filter((row) => row.params.sessionId === session.threadId).length, count);
+  const sent = await turn(session, 'history-restart-2', 'Continue after restart');
+  assert.equal(sent.status, 200, JSON.stringify(sent.json));
+  const complete = await waitSession(session, (view) => view.status === 'completed');
+  assert.equal(complete.threadId, session.threadId);
+  assert.deepEqual(complete.items.slice(0, first.items.length), first.items);
+  assert.doesNotMatch(JSON.stringify(complete.items), /HISTORY_/);
+  assert.equal(complete.items.filter((item) => item.type === 'userMessage').length, 2);
+  assert.equal(prompts().filter((row) => row.params.sessionId === session.threadId).length, count + 1);
+  assert.equal((await turn(session, 'history-restart-1', 'Do not repeat the first question')).status, 200);
+  assert.equal(prompts().filter((row) => row.params.sessionId === session.threadId).length, count + 1);
 });
 
 test('send streams Node-compatible NDJSON snapshots and reconnect never resubmits a prompt', async () => {

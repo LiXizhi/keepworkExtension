@@ -625,6 +625,7 @@ impl AgentManager {
                     viewers: Arc::new(AtomicUsize::new(0)),
                     configuration: Arc::new(AsyncMutex::new(())),
                     context_marker,
+                    restoring: false,
                     needs_native_history: false,
                 },
             );
@@ -787,6 +788,7 @@ impl AgentManager {
                 .as_ref()
                 .is_some_and(|old| Arc::ptr_eq(old, &harness))
                 && sessions[session_id].context_marker == current_marker
+                && !sessions[session_id].restoring
         };
         if !loaded {
             let (server, context_marker) = if contextual {
@@ -826,7 +828,17 @@ impl AgentManager {
                 }
                 params
             };
-            let mut native = harness
+            let acp = harness.protocol() == Protocol::Acp;
+            if acp {
+                let mut sessions = self.sessions.lock().unwrap();
+                let session = sessions
+                    .get_mut(session_id)
+                    .ok_or("Agent session not found")?;
+                session.restoring = true;
+                session.harness = Some(harness.clone());
+                session.context_marker = None;
+            }
+            let result = harness
                 .call(
                     if harness.protocol() == Protocol::Acp {
                         "session/load"
@@ -836,17 +848,43 @@ impl AgentManager {
                     parameters,
                     RPC_TIMEOUT,
                 )
-                .await?;
-            if harness.protocol() == Protocol::Acp {
-                native["sessionId"] = data["threadId"].clone();
-            }
-            if contextual && self.context.marker(owner, conversation).ok() != context_marker {
-                return Err("AIChat page changed while restoring the native tool bridge; reconnect before resubmitting".into());
-            }
+                .await;
+            // RPC replies and notifications have separate consumers. Keep the
+            // replay guard until every queued update/request has been handled,
+            // including on failure, before a new prompt can begin.
+            let drained = if acp {
+                harness.flush_events().await
+            } else {
+                Ok(())
+            };
             let mut sessions = self.sessions.lock().unwrap();
             let session = sessions
                 .get_mut(session_id)
                 .ok_or("Agent session not found")?;
+            session.restoring = false;
+            let mut native = match result.and_then(|native| drained.map(|_| native)) {
+                Ok(native) => native,
+                Err(error) => {
+                    if acp {
+                        session.harness = None;
+                    }
+                    return Err(error);
+                }
+            };
+            if acp {
+                native["sessionId"] = data["threadId"].clone();
+                for key in ["configOptions", "models", "modes"] {
+                    if native.get(key).is_none() && session.native.get(key).is_some() {
+                        native[key] = session.native[key].clone();
+                    }
+                }
+            }
+            if contextual && self.context.marker(owner, conversation).ok() != context_marker {
+                if acp {
+                    session.harness = None;
+                }
+                return Err("AIChat page changed while restoring the native tool bridge; reconnect before resubmitting".into());
+            }
             session.native = native;
             session.harness = Some(harness.clone());
             session.context_marker = context_marker;
@@ -885,9 +923,7 @@ impl AgentManager {
             ),
             _ => {}
         }
-        if input.get("images").is_some() {
-            return Err("UNSUPPORTED_FEATURE: Image turns are not available in this Rust native CLI contract".into());
-        }
+        let images = images::parse(input.get("images"))?;
         let text = input["text"]
             .as_str()
             .filter(|s| !s.trim().is_empty() && s.chars().count() <= 200_000)
@@ -955,6 +991,11 @@ impl AgentManager {
             let _guard = gate.lock().await;
             let harness = self.load(session_id, owner).await?;
             if harness.protocol() == Protocol::Acp {
+                if !images.is_empty()
+                    && harness.capabilities()["promptCapabilities"]["image"] != true
+                {
+                    return Err("UNSUPPORTED_FEATURE: This ACP agent does not advertise image input. Remove the images or switch agents.".into());
+                }
                 let mut native = { self.sessions.lock().unwrap()[session_id].native.clone() };
                 if let Some(model) = requested_model
                     .as_deref()
@@ -984,10 +1025,13 @@ impl AgentManager {
                 return Err(error);
             }
         };
+        let native_content = images::content(&native_text, &images, harness.protocol());
+        let mut visible_content = vec![json!({"type":"text", "text":text})];
+        visible_content.extend(images.iter().map(|_| json!({"type":"image"})));
         let turn_id = id();
         self.edit(session_id,|s|{
             s.data["turnId"]=json!(turn_id);
-            s.data["items"].as_array_mut().unwrap().push(json!({"id":format!("local-user-{}",id()),"type":"userMessage","content":[{"type":"text","text":text}]}));
+            s.data["items"].as_array_mut().unwrap().push(json!({"id":format!("local-user-{}",id()),"type":"userMessage","content":visible_content}));
             if let Some(model)=&requested_model{
                 if harness.protocol()==Protocol::Claude && s.data["model"]!=*model && requested_effort.is_none(){s.data["effort"]=Value::Null;}
                 s.data["model"]=json!(model);
@@ -995,8 +1039,19 @@ impl AgentManager {
             if let Some(effort)=&requested_effort{s.data["effort"]=json!(effort);}Ok(())
         })?;
         if harness.protocol() == Protocol::Acp {
-            let dispatched=match harness.submit("session/prompt",json!({"sessionId":data["threadId"],"prompt":[{"type":"text","text":native_text}]}),Duration::from_secs(30*60)).await {
-                Ok(reply)=>reply,Err(error)=>{self.reject_submission(session_id,&request_id,&error,true);return Err(format!("SUBMISSION_UNKNOWN:{error}"));}
+            let dispatched = match harness
+                .submit(
+                    "session/prompt",
+                    json!({"sessionId":data["threadId"],"prompt":native_content}),
+                    Duration::from_secs(30 * 60),
+                )
+                .await
+            {
+                Ok(reply) => reply,
+                Err(error) => {
+                    self.reject_submission(session_id, &request_id, &error, true);
+                    return Err(format!("SUBMISSION_UNKNOWN:{error}"));
+                }
             };
             self.edit(session_id, |s| {
                 if s.data["status"] == "starting" {
@@ -1042,7 +1097,7 @@ impl AgentManager {
                 }
             });
         } else {
-            let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":[{"type":"text","text":native_text}],"sandboxPolicy":{"type":if selected_mode=="craft"{"dangerFullAccess"}else{"readOnly"}},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
+            let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":native_content,"sandboxPolicy":{"type":if selected_mode=="craft"{"dangerFullAccess"}else{"readOnly"}},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
             if harness.protocol() == Protocol::Claude {
                 params.as_object_mut().unwrap().remove("sandboxPolicy");
                 params.as_object_mut().unwrap().remove("approvalPolicy");

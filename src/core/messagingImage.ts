@@ -70,7 +70,36 @@ export function saveReplyImageLedger(home: string, inbox: unknown): void {
 }
 
 export function imageSendReceipt(value: any, depth = 0): boolean {
-    return depth <= 8 && !!value && typeof value === 'object' && (
+    return depth <= 8 && receiptConfirmed(value) && (
         ['openTaskId', 'openMessageId', 'messageId'].some(key => typeof value[key] === 'string' && value[key].trim()) ||
         ['result', 'data'].some(key => imageSendReceipt(value[key], depth + 1)));
+}
+
+function receiptConfirmed(value:any):boolean {
+    return !!value&&typeof value==='object'&&!Array.isArray(value)&&value.success!==false&&!value.error&&
+        !['pending','sending','queued','processing','failed','failure','cancelled','canceled','rejected'].includes(String(value.status||value.state||'').toLowerCase());
+}
+export interface ImageReceiptIds { remoteTaskId?: string; remoteMessageId?: string; remoteConversationId?: string }
+/** Task IDs and message IDs occupy different namespaces. Only reviewed envelopes are traversed. */
+export function imageReceiptIds(value: any, conversation: string, requireConversation = false, depth = 0, allowRemoteConversation = false): ImageReceiptIds {
+    if (depth > 8 || !receiptConfirmed(value)) return {};
+    const id = (key: string) => typeof value[key] === 'string' && value[key].trim() && value[key].length <= 2048 ? value[key] as string : undefined;
+    const remoteTaskId = id('openTaskId');
+    const cid = id('openConversationId') || id('conversationId');
+    if(cid&&cid!==conversation&&!allowRemoteConversation)return remoteTaskId?{remoteTaskId}:{};
+    const remoteMessageId = (!requireConversation || !!cid) ? id('openMessageId') || id('messageId') : undefined;
+    const result: ImageReceiptIds = { ...(remoteTaskId ? { remoteTaskId } : {}), ...(remoteMessageId ? { remoteMessageId,...(cid&&cid!==conversation?{remoteConversationId:cid}:{}) } : {}) };
+    for (const key of ['result', 'data']) {
+        const nested = imageReceiptIds(value[key], conversation, requireConversation, depth + 1, allowRemoteConversation);
+        if(nested.remoteTaskId)result.remoteTaskId ||= nested.remoteTaskId;
+        if(!result.remoteMessageId&&nested.remoteMessageId){result.remoteMessageId=nested.remoteMessageId;if(nested.remoteConversationId)result.remoteConversationId=nested.remoteConversationId;}
+    }
+    return result;
+}
+
+/** Keep the local request identity and preview; only a verified outgoing remote ID can collapse an echo. */
+export function coalesceImageEchoes<T extends { id: string; conversation: string; direction: string; state?: string; remoteEvent?: boolean; image?: unknown; remoteMessageId?: string; remoteConversationId?: string }>(messages: T[]): T[] {
+    const aliases = new Set(messages.filter(row => row.direction === 'out' && row.image && row.remoteMessageId)
+        .flatMap(row => [JSON.stringify([row.conversation, row.remoteMessageId]),JSON.stringify([row.remoteConversationId||row.conversation,row.remoteMessageId]) ]));
+    return messages.filter(row => row.direction !== 'out' || !!row.image || !(['synced','recovered'].includes(row.state||'')||row.remoteEvent===true) || !aliases.has(JSON.stringify([row.conversation, row.id])));
 }

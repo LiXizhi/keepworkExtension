@@ -40,6 +40,17 @@ root = pathlib.Path.cwd()
 args = sys.argv[1:]
 def arg(flag):
     return args[args.index(flag)+1] if flag in args else None
+if args[:3] == ['chat', 'message', 'query-send-status']:
+    with open(root / '.fixture-task-calls', 'a') as log: log.write(json.dumps(args) + '\n')
+    result = root / '.fixture-task-result'
+    print(result.read_text() if result.exists() else '{}')
+    raise SystemExit(0)
+if args[:2] == ['event', 'status'] and (root / '.fixture-history').exists():
+    print(json.dumps({'identity': {'corp_id': 'fixture-corp', 'user_id': 'fixture-user', 'open_dingtalk_id': 'fixture-self'}}))
+    raise SystemExit(0)
+if args[:3] == ['chat', 'message', 'list-all'] and (root / '.fixture-history').exists():
+    print((root / '.fixture-history').read_text())
+    raise SystemExit(0)
 if args[:2] != ['chat', '+messages-send']:
     with open(root / '.fixture-other-cli', 'a') as log:
         log.write(json.dumps(args) + '\n')
@@ -281,6 +292,148 @@ async fn http(
     let body = serde_json::from_slice(&bytes)
         .unwrap_or_else(|_| json!({"raw":String::from_utf8_lossy(&bytes)}));
     (status, body)
+}
+
+#[tokio::test]
+async fn exact_send_task_id_merges_history_echo_and_preserves_image_request_across_restart() {
+    let _env = CLI_ENV.lock().await;
+    let f = Fixture::new();
+    std::fs::write(
+        f.root.join(".fixture-task-result"),
+        json!({"result":{"openMessageId":"remote-image","openConversationId":GROUP}}).to_string(),
+    )
+    .unwrap();
+    let sent = f.send(GROUP, "merge-request", &f.image()).await;
+    assert_eq!(sent["remoteTaskId"], "fixture-task");
+    assert_eq!(sent["remoteMessageId"], "remote-image");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(f.root.join(".fixture-history"), json!({"success":true,"result":{"hasMore":false,"conversationMessagesList":[{"singleChat":false,"openConversationId":GROUP,"messages":[{"openMessageId":"remote-image","senderOpenDingTalkId":"fixture-self","content":"[文件] image.png fileId: exact-file","createTime":now-3000}]}]}}).to_string()).unwrap();
+    let result = f
+        .service
+        .inbox_refresh(OWNER, PERSONA, BINDING)
+        .await
+        .unwrap();
+    assert_eq!(result["imported"], 0);
+    let rows = f.ledger()[BINDING]["messages"].as_array().unwrap().clone();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["image"].is_object() || row["id"] == "remote-image")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["image"].is_object()).unwrap()["id"],
+        "merge-request"
+    );
+    let lookups = std::fs::read_to_string(f.root.join(".fixture-task-calls")).unwrap();
+    let args: Vec<String> = serde_json::from_str(lookups.lines().next().unwrap()).unwrap();
+    assert_eq!(args[4], "fixture-task");
+    assert!(args.windows(2).any(|pair| pair == ["--profile", PROFILE]));
+    f.service.close().await;
+    let reopened = Fixture::open(&f.home);
+    let replay = reopened
+        .manual_image_reply(OWNER, PERSONA, BINDING, GROUP, "merge-request", &f.image())
+        .await
+        .unwrap();
+    assert_eq!(replay["remoteMessageId"], "remote-image");
+    assert_eq!(replay["image"], sent["image"]);
+    assert_eq!(f.calls().len(), 1);
+    f.finish(&reopened).await;
+}
+
+#[tokio::test]
+async fn late_task_metadata_removes_an_existing_synced_echo_without_merging_other_images() {
+    let _env = CLI_ENV.lock().await;
+    let f = Fixture::new();
+    let sent = f.send(GROUP, "late-request", &f.image()).await;
+    assert_eq!(sent["state"], "sent");
+    assert!(sent.get("remoteMessageId").is_none());
+    f.service.close().await;
+    let mut ledger = f.ledger();
+    let rows = ledger[BINDING]["messages"].as_array_mut().unwrap();
+    for (id, conversation, direction) in [
+        ("remote-image", GROUP, "out"),
+        ("remote-image", DIRECT, "out"),
+        ("different-image", GROUP, "out"),
+        ("remote-image", GROUP, "in"),
+    ] {
+        rows.push(json!({"id":id,"conversation":conversation,"direction":direction,"sender":"fixture-self","kind":"group","text":"[文件] image.png fileId: fixture-file","time":1794448800002_i64,"state":"synced"}));
+    }
+    std::fs::write(f.home.join("messaging-v1/inbox.json"), ledger.to_string()).unwrap();
+    std::fs::write(
+        f.root.join(".fixture-task-result"),
+        json!({"result":{"openMessageId":"remote-image","openConversationId":GROUP}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        f.root.join(".fixture-history"),
+        json!({"success":true,"result":{"hasMore":false,"conversationMessagesList":[]}})
+            .to_string(),
+    )
+    .unwrap();
+    let reopened = Fixture::open(&f.home);
+    reopened
+        .inbox_refresh(OWNER, PERSONA, BINDING)
+        .await
+        .unwrap();
+    let rows = f.ledger()[BINDING]["messages"].as_array().unwrap().clone();
+    assert!(!rows.iter().any(|row| row["id"] == "remote-image"
+        && row["conversation"] == GROUP
+        && row["direction"] == "out"));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["id"] == "remote-image")
+            .count(),
+        2
+    );
+    assert!(rows.iter().any(|row| row["id"] == "different-image"));
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == "late-request").unwrap()["remoteMessageId"],
+        "remote-image"
+    );
+    assert_eq!(f.calls().len(), 1);
+    f.finish(&reopened).await;
+}
+
+#[tokio::test]
+async fn legacy_direct_sender_key_retains_the_exact_tasks_actual_remote_conversation() {
+    let _env = CLI_ENV.lock().await;
+    let f = Fixture::new();
+    f.service.close().await;
+    let mut ledger = f.ledger();
+    ledger[BINDING]["messages"].as_array_mut().unwrap().push(json!({"id":"legacy-incoming","conversation":PEER,"sender":PEER,"direction":"in","kind":"direct","text":"legacy direct","time":1794448800000_i64}));
+    std::fs::write(f.home.join("messaging-v1/inbox.json"), ledger.to_string()).unwrap();
+    std::fs::write(
+        f.root.join(".fixture-task-result"),
+        json!({"result":{"openMessageId":"legacy-remote-image","openConversationId":DIRECT}})
+            .to_string(),
+    )
+    .unwrap();
+    let reopened = Fixture::open(&f.home);
+    let sent = reopened
+        .manual_image_reply(OWNER, PERSONA, BINDING, PEER, "legacy-direct", &f.image())
+        .await
+        .unwrap();
+    assert_eq!(sent["conversation"], PEER);
+    assert_eq!(sent["remoteConversationId"], DIRECT);
+    assert_eq!(sent["remoteMessageId"], "legacy-remote-image");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(f.root.join(".fixture-history"),json!({"success":true,"result":{"hasMore":false,"conversationMessagesList":[{"singleChat":true,"openConversationId":DIRECT,"messages":[{"openMessageId":"legacy-remote-image","senderOpenDingTalkId":"fixture-self","content":"[文件] image.png fileId: same-file","createTime":now-3000}]}]}}).to_string()).unwrap();
+    assert_eq!(
+        reopened
+            .inbox_refresh(OWNER, PERSONA, BINDING)
+            .await
+            .unwrap()["imported"],
+        0
+    );
+    assert_eq!(f.calls().len(), 1);
+    f.finish(&reopened).await;
 }
 
 #[tokio::test]

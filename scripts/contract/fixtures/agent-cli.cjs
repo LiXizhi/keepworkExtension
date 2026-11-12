@@ -124,6 +124,35 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   }
   if (method === 'session/load') {
     sessions.set(params.sessionId, { cwd: params.cwd, model: 'fixture-model', mode: 'default', mcpServers: params.mcpServers });
+    const replayFile = process.env.KEEPWORK_AGENT_FIXTURE_LOG && process.env.KEEPWORK_AGENT_FIXTURE_LOG + '.load-replay.json';
+    const replay = replayFile && fs.existsSync(replayFile) && JSON.parse(fs.readFileSync(replayFile, 'utf8'))[params.sessionId];
+    if (replay) {
+      if (replay.metadata) {
+        update(params.sessionId, { sessionUpdate: 'config_option_update', configOptions: [{
+          id: 'restored-model-choice', category: 'model', type: 'select', currentValue: 'fixture-model',
+          options: [{ value: 'fixture-model', name: 'Fixture model' }, { value: 'restored-model', name: 'Restored model' }],
+        }] });
+        update(params.sessionId, { sessionUpdate: 'current_mode_update', currentModeId: 'plan' });
+      }
+      update(params.sessionId, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'HISTORY_USER' } });
+      update(params.sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'HISTORY_THOUGHT' } });
+      text(params.sessionId, 'HISTORY_GREETING');
+      update(params.sessionId, {
+        sessionUpdate: 'tool_call', toolCallId: 'history-tool', title: 'HISTORY_TOOL', kind: 'read',
+        status: 'completed', rawOutput: { text: 'HISTORY_OUTPUT' },
+      });
+      if (replay.permission) send({
+        id: 'history-permission-' + params.sessionId, method: 'session/request_permission',
+        params: { sessionId: params.sessionId, toolCall: { toolCallId: 'history-permission', title: 'HISTORY_PERMISSION', kind: 'edit' },
+          options: [{ optionId: 'allow', kind: 'allow_once', name: 'Allow once' }, { optionId: 'reject', kind: 'reject_once', name: 'Reject once' }] },
+      });
+      if (replay.peerSessionId) text(replay.peerSessionId, 'LIVE_DURING_RESTORE');
+      // History precedes the load reply, as ACP peers do. Keep the load open
+      // briefly so queued notifications and permission requests are exercised.
+      return setTimeout(() => replay.fail
+        ? send({ id, error: { code: -32603, message: 'Fixture history load failed' } })
+        : reply(id, replay.metadata ? { sessionId: params.sessionId } : metadata(params.sessionId)), 60);
+    }
     return reply(id, metadata(params.sessionId));
   }
   if (method === 'session/set_model') {

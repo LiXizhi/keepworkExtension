@@ -1,3 +1,4 @@
+use super::item_stream::{apply_delta, is_item_delta, merge_item, visible_reasoning};
 use super::*;
 
 impl AgentManager {
@@ -60,6 +61,15 @@ impl AgentManager {
             .map(|(id, _)| id.clone())
     }
     fn acp_update(&self, session_id: &str, update: &Value) {
+        // session/load replays the native transcript. Only configuration belongs
+        // to the restored session; text and tools are already in local history.
+        if !matches!(
+            update["sessionUpdate"].as_str(),
+            Some("config_option_update" | "current_mode_update")
+        ) && self.sessions.lock().unwrap()[session_id].restoring
+        {
+            return;
+        }
         let _ = self.edit(session_id, |s| {
             let kind = update["sessionUpdate"].as_str().unwrap_or("");
             let turn = s.data["turnId"].as_str().unwrap_or("unknown").to_string();
@@ -185,12 +195,9 @@ impl AgentManager {
                             });
                         }
                         if let Some(old) = items.iter_mut().find(|old| old["id"] == item_id) {
-                            if let Some(fields) = item.as_object() {
-                                for (k, v) in fields {
-                                    old[k] = v.clone();
-                                }
-                            }
+                            merge_item(old, item);
                         } else {
+                            visible_reasoning(&mut item);
                             items.push(item);
                         }
                     }
@@ -211,20 +218,8 @@ impl AgentManager {
                             .retain(|p| p["id"] != id);
                     }
                 }
-                _ if method.ends_with("/delta") || method.ends_with("/outputDelta") => {
-                    if let Some(item) = s.data["items"]
-                        .as_array_mut()
-                        .unwrap()
-                        .iter_mut()
-                        .find(|item| item["id"] == params["itemId"])
-                    {
-                        let field = if item["type"] == "commandExecution" {
-                            "aggregatedOutput"
-                        } else {
-                            "text"
-                        };
-                        append(item, field, params["delta"].as_str().unwrap_or(""));
-                    }
+                _ if is_item_delta(method) || method == "item/reasoning/summaryPartAdded" => {
+                    apply_delta(s.data["items"].as_array_mut().unwrap(), method, params);
                 }
                 _ => {}
             }
@@ -245,13 +240,24 @@ impl AgentManager {
                 .await;
             return;
         };
-        let (data, pending_count) = {
+        let (data, pending_count, restoring) = {
             let sessions = self.sessions.lock().unwrap();
             (
                 sessions[&session_id].data.clone(),
                 sessions[&session_id].pending.len(),
+                sessions[&session_id].restoring,
             )
         };
+        if restoring {
+            let _ = harness
+                .reject(
+                    native_id,
+                    -32602,
+                    "Actions are unavailable during history replay",
+                )
+                .await;
+            return;
+        }
         if pending_count >= 32 || !ACTIVE.contains(&data["status"].as_str().unwrap_or("")) {
             let _ = harness
                 .reject(
@@ -613,6 +619,128 @@ fn cursor_questions(params: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn codex_reasoning_and_reply_are_visible_in_multiple_running_stream_frames() {
+        use futures_util::StreamExt;
+        let directory = std::env::temp_dir().join(format!("keepwork-codex-stream-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let manager = AgentManager::open(directory.join("sessions.json"), 0);
+        let data = json!({"id":"session","owner":"fixture","threadId":"native","turnId":"turn","backend":"codex","roots":[directory],"conversationId":"fixture","status":"running","cursor":0,"items":[],"pending":[],"submissions":{},"aichatContext":false});
+        let (events, _) = watch::channel(json!({"cursor":0,"session":snapshot(&data)}));
+        manager.sessions.lock().unwrap().insert(
+            "session".into(),
+            Session {
+                data,
+                harness: None,
+                native: json!({}),
+                pending: HashMap::new(),
+                events,
+                viewers: Arc::new(AtomicUsize::new(0)),
+                configuration: Arc::new(AsyncMutex::new(())),
+                context_marker: None,
+                restoring: false,
+                needs_native_history: false,
+            },
+        );
+        assert!(manager.stream("session", "another-owner").is_err());
+        let mut stream = manager
+            .stream("session", "fixture")
+            .unwrap()
+            .into_body()
+            .into_data_stream();
+        stream.next().await.unwrap().unwrap();
+        for (method, params, expected) in [
+            (
+                "item/reasoning/summaryTextDelta",
+                json!({"itemId":"thinking","summaryIndex":0,"delta":"先思"}),
+                "先思",
+            ),
+            (
+                "item/reasoning/summaryTextDelta",
+                json!({"itemId":"thinking","summaryIndex":0,"delta":"考中文🙂"}),
+                "先思考中文🙂",
+            ),
+            (
+                "item/started",
+                json!({"item":{"id":"thinking","type":"reasoning","summary":[],"content":[]}}),
+                "先思考中文🙂",
+            ),
+            (
+                "item/reasoning/summaryPartAdded",
+                json!({"itemId":"thinking","summaryIndex":1}),
+                "先思考中文🙂",
+            ),
+            (
+                "item/reasoning/summaryTextDelta",
+                json!({"itemId":"thinking","summaryIndex":1,"delta":"再回答"}),
+                "先思考中文🙂\n\n再回答",
+            ),
+            (
+                "item/completed",
+                json!({"item":{"id":"thinking","type":"reasoning","summary":["最终思考"],"content":[]}}),
+                "最终思考",
+            ),
+            (
+                "item/agentMessage/delta",
+                json!({"itemId":"reply","delta":"持续"}),
+                "持续",
+            ),
+            (
+                "item/agentMessage/delta",
+                json!({"itemId":"reply","delta":"输出🙂"}),
+                "持续输出🙂",
+            ),
+            (
+                "item/started",
+                json!({"item":{"id":"reply","type":"agentMessage","text":""}}),
+                "持续输出🙂",
+            ),
+            (
+                "item/completed",
+                json!({"item":{"id":"reply","type":"agentMessage"}}),
+                "持续输出🙂",
+            ),
+            (
+                "item/reasoning/textDelta",
+                json!({"itemId":"raw","contentIndex":0,"delta":"原生"}),
+                "原生",
+            ),
+            (
+                "item/reasoning/textDelta",
+                json!({"itemId":"raw","contentIndex":0,"delta":"推理"}),
+                "原生推理",
+            ),
+        ] {
+            manager.codex_update("session", method, &params);
+            let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame: Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(frame["session"]["status"], "running");
+            let item_id = params.get("itemId").unwrap_or(&params["item"]["id"]);
+            let item = frame["session"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == *item_id)
+                .expect("a streamed item must exist before completion");
+            assert_eq!(item["text"], expected, "{method}");
+        }
+        manager.codex_update(
+            "session",
+            "turn/completed",
+            &json!({"turn":{"status":"completed"}}),
+        );
+        let frame = stream.next().await.unwrap().unwrap();
+        let frame: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(frame["session"]["status"], "completed");
+        drop(stream);
+        drop(manager);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn native_approval_options_never_silently_widen_a_one_turn_grant() {
         let native = json!({"method":"session/request_permission","params":{"options":[{"kind":"allow_always","optionId":"persistent"}]}});
@@ -674,6 +802,7 @@ mod tests {
                 viewers: Arc::new(AtomicUsize::new(0)),
                 configuration: Arc::new(AsyncMutex::new(())),
                 context_marker: None,
+                restoring: false,
                 needs_native_history: false,
             },
         );

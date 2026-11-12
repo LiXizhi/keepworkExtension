@@ -7,9 +7,9 @@ Node. Same wire contract, no Node in the installer.
 - `/health.name` stays `keepwork-mcp`; the runtime reports
   `runtimeEngine: "rust"` and `runtimeProduct: "keepwork-mcp-runtime"`.
 - `/health` advertises file, folder-browser, PTY, presence, persona and messaging
-  contracts, plus `agentSessionApi`, `agentInventoryApi`, `agentContextApi` and
-  `agentModeApi` (`"v1"`) for the native CLI slice described below. Image turns,
-  non-Codex native history import, browser automation and unsupported provider protocols
+  contracts, plus `agentSessionApi`, `agentInventoryApi`, `agentContextApi`,
+  `agentModeApi` and `agentImageTurnApi` (`"v1"`) for the native CLI slice described below.
+  Non-Codex native history import, browser automation and unsupported provider protocols
   are not advertised as available.
 - Only advertises capabilities it actually serves, so AIChat degrades instead of
   calling a 404 while the port is in progress.
@@ -29,7 +29,7 @@ migration contract, manifest v2 and rollout order.
 ## Native CLI sessions
 
 The Rust daemon now implements `/agents/backends`, executable-only inventory,
-owner-scoped session create/list/read/update, text turns, approval replies,
+owner-scoped session create/list/read/update, text and image turns, approval replies,
 interruptions and NDJSON session snapshots. WorkBuddy and CodeBuddy use their
 native `--acp` process; the same adapter supports registered ACP CLIs. Codex uses
 its native `app-server --stdio` protocol, and Claude Code uses its native
@@ -46,6 +46,13 @@ daemon or treats installation detection as a successful model turn.
   restart never replay an uncertain prompt. Restarted in-flight turns remain
   uncertain and can be inspected; native history is resumed only when the
   provider advertises the required contract.
+- `/agents/sessions/:id/image-turns` accepts 1–4 inline PNG/JPEG/WebP/GIF data
+  URLs, at most 4 MiB decoded in total (7,000,000-byte HTTP body). Codex and
+  Claude receive native image blocks; ACP requires `promptCapabilities.image`
+  from the CLI handshake, including DeepSeek. Unsupported providers reject
+  before sending a prompt. Ordinary text requests keep their existing limits.
+  Daemon snapshots and history store image placeholders; the browser retains
+  submitted previews in its existing account-scoped transcript.
 - Craft requests full access, Ask preserves interactive native approvals, and
   Plan requires a native planning mode for ACP and denies mutating permissions.
   Unsupported model, effort or mode semantics fail before the prompt is sent.
@@ -67,6 +74,9 @@ daemon or treats installation detection as a successful model turn.
   and reports a clear error if retrieval fails. It never starts/resumes a thread
   or submits a prompt; unhydrated records keep the missing-items marker across
   unrelated saves instead of becoming a false empty transcript.
+- ACP `session/load` isolates replayed transcript events from the preserved local
+  history and rejects interactive requests during replay. Later turns wait until
+  the queued restore events have drained; restoration failures send no prompt.
 - Background `workspace_file` operates on explicitly granted local spaces;
   mutations require Craft and retain path/symlink confinement and read-before-
   edit checks. Remote/cloud/Git file operations require the original online

@@ -61,6 +61,9 @@ pub fn load(file: &Path, backend: &str, thread: &str) -> Result<Option<Value>, S
 }
 
 fn safe(value: &Value, depth: usize, budget: &mut usize) -> Value {
+    if super::images::is_inline(value) {
+        return json!({"type":"image"});
+    }
     if depth > 24 || *budget < 16 {
         return Value::Null;
     }

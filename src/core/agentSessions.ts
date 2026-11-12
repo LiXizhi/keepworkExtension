@@ -15,6 +15,7 @@ import { resolveAgentCli } from './agentCliProcess';
 import { AichatToolBridge } from './aichatToolBridge';
 import { AichatWorkspaceFiles, WORKSPACE_FILE_TOOL } from './aichatWorkspaceFiles';
 import { agentMode, agentAccess, AgentMode, PLAN_FALLBACK } from './agentModes';
+import { visibleReasoning, mergeStreamItem, isItemDelta, applyItemDelta } from './agentItemStream';
 export { AGENT_BACKENDS } from './agentCliBackends';
 type Backend = typeof AGENT_BACKENDS[number];
 
@@ -28,6 +29,7 @@ type Session = {
 };
 const ACTIVE = new Set(['starting', 'running', 'waiting', 'uncertain']);
 function visibleItem(item: any) {
+    item = visibleReasoning(item);
     if (item?.type !== 'userMessage' || !Array.isArray(item.content)) return item;
     const marker = '\n</aichat_context>\n<aichat_user_message>\n';
     return { ...item, content: item.content.map((part: any) => part.type === 'image' && (part.data || part.source?.data || /^data:/i.test(part.url)) ? {type:'image'} : part.type === 'text' && part.text?.startsWith('<aichat_context ') && part.text.includes(marker) ? { ...part, text: part.text.slice(part.text.indexOf(marker) + marker.length) } : part) };
@@ -536,7 +538,7 @@ export class AgentSessions {
         if (['account/updated', 'account/login/completed'].includes(message.method)) { this.clearCapabilities(backend); this.adapterFor(backend).refreshCapabilities?.(); }
         if (message.method === 'model/updated') this.clearCapabilities(backend, true);
         const p = message.params || {}, s = this.find(p, backend); if (!s) return;
-        if (s.retrying && (message.method === 'turn/started' || message.method === 'item/started' || message.method === 'item/completed' || message.method.endsWith('/delta') || message.method.endsWith('/outputDelta'))) {
+        if (s.retrying && (message.method === 'turn/started' || message.method === 'item/started' || message.method === 'item/completed' || isItemDelta(message.method))) {
             s.retrying = false; s.error = '';
         }
         if (message.method === 'turn/started') {
@@ -550,15 +552,15 @@ export class AgentSessions {
         if (message.method === 'item/started' || message.method === 'item/completed') {
             const item = bounded(visibleItem(p.item)); if (item?.id) {
                 const index = s.items.findIndex(i => i.id === item.id);
-                if (index < 0) s.items.push(item); else s.items[index] = { ...s.items[index], ...item };
+                if (index < 0) s.items.push(item); else s.items[index] = mergeStreamItem(s.items[index], item);
                 s.items = s.items.slice(-2000);
             }
         }
-        if (message.method.endsWith('/delta') || message.method.endsWith('/outputDelta')) {
-            const item = s.items.find(i => i.id === p.itemId);
-            if (item) { const key = item.type === 'commandExecution' ? 'aggregatedOutput' : 'text'; item[key] = String((item[key] || '') + (p.delta || '')).slice(-131072); }
+        if (isItemDelta(message.method) || message.method === 'item/reasoning/summaryPartAdded') {
+            applyItemDelta(s.items, message.method, p);
+            s.items = s.items.slice(-2000);
         }
-        this.emit(s, message.method.endsWith('/delta') || message.method.endsWith('/outputDelta'));
+        this.emit(s, isItemDelta(message.method));
     }
     close() {
         this.autoApproval.clear();

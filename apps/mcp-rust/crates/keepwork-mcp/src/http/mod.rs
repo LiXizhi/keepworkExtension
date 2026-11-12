@@ -137,7 +137,8 @@ impl AppState {
         caps.insert("agentInventoryApi".into(), serde_json::json!("v1"));
         caps.insert("agentContextApi".into(), serde_json::json!("v1"));
         caps.insert("agentModeApi".into(), serde_json::json!("v1"));
-        // Image/editor-model surfaces and non-Codex history stay unadvertised.
+        caps.insert("agentImageTurnApi".into(), serde_json::json!("v1"));
+        // Editor-model surfaces and non-Codex history stay unadvertised.
         caps
     }
 
