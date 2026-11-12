@@ -55,7 +55,10 @@ def update(start):
             value['calls'][key] = value['calls'].get(key, 0) + 1
         else:
             value['active'] = [p for p in value['active'] if p != pid]
-        path.write_text(json.dumps(value))
+        # Readers do not take the writer lock; publish a complete snapshot.
+        temporary = path.with_name('.counter.' + str(pid) + '.tmp')
+        temporary.write_text(json.dumps(value))
+        os.replace(temporary, path)
         with open(root / '.started-pids', 'a') as out:
             if start: out.write(str(pid) + '\n')
 update(True)
@@ -136,10 +139,14 @@ impl Fixture {
     }
 
     fn counters(&self) -> Value {
-        std::fs::read(self.root.join(".counter.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_else(|| json!({"active":[],"peak":0,"calls":{}}))
+        match std::fs::read(self.root.join(".counter.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .expect("metadata fixture counter must be a complete JSON snapshot"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                json!({"active":[],"peak":0,"calls":{}})
+            }
+            Err(error) => panic!("could not read metadata fixture counter: {error}"),
+        }
     }
 
     fn total_calls(&self) -> usize {
