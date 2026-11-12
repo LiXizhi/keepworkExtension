@@ -22,17 +22,26 @@
 
 AIChat 宿主、工具、能力降级与画布滚动回归见相邻源码 `tests/README.md`。本轮未发布安装包，需要加载新桌面进程和更新后的网页源码；Windows/Linux/Electron 不宣称支持此原生能力。
 
-## 2026-11-12：小米遥控器 ATVV 与 Keepwork 云端听写（本轮验证待补）
+## 2026-11-12：小米遥控器 ATVV 与 Keepwork 云端听写（0.2.71）
 
 本轮将遥控器输入改为 Rust 原生内置的蓝牙连接、ATVV 解码和输入控制；松手后把当前一段内存 PCM 发送到 Keepwork 云端 ASR，识别完成再粘贴到系统光标。设置窗口只保留可选设备 ID 和启动/停止，不再要求安装 Python、准备 venv 或下载本地模型。使用入口、联网要求和权限说明见 [README.md](README.md#小米遥控器语音输入)。默认关闭，不自动启动；不依赖网页或 MCP 版本，不向网页暴露音频、转写文字或任意键盘注入接口。
 
-**当前记录状态**：本轮实际执行命令、通过数量、版本与日志路径待最终验证后补充。上一轮 0.2.69 的测试针对已替换实现，不能作为 Rust 原生与 Keepwork 云端识别链路已经通过的证据。以下为本轮验收要求，不代表已实测通过。
+已执行的验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建、Rust **120 通过 / 1 实连测试默认忽略**、Node **283 通过 / 4 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-native-remote-voice-check.log`。
+- `cargo test --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins live_keepwork_speech_accepts_synthetic_silence_without_credentials -- --ignored --nocapture`：真实 Keepwork 服务 **1/1 通过**，完成 TLS、`ready`、生成的 0.5 秒静音 PCM 上传、`asr_end` 与 `done`。无凭据、真实麦克风、遥控器录音或剪贴板操作；不等同于真实人声准确率验证。日志 `/private/tmp/keepwork-remote-voice-cloud-live.log`。
+- `node --test apps/aichat-rust/tests/remote-voice.test.cjs apps/aichat-rust/tests/remote-voice-native-input.test.cjs`：**5/5**，覆盖私有设置 ACL、无运行时/模型依赖、固定服务协议和 macOS fake AX 窗口/控件/选区检查。
+- Windows x64、ARM64：真实 BLE、ATVV、ASR、原生输入模块及其测试的隔离集成 `cargo check --offline --tests --target <target>` 均通过，异步任务经 `tokio::spawn` 检查 `Send`；仅应用宿主状态方法使用 stub。临时夹具 `/private/tmp/keepwork-native-remote-voice-check`。未进行 Windows 可执行文件链接、打包或设备实测。
+- `cargo build --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，已生成 macOS arm64 开发程序 `src-tauri/target/debug/Keepwork`，需重启新构建进程。四处版本同步 **0.2.71**，未发布安装包。构建日志 `/private/tmp/keepwork-native-remote-voice-build.log`。
+
+以下为其余验收要求和边界；未将代码检查或夹具验证等同于完整真机链路通过。
 
 - **免环境准备与失败边界**：在未安装 Python、没有本地语音模型的系统中直接启动；无“准备环境/模型”按钮、路径要求、安装脚本或后台下载。覆盖设备 ID 留空/指定、无 BLE 适配器、设备不可达、权限拒绝、重复启动和停止。错误有明确来源，不影响普通聊天或其他原生能力。
 - **协议与音频夹具**：验证 ATVV 握手、控制消息、120 字节 ADPCM 帧、高 nibble 优先解码与已知 PCM 向量，覆盖通知分片、重复起止、空录音、超长录音、断连中止及重连。核对 `MIC_OPEN` 时机，避免“约 1.9 秒无声音频”旧问题；输出须为 16 kHz 单声道 signed PCM16 little-endian。
-- **Keepwork ASR 契约**：使用固定 `wss://speechrtc.keepwork.com/speech`，`asr_format=pcm`、`asr_rate=16000`；等待 `ready` 后发送当前录音的二进制 PCM，结束发送 `{type:"asr_end"}`，仅在本轮 ASR 完成后使用识别文字。覆盖多个结果、空结果、服务错误、握手/完成超时、连接中断、未知附加字段及缺失可选 TTS 元信息；不发送 TTS 请求。握手与识别结果使用隔离 WebSocket 夹具验证，不能据此声称线上 ASR 已通过。
+- **Keepwork ASR 契约**：使用固定 `wss://speechrtc.keepwork.com/speech`，`asr_format=pcm`、`asr_rate=16000`；等待 `ready` 后发送当前录音的二进制 PCM，结束发送 `{type:"asr_end"}`，仅在本轮 ASR 完成后使用识别文字。真实本地 WebSocket 夹具覆盖累计快照替换、空最终快照、服务错误、握手/完成超时、连接中断、未知附加字段及缺失可选 TTS 元信息；不发送 TTS 请求。线上验证范围仅为上方合成静音实连。
 - **网络与重试**：录音松手前不上传。断网、服务拒绝或超时后显示识别失败，不自动重传音频、不回退本地模型、不输入部分结果。网络恢复后仅新录音可建立新请求；停止、退出和新会话令旧请求失效，迟到结果不得粘贴。
 - **输入与生命周期**：仅就绪后预留全局 F5，实体键盘 F5 同样被预留；停止、断连和退出后恢复。记录开始录音时的前台目标，识别完成前切换目标时仅复制文字、不自动粘贴；不按 Enter、不唤起主窗口。停止或退出时取消未完成录音/识别，不延迟粘贴、不重复输入。
+- **忙时与固件恢复**：PTT 夹具验证识别忙时丢弃整段新录音，直到松键都不接收尾部、不发 `MIC_CLOSE`、不排队，上一段识别继续。损坏/超时需要 `MIC_CLOSE` 时结束本次连接，释放 F5 并重建 GATT 订阅，避免固件 2671 关闭后 Notify 失效仍显示假就绪；该固件的实际恢复仍需实机验证。
 - **权限与兼容**：macOS 覆盖首次蓝牙、辅助功能与输入监控的允许/拒绝/撤销；Windows 覆盖 BLE 不可用、访问被拒绝和更高权限应用拒绝粘贴。分别验证新旧 AIChat 网页、MCP 未运行或旧 MCP、离线网页下的原生入口；网页离线不影响入口，但云端识别仍需网络。普通聊天、网页麦克风、终端和文件操作保持可用。CEF/Linux 不宣称具备该输入能力。
 - **隐私边界**：启动前明确提示录音将发送到 Keepwork 云端。确认录音按住期间仅在内存保存、松手后仅发送当前一段，不写入本地录音文件；音频与转写文字不进入 Rust 日志、网页或 MCP。粘贴/目标变化时仅预期文字进入系统剪贴板。
 

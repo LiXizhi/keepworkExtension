@@ -9,6 +9,7 @@ const labels: Record<string, string> = {
   scanning: "正在查找遥控器", connecting: "正在连接蓝牙", ready: "已就绪 · 按住语音键说话",
   recording: "正在录音 · 松手后识别", transcribing: "正在通过 Keepwork 识别", pasted: "已粘贴到光标位置",
   "cloud-error": "Keepwork 语音识别未完成 · 请重新录制",
+  busy: "正在识别上一段 · 本次录音未接收",
   copied: "已复制文字 · 请在目标输入框手动粘贴", reconnecting: "蓝牙已断开，正在重连", error: "语音输入遇到错误",
 };
 let dirty = false;

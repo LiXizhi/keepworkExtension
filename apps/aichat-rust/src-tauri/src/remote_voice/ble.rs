@@ -348,7 +348,10 @@ async fn connection(
                     Ok(actions)=>actions,
                     Err(message)=>{
                         let close=ptt.abort(); write(peripheral,&tx,&close,cancel).await?;
-                        service.update(generation,"error",&message,None); continue;
+                        // MIC_CLOSE invalidates Notify on firmware 2671.
+                        // End this attempt so only freshly subscribed audio
+                        // can enter the next physical PTT session.
+                        return Err(Failure::temporary(&format!("{message} 正在重新连接语音通道，请稍后重新录制。")));
                     }
                 };
                 for action in actions {
@@ -375,7 +378,7 @@ async fn connection(
             _=heartbeat.tick()=>{
                 if ptt.expired() {
                     let close=ptt.abort(); write(peripheral,&tx,&close,cancel).await?;
-                    service.update(generation,"error","单次语音输入不能超过 60 秒，请松开语音键后重试。",None);
+                    return Err(Failure::temporary("单次语音输入不能超过 60 秒，正在重新连接语音通道；请松开语音键后重试。"));
                 }
                 health_ticks+=1;
                 if health_ticks%4==0 && !operation(cancel,peripheral.is_connected(),3).await? { return Err(Failure::temporary("遥控器连接已断开。")); }
