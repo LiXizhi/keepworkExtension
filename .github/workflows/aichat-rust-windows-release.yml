@@ -6,6 +6,13 @@ on:
 permissions:
   contents: read
 
+env:
+  KP_QINIU_BUCKET: haqi
+  KP_QINIU_DOMAIN: https://cdn.keepwork.com
+  KP_QINIU_UPLOAD_HOST: https://up-z2.qiniup.com
+  # Immutable per-version copies of the three installers; do not reuse the desktop update feeds.
+  KP_QINIU_PREFIX: keepwork/aichat-rust/
+
 concurrency:
   group: aichat-rust-release-${{ github.ref }}
   cancel-in-progress: false
@@ -14,6 +21,9 @@ jobs:
   build:
     name: Windows Rust (${{ matrix.arch }})
     runs-on: windows-latest
+    outputs:
+      # Both matrix legs share the signing configuration, so either one may report it.
+      signed: ${{ steps.signing.outputs.signed }}
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +54,7 @@ jobs:
             apps/mcp-rust -> target
             apps/aichat-rust/src-tauri -> target
       - name: Import the code-signing certificate
+        id: signing
         shell: pwsh
         env:
           WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
@@ -51,6 +62,7 @@ jobs:
         run: |
           if (-not $env:WINDOWS_CERT_PFX_BASE64) {
             Write-Output '::warning::No Windows signing certificate configured; this build will be unsigned.'
+            "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             exit 0
           }
           $pfx = Join-Path $env:RUNNER_TEMP 'keepwork-signing.pfx'
@@ -67,6 +79,7 @@ jobs:
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
           }
           "WINDOWS_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           @{
             bundle = @{
               windows = @{
@@ -219,6 +232,64 @@ jobs:
           name: aichat-rust-macos-universal-rust
           path: release-packages/*
           if-no-files-found: error
+
+  publish-cdn:
+    name: Copy installers to the CDN
+    needs: [build, build-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # The three installers share one version path, so replacements must not interleave.
+    concurrency:
+      group: aichat-rust-cdn-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Check publication preconditions
+        id: gate
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          SIGNED: ${{ needs.build.outputs.signed }}
+        run: |
+          version=$(node -p "require('./apps/aichat-rust/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -z "$KP_QINIU_ACCESS_KEY" ]; then
+            echo "::warning::KP_QINIU_ACCESS_KEY is not configured; skipping the CDN copy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          elif [ "$SIGNED" != "true" ]; then
+            echo "::warning::The Windows installers are unsigned; skipping the CDN copy so the public download stays signed."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate the three installers
+        if: steps.gate.outputs.ready == 'true'
+        run: >-
+          node apps/aichat-rust/scripts/publish-cdn-release.cjs
+          --release-dir dist
+          --version "${{ steps.gate.outputs.version }}"
+          --prefix "$KP_QINIU_PREFIX"
+          --domain "$KP_QINIU_DOMAIN"
+          --dry-run
+      - name: Upload installers and verify the CDN
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+        run: >-
+          node apps/aichat-rust/scripts/publish-cdn-release.cjs
+          --release-dir dist
+          --version "${{ steps.gate.outputs.version }}"
+          --prefix "$KP_QINIU_PREFIX"
+          --domain "$KP_QINIU_DOMAIN"
+          --bucket "$KP_QINIU_BUCKET"
+          --upload-host "$KP_QINIU_UPLOAD_HOST"
 
   publish:
     name: Publish release assets
