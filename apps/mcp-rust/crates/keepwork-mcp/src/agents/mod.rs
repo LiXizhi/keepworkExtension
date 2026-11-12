@@ -1,6 +1,7 @@
 //! Native CLI sessions. The browser receives normalized snapshots, never a raw
 //! RPC tunnel or a choice of executable. Credentials and tool grants stay in RAM.
 mod antigravity;
+mod body;
 mod claude;
 pub mod context;
 pub mod discovery;
@@ -637,7 +638,7 @@ async fn handle_request(
             return error_response("JSON required");
         }
         let limit = if image_turn { 7_000_000 } else { 2_000_000 };
-        match axum::body::to_bytes(req.into_body(), limit).await {
+        match body::read(req.into_body(), limit).await {
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(value) if value.is_object() => value,
                 _ => return error_response("JSON object required"),
