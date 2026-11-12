@@ -1,5 +1,6 @@
 out/
 node_modules/
+__pycache__/
 .vscode-test/
 *.vsix
 apps/vscode-extension/dist/

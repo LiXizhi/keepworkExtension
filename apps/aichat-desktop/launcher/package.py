@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -19,18 +20,33 @@ TARGETS = ("windows-x64", "macos-x64", "macos-arm64")
 
 
 # These are the two scripts the official page needs before rendering its UI.
-SDK = ("https://cdn.keepwork.com/sdk/keepworkSDK.iife.js?v=9cd606c6d41b",
-       "9cd606c6d41bce4ad76c0aa41758f49b6bb7be04096ac7f6e7fdada1b03fd56d")
+# The SDK build id is the leading hex digits of that build's sha256 (the CDN cache
+# key), so take it from the page instead of pinning a build that the page may replace.
+SDK_URL = "https://cdn.keepwork.com/sdk/keepworkSDK.iife.js?v="
+SDK_BUILD = re.compile(re.escape(SDK_URL) + r"([0-9a-f]{12,64})")
 TAILWIND = ("https://cdn.keepwork.com/keepwork/cdn/tailwindcss@3.4.16.js",
             "a099dd026585d44fe6602bdc66680e407700f935ca92cd0c9443c6ebb96be45e")
 
 
+def startup_scripts(page):
+    """Resolve the two startup scripts to the exact builds the page loads."""
+    builds = sorted(set(SDK_BUILD.findall(page)))
+    if len(builds) != 1:
+        raise ValueError("Expected one bundled SDK build in AIChat.html, found " + (", ".join(builds) or "none"))
+    sdk = (SDK_URL + builds[0], builds[0])
+    for url, _ in (sdk, TAILWIND):
+        if url not in page:
+            raise ValueError("Review the packaged web startup dependency: " + url)
+    return sdk, TAILWIND
+
+
 def add_script(archive, name, source):
-    url, expected = source
+    url, integrity = source
     with urllib.request.urlopen(url, timeout=60) as response:
         data = response.read(16 * 1024 * 1024)
-    if hashlib.sha256(data).hexdigest() != expected:
-        raise ValueError("Unexpected digest for " + url)
+    digest = hashlib.sha256(data).hexdigest()
+    if not digest.startswith(integrity):
+        raise ValueError("Unexpected digest for " + url + ": " + digest)
     archive.data("web-libs/" + name, data)
 
 
@@ -106,11 +122,9 @@ def application(a, web, version):
                        commit=commit, env={"LOCAL_MODEL_ROOT": "app"} if service == "model" else {}))
     # Take only tracked public app resources, never developer credentials or build output.
     page = (web / "AIChat.html").read_text(encoding="utf-8")
-    for url, _ in (SDK, TAILWIND):
-        if url not in page:
-            raise ValueError("Review the packaged web startup dependency: " + url)
-    add_script(a, "sdk.js", SDK)
-    a.metadata("web-libs/assets.json", {SDK[0]: "sdk.js", TAILWIND[0]: "tailwind.js"})
+    sdk, tailwind = startup_scripts(page)
+    add_script(a, "sdk.js", sdk)
+    a.metadata("web-libs/assets.json", {sdk[0]: "sdk.js", tailwind[0]: "tailwind.js"})
     roots = ["AIChat.html", "AIChat_skins.json", "base-manifest.json", "LICENSE", "THIRD_PARTY_NOTICES.md",
              "preview_broker.html", "preview_host.html", "preview_service_worker.js", "preview_debug_bridge.js",
              "audio", "css", "js", "packages", "profiles", "runtime", "skills", "skins", "tools"]

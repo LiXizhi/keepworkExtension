@@ -65,6 +65,7 @@ jobs:
         env:
           KP_PORTABLE_BUILD: '1'
       - run: node --test apps/aichat-desktop/tests/launcher-release.test.cjs
+      - run: python apps/aichat-desktop/launcher/test_package.py
       - env:
           VERSION: ${{ inputs.version }}
         run: python apps/aichat-desktop/launcher/package.py app --web web-source --version "$VERSION" --out artifacts
