@@ -8,9 +8,9 @@ const { collectReleaseFiles, collectUpdateFeeds, publishRelease } = require('../
 
 const version = '1.2.3';
 const publishedAt = '2026-11-13T08:00:00.000Z';
-const targets = ['win32-x64', 'win32-arm64', 'darwin-x64', 'darwin-arm64'];
+const targets = ['win32-x64', 'win32-arm64', 'darwin-universal'];
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-const feedUrl = target => `https://cdn.keepwork.com/keepwork/aichat-desktop/${target}/latest-client.json`;
+const feedUrl = target => `https://cdn.keepwork.com/keepwork/aichat-rust/${target}/latest-client.json`;
 
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-automatic-update-'));
@@ -35,7 +35,7 @@ function legacyDownload() {
     product: 'aichat-desktop',
     version: '0.1.10',
     platform: 'macos',
-    arch: 'arm64',
+    arch: 'universal',
     format: 'zip',
     fileName: 'Keepwork-Launcher-macos-arm64.zip',
     url: 'https://cdn.keepwork.com/keepwork/aichat-desktop/darwin-arm64/Keepwork-Launcher-macos-arm64.zip',
@@ -46,14 +46,14 @@ function legacyDownload() {
   };
 }
 
-test('publishes discoverable manifests at every existing native desktop target path', t => {
+test('publishes exactly three independent Rust desktop feeds matching the three installers', t => {
   const { entries } = fixture(t);
   const feeds = collectUpdateFeeds(entries, version, publishedAt);
   assert.equal(feeds.length, targets.length);
   assert.deepEqual(feeds.map(targetOf).sort(), [...targets].sort());
   for (const feed of feeds) {
     const target = targetOf(feed);
-    assert.equal(feed.remoteKey, `keepwork/aichat-desktop/${target}/latest-client.json`);
+    assert.equal(feed.remoteKey, `keepwork/aichat-rust/${target}/latest-client.json`);
     const bytes = fs.readFileSync(feed.filePath);
     assert.equal(feed.size, bytes.length);
     assert.equal(feed.sha256, digest(bytes));
@@ -75,17 +75,19 @@ test('publishes discoverable manifests at every existing native desktop target p
     assert.deepEqual(manifest.installer, expected);
     for (const [key, value] of Object.entries(expected)) assert.deepEqual(manifest[key], value);
   }
-  assert.equal(readManifest(feeds.find(feed => targetOf(feed) === 'darwin-x64')).url,
-    readManifest(feeds.find(feed => targetOf(feed) === 'darwin-arm64')).url,
-    'both Mac architectures receive the same verified universal installer');
+  const mac = readManifest(feeds.find(feed => targetOf(feed) === 'darwin-universal'));
+  assert.equal(mac.arch, 'universal');
+  assert.equal(mac.platform, 'macos');
+  assert.equal(mac.url, entries.find(entry => entry.name.endsWith('universal.dmg')).url);
+  assert.equal(feeds.some(feed => /aichat-desktop|darwin-(x64|arm64)/.test(feed.url)), false);
 });
 
 test('adds native installer metadata without changing legacy ZIP downloads or unknown fields', t => {
   const { entries } = fixture(t);
   const previous = legacyDownload();
   const original = structuredClone(previous);
-  const feeds = collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous });
-  const manifest = readManifest(feeds.find(feed => targetOf(feed) === 'darwin-arm64'));
+  const feeds = collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous });
+  const manifest = readManifest(feeds.find(feed => targetOf(feed) === 'darwin-universal'));
   const { installer, ...preserved } = manifest;
   assert.deepEqual(preserved, original);
   assert.deepEqual(previous, original, 'planning must not mutate the live descriptor fixture');
@@ -98,11 +100,11 @@ test('adds native installer metadata without changing legacy ZIP downloads or un
 test('normalizes missing historical feed identity additively without replacing legacy download fields', t => {
   const { entries } = fixture(t), previous = legacyDownload();
   for (const key of ['schemaVersion', 'product', 'platform', 'arch']) delete previous[key];
-  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous })
-    .find(feed => targetOf(feed) === 'darwin-arm64'));
+  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous })
+    .find(feed => targetOf(feed) === 'darwin-universal'));
   for (const [key, value] of Object.entries(previous)) assert.deepEqual(manifest[key], value);
   assert.equal(manifest.schemaVersion, 1); assert.equal(manifest.product, 'aichat-desktop');
-  assert.equal(manifest.platform, 'macos'); assert.equal(manifest.arch, 'arm64');
+  assert.equal(manifest.platform, 'macos'); assert.equal(manifest.arch, 'universal');
   assert.equal(manifest.installer.version, version);
 });
 
@@ -110,23 +112,23 @@ for (const legacy of [true, false]) {
   test(`refuses downgrading an existing ${legacy ? 'legacy ZIP native installer' : 'native top-level'} feed`, t => {
     const { entries } = fixture(t);
     const feed = readManifest(collectUpdateFeeds(entries, version, publishedAt)
-      .find(entry => targetOf(entry) === 'darwin-arm64'));
+      .find(entry => targetOf(entry) === 'darwin-universal'));
     const previous = legacy ? { ...legacyDownload(), installer: { ...feed.installer, version: '2.0.0' } }
       : { ...feed, version: '2.0.0', installer: undefined };
-    assert.throws(() => collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous }));
+    assert.throws(() => collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous }));
   });
 
   for (const field of ['url', 'size', 'sha256']) {
     test(`refuses same-version ${field} conflicts in an existing ${legacy ? 'legacy ZIP native installer' : 'native top-level'} feed`, t => {
       const { entries } = fixture(t);
       const feed = readManifest(collectUpdateFeeds(entries, version, publishedAt)
-        .find(entry => targetOf(entry) === 'darwin-arm64'));
+        .find(entry => targetOf(entry) === 'darwin-universal'));
       const changed = { ...feed.installer, [field]: field === 'url'
         ? 'https://cdn.keepwork.com/different-installer.dmg'
         : field === 'size' ? feed.installer.size + 1 : 'f'.repeat(64) };
       const previous = legacy ? { ...legacyDownload(), installer: changed }
         : { ...feed, ...changed, installer: undefined };
-      assert.throws(() => collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous }));
+      assert.throws(() => collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous }));
     });
   }
 }
@@ -134,10 +136,10 @@ for (const legacy of [true, false]) {
 test('an identical installer can be republished while retaining legacy ZIP fields', t => {
   const { entries } = fixture(t);
   const feed = readManifest(collectUpdateFeeds(entries, version, publishedAt)
-    .find(entry => targetOf(entry) === 'darwin-arm64'));
+    .find(entry => targetOf(entry) === 'darwin-universal'));
   const previous = { ...legacyDownload(), installer: feed.installer };
-  const next = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous })
-    .find(entry => targetOf(entry) === 'darwin-arm64'));
+  const next = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous })
+    .find(entry => targetOf(entry) === 'darwin-universal'));
   assert.deepEqual(next, previous);
 });
 
@@ -150,22 +152,22 @@ test('a historical installer without its own version inherits the legacy descrip
       size: 55, sha256: 'b'.repeat(64),
     },
   };
-  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous })
-    .find(entry => targetOf(entry) === 'darwin-arm64'));
+  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous })
+    .find(entry => targetOf(entry) === 'darwin-universal'));
   assert.equal(manifest.version, previous.version, 'legacy ZIP release identity remains unchanged');
   assert.equal(manifest.url, previous.url);
   assert.equal(manifest.installer.version, version);
   assert.equal(manifest.installer.url, entries.find(entry => entry.name.endsWith('.dmg')).url);
   assert.throws(() => collectUpdateFeeds(entries, version, publishedAt,
-    { 'darwin-arm64': { ...previous, version: '9.0.0' } }), /downgrade/i,
+    { 'darwin-universal': { ...previous, version: '9.0.0' } }), /downgrade/i,
     'the missing nested version must not bypass the older format version fallback');
 });
 
 test('a standalone legacy ZIP release version does not block the independent native installer stream', t => {
   const { entries } = fixture(t);
   const previous = { ...legacyDownload(), version: '9.0.0' };
-  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous })
-    .find(entry => targetOf(entry) === 'darwin-arm64'));
+  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous })
+    .find(entry => targetOf(entry) === 'darwin-universal'));
   assert.equal(manifest.version, '9.0.0');
   assert.equal(manifest.sha256, previous.sha256);
   assert.equal(manifest.url, previous.url);
@@ -175,24 +177,24 @@ test('a standalone legacy ZIP release version does not block the independent nat
 test('a same-version historical installer without its own version cannot change identity', t => {
   const { entries } = fixture(t);
   const native = readManifest(collectUpdateFeeds(entries, version, publishedAt)
-    .find(entry => targetOf(entry) === 'darwin-arm64'));
+    .find(entry => targetOf(entry) === 'darwin-universal'));
   const { version: _version, ...unversioned } = native.installer;
   const previous = { ...legacyDownload(), version, installer: unversioned };
-  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous })
-    .find(entry => targetOf(entry) === 'darwin-arm64'));
+  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous })
+    .find(entry => targetOf(entry) === 'darwin-universal'));
   assert.equal(manifest.installer.version, version);
   assert.equal(manifest.installer.url, unversioned.url);
   assert.throws(() => collectUpdateFeeds(entries, version, publishedAt, {
-    'darwin-arm64': { ...previous, installer: { ...unversioned, sha256: 'c'.repeat(64) } },
+    'darwin-universal': { ...previous, installer: { ...unversioned, sha256: 'c'.repeat(64) } },
   }), /different installer/i);
 });
 
 test('an identical native installer preserves its original publication date across retries', t => {
   const { entries } = fixture(t);
   const previous = readManifest(collectUpdateFeeds(entries, version, publishedAt)
-    .find(entry => targetOf(entry) === 'darwin-arm64'));
+    .find(entry => targetOf(entry) === 'darwin-universal'));
   const manifest = readManifest(collectUpdateFeeds(entries, version, '2026-11-14T08:00:00.000Z',
-    { 'darwin-arm64': previous }).find(entry => targetOf(entry) === 'darwin-arm64'));
+    { 'darwin-universal': previous }).find(entry => targetOf(entry) === 'darwin-universal'));
   assert.equal(manifest.publishedAt, publishedAt);
   assert.equal(manifest.installer.publishedAt, publishedAt);
 });
@@ -200,7 +202,7 @@ test('an identical native installer preserves its original publication date acro
 test('invalid live descriptor values are rejected instead of being replaced as absent feeds', t => {
   const { entries } = fixture(t);
   for (const previous of [null, false, 0, '', [], 'invalid', { product: 'another-product' }]) {
-    assert.throws(() => collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous }),
+    assert.throws(() => collectUpdateFeeds(entries, version, publishedAt, { 'darwin-universal': previous }),
       /Invalid existing desktop update feed/, `must reject ${JSON.stringify(previous)}`);
   }
 });
@@ -269,7 +271,7 @@ function publication(entries, { previousByTarget = {}, failAt } = {}) {
 test('switches automatic-update feeds only after every immutable installer is verified', async t => {
   const { entries } = fixture(t);
   const old = legacyDownload();
-  const run = publication(entries, { previousByTarget: { 'darwin-arm64': old } });
+  const run = publication(entries, { previousByTarget: { 'darwin-universal': old } });
   await publishRelease(entries, run.config, run.dependencies);
   assert.deepEqual(run.events.filter(event => event.startsWith('read-feed:')).sort(),
     targets.map(target => `read-feed:${target}`).sort());
@@ -280,15 +282,43 @@ test('switches automatic-update feeds only after every immutable installer is ve
   assert.ok(run.events.indexOf('refresh-feeds') < run.events.indexOf('verify-feeds'));
   assert.ok(run.events.indexOf('verify-feeds') < run.events.indexOf('read-notes'));
   assert.ok(run.events.indexOf('read-notes') < run.events.indexOf('write-notes'));
-  const { installer, ...preserved } = run.feedUploads.find(entry => entry.target === 'darwin-arm64').manifest;
+  const { installer, ...preserved } = run.feedUploads.find(entry => entry.target === 'darwin-universal').manifest;
   assert.deepEqual(preserved, old);
   assert.equal(installer.version, version);
+});
+
+test('publication leaves all existing Electron and Launcher discovery channels untouched', async t => {
+  const { entries } = fixture(t);
+  const untouched = new Map([
+    ...['win32-x64', 'win32-arm64', 'darwin-x64', 'darwin-arm64'].map(target =>
+      [`keepwork/aichat-desktop/${target}/latest-client.json`, `existing Electron feed: ${target}`]),
+    ...['x64', 'arm64'].map(arch =>
+      [`keepwork/aichat-cef/v1/client/windows-${arch}/latest-client.json`, `existing Launcher feed: ${arch}`]),
+  ]);
+  const objects = new Map(untouched);
+  const run = publication(entries);
+  const fetchImpl = run.dependencies.fetchImpl;
+  run.dependencies.fetchImpl = async url => {
+    assert.match(new URL(url).pathname, /^\/keepwork\/aichat-rust\//,
+      'Rust publication must never read another desktop or Launcher discovery channel');
+    return fetchImpl(url);
+  };
+  const uploadEntry = run.dependencies.transport.uploadEntry;
+  run.dependencies.transport.uploadEntry = async (config, entry) => {
+    assert.match(entry.remoteKey, /^keepwork\/aichat-rust\//);
+    objects.set(entry.remoteKey, fs.readFileSync(entry.filePath, 'utf8'));
+    return uploadEntry(config, entry);
+  };
+  await publishRelease(entries, run.config, run.dependencies);
+  assert.equal(run.feedUploads.length, 3);
+  assert.equal(objects.size, untouched.size + entries.length + 3);
+  for (const [key, original] of untouched) assert.equal(objects.get(key), original);
 });
 
 test('a newer live feed aborts publication before uploads, refreshes or release-note writes', async t => {
   const { entries } = fixture(t);
   const run = publication(entries, {
-    previousByTarget: { 'darwin-arm64': { ...legacyDownload(), installer: { version: '9.0.0' } } },
+    previousByTarget: { 'darwin-universal': { ...legacyDownload(), installer: { version: '9.0.0' } } },
   });
   await assert.rejects(publishRelease(entries, run.config, run.dependencies));
   assert.ok(run.events.every(event => event.startsWith('read-')));

@@ -18,11 +18,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 mod install_tests;
 
-pub const DEFAULT_DESKTOP_FEED_BASE: &str = "https://cdn.keepwork.com/keepwork/aichat-desktop";
+pub const DEFAULT_DESKTOP_FEED_BASE: &str = "https://cdn.keepwork.com/keepwork/aichat-rust";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedDesktopUpdateMeta {
+    #[serde(default)]
+    pub feed_url: String,
     pub latest_version: String,
     pub published_at: String,
     pub checked_at: String,
@@ -102,24 +104,42 @@ pub fn now_iso_string() -> String {
 }
 
 pub fn default_desktop_feed_url() -> String {
-    if let Ok(custom) = std::env::var("AICHAT_UPDATE_FEED_URL") {
-        if !custom.trim().is_empty() {
-            return custom.trim().to_string();
-        }
+    let custom = std::env::var("AICHAT_UPDATE_FEED_URL").ok();
+    let compatibility_launcher = cfg!(windows)
+        && std::env::current_exe()
+            .map(|exe| exe.with_file_name("Keepwork.exe").is_file())
+            .unwrap_or(false);
+    desktop_feed_url_for(
+        current_runtime_platform(),
+        current_runtime_arch(),
+        compatibility_launcher,
+        custom.as_deref(),
+    )
+}
+
+fn desktop_feed_url_for(
+    platform: &str,
+    arch: &str,
+    compatibility_launcher: bool,
+    custom: Option<&str>,
+) -> String {
+    if let Some(custom) = custom.map(str::trim).filter(|value| !value.is_empty()) {
+        return custom.to_string();
     }
-    #[cfg(windows)]
-    if std::env::current_exe()
-        .map(|exe| exe.with_file_name("Keepwork.exe").is_file())
-        .unwrap_or(false)
-    {
+    if platform == "win32" && compatibility_launcher {
         // A compatibility install must retain its Win7-capable outer launcher.
         // Never replace it with the ordinary Tauri-only installer feed.
         return format!(
             "https://cdn.keepwork.com/keepwork/aichat-cef/v1/client/windows-{}/latest-client.json",
-            current_runtime_arch()
+            arch
         );
     }
-    let target = format!("{}-{}", current_runtime_platform(), current_runtime_arch());
+    let target = match (platform, arch) {
+        ("win32", "x64") => "win32-x64",
+        ("win32", "arm64") => "win32-arm64",
+        ("darwin", "x64" | "arm64") => "darwin-universal",
+        _ => return String::new(),
+    };
     format!("{DEFAULT_DESKTOP_FEED_BASE}/{target}/latest-client.json")
 }
 
@@ -142,7 +162,17 @@ impl UpdateManager {
         feed_url: String,
         launcher_exe: Option<PathBuf>,
     ) -> Self {
-        let meta = Self::load_meta(&metadata_file);
+        let cached = Self::load_meta(&metadata_file);
+        // A channel switch must not activate a previously staged installer.
+        // Historical metadata without a source remains on disk for old clients.
+        let meta = if !feed_url.is_empty() && cached.feed_url == feed_url {
+            cached
+        } else {
+            PersistedDesktopUpdateMeta {
+                feed_url: feed_url.clone(),
+                ..Default::default()
+            }
+        };
         let ready = !meta.downloaded_path.is_empty()
             && Path::new(&meta.downloaded_path).is_file()
             && is_version_newer(&meta.latest_version, &desktop_version)
@@ -325,6 +355,9 @@ impl UpdateManager {
     }
 
     async fn fetch_and_stage_desktop_update(&self) -> Result<(), String> {
+        if self.feed_url.is_empty() {
+            return Err("当前平台没有可用的桌面自动更新通道".to_string());
+        }
         let builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(15 * 60));
@@ -429,6 +462,7 @@ impl UpdateManager {
                         ds.stale = false;
                         ds.error.clear();
                         ds.meta = PersistedDesktopUpdateMeta {
+                            feed_url: self.feed_url.clone(),
                             latest_version: version,
                             published_at,
                             checked_at,
@@ -502,6 +536,7 @@ impl UpdateManager {
             ds.stale = false;
             ds.error.clear();
             ds.meta = PersistedDesktopUpdateMeta {
+                feed_url: self.feed_url.clone(),
                 latest_version: version,
                 published_at,
                 checked_at,
@@ -727,6 +762,95 @@ mod tests {
     use std::thread;
     use uuid::Uuid;
 
+    #[test]
+    fn desktop_feeds_use_three_rust_targets_and_preserve_explicit_channels() {
+        for (platform, arch, target) in [
+            ("win32", "x64", "win32-x64"),
+            ("win32", "arm64", "win32-arm64"),
+            ("darwin", "x64", "darwin-universal"),
+            ("darwin", "arm64", "darwin-universal"),
+        ] {
+            assert_eq!(
+                desktop_feed_url_for(platform, arch, false, None),
+                format!(
+                    "https://cdn.keepwork.com/keepwork/aichat-rust/{target}/latest-client.json"
+                )
+            );
+        }
+        assert!(desktop_feed_url_for("linux", "x64", false, None).is_empty());
+        assert!(desktop_feed_url_for("win32", "ia32", false, None).is_empty());
+        for arch in ["x64", "arm64"] {
+            assert_eq!(
+                desktop_feed_url_for("win32", arch, true, Some("  ")),
+                format!("https://cdn.keepwork.com/keepwork/aichat-cef/v1/client/windows-{arch}/latest-client.json")
+            );
+        }
+        assert_eq!(
+            desktop_feed_url_for(
+                "win32",
+                "x64",
+                true,
+                Some(" https://example.com/custom.json  ")
+            ),
+            "https://example.com/custom.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_desktop_updates_are_restored_only_for_the_same_feed() {
+        let feed = "http://127.0.0.1:1/latest-client.json";
+        for source in [
+            None,
+            Some(
+                "https://cdn.keepwork.com/keepwork/aichat-desktop/darwin-arm64/latest-client.json",
+            ),
+            Some(feed),
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("aichat-update-channel-{}", Uuid::new_v4()));
+            let downloads = root.join("downloads");
+            fs::create_dir_all(&downloads).unwrap();
+            let package = downloads.join("0.3.0-installer.dmg");
+            let payload = b"previously verified installer";
+            fs::write(&package, payload).unwrap();
+            let cached = PersistedDesktopUpdateMeta {
+                feed_url: source.unwrap_or_default().into(),
+                latest_version: "0.3.0".into(),
+                url: "https://cdn.keepwork.com/fixture.dmg".into(),
+                downloaded_path: package.to_string_lossy().into(),
+                sha256: sha256_hex(payload),
+                size: payload.len() as u64,
+                ..Default::default()
+            };
+            let metadata_file = root.join("meta.json");
+            let mut json = serde_json::to_value(cached).unwrap();
+            if source.is_none() {
+                json.as_object_mut().unwrap().remove("feedUrl");
+            }
+            atomic_json_write(&metadata_file, &json).unwrap();
+            let original = fs::read(&metadata_file).unwrap();
+            let manager = UpdateManager::new(
+                "0.2.0".into(),
+                metadata_file.clone(),
+                downloads,
+                feed.into(),
+                None,
+            );
+            let mcp = RuntimeStatusSnapshot::initial("mcp", 8089);
+            let matching = source == Some(feed);
+            assert_eq!(manager.snapshot(&mcp).desktop.can_apply, matching);
+            manager.check_desktop_update().await;
+            let snapshot = manager.snapshot(&mcp).desktop;
+            assert_eq!(snapshot.can_apply, matching);
+            assert_eq!(snapshot.stale, matching);
+            assert_eq!(snapshot.latest_version, if matching { "0.3.0" } else { "" });
+            assert_eq!(manager.prepare_desktop_install().is_ok(), matching);
+            assert_eq!(fs::read(&metadata_file).unwrap(), original);
+            assert_eq!(fs::read(&package).unwrap(), payload);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     fn update_server(
         make_manifest: impl FnOnce(&str) -> Value,
         payload: Vec<u8>,
@@ -826,14 +950,13 @@ mod tests {
         fs::create_dir_all(&downloads).unwrap();
         let old_path = downloads.join("0.3.0-installer.dmg");
         fs::write(&old_path, b"previous verified installer").unwrap();
-        let meta = PersistedDesktopUpdateMeta {
+        let mut meta = PersistedDesktopUpdateMeta {
             latest_version: "0.3.0".into(),
             downloaded_path: old_path.to_string_lossy().into(),
             sha256: sha256_hex(b"previous verified installer"),
             ..Default::default()
         };
         let metadata_file = root.join("meta.json");
-        atomic_json_write(&metadata_file, &meta).unwrap();
         let (feed, server) = update_server(
             |base| {
                 serde_json::json!({
@@ -845,6 +968,8 @@ mod tests {
             b"corrupt newer download".to_vec(),
             2,
         );
+        meta.feed_url = feed.clone();
+        atomic_json_write(&metadata_file, &meta).unwrap();
         let manager = UpdateManager::new("0.2.0".into(), metadata_file, downloads, feed, None);
         manager.check_desktop_update().await;
         server.join().unwrap();
@@ -1148,7 +1273,7 @@ mod tests {
             "0.2.0".to_string(),
             root.join("update-metadata.json"),
             root.join("downloads"),
-            feed_url,
+            feed_url.clone(),
             None,
         );
 
@@ -1175,7 +1300,7 @@ mod tests {
             "0.2.0".to_string(),
             root.join("update-metadata.json"),
             root.join("downloads"),
-            "http://127.0.0.1:1/unreachable.json".to_string(),
+            feed_url,
             None,
         );
         offline_manager.check_desktop_update().await;

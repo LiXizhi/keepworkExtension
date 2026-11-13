@@ -15,8 +15,8 @@ const INSTALLERS = [
   { label: 'Windows ARM64（EXE）', suffix: 'arm64-setup.exe' },
   { label: 'macOS Universal（DMG）', suffix: 'universal.dmg' },
 ];
-const UPDATE_TARGETS = ['win32-x64', 'win32-arm64', 'darwin-x64', 'darwin-arm64'];
-const updateKey = target => `keepwork/aichat-desktop/${target}/latest-client.json`;
+const UPDATE_TARGETS = ['win32-x64', 'win32-arm64', 'darwin-universal'];
+const updateKey = target => `keepwork/aichat-rust/${target}/latest-client.json`;
 const cdnUrl = key => `https://cdn.keepwork.com/${key}`;
 
 function collectReleaseFiles(directory, version) {

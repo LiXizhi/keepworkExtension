@@ -500,8 +500,17 @@ impl RuntimeSupervisor {
     }
 
     async fn require_vacant_port(&self) -> Result<(), String> {
+        // Winsock can take longer than 1.2 seconds to report an explicitly
+        // refused loopback connection, including after a listener has closed.
+        // Wait for that result within a bounded Windows-specific deadline;
+        // expiration is still unknown, never permission to start a process.
+        let timeout = if cfg!(windows) {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(1200)
+        };
         match tokio::time::timeout(
-            Duration::from_millis(1200),
+            timeout,
             tokio::net::TcpStream::connect(("127.0.0.1", self.config.port)),
         )
         .await

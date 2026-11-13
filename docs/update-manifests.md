@@ -8,17 +8,18 @@
 
 ## 地址与通道
 
-公开下载域名为 `https://cdn.keepwork.com`。保留以下已有对象 key，不以新文件名切断已安装客户端：
+公开下载域名为 `https://cdn.keepwork.com`。Rust 桌面使用专用地址；历史桌面对象 key 保留，由原渠道继续管理：
 
 | 更新流 | 可变版本清单 key | 包的身份与路径 |
 | --- | --- | --- |
-| 桌面 v1 | `keepwork/aichat-desktop/<target>/latest-client.json` | 原生 EXE / DMG：`keepwork/aichat-rust/<version>/<fileName>`；已有顶层 Launcher ZIP 保持原样 |
+| Rust 桌面 v1 | `keepwork/aichat-rust/<target>/latest-client.json` | 原生 EXE / DMG：`keepwork/aichat-rust/<version>/<fileName>`；仅三个目标 |
+| 历史桌面 v1 | `keepwork/aichat-desktop/<target>/latest-client.json` | 保留原有 ZIP / `installer` 合同；Rust 发布器不再改写这些地址 |
 | Rust MCP v2 | `keepwork/mcp-stable-rs/<platform>-<arch>.json` | 不可变 ZIP：`keepwork/mcp-stable-rs/<version>/<platform>-<arch>.zip` |
 | Node MCP v1 | `keepwork/mcp-stable/<platform>-<arch>.json` | 继续原 Node 清单与下载合同，不用 Rust 内容覆盖 |
 
-桌面 `<target>` 为 `win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64`。MCP 的 `<platform>` 为 `windows`、`macos` 或 `linux`，`<arch>` 为 `x64` 或 `arm64`；只发布已有对应产物并完成验收的目标，清单存在不代表其他目标已经交付。桌面原生清单的 `platform` 使用 `windows` / `macos`，与既有 URL 中的 `win32` / `darwin` 区分；历史字段保留原值。
+Rust 桌面 `<target>` 仅为 `win32-x64`（Windows x64 EXE）、`win32-arm64`（Windows ARM64 EXE）、`darwin-universal`（macOS Universal DMG）。两种 Mac CPU 架构都读取同一个 `darwin-universal` 清单；该清单的 `platform: macos`、`arch: universal` 描述包含两种架构的同一安装包。历史桌面目标 `win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64` 保留原字段。MCP 的 `<platform>` 为 `windows`、`macos` 或 `linux`，`<arch>` 仍仅为 `x64` 或 `arm64`；只发布已有对应产物并完成验收的目标，清单存在不代表其他目标已经交付。
 
-`AICHAT_UPDATE_FEED_URL` 和 `AICHAT_MCP_FEED_URL` 是显式通道覆盖。切换地址不授权换引擎、降级或复用其他地址的远端版本缓存。Windows CEF / 外层 Launcher 兼容安装保留自己的通道与签名合同，不通过普通 Tauri 清单替换外层启动器。
+`AICHAT_UPDATE_FEED_URL` 和 `AICHAT_MCP_FEED_URL` 是显式通道覆盖。切换地址不授权换引擎、降级或复用其他地址的远端版本缓存。Rust 专用清单返回 404 或检查失败时不自动读取历史 Electron / Launcher 清单。Windows CEF / 外层 Launcher 兼容安装保留自己的通道与签名合同，不通过普通 Tauri 清单替换外层启动器。
 
 ## 字段语义
 
@@ -27,9 +28,9 @@
 | 字段 | 含义与约束 |
 | --- | --- |
 | `schemaVersion` | 清单协议版本，独立于产品版本；桌面原生清单为 `1`，Node MCP 为 `1`，Rust MCP 为 `2`。历史桌面 ZIP 清单省略时仍可读取，新发布器可补上缺失的 `1` |
-| `product` | 更新对象；桌面为 `aichat-desktop`，Rust MCP 为 `keepwork-mcp-runtime`，Node MCP 为 `keepwork-mcp-node-runtime`。已有历史桌面字段保持原样 |
+| `product` | 更新对象；桌面沿用 `aichat-desktop` 合同标识，包括 Rust 专用地址；Rust MCP 为 `keepwork-mcp-runtime`，Node MCP 为 `keepwork-mcp-node-runtime`。已有历史桌面字段保持原样 |
 | `engine` | MCP 执行引擎。Rust v2 必须显式为 `rust`；Node v1 的历史省略值仍按 Node 处理，新写入时为 `node`。桌面实现使用 Rust 不代表桌面清单要声明 MCP 引擎 |
-| `platform` / `arch` | 包适用的系统和架构，须与请求目标、包内清单和实际二进制一致。Universal DMG 可由两个 Mac 清单引用同一个文件，各清单仍标明自己的目标架构 |
+| `platform` / `arch` | 包适用的系统和架构，须与请求目标、包内清单和实际二进制一致。Rust 桌面 Universal DMG 使用单个 `macos` / `universal` 清单；仅 macOS 桌面允许 `universal`。历史桌面及 MCP 的架构字段保持原合同 |
 | `version` | 此候选所属产品的版本号，新发布使用不含 `v` 前缀的 `major.minor.patch`。不使用 MCP 协议版本代替运行时版本；嵌套 `installer.version` 独立于历史顶层 ZIP 版本 |
 | `commit` | 构建候选对应的 40 位 Git commit；MCP 必需。桌面原生包可附加，不能把发布时 checkout 的 commit 直接填给另一个源码构建的包 |
 | `sourceHash` | Rust 候选的源码输入 SHA-256，与嵌入二进制身份一致；新 Rust 发布清单与包内身份必须包含该字段。历史消费者可忽略该附加字段 |
@@ -42,11 +43,17 @@
 
 `checkedAt`、`downloadedPath`、`stale`、下载进度及错误是客户端本地状态，不是 CDN 发布身份。未知时间或身份显示未知；不填 `0`、当前时间或其他产品的版本来制造完整结果。
 
-## 桌面 v1：保留 ZIP，追加原生安装包
+## Rust 桌面 v1：三个专用原生安装包清单
+
+Rust 发布器只更新 `keepwork/aichat-rust/` 下的三个专用清单。Windows 使用各自架构的 EXE，macOS 使用 Universal DMG。顶层写入 `schemaVersion: 1`、`product: aichat-desktop`、`platform`、`arch` 及完整原生包描述，并保留同一描述的 `installer`。客户端优先读取 `installer.version`，缺失时沿用顶层 `version`；大小、摘要、下载地址与文件名必须属于同一个候选。发布顺序为先验证全部三个不可变安装包，再提升三个清单。
+
+已有 Rust 客户端的旧默认地址不会因新地址出现而改变；迁移方式是手动安装使用新地址的版本，或显式配置其支持的 feed 地址。发布器不为迁移而改写历史四个地址，新客户端也不在专用地址失败时回退旧地址。没有来源字段的本地更新缓存不得被当作新渠道的可安装候选。准备源码与本地清单不代表新地址已发布。
+
+## 历史桌面 v1：保留 ZIP，追加原生安装包
 
 已有清单顶层的 legacy ZIP 下载字段与附加字段全部保留，追加或更新 `installer`；缺失的 `schemaVersion`、`product`、`platform` 和 `arch` 可按既有通道与目标补齐。已有身份值必须通过校验，显式冲突时拒绝发布，不覆盖原值来掩盖冲突。新客户端优先使用 `installer`；其 `version`、`publishedAt`、`url`、`size` 和 `sha256` 描述同一个原生包，不能混用顶层 ZIP 的摘要或大小。历史 `installer` 没有独立版本时沿用顶层 `version`；新发布器总是写出独立版本。
 
-下例仅演示结构，版本、地址和摘要不代表已发布产物：
+下例仅演示历史兼容结构，版本、地址和摘要不代表已发布产物；Rust 专用发布流程不再写入此历史地址：
 
 ```json
 {
@@ -116,7 +123,7 @@ Rust MCP 现有 CI 的 build/package 不等于 CDN promotion。独立入口为 [
 ## 客户端失败与兼容行为
 
 - HTTP 404、断网、认证或解析错误分别显示实际原因，不报“已是最新”。保留当前可用服务、用户数据和已验证 pending；两条更新流独立，MCP 失败不阻断桌面检查或普通聊天。
-- MCP 本地远端缓存已通过 `latestSource` 绑定原始 feed URL、product、engine、platform 和 arch。离线只能展示同一来源的已验证结果，并标记 `stale`；切换引擎、目标或 feed 后不套用旧版本。旧缓存没有来源字段时显示远端未知，保留磁盘记录和现有运行时，不根据版本号猜来源。桌面 `update-metadata.json` 目前仍没有来源绑定字段，跨自定义 feed 的桌面缓存隔离尚待补齐；不能把本轮 MCP 的修复结果视为桌面也已完成该能力。
+- MCP 本地远端缓存通过 `latestSource` 绑定原始 feed URL、product、engine、platform 和 arch。桌面 `update-metadata.json` 同样按 feed URL 隔离恢复；只恢复来源匹配的版本与可安装候选。离线只能展示同一来源的已验证结果，并标记 `stale`；切换引擎、目标或 feed 后不套用旧版本。旧缓存没有来源字段时显示远端未知，保留磁盘记录与下载文件和现有运行时，不根据版本号猜来源，也不激活旧渠道的安装包。
 - 有效远端版本等于或低于本机时不下载、不降级；旧 ZIP 不应被当作需要安装的更新而报错。只有实际较新的候选才要求满足当前平台的安装合同；较新但仅 ZIP、缺摘要或身份错误时明确不可用，按钮保持禁用。
 - 下载只暂存；桌面安装需用户确认，MCP 激活保留 PID / owner 复验与外部宿主保护。不因为清单更新而停止外部 VS Code / Local Helper 服务，不自动重放结果不确定的任务。
 - 兼容回归覆盖新客户端与历史顶层清单、独立 `installer` 版本、旧客户端读取新清单、旧/新 MCP 合同，以及缺字段、404、断网、切流和重连。隔离夹具通过只证明对应合同；公开清单、最终下载包及实际安装升级分别记录结果。

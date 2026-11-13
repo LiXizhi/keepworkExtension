@@ -26,14 +26,20 @@
       "properties": { "format": { "enum": ["exe", "dmg"] } }
     },
     "desktop": {
-      "allOf": [{ "$ref": "#/$defs/package" }],
+      "allOf": [
+        { "$ref": "#/$defs/package" },
+        {
+          "if": { "properties": { "arch": { "const": "universal" } }, "required": ["arch"] },
+          "then": { "properties": { "platform": { "const": "macos" } } }
+        }
+      ],
       "type": "object",
       "required": ["schemaVersion", "product", "platform", "arch", "format"],
       "properties": {
         "schemaVersion": { "const": 1 },
         "product": { "const": "aichat-desktop" },
         "platform": { "enum": ["macos", "windows"] },
-        "arch": { "enum": ["arm64", "x64"] },
+        "arch": { "enum": ["arm64", "x64", "universal"] },
         "format": { "enum": ["zip", "dmg", "exe"] },
         "installer": { "$ref": "#/$defs/installer" }
       },

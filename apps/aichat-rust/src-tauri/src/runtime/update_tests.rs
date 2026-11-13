@@ -23,6 +23,20 @@ fn root() -> PathBuf {
     root
 }
 
+// Windows CI builds on D: and uses C: for temporary runtime fixtures. Keep
+// zero-copy hard links when available, but preserve the exact executable bytes
+// across volumes instead of requiring the test profile to live on one drive.
+fn install_fixture_executable(destination: &Path) {
+    let executable = std::env::current_exe().unwrap();
+    match fs::hard_link(&executable, destination) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            fs::copy(executable, destination).unwrap();
+        }
+        Err(error) => panic!("Cannot install fixture executable: {error}"),
+    }
+}
+
 fn write_bundle(dir: &Path, feed: &RuntimeUpdateManifest) {
     fs::create_dir_all(dir.join("bin")).unwrap();
     let target = match (mcp_feed_platform(), current_runtime_arch()) {
@@ -646,7 +660,7 @@ async fn explicit_apply_can_activate_an_equal_version_repack_after_native_health
         } else {
             "bin/keepwork-mcp"
         };
-        fs::hard_link(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
+        install_fixture_executable(&directory.join(entry));
         fs::write(directory.join("runtime.json"), json!({
             "product":RUST_MCP_PRODUCT, "engine":"rust", "platform":mcp_feed_platform(),
             "arch":current_runtime_arch(), "version":"0.4.0", "commit":commit, "entry":entry,
@@ -1080,7 +1094,7 @@ async fn takeover_boundary_candidate_failure_preserves_foreign_listener_and_pend
         let directory = root.join("store").join(name);
         fs::create_dir_all(directory.join("bin")).unwrap();
         let entry = if cfg!(windows) { "bin/keepwork-mcp.exe" } else { "bin/keepwork-mcp" };
-        fs::hard_link(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
+        install_fixture_executable(&directory.join(entry));
         let mut env = json!({
             "KP_UPDATE_FIXTURE_PORT":port.to_string(), "KP_UPDATE_FIXTURE_VERSION":version,
             "KP_UPDATE_FIXTURE_START_SIGNAL":signal.to_string_lossy()
@@ -1094,7 +1108,10 @@ async fn takeover_boundary_candidate_failure_preserves_foreign_listener_and_pend
     }
     let signal = candidate_started.clone();
     let server = tokio::spawn(async move {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Startup performs two explicit refusal probes before launching. Allow
+        // their bounded Winsock deadlines as well as initial health discovery.
+        let deadline = std::time::Instant::now()
+            + Duration::from_secs(if cfg!(windows) { 15 } else { 5 });
         while !signal.is_file() {
             assert!(std::time::Instant::now() < deadline, "candidate must start before the foreign listener appears");
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1168,7 +1185,7 @@ async fn failed_activation_rolls_back_to_last_verified_runtime() {
         };
         // A hard link to our own test executable keeps this fixture cross-platform
         // and never calls a shared daemon or requires a cloud account.
-        fs::hard_link(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
+        install_fixture_executable(&directory.join(entry));
         let mut env =
             json!({"KP_UPDATE_FIXTURE_PORT":port.to_string(),"KP_UPDATE_FIXTURE_VERSION":version});
         if fail {
@@ -1264,7 +1281,7 @@ async fn local_model_legacy_health_without_pid_still_starts() {
     } else {
         "bin/fixture"
     };
-    fs::hard_link(std::env::current_exe().unwrap(), bundle.join(entry)).unwrap();
+    install_fixture_executable(&bundle.join(entry));
     // A native test child serves the actual legacy local-model response shape;
     // no real local-model process or model download is required by this fixture.
     fs::write(bundle.join("runtime.json"), json!({"product":"keepwork-local-model-node-runtime", "engine":"rust",
@@ -1614,4 +1631,30 @@ async fn staging_bootstraps_without_a_baseline_and_compares_only_observed_same_e
         drop(supervisor);
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+#[tokio::test]
+async fn vacancy_probe_rejects_a_listener_and_waits_for_explicit_refusal_after_close() {
+    let root = root();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let supervisor = RuntimeSupervisor::new(RuntimeConfig {
+        id: "mcp".into(),
+        products: vec![RUST_MCP_PRODUCT.into()],
+        port,
+        health_path: "/health".into(),
+        updates_enabled: false,
+        bundled_dir: root.join("missing"),
+        store_dir: root.join("store"),
+        feed_url: String::new(),
+    });
+    assert!(supervisor.require_vacant_port().await.is_err());
+    drop(listener);
+    supervisor
+        .require_vacant_port()
+        .await
+        .expect("a released loopback port must eventually report ConnectionRefused");
+    assert!(supervisor.child.lock().unwrap().is_none());
+    assert_eq!(supervisor.rust_start_failures.load(Ordering::Relaxed), 0);
+    fs::remove_dir_all(root).unwrap();
 }

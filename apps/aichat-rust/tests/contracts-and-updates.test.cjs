@@ -173,7 +173,7 @@ test("self-update and automatic update flows are preserved for both MCP and Desk
   assert.ok(runtimeRs.includes("apply_staged_update"));
 
   // Desktop self-update checks
-  assert.ok(updatesRs.includes("https://cdn.keepwork.com/keepwork/aichat-desktop"));
+  assert.ok(updatesRs.includes("https://cdn.keepwork.com/keepwork/aichat-rust"));
   assert.ok(updatesRs.includes("latest-client.json"));
   assert.ok(updatesRs.includes("update-metadata.json") || updatesRs.includes("PersistedDesktopUpdateMeta"));
   assert.ok(updatesRs.includes("prepare_desktop_install"));

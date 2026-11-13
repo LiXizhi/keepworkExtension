@@ -697,18 +697,31 @@ mod tests {
             .handle("other:window", &files, "output", &json!({ "id": id }))
             .is_err());
 
+        // Send the platform's normal line ending without changing raw-input
+        // semantics. Split the marker so a PTY echo of the input cannot satisfy
+        // the assertion before the shell actually executes the command.
+        let command = if cfg!(windows) {
+            "Write-Output ('KEEPWORK_' + 'PTY_OK')\r\n"
+        } else {
+            "printf '%s%s\\n' KEEPWORK_ PTY_OK\n"
+        };
+        assert!(!command.contains("KEEPWORK_PTY_OK"));
         manager
             .handle(
                 "desktop:main",
                 &files,
                 "write",
-                &json!({ "id": id, "data": "echo KEEPWORK_PTY_OK\n" }),
+                &json!({ "id": id, "data": command }),
             )
             .unwrap();
 
         let mut combined = String::new();
         let mut cursor = 0usize;
-        for _ in 0..40 {
+        let mut last_chunk = Value::Null;
+        // A cold Windows PowerShell process can take longer than two seconds
+        // while the host test suite is also starting native subprocesses.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
             let out = manager
                 .handle(
                     "desktop:main",
@@ -717,21 +730,25 @@ mod tests {
                     &json!({ "id": id, "cursor": cursor }),
                 )
                 .unwrap();
-            cursor = out["cursor"].as_u64().unwrap() as usize;
+            let next_cursor = out["cursor"].as_u64().unwrap() as usize;
+            assert!(next_cursor >= cursor, "Output cursor must not move backwards");
+            cursor = next_cursor;
             combined.push_str(out["output"].as_str().unwrap_or(""));
+            last_chunk = out;
             if combined.contains("KEEPWORK_PTY_OK") {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
-        assert!(
-            combined.contains("KEEPWORK_PTY_OK"),
-            "Expected PTY output to contain KEEPWORK_PTY_OK, got: {combined}"
-        );
 
+        // Close our real shell even when the marker assertion is about to fail.
         manager
             .handle("desktop:main", &files, "close", &json!({ "id": id }))
             .unwrap();
         let _ = fs::remove_dir_all(&root);
+        assert!(
+            combined.contains("KEEPWORK_PTY_OK"),
+            "Expected executed shell output KEEPWORK_PTY_OK, got: {combined:?}; final chunk: {last_chunk}"
+        );
     }
 }
