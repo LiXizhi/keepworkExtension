@@ -83,7 +83,25 @@ test('an occupied unresponsive server fails within the probe timeout and remains
   const started = Date.now();
   assert.equal((await probeDevServer({ projectRoot, port, timeoutMs: 100 })).state, 'occupied');
   assert.ok(Date.now() - started < 2000);
+  await assert.rejects(ensureDevServer({ projectRoot, port, timeoutMs: 100, createServer: () => {
+    assert.fail('an uncertain listener must never allow another server to start');
+  } }), /Identity probe timed out/);
   assert.equal(server.listening, true);
+});
+
+test('a matching identity delayed beyond one second reuses the existing server', async t => {
+  const projectRoot = project(t);
+  const server = http.createServer((_req, res) => {
+    setTimeout(() => res.end(JSON.stringify({ protocol: IDENTITY_PROTOCOL, projectRoot })), 1500);
+  });
+  const port = await listen(server); t.after(() => close(server));
+  assert.equal((await probeDevServer({ projectRoot, port })).state, 'same');
+  const reused = await ensureDevServer({ projectRoot, port, createServer: () => {
+    assert.fail('a slow matching identity must not create a second server');
+  } });
+  assert.equal(reused.reused, true);
+  await reused.close();
+  assert.equal(server.listening, true, 'closing a reused handle must preserve its owner');
 });
 
 test('two concurrent real Vite starts converge on one owner after both observe a free port', async t => {

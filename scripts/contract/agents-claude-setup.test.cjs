@@ -201,7 +201,9 @@ test('Claude roots and AIChat tool context reach its own process without leaking
   await turn(session, 'context-one', 'context hello', { contextVersion: 1 });
   const done = await wait(session, (view) => view.status === 'completed');
   const launch = rows().find((row) => row.type === 'launch' && row.thread === session.threadId);
-  assert.equal(launch.cwd, root); assert.ok(launch.args.includes('--add-dir')); assert.ok(launch.args.includes(extraRoot));
+  assert.equal(launch.cwd, h.canonicalAgentRoot(root));
+  assert.ok(launch.args.includes('--add-dir'));
+  assert.ok(launch.args.includes(h.canonicalAgentRoot(extraRoot)));
   const configIndex = launch.args.indexOf('--mcp-config'); assert.notEqual(configIndex, -1);
   assert.ok(JSON.parse(launch.args[configIndex + 1]).mcpServers.keepwork_aichat);
   const nativeText = JSON.stringify(users(session.threadId)[0].message); assert.match(nativeText, /aichat_context/); assert.match(nativeText, /claude-rev/);

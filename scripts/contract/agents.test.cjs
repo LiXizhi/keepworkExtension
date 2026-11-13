@@ -947,7 +947,7 @@ test('malformed or duplicate persisted records stay read-only and preserve their
 test('Rust and Node can take turns hosting one profile without losing ACP history or replaying requests', async (t) => {
   if (!h.hasNodeReference()) return t.skip('Node reference has not been built; cross-engine live fixture not available');
   const createdByRust = await create('rust-to-node-history');
-  const expectedRoot = process.platform === 'win32' ? fs.realpathSync(root).toLowerCase() : fs.realpathSync(root);
+  const expectedRoot = h.canonicalAgentRoot(root);
   assert.deepEqual(createdByRust.roots, [expectedRoot], 'persisted roots must use the published Node identity format');
   assert.equal((await turn(createdByRust, 'rust-history-1', 'answer from Rust host')).status, 200);
   const rustDone = await waitSession(createdByRust, (view) => view.status === 'completed');
