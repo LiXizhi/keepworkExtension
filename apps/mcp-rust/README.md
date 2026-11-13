@@ -14,17 +14,21 @@ Node. Same wire contract, no Node in the installer.
 - Only advertises capabilities it actually serves, so AIChat degrades instead of
   calling a 404 while the port is in progress.
 
-## Phase status
+## Current scope and acceptance
 
-| Phase | Scope | State |
-| --- | --- | --- |
-| P0 | lifecycle, config/paths, CORS/auth, `/health`, `/exists`, `/fs/stat`, `/admin/status|stop`, MCP handshake + `mcp_status` | implemented |
-| P1 | `/fs/*` full (`list`/`search`/`stat`/`file`/`dir`/`reveal`), `/fs/locations|browse`, PTY `/terminal/*`, `run_terminal`, `grep_files`, `web_search`, `fetch_url` | implemented |
-| P2 | agents/ACP, messaging, personas, presence SSE | partial: native ACP/Codex/Claude sessions, page-bound tool context, presence, persona tools and DingTalk/Feishu messaging implemented; provider-specific gaps remain |
-| P3 | browser, computer, paracraft, dashboard, admin API docs/history | planned |
+The [Rust capability matrix](../../docs/rust-capability-matrix.md) is the current
+feature/engine/platform index. Files, PTY, portable tools, Dashboard, admin API
+catalog/history, native CLI sessions and image turns, persona local tools,
+DingTalk/Feishu messaging and owner-driven Circles are implemented. Browser,
+computer and Paracraft services, autonomous multi-agent routing and headless
+messaging workers are not fully ported. Optional capabilities decide availability;
+product version equality is never required.
 
-See [docs/rust-runtime-migration.md](../../docs/rust-runtime-migration.md) for the
-migration contract, manifest v2 and rollout order.
+See [the migration contract](../../docs/rust-runtime-migration.md) for manifest
+v2, independent update streams and ownership boundaries, and the
+[packaged-release checklist](../../docs/acceptance/rust-desktop-release.md) for
+durable evidence. Dated validation below records its exact source/environment;
+it does not certify a current installed package, every platform or a real account.
 
 ## Native CLI sessions
 
@@ -126,7 +130,7 @@ continue. Antigravity accepts text only and explicitly rejects image input.
 Executable discovery remains separate from protocol/account verification, and
 metadata queries do not launch login or submit a prompt.
 
-Image turns, account switching, non-Codex native history import and the Copilot
+Account switching, non-Codex native history import and the Copilot
 VS Code custom-model bridge also remain outside this Rust implementation. A
 registered ACP provider is not evidence that its installed version, account,
 models or platform have passed a live acceptance run.
@@ -212,12 +216,13 @@ cargo test --offline --manifest-path apps/mcp-rust/Cargo.toml --test circles_con
 cargo test --offline --manifest-path apps/mcp-rust/Cargo.toml --lib circle_
 ```
 
-## Persona support in 0.2.4
+## Persona support
 
 The daemon supports persona configuration, conversation history, message submission,
 read/clear/cancel operations and change events under `/agents/personas`. AIChat's
 existing desktop pet can send to **My Persona** through Bridge v1 when the local
-service and a local second-brain folder are connected. This does not complete P2.
+service and a local second-brain folder are connected. The current optional
+contracts and remaining scope live in the capability matrix.
 
 - Persona records use the Node-compatible `~/.keepwork-mcp/personas-v1` files.
   Requests require an allowed explicit `Origin`, `X-Agent-Owner` and daemon
@@ -234,10 +239,14 @@ service and a local second-brain folder are connected. This does not complete P2
   `stats.ownerGroups`; fingerprints never expose request owner keys. Historical
   records are retained, including empty conversations, and are never merged
   across identities.
-- Replies come from a real HTTPS Keepwork `/core/v0/gpt/chat` request. This
-  runtime uses Keepwork rather than native CLI executors. It can include the
-  persona's bounded conversation history and confined `AGENTS.md` instructions;
-  it has no workspace tools or general second-brain file retrieval.
+- Replies use HTTPS Keepwork `/core/v0/gpt/chat`, rather than a native CLI persona
+  executor. The bounded conversation history and confined `AGENTS.md` instructions
+  can be combined with `grep_files`, `web_search`, `fetch_url`, and a `run_terminal`
+  limited to one `dws` or `lark-cli` command. Keepwork receives `localTools`; tools
+  execute only after a complete validated argument snapshot, with at most eight
+  rounds. This is not arbitrary shell or general file-write authority. The channel
+  auto-answer pump uses its separate text-only path; native persona CLI and
+  headless-worker execution remain unsupported.
 - `taskContextVersion: 1` supports `contextMode: "isolated"`, which omits prior
   conversation history and summaries. Omitted `contextMode` keeps the historical
   conversation behavior.
@@ -245,11 +254,13 @@ service and a local second-brain folder are connected. This does not complete P2
   Reusing the request ID does not submit another model request. Interrupted runs
   become unknown after restart and are not replayed. Clients must inspect an
   uncertain outcome before submitting a new request.
-- Replies carry daemon-owned execution counts of zero tool requests and zero
-  tool returns. They are text answers, not evidence that files changed or business
-  actions completed. Persona collaboration, file writes, DingTalk/Feishu/WeChat,
-  sales automation and native CLI execution are not provided; unsupported actions
-  return feature-specific errors and their optional capabilities are not advertised.
+- Replies carry actual daemon-owned execution metadata; zero counts are not a
+  blanket current contract, and omitted metadata means unknown. Claimed file
+  changes or business actions require tool results and receipts. DingTalk/Feishu
+  channel management, manual replies and owner-driven Circles are implemented;
+  autonomous persona collaboration, general file writes, WeChat, sales automation
+  and native CLI persona execution remain outside this implementation. Unsupported
+  actions fail at their feature boundary while ordinary text remains usable.
 
 ## DingTalk listener lifecycle
 
@@ -405,7 +416,7 @@ crates/keepwork-mcp/
   src/fs.rs          /fs/* routes, MIME and size caps
   src/folders.rs     /fs/locations, /fs/browse
   src/presence.rs    /aichat/presence (JSON + SSE) & MCP keepwork/presence
-  src/personas.rs    owner-scoped persona records, text replies and change events
+  src/personas/     owner-scoped persona records, local tools, Circles and change events
   src/terminal.rs    PTY sessions, cursor replay, deny-list
   src/shell.rs       run_terminal (spawn, timeout, output cap)
   src/grep.rs        grep_files (ripgrep + loop-aware walker)
@@ -416,6 +427,31 @@ crates/keepwork-mcp/
   src/tools.rs       tool registry (P1: the five portable tools)
   tests/contract.rs  wire contract (headers, payloads, SSE framing)
 ```
+
+## Session persistence optimization (0.2.47)
+
+The 0.2.48 smoke runner checks the compiled binary identity, live child PID and
+isolated workspace before every POST, including shutdown. Authentication uses
+only that child's temporary profile. HTTP startup/body/shutdown are bounded;
+cleanup signals and reaps only the owned child before removing its profile.
+Port conflicts, peer replacement, auth-on/auth-off loopback operation,
+hanging responses and spawn/exit failures have isolated regression fixtures in
+`scripts/smoke.test.cjs`. No smoke is allowed to use the shared port 8089.
+
+Streamed native CLI updates rewrite only the changed session's Node-compatible
+history sidecar. Registry records, request receipts, `sync_all`, cursors and full
+reconnect snapshots retain their existing commit order. Provider exits save the
+affected histories together; failed writes do not advance a cached fingerprint.
+
+An isolated macOS arm64 debug A/B benchmark (64 sessions × 32 chunks) reduced
+history writes from 2,048 to 32 and history bytes from 17,511,232 to 510,592.
+Registry writes remained 32 / 17,984,567 bytes. Its measured P95 was 436.938 ms
+versus 26.220 ms; this is a local disk fixture, not an end-to-end latency promise.
+Repeat with `node apps/mcp-rust/scripts/benchmark-agent-persistence.cjs --out <new-directory>`
+from the repository root. It saves both strategies' counters, build identity and
+logs without connecting to any daemon or account. Final task validation receipts
+are collected under `.test-runtime/rust-optimization-final/` at the repository root;
+real account, clean-machine and published-feed checks remain separate pending gates.
 
 ## Rules
 

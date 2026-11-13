@@ -54,9 +54,9 @@ test('health only advertises capabilities this build serves', async () => {
   }
 });
 
-test('health matches the Node reference on the shared identity fields', async () => {
+test('health matches the Node reference on the shared identity fields', async t => {
   const node = await h.startNode();
-  if (!node) return;
+  if (!node) return t.skip(h.nodeReferenceSkipReason);
   try {
     for (const key of ['ok', 'name', 'version', 'hostKind', 'requireAuth', 'fsApi', 'terminalApi', 'aichatPresenceApi', 'personasApi', 'messagingApi']) {
       assert.equal(rust.health[key], node.health[key], `field ${key} must match the Node daemon`);

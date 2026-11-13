@@ -238,7 +238,7 @@ impl AgentManager {
                     needs_native_history: false,
                 },
             );
-            if let Err(error) = self.persist(&sessions) {
+            if let Err(error) = self.persist_changed(&sessions, &session_id) {
                 sessions.remove(&session_id);
                 return Err(error);
             }

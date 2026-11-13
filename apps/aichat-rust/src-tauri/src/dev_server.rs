@@ -373,6 +373,14 @@ impl DevServer {
             first_port,
             port_count,
         )?;
+        Self::serve_listener(listener, root_dir, entry_file)
+    }
+
+    fn serve_listener(
+        listener: TcpListener,
+        root_dir: PathBuf,
+        entry_file: String,
+    ) -> Result<Self, String> {
         let port = listener
             .local_addr()
             .map_err(|e| format!("Failed to query local server address: {e}"))?
@@ -517,7 +525,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn fixture() -> (PathBuf, PathBuf, u16) {
+    fn source_fixture() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("source")).unwrap();
         fs::write(
@@ -525,6 +533,12 @@ mod tests {
             "<!doctype html><title>Origin</title>",
         )
         .unwrap();
+        let registry = root.join("profile/source-ports.json");
+        (root, registry)
+    }
+
+    fn fixture() -> (PathBuf, PathBuf, u16) {
+        let (root, registry) = source_fixture();
         // Keep fixtures outside both the user's 3001 range and the OS's
         // ephemeral client range: parallel HTTP tests may consume an ephemeral
         // port between our availability probe and the assertion that rebinds it.
@@ -546,8 +560,25 @@ mod tests {
                 }
             })
             .expect("isolated test port range unavailable");
-        let registry = root.join("profile/source-ports.json");
         (root, registry, first)
+    }
+
+    fn occupied_port_fixture() -> (PathBuf, PathBuf, u16, TcpListener) {
+        let (root, registry) = source_fixture();
+        // Keep the occupied socket itself, rather than probing, releasing and
+        // rebinding a port another test process can claim in between.
+        let listener = (0..1000)
+            .find_map(|_| {
+                let port = 20000 + (Uuid::new_v4().as_u128() % 9000) as u16;
+                match TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(listener) => Some(listener),
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
+                    Err(error) => panic!("Cannot bind occupied-port fixture: {error}"),
+                }
+            })
+            .expect("isolated occupied test port unavailable");
+        let port = listener.local_addr().unwrap().port();
+        (root, registry, port, listener)
     }
 
     #[test]
@@ -620,12 +651,15 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
-        let stranger = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let (root, registry, port, stranger) = occupied_port_fixture();
         let mut server =
             DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
                 .unwrap();
-        assert_eq!(server.port, port + 1);
+        let fallback_port = server.port;
+        assert!(
+            (port + 1..port + 8).contains(&fallback_port),
+            "the source must skip the occupied first port and stay in its configured range"
+        );
         server.stop();
         stranger.set_nonblocking(true).unwrap();
         assert_eq!(
@@ -637,8 +671,7 @@ mod tests {
             DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
                 .unwrap();
         assert_eq!(
-            restarted.port,
-            port + 1,
+            restarted.port, fallback_port,
             "an earlier port becoming free must not change the saved origin"
         );
         restarted.stop();
@@ -790,9 +823,8 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        let (root, registry, port, busy) = occupied_port_fixture();
         let source = root.join("source");
-        let busy = TcpListener::bind(("127.0.0.1", port)).unwrap();
         let error = DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 1)
             .err()
             .unwrap();
@@ -860,10 +892,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_local_aichat_source_on_loopback_and_blocks_traversal() {
-        let _test_ports = TEST_PORT_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("js")).unwrap();
         fs::write(
             root.join("AIChat.html"),
@@ -872,8 +901,12 @@ mod tests {
         .unwrap();
         fs::write(root.join("js/app.js"), "export const ok = true;").unwrap();
 
-        let mut server =
-            DevServer::start_in_port_range(&root, "AIChat.html", &registry, port, 8).unwrap();
+        // This case verifies HTTP and confinement, not origin allocation.
+        // Keep ownership of the OS-selected socket through server startup;
+        // probing and releasing a small range races other local test clients.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (source, entry) = source_identity(&root, "AIChat.html").unwrap();
+        let mut server = DevServer::serve_listener(listener, source, entry).unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let res = client.get(server.url()).send().await.unwrap();

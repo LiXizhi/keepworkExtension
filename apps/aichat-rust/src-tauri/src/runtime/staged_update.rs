@@ -1,272 +1,237 @@
-//! Download and stage verified MCP updates without changing the running process.
+//! Download and stage verified updates. Activation remains an explicit operation.
 
 use super::{
     current_runtime_arch, extract_zip_archive, is_version_newer, mcp_feed_platform, sha256_hex,
-    validate_runtime_dir, validate_runtime_dir_any, validate_update_manifest,
-    RuntimeStatusSnapshot, RuntimeSupervisor, RuntimeUpdateManifest,
+    validate_staged_runtime, validate_update_manifest, validate_update_url, RuntimeStatusSnapshot,
+    RuntimeSupervisor, RuntimeUpdateManifest,
 };
+use futures_util::StreamExt;
 use std::fs;
 use std::time::Duration;
 
+async fn bounded_body(response: reqwest::Response, limit: u64) -> Result<Vec<u8>, String> {
+    if response.content_length().is_some_and(|size| size > limit) {
+        return Err("更新响应超出大小限制".into());
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("读取更新响应失败：{error}"))?;
+        if bytes.len() as u64 + chunk.len() as u64 > limit {
+            return Err("更新响应超出大小限制".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 impl RuntimeSupervisor {
-    /// Checks remote MCP manifest, downloads & verifies ZIP if newer, stages it, and returns `(snapshot, newly_staged)`.
     pub async fn check_for_update(&self) -> (RuntimeStatusSnapshot, bool) {
         if !self.config.updates_enabled {
             return (self.snapshot(), false);
         }
-        if let Ok(mut st) = self.status.lock() {
-            st.update_state = "checking".to_string();
-            st.update_error.clear();
+        let _checking = self.update_operation.lock().await;
+        if let Ok(mut status) = self.status.lock() {
+            status.update_state = "checking".into();
+            status.update_error.clear();
         }
+        match self.stage_update().await {
+            Ok(newly_staged) => (self.snapshot(), newly_staged),
+            Err(error) => {
+                if let Ok(mut status) = self.status.lock() {
+                    status.update_state = "error".into();
+                    status.update_error = error;
+                }
+                (self.snapshot(), false)
+            }
+        }
+    }
 
-        let client = match reqwest::Client::builder()
+    async fn stage_update(&self) -> Result<bool, String> {
+        validate_update_url(&self.config.feed_url)?;
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = e.to_string();
-                }
-                return (self.snapshot(), false);
-            }
-        };
-
-        let resp = match client.get(&self.config.feed_url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = format!("检查更新失败（HTTP {}）", r.status().as_u16());
-                }
-                return (self.snapshot(), false);
-            }
-            Err(e) => {
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = format!("网络请求失败：{e}");
-                }
-                return (self.snapshot(), false);
-            }
-        };
-
-        let remote: RuntimeUpdateManifest = match resp.json().await {
-            Ok(m) => m,
-            Err(e) => {
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = format!("更新清单格式错误：{e}");
-                }
-                return (self.snapshot(), false);
-            }
-        };
-
-        let expected_platform = mcp_feed_platform();
-        let expected_arch = current_runtime_arch();
-        if let Err(err) = validate_update_manifest(
+            .map_err(|error| error.to_string())?;
+        let response = client
+            .get(&self.config.feed_url)
+            .send()
+            .await
+            .map_err(|error| format!("更新清单暂不可用：{error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "更新清单暂不可用（HTTP {}）",
+                response.status().as_u16()
+            ));
+        }
+        let remote: RuntimeUpdateManifest =
+            serde_json::from_slice(&bounded_body(response, 65_536).await?)
+                .map_err(|error| format!("更新清单格式错误：{error}"))?;
+        validate_update_manifest(
             &remote,
             self.config.product(),
-            expected_platform,
-            expected_arch,
-        ) {
-            if let Ok(mut st) = self.status.lock() {
-                st.update_state = "error".to_string();
-                st.update_error = err;
-            }
-            return (self.snapshot(), false);
-        }
+            mcp_feed_platform(),
+            current_runtime_arch(),
+        )?;
 
-        let mut record = Self::load_active_record(&self.config.store_dir);
-        record.latest_version = Some(remote.version.clone());
-        record.latest_built_at = Some(remote.built_at.clone());
-        let _ = self.save_active_record(&record);
-
-        let cur_snap = self.snapshot();
-        let installed_ver = if !cur_snap.version.is_empty() {
-            cur_snap.version.clone()
+        // Only compare within the selected engine. Never downgrade an attached
+        // newer service or substitute Node for a missing native capability.
+        let current = self.snapshot();
+        let same_engine = current
+            .engine
+            .eq_ignore_ascii_case(if self.configured_rust_mcp() {
+                "rust"
+            } else {
+                "node"
+            });
+        let current_version = if same_engine {
+            current.version.as_str()
         } else {
+            ""
+        };
+        let installed = self
+            .newest_local_version()
+            .filter(|version| is_version_newer(version, current_version))
+            .unwrap_or(current_version.to_string());
+        let installed = if installed.is_empty() {
             self.newest_local_version().unwrap_or_default()
+        } else {
+            installed
         };
-        let installed_commit = cur_snap.commit.clone();
+        let newer = installed.is_empty()
+            || is_version_newer(&remote.version, &installed)
+            || (remote.version == installed
+                && same_engine
+                && !current.commit.is_empty()
+                && remote.commit != current.commit);
 
-        let is_newer = is_version_newer(&remote.version, &installed_ver)
-            || (remote.version == installed_ver
-                && !installed_commit.is_empty()
-                && remote.commit != installed_commit);
-
-        if !is_newer || record.failed.as_deref() == Some(remote.sha256.as_str()) {
-            if let Ok(mut st) = self.status.lock() {
-                st.latest_version = remote.version;
-                st.latest_built_at = remote.built_at;
-                st.update_state = if record.pending.is_some() {
-                    "staged".to_string()
-                } else {
-                    "idle".to_string()
-                };
-            }
-            return (self.snapshot(), false);
-        }
-
-        // If already staged with the same sha256, no need to re-download
-        if record.pending.as_deref() == Some(remote.sha256.as_str())
-            && validate_runtime_dir(
-                &self.config.store_dir.join(&remote.sha256),
-                self.config.product(),
-            )
-            .is_ok()
         {
-            if let Ok(mut st) = self.status.lock() {
-                st.latest_version = remote.version.clone();
-                st.latest_built_at = remote.built_at;
-                st.pending_version = remote.version;
-                st.update_state = "staged".to_string();
-                st.update_progress = Some(100);
+            let _commit = self.lifecycle.lock().await;
+            let mut record = Self::load_active_record(&self.config.store_dir);
+            record.latest_version = Some(remote.version.clone());
+            record.latest_built_at = Some(remote.built_at.clone());
+            self.save_active_record(&record)?;
+            if let Ok(mut status) = self.status.lock() {
+                status.latest_version = remote.version.clone();
+                status.latest_built_at = remote.built_at.clone();
             }
-            return (self.snapshot(), false);
-        }
-
-        if let Ok(mut st) = self.status.lock() {
-            st.latest_version = remote.version.clone();
-            st.latest_built_at = remote.built_at.clone();
-            st.update_state = "downloading".to_string();
-            st.update_progress = Some(0);
-        }
-
-        // Download archive
-        let dl_resp = match client.get(&remote.url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = format!("下载更新包失败（HTTP {}）", r.status().as_u16());
+            if record.failed.as_deref() == Some(remote.sha256.as_str()) {
+                return Err("该更新此前启动失败，已保留可用版本；等待后续更新".into());
+            }
+            // A same-version pending cache still needs validation. Comparing
+            // version strings first must not hide a corrupted native payload.
+            if record.pending.as_deref() == Some(remote.sha256.as_str()) {
+                self.cached_runtime(&remote.sha256)
+                    .and_then(|_| {
+                        validate_staged_runtime(
+                            &self.config.store_dir.join(&remote.sha256),
+                            &remote,
+                        )
+                    })
+                    .map_err(|error| format!("待更新运行时校验失败，已保留可用版本：{error}"))?;
+                if let Ok(mut status) = self.status.lock() {
+                    status.pending_version = remote.version;
+                    status.update_state = "staged".into();
+                    status.update_progress = Some(100);
                 }
-                return (self.snapshot(), false);
+                return Ok(false);
             }
-            Err(e) => {
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = format!("下载失败：{e}");
+            if !newer {
+                if let Ok(mut status) = self.status.lock() {
+                    status.update_state = if record.pending.is_some() {
+                        "staged"
+                    } else {
+                        "idle"
+                    }
+                    .into();
                 }
-                return (self.snapshot(), false);
+                return Ok(false);
             }
-        };
-
-        let archive_bytes = match dl_resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = format!("读取更新包流失败：{e}");
-                }
-                return (self.snapshot(), false);
-            }
-        };
-
-        if archive_bytes.len() as u64 != remote.size {
-            if let Ok(mut st) = self.status.lock() {
-                st.update_state = "error".to_string();
-                st.update_error = format!(
-                    "更新包大小不匹配（实际 {}，预期 {}）",
-                    archive_bytes.len(),
-                    remote.size
-                );
-            }
-            return (self.snapshot(), false);
         }
 
-        let actual_sha = sha256_hex(&archive_bytes);
-        if !actual_sha.eq_ignore_ascii_case(&remote.sha256) {
-            if let Ok(mut st) = self.status.lock() {
-                st.update_state = "error".to_string();
-                st.update_error = "更新包 SHA-256 校验失败".to_string();
-            }
-            return (self.snapshot(), false);
+        if let Ok(mut status) = self.status.lock() {
+            status.update_state = "downloading".into();
+            status.update_progress = Some(0);
+        }
+        let response = client
+            .get(&remote.url)
+            .send()
+            .await
+            .map_err(|error| format!("下载失败：{error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "下载更新包失败（HTTP {}）",
+                response.status().as_u16()
+            ));
+        }
+        let bytes = bounded_body(response, remote.size).await?;
+        if bytes.len() as u64 != remote.size {
+            return Err("更新包大小与清单不一致".into());
+        }
+        if !sha256_hex(&bytes).eq_ignore_ascii_case(&remote.sha256) {
+            return Err("更新包 SHA-256 校验失败".into());
         }
 
-        let _ = fs::create_dir_all(&self.config.store_dir);
-        let zip_file = self
+        fs::create_dir_all(&self.config.store_dir).map_err(|error| error.to_string())?;
+        // A unique private staging directory cannot overlap a running binary or
+        // a previous check. No downloaded file is executed during validation.
+        let staging = self
             .config
             .store_dir
-            .join(format!("download-{}.zip", remote.sha256));
-        let staging_dir = self
-            .config
-            .store_dir
-            .join(format!("staging-{}", remote.sha256));
-        let final_dir = self.config.store_dir.join(&remote.sha256);
-
-        let _ = fs::remove_dir_all(&staging_dir);
-        if let Err(e) = fs::write(&zip_file, &archive_bytes) {
-            if let Ok(mut st) = self.status.lock() {
-                st.update_state = "error".to_string();
-                st.update_error = format!("写入临时更新包失败：{e}");
-            }
-            return (self.snapshot(), false);
-        }
-
-        let extract_res = extract_zip_archive(&zip_file, &staging_dir);
-        let _ = fs::remove_file(&zip_file);
-        if let Err(e) = extract_res {
-            let _ = fs::remove_dir_all(&staging_dir);
-            if let Ok(mut st) = self.status.lock() {
-                st.update_state = "error".to_string();
-                st.update_error = e;
-            }
-            return (self.snapshot(), false);
-        }
-
-        let extracted_manifest = match validate_runtime_dir_any(
-            &staging_dir,
-            &self
-                .config
-                .products
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                let _ = fs::remove_dir_all(&staging_dir);
-                if let Ok(mut st) = self.status.lock() {
-                    st.update_state = "error".to_string();
-                    st.update_error = e;
-                }
-                return (self.snapshot(), false);
+            .join(format!("staging-{}", uuid::Uuid::new_v4()));
+        let archive = staging.with_extension("zip");
+        fs::write(&archive, &bytes).map_err(|error| error.to_string())?;
+        let validated = extract_zip_archive(&archive, &staging)
+            .and_then(|()| validate_staged_runtime(&staging, &remote));
+        let _ = fs::remove_file(&archive);
+        let runtime = match validated {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
             }
         };
-
-        if extracted_manifest.commit != remote.commit
-            || extracted_manifest.version != remote.version
-        {
-            let _ = fs::remove_dir_all(&staging_dir);
-            if let Ok(mut st) = self.status.lock() {
-                st.update_state = "error".to_string();
-                st.update_error = "解压后的 runtime.json 版本或 commit 与清单不一致".to_string();
+        if remote.engine.as_deref() == Some("rust") {
+            let receipt = fs::read(staging.join(&runtime.entry))
+                .map_err(|_| "Could not read verified native binary".to_string())
+                .and_then(|binary| {
+                    let mut receipt =
+                        serde_json::to_value(&remote).map_err(|error| error.to_string())?;
+                    receipt["binarySha256"] = serde_json::json!(sha256_hex(&binary));
+                    crate::files::atomic_json_write(
+                        &staging.join(".update-manifest.json"),
+                        &receipt,
+                    )
+                });
+            if let Err(error) = receipt {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
             }
-            return (self.snapshot(), false);
         }
 
-        let _ = fs::remove_dir_all(&final_dir);
-        if let Err(e) = fs::rename(&staging_dir, &final_dir) {
-            let _ = fs::remove_dir_all(&staging_dir);
-            if let Ok(mut st) = self.status.lock() {
-                st.update_state = "error".to_string();
-                st.update_error = format!("提交更新目录失败：{e}");
-            }
-            return (self.snapshot(), false);
+        let _commit = self.lifecycle.lock().await;
+        let mut record = Self::load_active_record(&self.config.store_dir);
+        let destination = self.config.store_dir.join(&remote.sha256);
+        if destination.exists() {
+            // Never remove or overwrite resources which a daemon may still use.
+            let result = validate_staged_runtime(&destination, &remote);
+            let _ = fs::remove_dir_all(&staging);
+            result?;
+        } else if let Err(error) = fs::rename(&staging, &destination) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("提交更新目录失败：{error}"));
         }
-
         let newly_staged = record.notified.as_deref() != Some(remote.sha256.as_str());
         record.pending = Some(remote.sha256.clone());
-        record.notified = Some(remote.sha256.clone());
-        let _ = self.save_active_record(&record);
-
-        if let Ok(mut st) = self.status.lock() {
-            st.pending_version = remote.version;
-            st.update_state = "staged".to_string();
-            st.update_progress = Some(100);
-            st.update_error.clear();
+        record.notified = Some(remote.sha256);
+        self.save_active_record(&record)?;
+        if let Ok(mut status) = self.status.lock() {
+            status.pending_version = remote.version;
+            status.update_state = "staged".into();
+            status.update_progress = Some(100);
+            status.update_error.clear();
         }
-        (self.snapshot(), newly_staged)
+        Ok(newly_staged)
     }
 }

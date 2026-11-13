@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.82"
+version = "0.2.95"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
@@ -23,6 +23,11 @@ path = "src/main.rs"
 [[bin]]
 name = "desktop-smoke"
 path = "src/bin/desktop_smoke.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "startup-smoke"
+path = "src/bin/startup_smoke.rs"
 required-features = ["dev-bins"]
 
 [[bin]]
@@ -85,8 +90,11 @@ btleplug = "=0.13.5"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(windows)'.dependencies]
 junction = "1"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility", "Devices_Bluetooth", "Devices_Enumeration", "Foundation"] }
 windows-collections = "0.3"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_Graphics_Gdi", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_LibraryLoader"] }

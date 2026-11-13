@@ -18,6 +18,7 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const binaryName = process.platform === 'win32' ? 'keepwork-mcp.exe' : 'keepwork-mcp';
 const defaultRustBin = path.join(repoRoot, 'apps', 'mcp-rust', 'target', 'release', binaryName);
 const nodeEntry = path.join(repoRoot, 'apps', 'mcp-runtime', 'dist', 'cli.cjs');
+const nodeReferenceSkipReason = 'Node reference has not been built; cross-engine comparison was not run. Run npm run build --prefix apps/mcp-runtime.';
 
 function rustBinary() {
   const candidate = process.env.KEEPWORK_MCP_TEST_BIN || defaultRustBin;
@@ -27,8 +28,18 @@ function rustBinary() {
   return candidate;
 }
 
-function hasNodeReference() {
-  return fs.existsSync(nodeEntry);
+function hasNodeReference({ env = process.env, exists = fs.existsSync } = {}) {
+  const available = exists(nodeEntry);
+  // CI comparisons are mandatory even if a caller forgot the explicit flag.
+  // Local Rust-only runs remain useful, with visible skipped comparison cases.
+  if (!available && (env.KEEPWORK_MCP_REQUIRE_NODE_REFERENCE === '1' || ['1', 'true'].includes(env.CI))) {
+    throw new Error('Required Node reference missing: ' + nodeEntry + '. Run npm run build --prefix apps/mcp-runtime before wire contracts.');
+  }
+  return available;
+}
+
+function nodeReferenceTestOptions() {
+  return { skip: hasNodeReference() ? false : nodeReferenceSkipReason };
 }
 
 function freePort() {
@@ -244,6 +255,8 @@ module.exports = {
   repoRoot,
   rustBinary,
   hasNodeReference,
+  nodeReferenceTestOptions,
+  nodeReferenceSkipReason,
   freePort,
   isolatedHome,
   waitForHealth,

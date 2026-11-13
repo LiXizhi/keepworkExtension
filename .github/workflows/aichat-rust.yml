@@ -2,17 +2,39 @@ name: AIChat Rust Desktop (Tauri 2)
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/aichat-rust/**"
+      - "apps/mcp-rust/**"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "package*.json"
+      - "docs/acceptance/rust-release-evidence.schema.json"
+      - ".github/workflows/*rust*.yml"
   push:
     branches: [master, main]
     paths:
       - "apps/aichat-rust/**"
       - "apps/mcp-rust/**"
-      - "src/core/**"
-      - "src/pet/**"
+      - "src/**"
+      - "apps/mcp-runtime/**"
+      - "scripts/**"
+      - "package*.json"
+      - "docs/acceptance/rust-release-evidence.schema.json"
+      - ".github/workflows/rust-desktop-validation.yml"
       - ".github/workflows/aichat-rust.yml"
 
+permissions:
+  contents: read
+
 jobs:
+  validate:
+    uses: ./.github/workflows/rust-desktop-validation.yml
+
   build-macos-universal:
+    needs: validate
+    if: github.event_name != 'pull_request'
     name: Build macOS Universal (arm64 + x86_64)
     runs-on: macos-latest
     steps:
@@ -28,17 +50,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      # runtime::tests::staged_node_bundle_is_readable_by_rust_on_macos_and_windows
-      # runs apps/mcp-runtime/scripts/stage-runtime.cjs, so the runtime's
-      # devDependencies must exist before `pnpm check` runs `cargo test`.
-      - name: Install MCP runtime deps required by cargo tests
-        run: npm ci --prefix apps/mcp-runtime
-      - name: Install dependencies & run checks
+      - name: Install dependencies
         working-directory: apps/aichat-rust
         run: |
           pnpm install --frozen-lockfile
-          pnpm check
-          pnpm smoke
       - name: Build macOS Universal app and DMG with Rust MCP
         working-directory: apps/aichat-rust
         run: pnpm make:mac
@@ -66,6 +81,8 @@ jobs:
             apps/aichat-rust/src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app
 
   build-windows:
+    needs: validate
+    if: github.event_name != 'pull_request'
     name: Build Windows (${{ matrix.arch }})
     runs-on: windows-latest
     strategy:

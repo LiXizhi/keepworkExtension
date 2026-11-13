@@ -1,11 +1,26 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.completionMetadata = completionMetadata;
 exports.throwIfAborted = throwIfAborted;
 exports.abortable = abortable;
 exports.parseArguments = parseArguments;
 exports.responseText = responseText;
 exports.runCompletion = runCompletion;
 const text_tool_calls_cjs_1 = require("./text_tool_calls.cjs");
+const unfinished = new Set(['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'error', 'cancelled', 'aborted', 'incomplete', 'failed']);
+function completionMetadata(metadata) {
+    const result = {};
+    for (const source of [metadata, metadata?.choices?.[0], metadata?.raw, metadata?.raw?.choices?.[0]]) {
+        for (const key of ['finish_reason', 'stop_reason', 'truncated', 'status', 'error']) {
+            const value = source?.[key];
+            if (value == null)
+                continue;
+            if (!(key in result) || unfinished.has(value) || (['truncated', 'error'].includes(key) && value))
+                result[key] = value;
+        }
+    }
+    return result;
+}
 /** One model/tool loop. Transports perform exactly one inference request. */
 function throwIfAborted(signal) {
     if (signal?.aborted) {
@@ -61,6 +76,56 @@ function parseArguments(raw) {
 function responseText(response) {
     return typeof response === 'string' ? response : response?.choices?.[0]?.message?.content ?? response?.result ?? response?.content ?? '';
 }
+function emptyNativePlaceholder(call) {
+    if (!call || typeof call !== 'object' || Array.isArray(call))
+        return false;
+    if (Object.keys(call).some(key => !['id', 'index', 'type', 'function'].includes(key)))
+        return false;
+    if (call.id != null && String(call.id).trim())
+        return false;
+    if (call.type != null && call.type !== 'function')
+        return false;
+    const fn = call.function;
+    if (fn == null)
+        return true;
+    if (typeof fn !== 'object' || Array.isArray(fn) || Object.keys(fn).some(key => !['name', 'arguments'].includes(key)))
+        return false;
+    return [fn.name, fn.arguments].every(value => value == null || (typeof value === 'string' && !value.trim()));
+}
+function finalizedNativeCalls(snapshots, iteration) {
+    const calls = [], ids = new Map(), indexes = new Map(), seen = new WeakSet();
+    for (const snapshot of snapshots) {
+        if (snapshot && typeof snapshot === 'object') {
+            if (seen.has(snapshot))
+                continue;
+            seen.add(snapshot);
+        }
+        if (emptyNativePlaceholder(snapshot))
+            continue;
+        const call = snapshot && typeof snapshot === 'object' ? snapshot : { function: { name: '' } };
+        let position = call.id ? ids.get(call.id) : undefined;
+        if (position === undefined && call.index !== undefined) {
+            const candidate = indexes.get(call.index), prior = calls[candidate];
+            if (prior && (!call.id || !prior.id || call.id === prior.id))
+                position = candidate;
+        }
+        if (position === undefined) {
+            position = calls.length;
+            calls.push(call);
+        }
+        else {
+            const prior = calls[position];
+            // Keep identity, but do not fill missing final arguments/name from
+            // an earlier snapshot and accidentally execute stale semantics.
+            calls[position] = { ...call, id: call.id || prior.id };
+        }
+        if (calls[position].id)
+            ids.set(calls[position].id, position);
+        if (call.index !== undefined)
+            indexes.set(call.index, position);
+    }
+    return calls.map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
+}
 async function runCompletion(options, { request, execute, emit = () => { } }) {
     const messages = options.messages || [], signal = options.abortController?.signal;
     const receipts = new Map();
@@ -71,20 +136,18 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
         const finalSummary = options.reserveFinalResponse && iteration === limit - 1;
         const response = await abortable(request({ ...options, ...(finalSummary ? { tools: [] } : {}), messages, onToolCall: call => {
                 // Keep the mutable SDK snapshot until the response has completed.
-                const key = call.id || `index:${call.index ?? announced.size}`;
+                const key = call?.id || `index:${call?.index ?? announced.size}`;
                 announced.set(key, call);
             } }), signal);
         throwIfAborted(signal);
-        const rawCalls = response?.choices?.[0]?.message?.tool_calls || response?.tool_calls;
-        for (const call of rawCalls || [])
-            announced.set(call.id || `index:${call.index ?? announced.size}`, call);
-        let calls = [...announced.values()].map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
+        const rawCalls = [response?.choices?.[0]?.message?.tool_calls, response?.tool_calls].filter(Array.isArray).flat();
+        let calls = finalizedNativeCalls([...announced.values(), ...rawCalls], iteration);
         let content = responseText(response);
         // Native calls are authoritative. Text recovery runs only after the
         // transport completes; partial/cancelled requests never reach execution.
-        const reason = response?.choices?.[0]?.finish_reason ?? response?.finish_reason ?? response?.stop_reason;
+        const reasons = [response?.choices?.[0]?.finish_reason, response?.finish_reason, response?.stop_reason];
         const incomplete = response?.truncated || response?.error
-            || ['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'error', 'cancelled', 'aborted'].includes(reason)
+            || reasons.some(reason => ['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'error', 'cancelled', 'aborted'].includes(reason))
             || ['incomplete', 'failed', 'cancelled'].includes(response?.status);
         const recovered = !calls.length && !incomplete
             ? (0, text_tool_calls_cjs_1.recoverTextToolCalls)(content, finalSummary ? [] : options.tools, iteration) : null;

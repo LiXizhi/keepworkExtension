@@ -7,10 +7,15 @@ mod macos_resources;
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        cc::Build::new()
-            .file("src/navigation_macos.m")
+        let mut native = cc::Build::new();
+        if std::env::var_os("CARGO_FEATURE_DEV_BINS").is_some() {
+            native.file("src/app/startup_smoke_macos.m");
+            println!("cargo:rerun-if-changed=src/app/startup_smoke_macos.m");
+        }
+        native.file("src/navigation_macos.m")
             .file("src/local_mcp_macos.m")
             .file("src/browser_surface_macos.m")
+            .file("src/app/native_startup_macos.m")
             .file("src/remote_voice/native_input_macos.m")
             .file("src/remote_voice/buttons_macos.m")
             .file("src/remote_voice/paired_macos.m")
@@ -19,6 +24,7 @@ fn main() {
         println!("cargo:rerun-if-changed=src/navigation_macos.m");
         println!("cargo:rerun-if-changed=src/local_mcp_macos.m");
         println!("cargo:rerun-if-changed=src/browser_surface_macos.m");
+        println!("cargo:rerun-if-changed=src/app/native_startup_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/native_input_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/buttons_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/paired_macos.m");

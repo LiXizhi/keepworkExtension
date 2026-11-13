@@ -13,6 +13,8 @@ pub struct DesktopSettings {
     #[serde(default = "default_true")]
     pub pet_visible: bool,
     pub open_at_login: Option<bool>,
+    #[serde(default)]
+    pub onboarding_offered: bool,
 }
 
 fn default_true() -> bool {
@@ -24,6 +26,7 @@ impl Default for DesktopSettings {
         Self {
             pet_visible: true,
             open_at_login: None,
+            onboarding_offered: false,
         }
     }
 }

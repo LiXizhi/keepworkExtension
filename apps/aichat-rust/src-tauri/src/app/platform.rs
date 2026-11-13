@@ -95,12 +95,17 @@ fn open_macos_url(
 
 #[cfg(target_os = "macos")]
 fn run_browser_command(command: &mut Command, timeout: Duration) -> Result<(), String> {
-    let mut child = command
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| e.to_string())?;
+    wait_browser_child(child, timeout)
+}
+
+#[cfg(target_os = "macos")]
+fn wait_browser_child(mut child: std::process::Child, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
     loop {
         match child.try_wait() {

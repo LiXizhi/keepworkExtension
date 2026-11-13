@@ -1,6 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--launch-url")) {
+        // Protocol arguments are untrusted. Reject extra argv instead of letting
+        // a quote in %1 inject profile, startup or installer helper options.
+        if aichat_rust_lib::launch_intents::protocol_launch_action(std::env::args_os().skip(2))
+            .is_none()
+        {
+            eprintln!("Invalid Keepwork launch URL");
+            std::process::exit(2);
+        }
+    }
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--stop-mcp")) {
         let result = std::env::args_os()
             .nth(2)

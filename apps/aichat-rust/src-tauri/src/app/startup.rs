@@ -1,26 +1,31 @@
 //! Application bootstrap, bundled runtime discovery and event-loop setup.
 
 use super::host_menu::setup_native_menu_and_tray;
-use super::main_window::{handle_main_page_load, show_main_window};
+use super::main_window::{
+    handle_main_page_load, hide_main_window, show_main_window, sync_window_presentation,
+};
 use super::pet_audio_host::notify_pet_audio_stopped;
 use super::pet_host::{broadcast_pet_state, ensure_pet_window};
 use super::platform::open_in_system_browser;
 use super::state::{resolve_profile_dir, AppCore};
 use super::updates_window::broadcast_update_status;
-use super::{commands, main_window, pet_audio_host, pet_host, updates_window};
-use crate::bridge::build_main_window_init_script_for_entry;
+use super::{commands, main_window, native_startup, pet_audio_host, pet_host, updates_window};
+use crate::bridge::build_main_window_init_script_with_launch_capability;
 use crate::deployment::{resolve_local_aichat_source_dir, startup_deployment};
 use crate::desktop_identity::{default_mcp_home, remember_desktop_client};
-use crate::desktop_lock::DesktopLock;
+use crate::desktop_lock::{DesktopLock, InstanceAction};
 use crate::dev_server::DevServer;
 use crate::files::NativeFiles;
+#[cfg(target_os = "macos")]
+use crate::launch_intents::parse_launch_url;
+use crate::launch_intents::{launch_url_from_args, LaunchIntents, LaunchUrl};
 use crate::login_startup::LoginStartup;
 use crate::page_connection::PageConnection;
 use crate::permissions::MediaGrants;
 use crate::pet::PetController;
 use crate::runtime::{
-    current_runtime_arch, current_runtime_platform, mcp_feed_platform, RuntimeConfig,
-    RuntimeSupervisor, DEFAULT_MCP_FEED_BASE, LOCAL_MODEL_PORT, MCP_PORT,
+    current_runtime_platform, default_mcp_feed_url, RuntimeConfig, RuntimeSupervisor,
+    LOCAL_MODEL_PORT, MCP_PORT,
 };
 use crate::security::{allowed_in_app_popup, allowed_navigation, ENTRY};
 use crate::terminal::TerminalSessionManager;
@@ -85,7 +90,7 @@ fn launcher_mcp_runtime(products: &[&str]) -> Option<PathBuf> {
     best.map(|(_, dir)| dir)
 }
 
-fn resolve_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> PathBuf {
+fn find_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> Option<PathBuf> {
     let arch = crate::runtime::current_runtime_arch();
     let roots = [
         resource_base.join("..").join("Resources"),
@@ -101,7 +106,7 @@ fn resolve_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> PathBuf {
         // so a universal macOS build can carry both arm64 and x64 runtimes.
         let per_arch = root.join("mcp-runtime").join(arch);
         if valid_mcp_runtime(&per_arch, products) {
-            return per_arch;
+            return Some(per_arch);
         }
         let flat = root.join("mcp-runtime");
         if legacy.is_none() && valid_mcp_runtime(&flat, products) {
@@ -109,18 +114,41 @@ fn resolve_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> PathBuf {
         }
     }
     legacy
+}
+
+fn selected_mcp_product(engine: Option<&str>, bundle: Option<&Path>) -> &'static str {
+    match engine {
+        Some("node") => MCP_PRODUCT_NODE,
+        Some(_) => MCP_PRODUCT_RUST,
+        // A validated application bundle preserves explicitly built Node compatibility
+        // packages. An unrelated DesktopLauncher runtime cannot choose this engine.
+        None if bundle.is_some_and(|dir| {
+            crate::runtime::validate_runtime_dir(dir, MCP_PRODUCT_NODE)
+                .is_ok_and(|manifest| manifest.engine.eq_ignore_ascii_case("node"))
+        }) =>
+        {
+            MCP_PRODUCT_NODE
+        }
+        None => MCP_PRODUCT_RUST,
+    }
+}
+
+fn resolve_bundled_mcp_dir(resource_base: &Path, products: &[&str]) -> PathBuf {
+    find_bundled_mcp_dir(resource_base, products)
         .or_else(|| launcher_mcp_runtime(products))
         .unwrap_or_else(|| {
             resource_base
                 .join("resources")
                 .join("mcp-runtime")
-                .join(arch)
+                .join(crate::runtime::current_runtime_arch())
         })
 }
 
 pub fn run() {
     let packaged = !cfg!(debug_assertions);
-    let background_launch = std::env::args().any(|a| a == "--background");
+    let launch_action = launch_url_from_args(std::env::args().skip(1));
+    let background_launch =
+        std::env::args().any(|a| a == "--background") && launch_action.is_none();
     let replace_existing = std::env::var("AICHAT_DESKTOP_REPLACE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -151,37 +179,33 @@ pub fn run() {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| profile_dir.clone());
 
-    let bundled_mcp_dir = std::env::var("AICHAT_MCP_BUNDLED_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            resolve_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_RUST, MCP_PRODUCT_NODE])
-        });
-    // The published feed still carries Node runtimes; a Rust build must not
-    // download a Node runtime over itself.
-    let bundled_mcp_is_rust =
-        crate::runtime::validate_runtime_dir(&bundled_mcp_dir, MCP_PRODUCT_RUST).is_ok();
+    let bundle_override = std::env::var("AICHAT_MCP_BUNDLED_DIR")
+        .ok()
+        .map(PathBuf::from);
+    let package_bundle = bundle_override
+        .clone()
+        .or_else(|| find_bundled_mcp_dir(&resource_base, &[MCP_PRODUCT_RUST, MCP_PRODUCT_NODE]));
+    let mcp_product = selected_mcp_product(
+        std::env::var("AICHAT_MCP_ENGINE").ok().as_deref(),
+        package_bundle.as_deref(),
+    );
+    let bundled_mcp_dir =
+        bundle_override.unwrap_or_else(|| resolve_bundled_mcp_dir(&resource_base, &[mcp_product]));
+    // Independent feeds prevent a native runtime from downloading Node over itself.
+    let mcp_is_rust = mcp_product == MCP_PRODUCT_RUST;
     let bundled_local_model_dir = std::env::var("AICHAT_LOCAL_MODEL_BUNDLED_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| resource_base.join("resources").join("local-model-runtime"));
 
-    let mcp_feed_url = std::env::var("AICHAT_MCP_FEED_URL").unwrap_or_else(|_| {
-        format!(
-            "{DEFAULT_MCP_FEED_BASE}/{}-{}.json",
-            mcp_feed_platform(),
-            current_runtime_arch()
-        )
-    });
+    let mcp_feed_url =
+        std::env::var("AICHAT_MCP_FEED_URL").unwrap_or_else(|_| default_mcp_feed_url(mcp_is_rust));
 
     let mcp_supervisor = Arc::new(RuntimeSupervisor::new(RuntimeConfig {
         id: "mcp".to_string(),
-        products: if bundled_mcp_is_rust {
-            vec![MCP_PRODUCT_RUST.to_string()]
-        } else {
-            vec![MCP_PRODUCT_NODE.to_string(), MCP_PRODUCT_RUST.to_string()]
-        },
+        products: vec![mcp_product.to_string()],
         port: MCP_PORT,
         health_path: "/health".to_string(),
-        updates_enabled: !bundled_mcp_is_rust,
+        updates_enabled: true,
         bundled_dir: bundled_mcp_dir,
         store_dir: mcp_runtimes_dir,
         feed_url: mcp_feed_url,
@@ -281,6 +305,14 @@ pub fn run() {
         );
     }
 
+    let mut launch_intents = LaunchIntents::new(settings_path.clone());
+    if launch_action == Some(LaunchUrl::Onboarding) {
+        launch_intents.offer_onboarding();
+    }
+    // Establish the launch default before the single-instance listener can
+    // receive a newer Wake/Launch/Close intent. Setup must not overwrite it.
+    let mut page_connection = PageConnection::default();
+    page_connection.set_foreground(!background_launch);
     let core = Arc::new(AppCore {
         profile_dir: profile_dir.clone(),
         settings_path,
@@ -305,14 +337,18 @@ pub fn run() {
         quitting: AtomicBool::new(false),
         channels: Mutex::new(channel_states(&Value::Null)),
         lock: Mutex::new(None),
-        page_connection: Mutex::new(PageConnection::default()),
+        page_connection: Mutex::new(page_connection),
+        launch_intents: Mutex::new(launch_intents),
     });
 
     let icon_b64 = base64::engine::general_purpose::STANDARD
         .encode(include_bytes!("../../icons/keepwork.png"));
     let icon_data_url = format!("data:image/png;base64,{icon_b64}");
-    let init_script = build_main_window_init_script_for_entry(
-        current_runtime_platform(), &icon_data_url, &core.entry_url.lock().unwrap(),
+    let init_script = build_main_window_init_script_with_launch_capability(
+        current_runtime_platform(),
+        &icon_data_url,
+        &core.entry_url.lock().unwrap(),
+        core.launch_intents.lock().unwrap().capability(),
     );
 
     let core_for_setup = Arc::clone(&core);
@@ -333,16 +369,19 @@ pub fn run() {
             let lock_file = core_for_setup.profile_dir.join("desktop-instance.json");
             let app_for_lock = app_handle.clone();
             let core_for_lock = Arc::clone(&core_for_setup);
-            match DesktopLock::acquire(
+            match DesktopLock::acquire_with_launch(
                 lock_file,
                 background_launch,
                 replace_existing,
-                move |should_exit| {
-                    if should_exit {
-                        core_for_lock.quitting.store(true, Ordering::Relaxed);
-                        app_for_lock.exit(0);
-                    } else {
-                        show_main_window(&app_for_lock, &core_for_lock);
+                launch_action,
+                move |action| {
+                    match action {
+                        InstanceAction::Replace => {
+                            core_for_lock.quitting.store(true, Ordering::Relaxed);
+                            app_for_lock.exit(0);
+                        }
+                        InstanceAction::Wake => show_main_window(&app_for_lock, &core_for_lock),
+                        InstanceAction::Launch(action) => super::launch::accept_launch_action(&app_for_lock, &core_for_lock, action),
                     }
                 },
             ) {
@@ -358,18 +397,37 @@ pub fn run() {
                 Err(_) => {}
             }
 
-            // Bring the MCP daemon up before the webview's first /health probe.
-            // One attempt here so startup stays short. A Rust MCP that fails is
-            // retried by the 60s heartbeat below, at most five times. A missing
-            // runtime still fails this call; the update checker stages one for
-            // a later launch. Runs after the single-instance lock so a second
-            // launch does not start a daemon before exiting.
-            let _ = tauri::async_runtime::block_on(
-                core_for_setup.mcp_supervisor.ensure_started(true),
-            );
-
             let _ = setup_native_menu_and_tray(&app_handle, &core_for_setup);
             core_for_setup.remote_voice.start_automatic();
+
+            let app_for_startup = app_handle.clone();
+            let core_for_startup = Arc::clone(&core_for_setup);
+            native_startup::create(&app_handle, core_for_setup.theme.current().native(), move |action| {
+                match action {
+                    native_startup::Action::Retry => main_window::reload_main_window(&app_for_startup, &core_for_startup),
+                    native_startup::Action::Hide => {
+                        hide_main_window(&app_for_startup, &core_for_startup);
+                        if core_for_startup.settings().pet_visible {
+                            ensure_pet_window(&app_for_startup, &core_for_startup, true);
+                        }
+                    }
+                }
+            })?;
+            let app_for_startup_close = app_handle.clone();
+            let core_for_startup_close = Arc::clone(&core_for_setup);
+            if let Some(startup) = app_handle.get_window("startup") {
+                startup.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        if !core_for_startup_close.quitting.load(Ordering::Relaxed) {
+                            api.prevent_close();
+                            hide_main_window(&app_for_startup_close, &core_for_startup_close);
+                            if core_for_startup_close.settings().pet_visible {
+                                ensure_pet_window(&app_for_startup_close, &core_for_startup_close, true);
+                            }
+                        }
+                    }
+                });
+            }
 
             // Configure main window navigation guard, close-to-tray, and initialization script
             let entry_target = core_for_setup
@@ -381,20 +439,25 @@ pub fn run() {
             let core_for_nav = Arc::clone(&core_for_setup);
             let core_for_page_load = Arc::clone(&core_for_setup);
             let core_for_popup = Arc::clone(&core_for_setup);
-            // Use the same WebView/storage for the local connection UI and chat.
-            // The local page initiates the first attempt after it has rendered.
+            // The local recovery document remains internal, using the same
+            // WebView/storage as chat. Only native controls are ever presented
+            // until a trusted entry document reports its first content.
             let shell_url = if tauri::is_dev() {
                 app.config().build.dev_url.clone()
             } else { None }.unwrap_or_else(|| {
                 if cfg!(target_os = "windows") { "http://tauri.localhost/" } else { "tauri://localhost/" }.parse().unwrap()
             });
-            let connection_script = {
+            let (connection_script, initial_generation) = {
                 let mut connection = core_for_setup.page_connection.lock().unwrap();
                 connection.shell_url = Some(shell_url.clone());
+                // Reserve the attempt before the hidden shell can bootstrap.
+                // Navigation follows the first daemon attempt asynchronously.
+                let generation = connection.begin(&entry_target, false).unwrap();
                 let script = include_str!("../../../src/pageConnection.js").replacen("export function", "function", 1);
                 let appearance = include_str!("../../../src/pageTheme.js").replacen("export function", "function", 1);
-                format!("(() => {{\n{appearance}\n{script}\ninstallPageConnection({}, {}, installPageTheme);\n}})();", json!(connection.token), json!(shell_url.as_str()))
+                (format!("(() => {{\n{appearance}\n{script}\ninstallPageConnection({}, {}, installPageTheme);\n}})();", json!(connection.token), json!(shell_url.as_str())), generation)
             };
+            sync_window_presentation(&app_handle, false);
             let mut main_builder = WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -408,7 +471,8 @@ pub fn run() {
             .resizable(true)
             .theme(Some(core_for_setup.theme.current().native()))
             .background_color(core_for_setup.theme.current().background())
-            .visible(!background_launch)
+            .visible(false)
+            .focused(false)
             // The pet keeps calls on this document while the main window is
             // hidden. WebKit's default inactive scheduling can suspend speech
             // callbacks after cancel/restart, leaving the next reply silent.
@@ -432,6 +496,7 @@ pub fn run() {
                 // Finished can arrive after the new page has published its pet
                 // snapshot, so it must leave that state intact.
                 if payload.event() == PageLoadEvent::Started {
+                    core_for_page_load.launch_intents.lock().unwrap().invalidate_document();
                     #[cfg(target_os = "macos")]
                     super::browser_surface::reset(&window);
                     if let Some(identity) = core_for_page_load.pet_audio.reset_page() {
@@ -508,9 +573,7 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     if !core_for_close.quitting.load(Ordering::Relaxed) {
                         api.prevent_close();
-                        if let Some(w) = app_for_close.get_webview_window("main") {
-                            let _ = w.hide();
-                        }
+                        hide_main_window(&app_for_close, &core_for_close);
                         if core_for_close.settings().pet_visible {
                             ensure_pet_window(&app_for_close, &core_for_close, true);
                         }
@@ -522,8 +585,15 @@ pub fn run() {
             let app_bg = app_handle.clone();
             let core_bg = Arc::clone(&core_for_setup);
             tauri::async_runtime::spawn(async move {
-                // Start Keepwork MCP (:8089) first, promoting any pending update on startup
+                // The native startup window can paint while MCP initializes.
+                // Keep the daemon's first attempt before chat's first /health
+                // probe; an unavailable optional runtime still permits chat.
                 let _ = core_bg.mcp_supervisor.ensure_started(true).await;
+                let app_for_entry = app_bg.clone();
+                let core_for_entry = Arc::clone(&core_bg);
+                let _ = app_bg.run_on_main_thread(move || {
+                    main_window::navigate_page_connection(&app_for_entry, &core_for_entry, &entry_target, initial_generation);
+                });
                 let _ = core_bg.local_model_supervisor.ensure_started(false).await;
                 broadcast_update_status(&app_bg, &core_bg);
 
@@ -532,8 +602,9 @@ pub fn run() {
                 let core_upd = Arc::clone(&core_bg);
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(15)).await;
+                    let mut notified_desktop_version = String::new();
                     loop {
-                        let (_snap, newly_staged) =
+                        let (snap, newly_staged) =
                             core_upd.updates.check_all(&core_upd.mcp_supervisor).await;
                         if newly_staged {
                             use tauri_plugin_notification::NotificationExt;
@@ -543,6 +614,18 @@ pub fn run() {
                                 .title("Keepwork MCP 更新已就绪")
                                 .body("本地 MCP 服务新版本已下载完成，可在「检查更新」窗口或下次重启后生效。")
                                 .show();
+                        }
+                        if snap.desktop.can_apply
+                            && snap.desktop.latest_version != notified_desktop_version
+                        {
+                            use tauri_plugin_notification::NotificationExt;
+                            let _ = app_upd
+                                .notification()
+                                .builder()
+                                .title("Keepwork 桌面应用更新已就绪")
+                                .body("新版本已下载并校验完成，请在「检查更新」窗口确认后安装。")
+                                .show();
+                            notified_desktop_version = snap.desktop.latest_version;
                         }
                         broadcast_update_status(&app_upd, &core_upd);
                         tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
@@ -581,6 +664,8 @@ pub fn run() {
             main_window::desktop_page_connection_attempt,
             main_window::desktop_main_document_ready,
             commands::desktop_report_startup_signin,
+            super::launch::desktop_get_launch_intent,
+            super::launch::desktop_acknowledge_launch_intent,
             pet_host::desktop_publish_pet_state,
             pet_host::desktop_pet_result,
             pet_audio_host::desktop_pet_audio,
@@ -614,7 +699,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .map(|app| {
             let voice = Arc::clone(&core.remote_voice);
-            app.run(move |_, event| {
+            let core_for_events = Arc::clone(&core);
+            app.run(move |app, event| {
+                #[cfg(target_os = "macos")]
+                if let tauri::RunEvent::Opened { urls } = &event {
+                    for action in urls.iter().filter_map(|url| parse_launch_url(url.as_str())) {
+                        super::launch::accept_launch_action(app, &core_for_events, action);
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = (&app, &core_for_events);
                 if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
                     voice.shutdown();
                 }
@@ -742,6 +836,66 @@ mod bundled_runtime_tests {
             r#"{"product":"keepwork-mcp-node-runtime","platform":"darwin","arch":"arm64","version":"0.1.45","commit":"0123456789abcdef0123456789abcdef01234567","node":"bin/node","entry":"dist/cli.cjs"}"#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn missing_and_corrupt_bundles_keep_the_rust_recovery_feed() {
+        let root = std::env::temp_dir().join(format!("aichat-mcp-recovery-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing");
+        for bundle in [None, Some(missing.as_path()), Some(root.as_path())] {
+            let product = selected_mcp_product(None, bundle);
+            assert_eq!(product, MCP_PRODUCT_RUST);
+            assert!(default_mcp_feed_url(product == MCP_PRODUCT_RUST).contains("/mcp-stable-rs/"));
+        }
+        fs::write(root.join("runtime.json"), "invalid manifest").unwrap();
+        assert_eq!(selected_mcp_product(None, Some(&root)), MCP_PRODUCT_RUST);
+        write_runtime(&root);
+        fs::remove_file(root.join("dist/cli.cjs")).unwrap();
+        assert_eq!(selected_mcp_product(None, Some(&root)), MCP_PRODUCT_RUST);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_engine_overrides_compatible_node_and_rust_bundles() {
+        let root = std::env::temp_dir().join(format!("aichat-mcp-engine-{}", Uuid::new_v4()));
+        write_runtime(&root);
+        assert_eq!(selected_mcp_product(None, Some(&root)), MCP_PRODUCT_NODE);
+        assert_eq!(
+            selected_mcp_product(Some("rust"), Some(&root)),
+            MCP_PRODUCT_RUST
+        );
+        assert_eq!(
+            selected_mcp_product(Some("node"), Some(&root)),
+            MCP_PRODUCT_NODE
+        );
+        assert_eq!(selected_mcp_product(Some("node"), None), MCP_PRODUCT_NODE);
+        assert!(!default_mcp_feed_url(false).contains("/mcp-stable-rs/"));
+
+        let file = root.join("runtime.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        manifest["product"] = json!(MCP_PRODUCT_RUST);
+        manifest["engine"] = json!("rust");
+        fs::write(&file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(valid_mcp_runtime(&root, &[MCP_PRODUCT_RUST]));
+        assert_eq!(selected_mcp_product(None, Some(&root)), MCP_PRODUCT_RUST);
+        assert_eq!(
+            selected_mcp_product(Some("node"), Some(&root)),
+            MCP_PRODUCT_NODE
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflicting_node_manifest_does_not_select_node_recovery() {
+        let root = std::env::temp_dir().join(format!("aichat-mcp-conflict-{}", Uuid::new_v4()));
+        write_runtime(&root);
+        let file = root.join("runtime.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        manifest["engine"] = json!("rust");
+        fs::write(&file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(selected_mcp_product(None, Some(&root)), MCP_PRODUCT_RUST);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

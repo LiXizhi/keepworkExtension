@@ -14,6 +14,13 @@ const names = [
   `Keepwork_${version}_universal.dmg`,
 ];
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const updateTargets = ['win32-x64', 'win32-arm64', 'darwin-x64', 'darwin-arm64'];
+const feedUrl = target => `https://cdn.keepwork.com/keepwork/aichat-desktop/${target}/latest-client.json`;
+const preflightFeeds = () => updateTargets.map(target => `preflight-feed:${target}`);
+const publishFeeds = () => [
+  ...updateTargets.map(target => `upload-feed:${target}`), 'refresh-feeds', 'verify-feeds',
+];
+const feedTarget = url => updateTargets.find(target => new URL(url).pathname === new URL(feedUrl(target)).pathname);
 
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-release-publication-'));
@@ -25,13 +32,19 @@ function fixture(t) {
 }
 
 function publication(entries, {
-  body = '原有发布说明\n\n- 保留原有验收记录。\n', response, failAt,
+  body = '原有发布说明\n\n- 保留原有验收记录。\n', response, feedResponse, failAt,
   refreshedUrls = entries.map(entry => entry.url),
 } = {}) {
   const events = [], writes = [];
   const config = { accessKey: 'fixture access key', secretKey: 'fixture secret key' };
   const dependencies = {
     fetchImpl: async url => {
+      const target = feedTarget(url);
+      if (target) {
+        events.push(`preflight-feed:${target}`);
+        if (failAt === 'preflight-feed') throw new Error('fixture feed preflight unavailable');
+        return feedResponse ? feedResponse(target) : new Response('', { status: 404 });
+      }
       const entry = entries.find(item => new URL(url).pathname === new URL(item.url).pathname);
       assert.ok(entry, `unexpected preflight URL ${url}`);
       events.push(`preflight:${entry.name}`);
@@ -40,19 +53,41 @@ function publication(entries, {
     },
     transport: {
       uploadEntry: async (actualConfig, entry) => {
+        const target = feedTarget(entry.url);
+        if (target) {
+          assert.deepEqual(actualConfig, { ...config, insertOnly: false });
+          events.push(`upload-feed:${target}`);
+          if (failAt === 'upload-feed') throw new Error('fixture feed upload failure');
+          const bytes = fs.readFileSync(entry.filePath);
+          assert.equal(entry.size, bytes.length);
+          assert.equal(entry.sha256, digest(bytes));
+          return;
+        }
         assert.deepEqual(actualConfig, { ...config, insertOnly: true });
         events.push(`upload:${entry.name}`);
         if (failAt === 'upload') throw new Error('fixture upload failure');
       },
       refreshUrls: async (actualConfig, urls) => {
         assert.equal(actualConfig, config);
+        if (urls.some(url => feedTarget(url))) {
+          assert.deepEqual(urls, updateTargets.map(feedUrl));
+          events.push('refresh-feeds');
+          if (failAt === 'refresh-feeds') throw new Error('fixture feed refresh failure');
+          return;
+        }
         assert.deepEqual(urls, refreshedUrls);
         events.push('refresh');
         if (failAt === 'refresh') throw new Error('fixture refresh failure');
       },
       verifyEntriesWithRetry: async (actualEntries, _attempts, _delayMs, cacheBust) => {
-        assert.deepEqual(actualEntries, entries);
         assert.equal(cacheBust, false, 'verify the exact download URLs included in release notes');
+        if (actualEntries.some(entry => feedTarget(entry.url))) {
+          assert.deepEqual(actualEntries.map(entry => feedTarget(entry.url)), updateTargets);
+          events.push('verify-feeds');
+          if (failAt === 'verify-feeds') throw new Error('fixture feed CDN checksum mismatch');
+          return;
+        }
+        assert.deepEqual(actualEntries, entries);
         events.push('verify');
         if (failAt === 'verify') throw new Error('fixture CDN checksum mismatch');
       },
@@ -178,8 +213,9 @@ test('preflights every immutable object and verifies all CDN downloads before ed
   await publishRelease(entries, run.config, run.dependencies);
   assert.deepEqual(run.events, [
     ...entries.map(entry => `preflight:${entry.name}`),
+    ...preflightFeeds(),
     ...entries.map(entry => `upload:${entry.name}`),
-    'refresh', 'verify', 'read-body', 'write-body',
+    'refresh', 'verify', ...publishFeeds(), 'read-body', 'write-body',
   ]);
   assert.equal(run.writes.length, 1);
   for (const entry of entries) assert.ok(run.writes[0].includes(entry.url));
@@ -193,6 +229,8 @@ test('accepts a rerun only when existing CDN objects have identical size and SHA
   assert.equal(run.writes.length, 1);
   assert.equal(run.events.some(event => event.startsWith('upload:')), false);
   assert.equal(run.events.includes('refresh'), false);
+  assert.deepEqual(run.events.filter(event => event.startsWith('upload-feed:')),
+    updateTargets.map(target => `upload-feed:${target}`));
   assert.ok(run.events.indexOf('verify') < run.events.indexOf('write-body'));
 });
 
@@ -236,6 +274,7 @@ test('a stale CDN 404 cannot overwrite a storage object or publish links when in
   await assert.rejects(publishRelease(entries, run.config, run.dependencies), /HTTP 614/);
   assert.deepEqual(run.events, [
     ...entries.map(entry => `preflight:${entry.name}`),
+    ...preflightFeeds(),
     `upload:${entries[0].name}`,
   ]);
   assert.equal(objects.size, 1);
@@ -252,13 +291,41 @@ test('an unavailable CDN must not be interpreted as a missing immutable object',
   assert.equal(run.writes.length, 0);
 });
 
-for (const failAt of ['preflight', 'upload', 'refresh', 'verify', 'read-body']) {
+const failureMessages = {
+  preflight: 'fixture preflight unavailable',
+  'preflight-feed': 'fixture feed preflight unavailable',
+  upload: 'fixture upload failure',
+  refresh: 'fixture refresh failure',
+  verify: 'fixture CDN checksum mismatch',
+  'upload-feed': 'fixture feed upload failure',
+  'refresh-feeds': 'fixture feed refresh failure',
+  'verify-feeds': 'fixture feed CDN checksum mismatch',
+  'read-body': 'fixture GitHub read failure',
+};
+for (const [failAt, expectedMessage] of Object.entries(failureMessages)) {
   test(`${failAt} failure leaves the existing GitHub release body untouched`, async t => {
     const { entries } = fixture(t);
     const run = publication(entries, { failAt });
-    await assert.rejects(publishRelease(entries, run.config, run.dependencies));
+    await assert.rejects(publishRelease(entries, run.config, run.dependencies),
+      { message: expectedMessage }, 'must reach the intended failure rather than fail earlier in an unrelated mock');
     assert.equal(run.writes.length, 0);
     assert.equal(run.events.includes('write-body'), false);
     if (failAt !== 'read-body') assert.equal(run.events.includes('read-body'), false);
   });
 }
+
+test('an unavailable update feed prevents every upload instead of replacing it as an absent feed', async t => {
+  const { entries } = fixture(t);
+  const run = publication(entries, { feedResponse: () => new Response('', { status: 503 }) });
+  await assert.rejects(publishRelease(entries, run.config, run.dependencies), /Desktop feed preflight HTTP 503/);
+  assert.equal(run.events.some(event => event.startsWith('upload')), false);
+  assert.equal(run.events.includes('read-body'), false);
+});
+
+test('malformed live update JSON prevents installer or feed writes', async t => {
+  const { entries } = fixture(t);
+  const run = publication(entries, { feedResponse: () => new Response('{invalid json') });
+  await assert.rejects(publishRelease(entries, run.config, run.dependencies), SyntaxError);
+  assert.equal(run.events.some(event => event.startsWith('upload')), false);
+  assert.equal(run.events.includes('read-body'), false);
+});

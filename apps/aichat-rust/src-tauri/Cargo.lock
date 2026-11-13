@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aichat-rust"
-version = "0.2.82"
+version = "0.2.95"
 dependencies = [
  "base64 0.22.1",
  "btleplug",
@@ -28,6 +28,7 @@ dependencies = [
  "dunce",
  "flate2",
  "futures-util",
+ "gtk",
  "junction",
  "libc",
  "reqwest 0.12.28",

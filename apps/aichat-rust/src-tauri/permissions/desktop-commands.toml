@@ -8,6 +8,8 @@ commands.allow = [
   "desktop_page_connection_attempt",
   "desktop_main_document_ready",
   "desktop_report_startup_signin",
+  "desktop_get_launch_intent",
+  "desktop_acknowledge_launch_intent",
   "desktop_publish_pet_state",
   "desktop_pet_result",
   "desktop_pet_audio",

@@ -15,6 +15,15 @@ pub fn build_main_window_init_script_for_entry(
     icon_data_url: &str,
     entry_url: &str,
 ) -> String {
+    build_main_window_init_script_with_launch_capability(platform, icon_data_url, entry_url, "")
+}
+
+pub fn build_main_window_init_script_with_launch_capability(
+    platform: &str,
+    icon_data_url: &str,
+    entry_url: &str,
+    launch_capability: &str,
+) -> String {
     // Only origin/path is needed for early appearance. Do not expose an entry's
     // query, fragment or credentials through the public bootstrap object.
     let entry = url::Url::parse(entry_url)
@@ -49,6 +58,7 @@ pub fn build_main_window_init_script_for_entry(
         r#"(() => {{
   if (window !== window.top) return;
   const bootstrap = {bootstrap};
+  const launchCapability = {launch_capability};
   {menu_chrome}
   {chrome_theme}
   {page_theme}
@@ -105,10 +115,31 @@ pub fn build_main_window_init_script_for_entry(
   const updateListeners = new Set();
   const folderListeners = new Set();
   const browserListeners = new Set();
+  const launchListeners = new Set();
+  const launchDocument = globalThis.crypto?.randomUUID?.() || "";
+  const launchEnabled = (() => {{
+    if (!launchCapability || !launchDocument || window.__AICHAT_PAGE_CONNECTION__) return false;
+    try {{
+      const current = new URL(window.location.href);
+      const entry = new URL(bootstrap.entryUrl || "https://keepwork.com/chat");
+      return !current.username && !current.password && (
+        (current.origin === entry.origin && current.pathname === entry.pathname)
+        || (current.origin === "https://keepwork.com" && current.pathname === "/chat")
+        || (current.protocol === "http:" && ["127.0.0.1", "localhost"].includes(current.hostname)
+          && current.pathname.endsWith("/AIChat.html")));
+    }} catch {{ return false; }}
+  }})();
+  let launchLive = launchEnabled;
+  window.addEventListener("pagehide", () => {{ launchLive = false; launchListeners.clear(); }}, {{ once: true }});
+  const invokeLaunch = (command, args = {{}}) => launchLive
+    ? invoke(command, {{ document: launchDocument, token: launchCapability, ...args }})
+    : Promise.reject(new Error("Launch document is no longer active"));
 
   window.addEventListener("__aichat_desktop_event__", (e) => {{
     const detail = e.detail || {{}};
-    if (detail.event === "browser-surface") {{
+    if (detail.event === "launch-intent" && launchLive) {{
+      for (const cb of launchListeners) {{ try {{ cb(); }} catch {{}} }}
+    }} else if (detail.event === "browser-surface") {{
       for (const cb of browserListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
     }} else if (detail.event === "pet-command") {{
       for (const cb of petListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
@@ -133,6 +164,7 @@ pub fn build_main_window_init_script_for_entry(
     petDictationAudioVersion: 1,
     petVoiceAudioVersion: 1,
     startupSignIn: true,
+    ...(launchEnabled ? {{ launchIntents: true }} : {{}}),
     ...(bootstrap.platform === "darwin" ? {{ browserSurfaceVersion: 1, browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
   }});
 
@@ -140,6 +172,15 @@ pub fn build_main_window_init_script_for_entry(
     const bridge = Object.freeze({{
       version: 1,
       capabilities,
+      ...(launchEnabled ? {{
+        getLaunchIntent: () => invokeLaunch("desktop_get_launch_intent"),
+        acknowledgeLaunchIntent: (id) => invokeLaunch("desktop_acknowledge_launch_intent", {{ id: String(id || "") }}),
+        onLaunchIntent: (cb) => {{
+          if (typeof cb !== "function") return () => {{}};
+          launchListeners.add(cb);
+          return () => launchListeners.delete(cb);
+        }},
+      }} : {{}}),
       browserSurface: (op, args = {{}}) => invoke("desktop_browser_surface", {{ op: String(op || ""), args: args || {{}} }}),
       onBrowserSurface: (cb) => {{
         if (typeof cb !== "function") return () => {{}};
@@ -431,6 +472,7 @@ pub fn build_main_window_init_script_for_entry(
     mountChrome();
   }}
 }})();"#,
+        launch_capability = json!(launch_capability),
     )
 }
 
@@ -470,5 +512,25 @@ mod tests {
         assert!(script.contains("defaultBrainFolder"));
         assert!(script.contains("checkUpdates"));
         assert!(script.contains("installUpdate"));
+    }
+
+    #[test]
+    fn launch_authority_stays_in_the_top_frame_closure_outside_public_bootstrap() {
+        let script = build_main_window_init_script_with_launch_capability(
+            "darwin",
+            "",
+            "https://keepwork.com/chat",
+            "private-launch-authority",
+        );
+        let bootstrap = script
+            .lines()
+            .find(|line| line.contains("const bootstrap ="))
+            .unwrap();
+        assert!(!bootstrap.contains("private-launch-authority"));
+        assert!(
+            script.find("if (window !== window.top) return;").unwrap()
+                < script.find("private-launch-authority").unwrap()
+        );
+        assert!(script.contains("token: launchCapability"));
     }
 }

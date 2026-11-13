@@ -2,15 +2,32 @@ name: Rust MCP daemon
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "package*.json"
+      - "apps/mcp-rust/**"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "skills/**"
+      - "docs/acceptance/rust-release-evidence.schema.json"
+      - ".github/workflows/mcp-rust.yml"
   push:
     branches: [master, main]
     paths:
       - "package.json"
       - "package-lock.json"
       - "apps/mcp-rust/**"
-      - "scripts/contract/**"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "skills/**"
+      - "docs/acceptance/rust-release-evidence.schema.json"
       - "docs/rust-runtime-migration.md"
       - ".github/workflows/mcp-rust.yml"
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -23,6 +40,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
       BIN: apps/mcp-rust/target/release/keepwork-mcp${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+      KEEPWORK_MCP_REQUIRE_NODE_REFERENCE: '1'
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,30 +52,62 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mcp-rust -> target
       - name: Install Node reference dependencies for wire contracts
-        run: npm ci --include=dev
+        run: |
+          mkdir -p .test-runtime/mcp-rust
+          npm ci --include=dev 2>&1 | tee .test-runtime/mcp-rust/dependencies.log
+          npm ci --prefix apps/mcp-runtime 2>&1 | tee -a .test-runtime/mcp-rust/dependencies.log
+      - name: Build mandatory Node reference
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-node-reference --level source --output .test-runtime/mcp-rust -- node scripts/build-node-reference.cjs
+      - name: Check validation infrastructure
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-validation --level fixture --output .test-runtime/mcp-rust -- node --test --test-reporter=tap scripts/contract/harness-reference.test.cjs scripts/sync-aichat-runtime.test.cjs scripts/aichat-runtime-build.test.mjs scripts/aichat-runtime-freshness.test.cjs scripts/rust-validation-evidence.test.cjs scripts/rust-validation-workflows.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/smoke.test.cjs
       - name: Format
-        working-directory: apps/mcp-rust
-        run: cargo fmt --all --check
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-format --level source --output .test-runtime/mcp-rust -- cargo fmt --all --check --manifest-path apps/mcp-rust/Cargo.toml
       - name: Lint
-        working-directory: apps/mcp-rust
-        run: cargo clippy --all-targets -- -D warnings
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-lint --level source --output .test-runtime/mcp-rust -- cargo clippy --locked --manifest-path apps/mcp-rust/Cargo.toml --all-targets -- -D warnings
       - name: Unit and contract tests (Rust)
-        working-directory: apps/mcp-rust
-        run: cargo test
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-rust --level fixture --output .test-runtime/mcp-rust -- cargo test --locked --manifest-path apps/mcp-rust/Cargo.toml
       - name: Release build
-        working-directory: apps/mcp-rust
-        run: cargo build --release
-      - name: Wire contract against the Node reference when available
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-build --level source --output .test-runtime/mcp-rust -- cargo build --release --locked --manifest-path apps/mcp-rust/Cargo.toml
+      - name: Wire contract against mandatory Node reference
         timeout-minutes: 10
         env:
           KEEPWORK_MCP_TEST_BIN: ${{ github.workspace }}/${{ env.BIN }}
-        run: node --test scripts/contract/*.test.cjs
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-wire --level fixture --output .test-runtime/mcp-rust -- node --test --test-reporter=tap scripts/contract/*.test.cjs
       - name: Smoke (spawn, handshake, /admin/stop)
-        run: node apps/mcp-rust/scripts/smoke.cjs
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-smoke --level fixture --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/smoke.cjs
+      - name: Package immutable Rust v2 runtime artifacts (no upload or promotion)
+        run: |
+          runtime_target=$(node -e 'process.stdout.write(require("./scripts/lib/rust-runtime-identity.cjs").readBuildInfo(process.argv[1]).target)' "$BIN")
+          node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-package --level source --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/package-runtime.cjs --target "$runtime_target" --binary "$BIN" --out .test-runtime/mcp-rust/package
       - name: Size gate (<= 10 MiB)
         shell: bash
         run: |
           bytes=$(wc -c < "$BIN")
           echo "binary bytes: $bytes"
           test "$bytes" -lt $((10 * 1024 * 1024))
+      - name: Save honest release acceptance summary
+        if: always()
+        run: |
+          artifact=()
+          shopt -s nullglob
+          archives=(.test-runtime/mcp-rust/package/*.zip)
+          if [[ ${#archives[@]} -gt 1 ]]; then
+            printf '%s\n' 'Expected exactly one runtime archive for this native runner'
+            exit 1
+          fi
+          if [[ ${#archives[@]} -eq 1 ]]; then
+            artifact=(--artifact "${archives[0]}")
+          fi
+          node scripts/rust-validation-evidence.cjs collect --product mcp-rust --output .test-runtime/mcp-rust "${artifact[@]}"
+      - name: Preserve first failures, TAP, native logs and pending gates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-rust-validation-${{ matrix.os }}
+          path: .test-runtime/mcp-rust/
+          if-no-files-found: warn
+          retention-days: 30

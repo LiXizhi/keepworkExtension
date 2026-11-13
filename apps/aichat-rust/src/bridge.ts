@@ -7,6 +7,7 @@ import type {
   DesktopStatus,
   GitInstallResult,
   GitStatus,
+  LaunchIntent,
   RootGrant,
   UpdatesSnapshot,
 } from "./types";
@@ -52,9 +53,23 @@ export const PAGE_COMMANDS = [
   "theme-dark",
 ] as const;
 
-export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
+export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktopBridge | null {
   if (window !== window.top) return null;
   if (window.aichatDesktop) return window.aichatDesktop;
+
+  const launchDocument = globalThis.crypto?.randomUUID?.() || "";
+  const launchEnabled = (() => {
+    if (!launchCapability || !launchDocument || window.__AICHAT_PAGE_CONNECTION__) return false;
+    try {
+      const current = new URL(window.location.href);
+      const entry = new URL(window.__AICHAT_DESKTOP_BOOTSTRAP__?.entryUrl || "https://keepwork.com/chat");
+      return !current.username && !current.password && (
+        (current.origin === entry.origin && current.pathname === entry.pathname)
+        || (current.origin === "https://keepwork.com" && current.pathname === "/chat")
+        || (current.protocol === "http:" && ["127.0.0.1", "localhost"].includes(current.hostname)
+          && current.pathname.endsWith("/AIChat.html")));
+    } catch { return false; }
+  })();
 
   const capabilities: DesktopCapabilities = Object.freeze({
     files: true,
@@ -63,15 +78,26 @@ export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
     gitSetup: true,
     floatingPet: true,
     startupSignIn: true,
+    ...(launchEnabled ? { launchIntents: true as const } : {}),
     ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceVersion: 1 as const, browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
   });
 
   const petListeners = new Set<(payload: Record<string, unknown>) => void>();
+  const launchListeners = new Set<() => void>();
+  let launchLive = launchEnabled;
+  window.addEventListener("pagehide", () => { launchLive = false; launchListeners.clear(); }, { once: true });
+  const invokeLaunch = <T>(command: string, args: Record<string, unknown> = {}): Promise<T> => launchLive
+    ? invoke<T>(command, { document: launchDocument, token: launchCapability, ...args })
+    : Promise.reject(new Error("Launch document is no longer active"));
   const browserListeners = new Set<(payload: Record<string, unknown>) => void>();
   void listen<Record<string, unknown>>("aichat-desktop:browser-surface", (event) => {
     for (const cb of browserListeners) { try { cb(event.payload); } catch {} }
   });
   window.addEventListener("__aichat_desktop_event__", ((event: CustomEvent) => {
+    if (event.detail?.event === "launch-intent" && launchLive) {
+      for (const cb of launchListeners) { try { cb(); } catch {} }
+      return;
+    }
     if (event.detail?.event !== "browser-surface") return;
     for (const cb of browserListeners) { try { cb(event.detail.payload); } catch {} }
   }) as EventListener);
@@ -121,6 +147,15 @@ export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
   const bridge: AIChatDesktopBridge = Object.freeze({
     version: 1,
     capabilities,
+    ...(launchEnabled ? {
+      getLaunchIntent: (): Promise<LaunchIntent | null> => invokeLaunch("desktop_get_launch_intent"),
+      acknowledgeLaunchIntent: (id: string): Promise<boolean> => invokeLaunch("desktop_acknowledge_launch_intent", { id: String(id || "") }),
+      onLaunchIntent: (callback: () => void): (() => void) => {
+        if (typeof callback !== "function") return () => {};
+        launchListeners.add(callback);
+        return () => { launchListeners.delete(callback); };
+      },
+    } : {}),
     browserSurface(op: string, args: Record<string, unknown> = {}): Promise<unknown> {
       return invoke("desktop_browser_surface", { op, args });
     },

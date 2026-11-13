@@ -2,8 +2,8 @@
 
 use super::events::broadcast_to_main;
 use super::main_window::{
-    current_entry_url, reload_main_window, reset_zoom, show_main_window, start_local_source,
-    step_zoom, use_published_site,
+    current_entry_url, hide_main_window, reload_main_window, reset_zoom, show_main_window,
+    start_local_source, step_zoom, use_published_site,
 };
 use super::pet_audio_host::stop_pet_audio;
 use super::pet_host::{ensure_pet_window, hide_pet_window};
@@ -158,11 +158,9 @@ pub async fn execute_host_command(
             }
         }
         "close-window" => {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.hide();
-                if core.settings().pet_visible {
-                    ensure_pet_window(app, core, true);
-                }
+            hide_main_window(app, core);
+            if core.settings().pet_visible {
+                ensure_pet_window(app, core, true);
             }
         }
         "reload" => reload_main_window(app, core),

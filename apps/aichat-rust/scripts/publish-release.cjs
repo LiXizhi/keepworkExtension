@@ -14,6 +14,9 @@ const INSTALLERS = [
   { label: 'Windows ARM64（EXE）', suffix: 'arm64-setup.exe' },
   { label: 'macOS Universal（DMG）', suffix: 'universal.dmg' },
 ];
+const UPDATE_TARGETS = ['win32-x64', 'win32-arm64', 'darwin-x64', 'darwin-arm64'];
+const updateKey = target => `keepwork/aichat-desktop/${target}/latest-client.json`;
+const cdnUrl = key => `https://cdn.keepwork.com/${key}`;
 
 function collectReleaseFiles(directory, version) {
   qiniu.normalizeVersion(version);
@@ -27,9 +30,62 @@ function collectReleaseFiles(directory, version) {
     if (!stat?.isFile() || stat.size <= 0) throw new Error(`Required non-empty release installer is missing: ${name}`);
     const remoteKey = `keepwork/aichat-rust/${version}/${name}`;
     return {
-      label, name, filePath, remoteKey,
+      label, name, filePath, remoteKey, version,
       url: `https://cdn.keepwork.com/${remoteKey}`,
       size: stat.size, sha256: qiniu.sha256(filePath),
+    };
+  });
+}
+
+function compareVersions(a, b) {
+  const left = qiniu.normalizeVersion(a).split('.').map(Number);
+  const right = qiniu.normalizeVersion(b).split('.').map(Number);
+  for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] - right[i];
+  return 0;
+}
+
+function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}) {
+  qiniu.normalizeVersion(version);
+  return UPDATE_TARGETS.map(target => {
+    const windows = target.startsWith('win32-');
+    const suffix = windows ? `${target.slice(6)}-setup.exe` : 'universal.dmg';
+    const pkg = entries.find(entry => entry.name === `Keepwork_${version}_${suffix}`);
+    if (!pkg) throw new Error(`Missing update installer for ${target}`);
+    const previous = previousByTarget[target];
+    if (Object.hasOwn(previousByTarget, target) && (!previous || typeof previous !== 'object' || Array.isArray(previous)
+      || (previous.product && previous.product !== 'aichat-desktop'))) {
+      throw new Error(`Invalid existing desktop update feed: ${target}`);
+    }
+    const legacyZip = previous?.format === 'zip' || /\.zip(?:[?#]|$)/i.test(previous?.url || '');
+    const oldInstaller = previous?.installer || (legacyZip ? undefined : previous);
+    const oldVersion = oldInstaller?.version || previous?.version;
+    if (oldInstaller && oldVersion) {
+      const comparison = compareVersions(oldVersion, version);
+      if (comparison > 0) throw new Error(`Refusing desktop update downgrade: ${target}`);
+      if (comparison === 0 && (oldInstaller.url !== pkg.url || oldInstaller.size !== pkg.size
+        || oldInstaller.sha256?.toLowerCase() !== pkg.sha256)) {
+        throw new Error(`Same desktop version has a different installer: ${target}`);
+      }
+    }
+    const installer = {
+      version, publishedAt: oldVersion === version ? (oldInstaller?.publishedAt || publishedAt) : publishedAt,
+      format: windows ? 'exe' : 'dmg', fileName: pkg.name,
+      url: pkg.url, size: pkg.size, sha256: pkg.sha256,
+    };
+    // Historical download consumers still require the top-level ZIP. Native
+    // clients use the additive installer, including its independent version.
+    const manifest = legacyZip ? { ...previous, installer } : {
+      ...previous, schemaVersion: 1, product: 'aichat-desktop',
+      platform: windows ? 'windows' : 'macos', arch: target.split('-')[1],
+      ...installer, installer,
+    };
+    const filePath = path.join(path.dirname(entries[0].filePath), 'update-feeds', target, 'latest-client.json');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const remoteKey = updateKey(target);
+    return {
+      name: `${target}/latest-client.json`, filePath, remoteKey, url: cdnUrl(remoteKey),
+      size: fs.statSync(filePath).size, sha256: qiniu.sha256(filePath),
     };
   });
 }
@@ -52,7 +108,9 @@ function updateReleaseBody(body, entries) {
   return body.slice(0, start) + block + body.slice(end + END.length);
 }
 
-async function publishRelease(entries, config, { transport = qiniu, fetchImpl = fetch, github } = {}) {
+async function publishRelease(entries, config, {
+  transport = qiniu, fetchImpl = fetch, github, publishedAt = new Date().toISOString(),
+} = {}) {
   const missing = [];
   // Check every versioned object before making the first CDN change. A retry
   // may reuse identical objects, but cannot replace this version with new bytes.
@@ -75,14 +133,32 @@ async function publishRelease(entries, config, { transport = qiniu, fetchImpl = 
       throw new Error(`CDN preflight HTTP ${response.status} for ${entry.name}`);
     }
   }
+  const previousByTarget = {};
+  for (const target of UPDATE_TARGETS) {
+    const response = await fetchImpl(`${cdnUrl(updateKey(target))}?kp_update_preflight=${Date.now()}`, {
+      headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(30_000),
+    });
+    if (response.ok) previousByTarget[target] = await response.json();
+    else {
+      await response.body?.cancel();
+      if (response.status !== 404) throw new Error(`Desktop feed preflight HTTP ${response.status}: ${target}`);
+    }
+  }
+  const feeds = collectUpdateFeeds(entries, entries[0].version, publishedAt, previousByTarget);
   // Enforce immutability at storage as well as at the CDN: a cached 404 must
   // never permit overwriting an existing version with different installer bytes.
   for (const entry of missing) await transport.uploadEntry({ ...config, insertOnly: true }, entry);
   if (missing.length) await transport.refreshUrls(config, missing.map(entry => entry.url));
   // Verify the actual download URLs, including cached responses seen by users.
   await transport.verifyEntriesWithRetry(entries, 20, 30_000, false);
+  // Promote discovery only after every referenced installer is verified.
+  const feedConfig = { ...config, insertOnly: false };
+  for (const feed of feeds) await transport.uploadEntry(feedConfig, feed);
+  await transport.refreshUrls(config, feeds.map(feed => feed.url));
+  await transport.verifyEntriesWithRetry(feeds, 20, 30_000, false);
   const body = await github.readBody();
   await github.writeBody(updateReleaseBody(body, entries));
+  return feeds;
 }
 
 function githubRelease(tag, repository) {
@@ -114,6 +190,7 @@ async function main() {
   const entries = collectReleaseFiles(directory, version);
   if (args.dryRun) {
     console.log(updateReleaseBody('', entries));
+    console.log(collectUpdateFeeds(entries, version, new Date().toISOString()).map(feed => feed.url).join('\n'));
     return;
   }
   const tag = `aichat-rust-v${version}`;
@@ -124,9 +201,9 @@ async function main() {
     secretKey: qiniu.required(process.env.KP_QINIU_SECRET_KEY, 'KP_QINIU_SECRET_KEY'),
     bucket: 'haqi', uploadHost: 'https://up-z2.qiniup.com',
   };
-  await publishRelease(entries, config, { github: githubRelease(tag, repository) });
-  writeCdnSummary({ title: 'KeepWork 第二大脑 — CDN 下载已写入 GitHub Release', version, entries });
+  const feeds = await publishRelease(entries, config, { github: githubRelease(tag, repository) });
+  writeCdnSummary({ title: 'KeepWork 第二大脑 — CDN 下载与自动更新清单已发布', version, entries: [...entries, ...feeds] });
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { collectReleaseFiles, updateReleaseBody, publishRelease };
+module.exports = { collectReleaseFiles, collectUpdateFeeds, updateReleaseBody, publishRelease };

@@ -54,6 +54,8 @@ after(async () => {
   await node?.stop();
 });
 
+test('filesystem cross-engine comparisons have a built Node reference', h.nodeReferenceTestOptions(), () => assert.ok(node));
+
 test('list keeps the Node entry shape, ordering and truncation', async () => {
   const result = await both(async (engine) => {
     const body = await json(

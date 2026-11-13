@@ -4,10 +4,83 @@ exports.recoverTextToolCalls = recoverTextToolCalls;
 /** Compatibility for completed model replies that serialize calls as XML text. */
 const MAX_TEXT = 1024 * 1024, MAX_CALLS = 32;
 const inert = text => text.replace(/[^\r\n]/g, ' ');
+const maskXmlLiterals = text => text.replace(/<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)/g, inert);
+function maskRanges(text, ranges) {
+    let masked = '', cursor = 0;
+    for (const [begin, end] of ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1])) {
+        if (begin < cursor)
+            continue;
+        masked += text.slice(cursor, begin) + inert(text.slice(begin, end));
+        cursor = end;
+    }
+    return masked + text.slice(cursor);
+}
+function maskLinks(text) {
+    const ranges = [], labels = [];
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] === '\\') {
+            i++;
+            continue;
+        }
+        if (text[i] === '[')
+            labels.push(i);
+        else if (text[i] === ']' && labels.length) {
+            const begin = labels.pop();
+            let target = i + 1;
+            while (text[target] === ' ' || text[target] === '\t')
+                target++;
+            const open = text[target], close = open === '(' ? ')' : ']';
+            if (open !== '(' && open !== '[')
+                continue;
+            let depth = 1, end = target + 1;
+            for (; end < text.length && depth; end++) {
+                if (text[end] === '\\')
+                    end++;
+                else if (text[end] === open)
+                    depth++;
+                else if (text[end] === close)
+                    depth--;
+            }
+            ranges.push([begin, end]);
+            i = end - 1;
+            if (depth)
+                break; // An unfinished target masks its tail once.
+        }
+    }
+    return maskRanges(text, ranges);
+}
+function maskHtml(text) {
+    const containers = new Set(['pre', 'code', 'script', 'style', 'textarea', 'template', 'xmp', 'blockquote', 'q']);
+    const rawText = new Set(['script', 'style', 'textarea', 'xmp']);
+    const tags = /<\/?([A-Za-z][\w:-]*)(?=[\s/>])(?:[^"'<>]|"[^"]*(?:"|$)|'[^']*(?:'|$))*(?:>|$)/g;
+    const ranges = [], stack = [];
+    let tag, begin;
+    while ((tag = tags.exec(text))) {
+        const name = tag[1].toLowerCase(), closing = tag[0].startsWith('</');
+        if (stack.length) {
+            if (closing && name === stack.at(-1)) {
+                stack.pop();
+                if (!stack.length)
+                    ranges.push([begin, tags.lastIndex]);
+            }
+            else if (!closing && containers.has(name) && !rawText.has(stack.at(-1)))
+                stack.push(name);
+        }
+        else if (!closing && containers.has(name)) {
+            begin = tag.index;
+            stack.push(name);
+        }
+        else if (!['tool_calls', 'seed:tool_call'].includes(tag[1]))
+            ranges.push([tag.index, tags.lastIndex]);
+    }
+    if (stack.length)
+        ranges.push([begin, text.length]);
+    return maskRanges(text, ranges);
+}
 function executableText(text) {
     // Mask examples without changing offsets into the original response.
     let fence = null;
-    const masked = text.replace(/<!--[\s\S]*?(?:-->|$)/g, inert).split('\n').map(line => {
+    const masked = text.split('\n').map(line => {
         const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
         if (fence) {
             if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length
@@ -21,16 +94,48 @@ function executableText(text) {
         }
         return /^(?: {0,3}>| {4}|\t)/.test(line) ? inert(line) : line;
     }).join('\n');
-    return masked.replace(/(`+)[\s\S]*?\1/g, inert);
+    const codeMasked = masked.replace(/(`+)[\s\S]*?\1/g, inert);
+    const definitionsMasked = codeMasked.replace(/^ {0,3}\[(?:\\.|[^\]\\\n])+\]:[^\n]*(?:\n[ \t]+[^\n]*)*/gm, inert);
+    return maskLinks(maskHtml(definitionsMasked));
 }
 function fields(text) {
     const entries = [];
     let rest = text.trim();
     while (rest) {
-        const match = /^<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/.exec(rest);
+        const match = /^<([A-Za-z_][\w.-]*)>([\s\S]*?)<\/\1>/.exec(maskXmlLiterals(rest));
         if (!match || entries.some(([name]) => name === match[1]))
             throw Error('Malformed or duplicate XML tool field');
-        entries.push([match[1], match[2]]);
+        entries.push([match[1], rest.slice(match[1].length + 2, match[0].length - match[1].length - 3)]);
+        rest = rest.slice(match[0].length).trim();
+    }
+    return entries;
+}
+function attributes(text, allowed) {
+    const result = Object.create(null);
+    let rest = text;
+    while (rest.trim()) {
+        const match = /^\s+([A-Za-z_][\w.-]*)\s*=\s*(["'])([\s\S]*?)\2/.exec(rest);
+        if (!match || !allowed.includes(match[1]) || Object.hasOwn(result, match[1]))
+            throw Error('Unsupported or duplicate XML tool attribute');
+        result[match[1]] = xmlValue(match[3]);
+        rest = rest.slice(match[0].length);
+    }
+    if (!result.name)
+        throw Error('Missing XML tool name');
+    return result;
+}
+function seedFields(text) {
+    const entries = [];
+    let rest = text.trim();
+    while (rest) {
+        const match = /^<parameter(\s[^>]*?)?>([\s\S]*?)<\/parameter>/.exec(maskXmlLiterals(rest));
+        if (!match)
+            throw Error('Malformed Seed tool parameter');
+        const attrs = attributes(match[1] || '', ['name', 'string']);
+        if (entries.some(([name]) => name === attrs.name) || (attrs.string !== undefined && !['true', 'false'].includes(attrs.string))) {
+            throw Error('Duplicate Seed parameter or invalid string flag');
+        }
+        entries.push([attrs.name, rest.slice(match[0].indexOf('>') + 1, match[0].length - '</parameter>'.length), attrs.string]);
         rest = rest.slice(match[0].length).trim();
     }
     return entries;
@@ -49,7 +154,13 @@ function xmlValue(text) {
         return String.fromCodePoint(code);
     });
 }
-function argumentValue(text, schema = {}) {
+function argumentValue(text, schema = {}, stringFlag) {
+    // Seed's explicit string flag controls serialization; schema still validates
+    // the result. Never coerce a declared string merely to make a call pass.
+    if (stringFlag === 'true')
+        return xmlValue(text);
+    if (stringFlag === 'false')
+        return JSON.parse(xmlValue(text.trim()));
     const value = xmlValue(!schema.type || schema.type === 'string' ? text : text.trim());
     // Unknown fields stay strings so validation can report their actual names.
     if (!schema.type || schema.type === 'string')
@@ -111,36 +222,47 @@ function validate(value, schema, field = 'arguments') {
         throw Error(`${field}: string size out of range`);
 }
 function recoverTextToolCalls(content, tools, iteration) {
-    if (typeof content !== 'string' || content.length > MAX_TEXT || !tools?.length || !content.includes('<tool_calls>'))
+    if (typeof content !== 'string' || content.length > MAX_TEXT || !tools?.length || !/<(?:tool_calls|seed:tool_call)>/.test(content))
         return null;
-    const visible = executableText(content), ranges = [], calls = [], errors = new Map();
-    const starts = /<tool_calls\b/g;
+    const literalMasked = maskXmlLiterals(content), visible = executableText(literalMasked), ranges = [], calls = [], errors = new Map();
+    const starts = /<(tool_calls|seed:tool_call)\b/g;
     let start;
     try {
         while ((start = starts.exec(visible))) {
-            const prefix = visible.slice(visible.lastIndexOf('\n', start.index - 1) + 1, start.index);
-            if (prefix.trim() && !/^(?: *<\/tool_calls> *)+$/.test(prefix))
-                continue;
-            if (!visible.startsWith('<tool_calls>', start.index))
+            // Explicit wrappers may follow ordinary prose on the same line.
+            // Example contexts are masked above rather than guessed from prose.
+            const open = `<${start[1]}>`, close = `</${start[1]}>`, seed = start[1] === 'seed:tool_call';
+            if (!visible.startsWith(open, start.index))
                 return null;
-            const end = visible.indexOf('</tool_calls>', starts.lastIndex);
+            // Argument text may contain Markdown/HTML examples. Its original
+            // closing wrapper still ends the call; CDATA and comments do not.
+            const end = literalMasked.indexOf(close, starts.lastIndex);
             if (end < 0)
                 return null;
-            const block = content.slice(start.index + 12, end);
+            const block = content.slice(start.index + open.length, end);
             let remaining = block.trim();
             if (!remaining)
                 return null;
             while (remaining) {
-                const tool = /^<tool>([\s\S]*?)<\/tool>/.exec(remaining);
+                const structural = maskXmlLiterals(remaining);
+                const tool = seed ? /^<function(\s[^>]*?)?>([\s\S]*?)<\/function>/.exec(structural) : /^<tool>([\s\S]*?)<\/tool>/.exec(structural);
                 if (!tool || calls.length >= MAX_CALLS)
                     return null;
-                const entries = fields(tool[1]);
-                const nameEntry = entries.find(([name]) => name === 'tool_name');
-                if (!nameEntry)
-                    return null;
-                const name = xmlValue(nameEntry[1].trim());
+                const body = remaining.slice(tool[0].indexOf('>') + 1, tool[0].length - (seed ? '</function>' : '</tool>').length);
+                let name, entries;
+                if (seed) {
+                    name = attributes(tool[1] || '', ['name']).name;
+                    entries = seedFields(body);
+                }
+                else {
+                    const values = fields(body), nameEntry = values.find(([key]) => key === 'tool_name');
+                    if (!nameEntry)
+                        return null;
+                    name = xmlValue(nameEntry[1].trim());
+                    entries = values.filter(([key]) => key !== 'tool_name');
+                }
                 const definition = tools.find(item => item.function?.name === name)?.function;
-                const args = Object.fromEntries(entries.filter(([key]) => key !== 'tool_name').map(([key, value]) => [key, argumentValue(value, definition?.parameters?.properties?.[key])]));
+                const args = Object.fromEntries(entries.map(([key, value, stringFlag]) => [key, argumentValue(value, definition?.parameters?.properties?.[key], stringFlag)]));
                 const id = `text-call-${iteration}-${calls.length}`;
                 calls.push({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
                 if (definition) {
@@ -154,7 +276,7 @@ function recoverTextToolCalls(content, tools, iteration) {
                 }
                 remaining = remaining.slice(tool[0].length).trim();
             }
-            const after = end + 13;
+            const after = end + close.length;
             ranges.push([start.index, after]);
             starts.lastIndex = after;
         }

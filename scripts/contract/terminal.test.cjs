@@ -47,6 +47,8 @@ after(async () => {
   await node?.stop();
 });
 
+test('terminal cross-engine comparisons have a built Node reference', h.nodeReferenceTestOptions(), () => assert.ok(node));
+
 test('create returns a session snapshot', async () => {
   const result = await both(async (engine) => {
     const created = await json(`${engine.base}/terminal/sessions`, {

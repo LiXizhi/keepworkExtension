@@ -107,13 +107,14 @@ fn safe(value: &Value, depth: usize, budget: &mut usize) -> Value {
     }
 }
 
-pub fn save(file: &Path, data: &Value, native: &Value) -> Result<(), String> {
+/// Returns bytes durably written, or zero for backends without a sidecar.
+pub fn save(file: &Path, data: &Value, native: &Value) -> Result<usize, String> {
     let backend = data["backend"].as_str().unwrap_or("codex");
     let thread = data["threadId"]
         .as_str()
         .ok_or("Native history thread ID required")?;
     let Some(path) = sidecar(file, backend, thread)? else {
-        return Ok(());
+        return Ok(0);
     };
     let existing = load(file, backend, thread)?;
     let cwd = data["roots"]
@@ -250,7 +251,7 @@ pub fn save(file: &Path, data: &Value, native: &Value) -> Result<(), String> {
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
     }
-    result.map_err(str::to_owned)
+    result.map(|()| bytes.len()).map_err(str::to_owned)
 }
 
 #[cfg(test)]

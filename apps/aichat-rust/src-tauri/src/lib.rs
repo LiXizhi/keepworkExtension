@@ -7,6 +7,7 @@ pub mod dev_server;
 pub mod files;
 pub mod git_setup;
 pub mod installer_stop;
+pub mod launch_intents;
 pub mod login_startup;
 pub mod menu;
 pub mod navigation;
@@ -32,3 +33,6 @@ pub use app::{
 };
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(all(feature = "dev-bins", target_os = "macos"))]
+pub use app::run_startup_smoke;

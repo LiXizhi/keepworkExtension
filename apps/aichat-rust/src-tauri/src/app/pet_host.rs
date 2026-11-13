@@ -37,6 +37,16 @@ pub(super) fn broadcast_pet_state(app: &AppHandle, core: &AppCore) {
     let _ = app.emit("aichat-desktop:pet-state", &snap);
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn primary_button_from_macos_mask(buttons: usize) -> bool {
+    buttons & 1 != 0
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn primary_button_from_windows_state(state: i16) -> bool {
+    (state as u16) & 0x8000 != 0
+}
+
 fn primary_button_down() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -48,12 +58,12 @@ fn primary_button_down() -> bool {
             }
             let send: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> usize =
                 std::mem::transmute(objc_msgSend as *const ());
-            (send(class, sel) & 1) != 0
+            primary_button_from_macos_mask(send(class, sel))
         }
     }
     #[cfg(target_os = "windows")]
     {
-        unsafe { (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 }
+        unsafe { primary_button_from_windows_state(GetAsyncKeyState(0x01)) }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -363,7 +373,8 @@ pub(super) fn desktop_publish_pet_state(
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state_mgr)?;
     let incoming = state.unwrap_or_else(|| json!({}));
-    let supports_audio = (incoming["petDictationAudioVersion"].as_u64() == Some(pet_audio::VERSION)
+    let supports_audio = (incoming["petDictationAudioVersion"].as_u64()
+        == Some(pet_audio::VERSION)
         || (incoming["target"].as_str() == Some("persona")
             && incoming["petVoiceAudioVersion"].as_u64() == Some(pet_audio::VERSION)))
         && incoming["ready"].as_bool() == Some(true);
@@ -431,8 +442,7 @@ async fn request_pet_command(
             return Ok(stopped);
         }
     }
-    let pet_capture = pet::uses_pet_audio(&snapshot, name)
-        && core.pet_audio.supported(context);
+    let pet_capture = pet::uses_pet_audio(&snapshot, name) && core.pet_audio.supported(context);
     let capture_id = if pet_capture {
         let (id, replaced) = match core.pet_audio.issue(context, &request_id) {
             Ok(capture) => capture,
@@ -693,9 +703,48 @@ pub(super) async fn desktop_pet_action(
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg(test)]
 mod pet_drag_host_tests {
     #[test]
+    fn macos_button_mask_distinguishes_primary_from_other_buttons() {
+        for (mask, pressed) in [
+            (0, false),
+            (1, true),
+            (2, false),
+            (3, true),
+            (4, false),
+            (1 << 16, false),
+            (usize::MAX, true),
+        ] {
+            assert_eq!(
+                super::primary_button_from_macos_mask(mask),
+                pressed,
+                "macOS button mask {mask:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_button_state_uses_current_high_bit_without_historical_low_bit() {
+        for (bits, pressed) in [
+            (0u16, false),
+            (1, false),
+            (0x7fff, false),
+            (0x8000, true),
+            (0x8001, true),
+            (0xffff, true),
+        ] {
+            assert_eq!(
+                super::primary_button_from_windows_state(bits as i16),
+                pressed,
+                "Windows button state {bits:#x}"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    #[ignore = "requires an unlocked interactive desktop with the physical primary mouse button released; run separately with --ignored --exact"]
     fn primary_button_is_up_without_a_held_click() {
         assert!(
             !super::primary_button_down(),

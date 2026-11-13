@@ -53,7 +53,9 @@ impl AgentManager {
         if originals.is_empty() {
             return Ok(());
         }
-        if let Err(error) = self.persist(&sessions) {
+        let changed: std::collections::HashSet<&str> =
+            originals.iter().map(|(id, _)| id.as_str()).collect();
+        if let Err(error) = self.persist_with_histories(&sessions, |id| changed.contains(id)) {
             for (id, original) in originals {
                 let data = sessions.get_mut(&id).unwrap().data.as_object_mut().unwrap();
                 for (key, value) in FIELDS.into_iter().zip(original) {

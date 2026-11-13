@@ -7,8 +7,8 @@
       "output": "90e88f0f46e49385abf925082b11c8bddba157c40c53d7206efad40f1b029cd6"
     },
     "completion.mjs": {
-      "source": "8ba0d66f6ad4a7ec0bfdf021b9893599252f2c51c875bee17e229011892c00b3",
-      "output": "f537c6deb27cb17718abdf708a4cd10d2522c23a79b2b44f06b2aa756ca9dfc8"
+      "source": "edfdf3266af0d04339dd0be28903296fecd3c668e84bdf7b4aac846ccdada1d4",
+      "output": "f4af61b9c4a64a1716d036c1dbe23c3baf5e609b5cb7adc305ab3ee03cf11a6b"
     },
     "context.mjs": {
       "source": "d053875cb9316780e76ad483c57e694b5bdc567391839f3102a10244fde57f6d",
@@ -23,8 +23,8 @@
       "output": "f3d34e80d4bf409518a1d97d7677e580a2e85553e50126ca94f27dadeab2371c"
     },
     "model_service_adapter.mjs": {
-      "source": "b57415a13a30b8bd01c0c4713469b1a66513f8aac75702377603eaaf103b3042",
-      "output": "2b42e01fda2bcc9aba8c7fba5cf7bbf50f4b55bde3c9cef68fd8cc2df9b4bf1d"
+      "source": "6e6c9c8b38e09a93311d49e04934c822f99f3fd59a6350f7c23a8df6613d0969",
+      "output": "766cfb61989ed9abfa7bd049bf8824e2465a9631ed001c5195fea09f9815f9b0"
     },
     "package_registry.mjs": {
       "source": "63c8717de9cad20341a19ba30be7d69d1e7fb9f994d01f9678e46797974c381f",
@@ -55,8 +55,8 @@
       "output": "eb5ec17715a2875561b4f4ecc365f9409d21bea580b2902baae133939ebf548f"
     },
     "sdk_adapter.mjs": {
-      "source": "f3f68f3c4a2357512e097e3117059754fc544524d00e375b766332495fe354ed",
-      "output": "f7d11a475b756ed1d45e29d9e4814cd594a1800c79e5122475cc727e4e2af510"
+      "source": "fe2af4728fe9cd179bfcc351f5d7ddcb825f57d4fe5280e17ed8a6c0f855be87",
+      "output": "b930519305b1f4a9e4b5aa79004c43b4e72378c2d30e3c33c74a5137c214a745"
     },
     "service_contracts.mjs": {
       "source": "b6c0a58fddc6218baac68227b8d8d709a8db85abd8056b8289b78396b88a477b",
@@ -67,12 +67,12 @@
       "output": "28386ec30681641cc4024fff98140679a8716a85fc94e750227d63a25ae047f3"
     },
     "text_tool_calls.mjs": {
-      "source": "a2819145e8bfbc2570fd1897a30cedc1fa35cff40cce2b6fa4d6521729942b63",
-      "output": "d9b7203aa313224105ca9243dd062d8b0da43b67523dc6945ebf3a58cc8716a2"
+      "source": "af77de4187595822872e2ccec556990fa53c426091f1c079d952f8f73882cbfd",
+      "output": "72438a2a34e4ed0ea103c6451143a78b94a9347b62eaad205155339ece95a22b"
     }
   },
   "sourceRevision": {
-    "commit": "833fc4bed688ac22ae5359ac002bb38d3d1621ea",
+    "commit": "d2e2263254129b0e0c70d0a34bbc0357b11502e0",
     "dirty": false
   }
 }

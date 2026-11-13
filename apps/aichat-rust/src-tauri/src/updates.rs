@@ -119,7 +119,8 @@ impl UpdateManager {
         let meta = Self::load_meta(&metadata_file);
         let ready = !meta.downloaded_path.is_empty()
             && Path::new(&meta.downloaded_path).is_file()
-            && is_version_newer(&meta.latest_version, &desktop_version);
+            && is_version_newer(&meta.latest_version, &desktop_version)
+            && !unsupported_zip(Path::new(&meta.downloaded_path), launcher_exe.as_deref());
         let initial_state = if ready {
             "ready"
         } else if !meta.latest_version.is_empty()
@@ -232,7 +233,11 @@ impl UpdateManager {
         let can_apply_desktop = ds.state == "ready"
             && !ds.meta.downloaded_path.is_empty()
             && Path::new(&ds.meta.downloaded_path).is_file()
-            && is_version_newer(&ds.meta.latest_version, &self.desktop_version);
+            && is_version_newer(&ds.meta.latest_version, &self.desktop_version)
+            && !unsupported_zip(
+                Path::new(&ds.meta.downloaded_path),
+                self.launcher_exe.as_deref(),
+            );
 
         let desktop_comp = UpdateComponentStatus {
             id: "desktop".to_string(),
@@ -269,7 +274,7 @@ impl UpdateManager {
     }
 
     pub async fn check_desktop_update(&self) {
-        if let Ok(mut ds) = self.desktop_state.lock() {
+        let previous_meta = if let Ok(mut ds) = self.desktop_state.lock() {
             if ds.checking {
                 return;
             }
@@ -277,16 +282,26 @@ impl UpdateManager {
             ds.state = "checking".to_string();
             ds.error.clear();
             ds.stale = false;
-        }
+            ds.meta.clone()
+        } else {
+            return;
+        };
 
         let res = self.fetch_and_stage_desktop_update().await;
         if let Err(err) = res {
             if let Ok(mut ds) = self.desktop_state.lock() {
                 ds.checking = false;
+                // A failed newer download must not relabel the previously
+                // verified installer as the new release.
+                ds.meta = previous_meta;
                 let has_cached = !ds.meta.latest_version.is_empty();
                 let has_ready = !ds.meta.downloaded_path.is_empty()
                     && Path::new(&ds.meta.downloaded_path).is_file()
-                    && is_version_newer(&ds.meta.latest_version, &self.desktop_version);
+                    && is_version_newer(&ds.meta.latest_version, &self.desktop_version)
+                    && !unsupported_zip(
+                        Path::new(&ds.meta.downloaded_path),
+                        self.launcher_exe.as_deref(),
+                    );
                 ds.state = if has_ready { "ready" } else { "error" }.to_string();
                 ds.stale = has_cached;
                 ds.error = err;
@@ -295,13 +310,16 @@ impl UpdateManager {
     }
 
     async fn fetch_and_stage_desktop_update(&self) -> Result<(), String> {
-        let builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+        let builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(15 * 60));
         #[cfg(test)]
         let builder = builder.no_proxy();
         let client = builder.build().map_err(|e| e.to_string())?;
 
         let resp = client
             .get(&self.feed_url)
+            .timeout(Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| format!("无法连接桌面更新服务器：{e}"))?;
@@ -316,8 +334,13 @@ impl UpdateManager {
             .await
             .map_err(|e| format!("解析桌面更新清单失败：{e}"))?;
 
-        let version = body
+        // Historical feeds describe a ZIP at the top level and the interactive
+        // platform installer in this additive field. Its version is independent
+        // so legacy ZIP consumers can keep their existing download contract.
+        let package = desktop_install_manifest(&body)?;
+        let version = package
             .get("version")
+            .or_else(|| body.get("version"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
@@ -326,27 +349,28 @@ impl UpdateManager {
             return Err(format!("无效的桌面远端版本号：{version}"));
         }
 
-        let published_at = body
+        let published_at = package
             .get("publishedAt")
+            .or_else(|| body.get("publishedAt"))
             .or_else(|| body.get("releaseDate"))
             .or_else(|| body.get("builtAt"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let url = body
+        let url = package
             .get("url")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
             .to_string();
-        let sha256 = body
+        let sha256 = package
             .get("sha256")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
-        let size = body.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-        let file_name = body
+        let size = package.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        let file_name = package
             .get("fileName")
             .and_then(|v| v.as_str())
             .filter(|s| !s.contains('/') && !s.contains('\\') && !s.contains(".."))
@@ -354,6 +378,15 @@ impl UpdateManager {
             .to_string();
 
         let checked_at = now_iso_string();
+
+        if (package.get("fileName").is_some() || is_version_newer(&version, &self.desktop_version))
+            && unsupported_zip(Path::new(&file_name), self.launcher_exe.as_deref())
+        {
+            return Err(
+                "更新清单未提供可安装的原生更新包（仅提供 ZIP），请下载安装新版桌面应用"
+                    .to_string(),
+            );
+        }
 
         if !is_version_newer(&version, &self.desktop_version) {
             if let Ok(mut ds) = self.desktop_state.lock() {
@@ -469,8 +502,10 @@ impl UpdateManager {
     }
 
     pub async fn check_all(&self, mcp_supervisor: &RuntimeSupervisor) -> (UpdatesSnapshot, bool) {
-        let (_, newly_staged_mcp) = mcp_supervisor.check_for_update().await;
-        self.check_desktop_update().await;
+        let ((_, newly_staged_mcp), ()) = tokio::join!(
+            mcp_supervisor.check_for_update(),
+            self.check_desktop_update()
+        );
         let snap = self.snapshot(&mcp_supervisor.snapshot());
         (snap, newly_staged_mcp)
     }
@@ -486,6 +521,9 @@ impl UpdateManager {
         let path = PathBuf::from(&ds.meta.downloaded_path);
         if !path.is_file() {
             return Err("桌面端更新安装包不存在，请重新检查更新".to_string());
+        }
+        if unsupported_zip(&path, self.launcher_exe.as_deref()) {
+            return Err("ZIP 更新包需要兼容 Launcher，请重新检查原生桌面更新".to_string());
         }
         let bytes = fs::read(&path).map_err(|e| format!("读取桌面更新包失败：{e}"))?;
         if !ds.meta.sha256.is_empty() && sha256_hex(&bytes) != ds.meta.sha256 {
@@ -567,6 +605,29 @@ impl UpdateManager {
     }
 }
 
+fn desktop_install_manifest(body: &Value) -> Result<&Value, String> {
+    match body.get("installer") {
+        Some(installer) if installer.is_object() => Ok(installer),
+        Some(_) => Err("桌面更新清单的 installer 字段无效".to_string()),
+        None => Ok(body),
+    }
+}
+
+fn unsupported_zip(package: &Path, launcher: Option<&Path>) -> bool {
+    if !package
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        return false;
+    }
+    #[cfg(not(target_os = "windows"))]
+    if launcher.is_some_and(Path::is_file) {
+        return false;
+    }
+    let _ = launcher;
+    true
+}
+
 /// Start an interactive platform installer without inheriting terminal handles.
 #[cfg(not(target_os = "windows"))]
 fn spawn_installer(program: &Path, args: &[&OsStr]) -> Result<(), String> {
@@ -588,6 +649,276 @@ mod tests {
     use std::thread;
     use uuid::Uuid;
 
+    fn update_server(
+        make_manifest: impl FnOnce(&str) -> Value,
+        payload: Vec<u8>,
+        expected_requests: usize,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let manifest = make_manifest(&base).to_string();
+        let server = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut count = 0;
+            while count < expected_requests && std::time::Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let bytes = if request.starts_with("GET /latest-client.json ") {
+                    manifest.as_bytes()
+                } else {
+                    assert!(request.starts_with("GET /installer.dmg "), "{request}");
+                    payload.as_slice()
+                };
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                stream.write_all(header.as_bytes()).unwrap();
+                stream.write_all(bytes).unwrap();
+                count += 1;
+            }
+            assert_eq!(count, expected_requests);
+        });
+        (format!("{base}/latest-client.json"), server)
+    }
+
+    #[tokio::test]
+    async fn accepts_native_and_legacy_installer_feeds_with_independent_versions() {
+        for shape in ["native", "legacy", "independent"] {
+            let root = std::env::temp_dir().join(format!("aichat-updater-{}", Uuid::new_v4()));
+            let payload = b"verified interactive installer".to_vec();
+            let (feed, server) = update_server(
+                |base| {
+                    let mut installer = serde_json::json!({
+                        "version": "0.3.0", "fileName": "installer.dmg",
+                        "url": format!("{base}/installer.dmg"),
+                        "size": payload.len(), "sha256": sha256_hex(&payload),
+                        "publishedAt": "2026-11-13T08:00:00Z",
+                    });
+                    if shape == "native" {
+                        return installer;
+                    }
+                    if shape == "legacy" {
+                        installer.as_object_mut().unwrap().remove("version");
+                    }
+                    serde_json::json!({
+                        "version": if shape == "legacy" { "0.3.0" } else { "0.1.10" },
+                        "format": "zip", "url": format!("{base}/legacy-launcher.zip"),
+                        "installer": installer, "unknownOptionalField": true,
+                    })
+                },
+                payload.clone(),
+                2,
+            );
+            let manager = UpdateManager::new(
+                "0.2.0".into(),
+                root.join("meta.json"),
+                root.join("downloads"),
+                feed,
+                None,
+            );
+            manager.check_desktop_update().await;
+            server.join().unwrap();
+            let snap = manager.snapshot(&RuntimeStatusSnapshot::initial("mcp", 8089));
+            assert!(snap.desktop.can_apply, "{shape}: {}", snap.desktop.error);
+            assert_eq!(snap.desktop.latest_version, "0.3.0");
+            assert_eq!(snap.desktop.published_at, "2026-11-13T08:00:00Z");
+            assert_eq!(
+                fs::read(manager.prepare_desktop_install().unwrap()).unwrap(),
+                payload
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_newer_download_retains_the_previous_verified_release_identity() {
+        let root = std::env::temp_dir().join(format!("aichat-updater-{}", Uuid::new_v4()));
+        let downloads = root.join("downloads");
+        fs::create_dir_all(&downloads).unwrap();
+        let old_path = downloads.join("0.3.0-installer.dmg");
+        fs::write(&old_path, b"previous verified installer").unwrap();
+        let meta = PersistedDesktopUpdateMeta {
+            latest_version: "0.3.0".into(),
+            downloaded_path: old_path.to_string_lossy().into(),
+            sha256: sha256_hex(b"previous verified installer"),
+            ..Default::default()
+        };
+        let metadata_file = root.join("meta.json");
+        atomic_json_write(&metadata_file, &meta).unwrap();
+        let (feed, server) = update_server(
+            |base| {
+                serde_json::json!({
+                    "version": "0.4.0", "fileName": "installer.dmg",
+                    "url": format!("{base}/installer.dmg"),
+                    "sha256": sha256_hex(b"expected new installer"),
+                })
+            },
+            b"corrupt newer download".to_vec(),
+            2,
+        );
+        let manager = UpdateManager::new("0.2.0".into(), metadata_file, downloads, feed, None);
+        manager.check_desktop_update().await;
+        server.join().unwrap();
+        let snap = manager.snapshot(&RuntimeStatusSnapshot::initial("mcp", 8089));
+        assert!(snap.desktop.can_apply);
+        assert!(snap.desktop.stale);
+        assert!(snap.desktop.error.contains("SHA-256"));
+        assert_eq!(snap.desktop.latest_version, "0.3.0");
+        assert_eq!(manager.prepare_desktop_install().unwrap(), old_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_installer_does_not_fall_back_to_a_legacy_zip() {
+        let root = std::env::temp_dir().join(format!("aichat-updater-{}", Uuid::new_v4()));
+        let (feed, server) = update_server(
+            |base| {
+                serde_json::json!({
+                    "version": "0.3.0", "url": format!("{base}/legacy.zip"),
+                    "sha256": sha256_hex(b"zip"), "installer": false,
+                })
+            },
+            vec![],
+            1,
+        );
+        let manager = UpdateManager::new(
+            "0.2.0".into(),
+            root.join("meta.json"),
+            root.join("downloads"),
+            feed,
+            None,
+        );
+        manager.check_desktop_update().await;
+        server.join().unwrap();
+        let snap = manager.snapshot(&RuntimeStatusSnapshot::initial("mcp", 8089));
+        assert_eq!(snap.desktop.state, "error");
+        assert!(!snap.desktop.can_apply);
+        assert!(snap.desktop.error.contains("installer"));
+        assert!(!root.join("downloads").exists());
+    }
+
+    #[tokio::test]
+    async fn zip_only_feed_is_unavailable_and_does_not_download_or_offer_installation() {
+        let root = std::env::temp_dir().join(format!("aichat-updater-{}", Uuid::new_v4()));
+        let (feed, server) = update_server(
+            |base| {
+                serde_json::json!({
+                    "version": "0.3.0", "format": "zip", "fileName": "legacy.zip",
+                    "url": format!("{base}/legacy.zip"), "sha256": sha256_hex(b"zip"),
+                })
+            },
+            vec![],
+            1,
+        );
+        let manager = UpdateManager::new(
+            "0.2.0".into(),
+            root.join("meta.json"),
+            root.join("downloads"),
+            feed,
+            None,
+        );
+        manager.check_desktop_update().await;
+        server.join().unwrap();
+        let snap = manager.snapshot(&RuntimeStatusSnapshot::initial("mcp", 8089));
+        assert_eq!(snap.desktop.state, "error");
+        assert!(!snap.desktop.can_apply);
+        assert!(snap.desktop.error.contains("ZIP"));
+        assert!(!root.join("downloads").exists());
+    }
+
+    #[tokio::test]
+    async fn desktop_download_completes_while_mcp_check_is_still_waiting() {
+        use crate::runtime::RuntimeConfig;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = std::env::temp_dir().join(format!("aichat-updater-{}", Uuid::new_v4()));
+        let payload = b"desktop installer".to_vec();
+        let (feed, desktop_server) = update_server(
+            |base| {
+                serde_json::json!({
+                    "version": "0.3.0", "fileName": "installer.dmg",
+                    "url": format!("{base}/installer.dmg"), "sha256": sha256_hex(&payload),
+                })
+            },
+            payload.clone(),
+            2,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (release, pending) = tokio::sync::oneshot::channel::<()>();
+        let (seen, mcp_request) = tokio::sync::oneshot::channel();
+        let mcp = Arc::new(RuntimeSupervisor::new(RuntimeConfig {
+            id: "mcp".into(),
+            products: vec!["keepwork-mcp-node-runtime".into()],
+            port: 0,
+            health_path: "/health".into(),
+            updates_enabled: true,
+            bundled_dir: root.join("bundle"),
+            store_dir: root.join("store"),
+            feed_url: format!(
+                "http://127.0.0.1:{}/mcp.json",
+                listener.local_addr().unwrap().port()
+            ),
+        }));
+        let mcp_server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            stream.read(&mut request).await.unwrap();
+            seen.send(()).unwrap();
+            pending.await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let manager = Arc::new(UpdateManager::new(
+            "0.2.0".into(),
+            root.join("meta.json"),
+            root.join("downloads"),
+            feed,
+            None,
+        ));
+        let checking = {
+            let manager = Arc::clone(&manager);
+            let mcp = Arc::clone(&mcp);
+            tokio::spawn(async move { manager.check_all(&mcp).await })
+        };
+        tokio::time::timeout(Duration::from_secs(3), mcp_request)
+            .await
+            .unwrap()
+            .unwrap();
+        let ready_before_mcp_finished = tokio::time::timeout(Duration::from_secs(3), async {
+            while !manager.snapshot(&mcp.snapshot()).desktop.can_apply {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(!checking.is_finished());
+        release.send(()).unwrap();
+        let (snap, _) = checking.await.unwrap();
+        mcp_server.await.unwrap();
+        desktop_server.join().unwrap();
+        assert!(
+            ready_before_mcp_finished,
+            "the desktop download must not await MCP's response"
+        );
+        assert!(snap.desktop.can_apply);
+        assert!(!snap.mcp.error.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn downloads_verifies_desktop_update_and_preserves_stale_cache_on_offline_error() {
         let root = std::env::temp_dir().join(format!("aichat-rust-upd-{}", Uuid::new_v4()));
@@ -600,14 +931,14 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let pkg_url = format!("http://127.0.0.1:{port}/KeepWork-SecondBrain.zip");
+        let pkg_url = format!("http://127.0.0.1:{port}/KeepWork-SecondBrain.dmg");
         let feed_url = format!("http://127.0.0.1:{port}/latest-client.json");
 
         let manifest_body = serde_json::json!({
             "product": "aichat-desktop",
             "version": "0.3.0",
             "publishedAt": "2026-11-09T10:00:00Z",
-            "fileName": "KeepWork-SecondBrain.zip",
+            "fileName": "KeepWork-SecondBrain.dmg",
             "url": pkg_url,
             "sha256": pkg_sha,
             "size": pkg_size,

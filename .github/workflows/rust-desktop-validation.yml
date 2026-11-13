@@ -1,0 +1,67 @@
+name: Rust desktop validation (no publication)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Native desktop checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/aichat-rust/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/mcp-rust -> target
+            apps/aichat-rust/src-tauri -> target
+      - name: Install isolated build and fixture dependencies
+        run: |
+          mkdir -p .test-runtime/rust-desktop
+          npm ci --include=dev 2>&1 | tee .test-runtime/rust-desktop/dependencies.log
+          npm ci --prefix apps/mcp-runtime 2>&1 | tee -a .test-runtime/rust-desktop/dependencies.log
+          pnpm --prefix apps/aichat-rust install --frozen-lockfile 2>&1 | tee -a .test-runtime/rust-desktop/dependencies.log
+      - name: Check packaged runtime integrity
+        run: node scripts/rust-validation-evidence.cjs run --id source-checks-runtime --level source --output .test-runtime/rust-desktop -- node scripts/sync-aichat-runtime.cjs --check --mode packaged
+      - name: TypeScript check
+        run: node scripts/rust-validation-evidence.cjs run --id source-checks-typescript --level source --output .test-runtime/rust-desktop -- node apps/aichat-rust/node_modules/typescript/bin/tsc --noEmit --project apps/aichat-rust/tsconfig.json
+      - name: Frontend build
+        run: node scripts/rust-validation-evidence.cjs run --id source-checks-build --level source --output .test-runtime/rust-desktop -- node apps/aichat-rust/scripts/build.mjs
+      - name: Native Rust unit tests (host architecture)
+        run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-rust --level fixture --output .test-runtime/rust-desktop -- cargo test --locked --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins
+      - name: Node contracts and Windows installer regressions
+        # The Windows matrix runs the Windows-only process ownership and NSIS
+        # cases, rather than counting macOS platform skips as Windows coverage.
+        run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-node --level fixture --output .test-runtime/rust-desktop -- node --test --test-reporter=tap apps/aichat-rust/tests/*.test.cjs
+      - name: Native PTY and lifecycle smoke fixtures
+        run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-smoke --level fixture --output .test-runtime/rust-desktop -- node apps/aichat-rust/scripts/smoke.cjs
+      - name: Save honest release acceptance summary
+        if: always()
+        run: node scripts/rust-validation-evidence.cjs collect --product aichat-rust --output .test-runtime/rust-desktop
+      - name: Preserve first failures, TAP, native logs and pending gates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-desktop-validation-${{ matrix.os }}
+          path: .test-runtime/rust-desktop/
+          if-no-files-found: warn
+          retention-days: 30

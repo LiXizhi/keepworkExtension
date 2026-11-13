@@ -3,6 +3,7 @@
 use crate::desktop_lock::DesktopLock;
 use crate::dev_server::DevServer;
 use crate::files::NativeFiles;
+use crate::launch_intents::LaunchIntents;
 use crate::login_startup::{load_settings, save_settings, DesktopSettings, LoginStartup};
 use crate::page_connection::{self, PageConnection};
 use crate::permissions::MediaGrants;
@@ -63,6 +64,7 @@ pub struct AppCore {
     pub channels: Mutex<Vec<ChannelStatus>>,
     pub lock: Mutex<Option<DesktopLock>>,
     pub page_connection: Mutex<PageConnection>,
+    pub launch_intents: Mutex<LaunchIntents>,
 }
 
 impl AppCore {

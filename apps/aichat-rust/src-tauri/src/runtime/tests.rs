@@ -499,6 +499,7 @@ fn update_manifest_accepts_published_mcp_platform() {
     let manifest = RuntimeUpdateManifest {
         schema_version: 1,
         product: "keepwork-mcp-node-runtime".to_string(),
+        engine: None,
         platform: mcp_feed_platform().to_string(),
         arch: current_runtime_arch().to_string(),
         version: "0.1.44".to_string(),

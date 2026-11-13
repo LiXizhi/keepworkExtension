@@ -27,3 +27,21 @@
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   !insertmacro KEEPWORK_STOP_BUNDLED_MCP
 !macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  ; A current-user protocol starts only this verified installation, directly.
+  ; The Rust parser accepts two exact actions and never invokes a shell.
+  WriteRegStr HKCU "Software\Classes\keepwork-secondbrain" "" "URL:Keepwork Second Brain"
+  WriteRegStr HKCU "Software\Classes\keepwork-secondbrain" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\keepwork-secondbrain\shell\open\command" "" '$"$INSTDIR\${MAINBINARYNAME}.exe$" --launch-url $"%1$"'
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ; Another edition/installation may now own this shared URL scheme.
+  Push $0
+  ReadRegStr $0 HKCU "Software\Classes\keepwork-secondbrain\shell\open\command" ""
+  ${If} $0 == '$"$INSTDIR\${MAINBINARYNAME}.exe$" --launch-url $"%1$"'
+    DeleteRegKey HKCU "Software\Classes\keepwork-secondbrain"
+  ${EndIf}
+  Pop $0
+!macroend

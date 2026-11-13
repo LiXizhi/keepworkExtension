@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { syncRuntime } = require('./sync-aichat-runtime.cjs');
+const { syncRuntime, parseArgs } = require('./sync-aichat-runtime.cjs');
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-sync-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -47,7 +47,49 @@ test('canonical CRLF and LF checkouts share source hashes and compiled output', 
 });
 
 test('default source resolves independently of current working directory', () => {
-  execFileSync(process.execPath, [path.join(__dirname, 'sync-aichat-runtime.cjs'), '--check'], { cwd: os.tmpdir() });
+  // This checkout may have a sibling AIChat under active development. A check of
+  // the committed copy must not depend on that unrelated working tree.
+  const output = execFileSync(process.execPath, [path.join(__dirname, 'sync-aichat-runtime.cjs'), '--check', '--mode', 'packaged'], { cwd: os.tmpdir(), encoding: 'utf8' });
+  assert.match(output, /packaged runtime integrity verified \(mode: packaged\)/);
+});
+
+test('explicit packaged checks ignore canonical drift without accepting modified output', t => {
+  const options = fixture(t);
+  syncRuntime(options);
+  fs.writeFileSync(path.join(options.source, 'agent.mjs'), 'export const value = 2;');
+  const before = fs.readFileSync(path.join(options.dest, 'manifest.json'), 'utf8');
+  assert.deepEqual(syncRuntime({ ...options, check: true, mode: 'packaged' }), []);
+  assert.equal(fs.readFileSync(path.join(options.dest, 'manifest.json'), 'utf8'), before);
+  assert.throws(() => syncRuntime({ ...options, check: true, mode: 'canonical' }), /source changed: agent\.mjs/);
+  fs.appendFileSync(path.join(options.dest, 'agent.cjs'), '// tampered');
+  assert.throws(() => syncRuntime({ ...options, check: true, mode: 'packaged' }), /modified/);
+  assert.throws(() => syncRuntime({ ...options, mode: 'packaged' }), /requires --check/);
+});
+
+test('canonical mode requires source and diagnoses source, compiler and inventory changes without writes', t => {
+  const options = fixture(t);
+  fs.writeFileSync(path.join(options.source, 'removed.mjs'), 'export const removed = true;');
+  syncRuntime(options);
+  const before = fs.readFileSync(path.join(options.dest, 'manifest.json'), 'utf8');
+  fs.writeFileSync(path.join(options.source, 'agent.mjs'), 'export const value = 42;');
+  fs.unlinkSync(path.join(options.source, 'removed.mjs'));
+  fs.writeFileSync(path.join(options.source, 'added.mjs'), 'export const added = true;');
+  assert.throws(() => syncRuntime({ ...options, check: true, mode: 'canonical' }), error => {
+    for (const pattern of [/source changed: agent\.mjs/, /compiler output changed: agent\.mjs/, /added source: added\.mjs/, /removed source: removed\.mjs/, /TypeScript \d/, /Packaged revision: unknown/]) assert.match(error.message, pattern);
+    return true;
+  });
+  assert.equal(fs.readFileSync(path.join(options.dest, 'manifest.json'), 'utf8'), before);
+  fs.rmSync(path.dirname(options.source), { recursive: true });
+  assert.throws(() => syncRuntime({ ...options, check: true, mode: 'canonical' }), /source missing/);
+  assert.deepEqual(syncRuntime({ ...options, check: true }), [], 'legacy auto still checks packaged integrity without source');
+});
+
+test('mode arguments are explicit and invalid options cannot silently select another check', () => {
+  assert.equal(parseArgs(['--check', '--mode', 'canonical']).mode, 'canonical');
+  assert.equal(parseArgs(['--mode=packaged', '--check']).mode, 'packaged');
+  assert.equal(parseArgs([]).mode, 'auto');
+  for (const args of [['--mode'], ['--unknown'], ['one', 'two'], ['--check', '--mode=packaged', 'source']]) assert.throws(() => parseArgs(args));
+  assert.throws(() => syncRuntime({ check: true, mode: 'typo' }), /mode must be/);
 });
 
 test('Git checkout with autocrlf preserves packaged runtime integrity', t => {
@@ -83,7 +125,7 @@ test('Git checkout with autocrlf preserves packaged runtime integrity', t => {
 test('build and watch automatically refresh canonical source edits and inventory changes', async t => {
   const options = fixture(t);
   const { aichatRuntimePlugin } = await import('./aichat-runtime-build.mjs');
-  const { context } = require('../apps/vscode-extension/node_modules/esbuild');
+  const { context } = require('../apps/mcp-runtime/node_modules/esbuild');
   let completions = 0, latest;
   const ctx = await context({ stdin: { contents: `module.exports = require(${JSON.stringify(path.join(options.dest, 'agent.cjs'))});`, resolveDir: options.root },
     bundle: true, platform: 'node', write: false, logLevel: 'silent',
@@ -121,7 +163,7 @@ test('standalone builds and checks verify the committed copy without AIChat', as
   assert.deepEqual(syncRuntime({ ...options, check: true }), []);
   assert.equal(fs.readFileSync(path.join(options.dest, 'manifest.json'), 'utf8'), before);
   const { aichatRuntimePlugin } = await import('./aichat-runtime-build.mjs');
-  const { build } = require('../apps/vscode-extension/node_modules/esbuild');
+  const { build } = require('../apps/mcp-runtime/node_modules/esbuild');
   const buildOptions = { entryPoints: [path.join(options.dest, 'agent.cjs')], bundle: true,
     platform: 'node', write: false, logLevel: 'silent', plugins: [aichatRuntimePlugin(options)] };
   const result = await build(buildOptions);

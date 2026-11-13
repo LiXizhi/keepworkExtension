@@ -1,10 +1,11 @@
 //! Main document lifecycle, connection recovery and local source navigation.
 
+use super::native_startup;
 use super::pet_audio_host::stop_pet_audio;
 use super::sender::verify_main_sender;
 use super::state::{AppCore, DesktopStatus};
 use crate::dev_server::DevServer;
-use crate::page_connection::{Phase, LOAD_TIMEOUT_SECONDS};
+use crate::page_connection::{Phase, Presentation, LOAD_TIMEOUT_SECONDS};
 use crate::pet::PetController;
 use crate::security::{self, ENTRY};
 use crate::terminal::TerminalSessionManager;
@@ -28,14 +29,81 @@ pub(super) fn handle_main_page_load(
 
 pub fn show_main_window(app: &AppHandle, core: &AppCore) {
     stop_pet_audio(app, core, None, "已打开主窗口，语音输入已停止", false);
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    core.page_connection.lock().unwrap().set_foreground(true);
+    sync_window_presentation(app, true);
     if let Some(pet_win) = app.get_webview_window("pet") {
         let _ = pet_win.hide();
     }
+}
+
+pub(super) fn hide_main_window(app: &AppHandle, core: &AppCore) {
+    core.page_connection.lock().unwrap().set_foreground(false);
+    sync_window_presentation(app, false);
+}
+
+/// Always read the latest visibility intent on the UI thread. Ready, timeout,
+/// single-instance wake and close may have been queued in a different order.
+pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let core = handle.state::<Arc<AppCore>>();
+        if core.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        let (presentation, failed) = {
+            let connection = core.page_connection.lock().unwrap();
+            (
+                connection.presentation(),
+                connection.snapshot("").phase == Phase::Unavailable,
+            )
+        };
+        let main = handle.get_webview_window("main");
+        let startup = handle.get_window("startup");
+        match presentation {
+            Presentation::Hidden => {
+                if let Some(window) = main {
+                    let _ = window.hide();
+                }
+                if let Some(window) = startup {
+                    let _ = window.hide();
+                }
+            }
+            Presentation::Startup => {
+                if let Some(window) = main {
+                    let _ = window.hide();
+                }
+                if let Some(window) = startup.as_ref() {
+                    let _ = window.set_theme(Some(core.theme.current().native()));
+                }
+                if let Err(error) = native_startup::update(&handle, failed) {
+                    eprintln!("[desktop] Cannot update native startup: {error}");
+                }
+                if let Some(window) = startup {
+                    let was_visible = window.is_visible().unwrap_or(false);
+                    let _ = window.show();
+                    if focus || !was_visible {
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                }
+            }
+            Presentation::Main => {
+                // Show the ready document before dismissing the native surface.
+                if let Some(window) = main {
+                    let was_visible = window.is_visible().unwrap_or(false);
+                    if window.show().is_ok() {
+                        if focus || !was_visible {
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                        if let Some(window) = startup {
+                            let _ = window.hide();
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 pub(super) fn current_entry_url(core: &Arc<AppCore>) -> String {
@@ -89,21 +157,38 @@ fn show_connection_failure(app: &AppHandle, core: &AppCore, generation: u64, rea
     if let (Some(window), Some(shell)) = (app.get_webview_window("main"), shell) {
         let _ = window.navigate(shell);
     }
+    sync_window_presentation(app, false);
 }
 
 fn start_page_connection(app: &AppHandle, core: &Arc<AppCore>, target: &str, automatic: bool) {
     if core.quitting.load(Ordering::Relaxed) {
         return;
     }
-    let Some(window) = app.get_webview_window("main") else {
+    if app.get_webview_window("main").is_none() {
         return;
-    };
+    }
     let Some(generation) = core
         .page_connection
         .lock()
         .unwrap()
         .begin(target, automatic)
     else {
+        return;
+    };
+    sync_window_presentation(app, false);
+    navigate_page_connection(app, core, target, generation);
+}
+
+pub(super) fn navigate_page_connection(
+    app: &AppHandle,
+    core: &Arc<AppCore>,
+    target: &str,
+    generation: u64,
+) {
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else {
         return;
     };
     // The URL is always chosen by the host; recovery IPC cannot supply a URL.
@@ -120,6 +205,11 @@ fn start_page_connection(app: &AppHandle, core: &Arc<AppCore>, target: &str, aut
         );
         return;
     };
+    // Startup waits for the first daemon attempt off the UI thread. A menu
+    // navigation during that wait may already have superseded this ticket.
+    if core.page_connection.lock().unwrap().attempt(&url) != Some(generation) {
+        return;
+    }
     if window.navigate(url).is_err() {
         show_connection_failure(
             app,
@@ -208,6 +298,7 @@ pub(super) fn desktop_page_connection_attempt(
 
 #[tauri::command]
 pub(super) fn desktop_main_document_ready(
+    app: AppHandle,
     window: WebviewWindow,
     state: tauri::State<'_, Arc<AppCore>>,
     token: String,
@@ -218,11 +309,15 @@ pub(super) fn desktop_main_document_ready(
     if actual.as_str() != url {
         return Ok(false);
     }
-    Ok(state
+    let ready = state
         .page_connection
         .lock()
         .unwrap()
-        .document_ready(generation, &actual))
+        .document_ready(generation, &actual);
+    if ready {
+        sync_window_presentation(&app, false);
+    }
+    Ok(ready)
 }
 
 /// 按比例步进缩放（Tauri 2.12 无 zoom 读取接口，用 `AppCore::zoom` 记账）。

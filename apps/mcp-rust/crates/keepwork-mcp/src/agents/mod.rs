@@ -14,7 +14,11 @@ mod history;
 mod images;
 mod item_stream;
 mod native;
+#[cfg(test)]
+mod persistence_tests;
 mod sessions;
+#[cfg(test)]
+use persistence_tests::PersistenceStats;
 
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
@@ -59,6 +63,8 @@ pub struct AgentManager {
     closing: AtomicBool,
     #[cfg(test)]
     persist_calls: AtomicUsize,
+    #[cfg(test)]
+    persistence_stats: PersistenceStats,
     pub context: Arc<context::ContextManager>,
 }
 
@@ -375,11 +381,34 @@ impl AgentManager {
             closing: AtomicBool::new(false),
             #[cfg(test)]
             persist_calls: AtomicUsize::new(0),
+            #[cfg(test)]
+            persistence_stats: PersistenceStats::default(),
             context: Arc::new(context::ContextManager::new()),
         })
     }
 
     fn persist(&self, sessions: &HashMap<String, Session>) -> Result<(), String> {
+        self.persist_with_histories(sessions, |_| true)
+    }
+
+    fn persist_changed(
+        &self,
+        sessions: &HashMap<String, Session>,
+        changed: &str,
+    ) -> Result<(), String> {
+        self.persist_with_histories(sessions, |id| id == changed)
+    }
+
+    /// Registry records and receipts are still synchronously committed on every
+    /// update. Only histories belonging to the edited sessions are rewritten;
+    /// unrelated transcripts must not amplify each streamed chunk into N fsyncs.
+    /// This is explicit mutation scope, not a cache: a failed registry commit
+    /// cannot advance a fingerprint and suppress a required retry.
+    fn persist_with_histories(
+        &self,
+        sessions: &HashMap<String, Session>,
+        save_history: impl Fn(&str) -> bool,
+    ) -> Result<(), String> {
         #[cfg(test)]
         self.persist_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(error) = &self.load_error {
@@ -388,8 +417,28 @@ impl AgentManager {
         let parent = self.file.parent().ok_or("Invalid agent registry")?;
         std::fs::create_dir_all(parent).map_err(|_| "Could not persist agent registry")?;
         let mut rows = Vec::with_capacity(sessions.len());
-        for session in sessions.values() {
-            history::save(&self.file, &session.data, &session.native)?;
+        for (id, session) in sessions {
+            let write_history = save_history(id);
+            #[cfg(test)]
+            let write_history = write_history
+                || self
+                    .persistence_stats
+                    .legacy_all_histories
+                    .load(Ordering::Relaxed);
+            if write_history {
+                let history_bytes = history::save(&self.file, &session.data, &session.native)?;
+                #[cfg(test)]
+                if history_bytes > 0 {
+                    self.persistence_stats
+                        .history_writes
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.persistence_stats
+                        .history_bytes
+                        .fetch_add(history_bytes, Ordering::Relaxed);
+                }
+                #[cfg(not(test))]
+                let _ = history_bytes;
+            }
             let mut data = session.data.clone();
             // Node Codex history lives in the CLI. Preserve its unresolved
             // absence across unrelated registry saves and shutdown.
@@ -424,9 +473,19 @@ impl AgentManager {
         let mut file = options
             .open(&temporary)
             .map_err(|_| "Could not persist agent registry")?;
-        file.write_all(&serde_json::to_vec(&rows).map_err(|_| "Could not persist agent registry")?)
+        let bytes = serde_json::to_vec(&rows).map_err(|_| "Could not persist agent registry")?;
+        file.write_all(&bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| "Could not persist agent registry")?;
+        #[cfg(test)]
+        {
+            self.persistence_stats
+                .registry_writes
+                .fetch_add(1, Ordering::Relaxed);
+            self.persistence_stats
+                .registry_bytes
+                .fetch_add(bytes.len(), Ordering::Relaxed);
+        }
         std::fs::rename(temporary, &self.file)
             .map_err(|_| "Could not persist agent registry".into())
     }
@@ -472,7 +531,7 @@ impl AgentManager {
                 items.remove(0);
             }
         }
-        if let Err(error) = self.persist(&sessions) {
+        if let Err(error) = self.persist_changed(&sessions, session_id) {
             sessions.get_mut(session_id).unwrap().data = original;
             return Err(error);
         }

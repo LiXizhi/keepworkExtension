@@ -4,16 +4,18 @@
 
 CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、托管 MCP、宠物和本地文件 / 终端能力；下文桌面功能描述适用于正常的 Tauri / WebView2 路径。兼容安装包不内置 CEF，首次回退需要下载。**这不是已验证的生产发行版**：Windows 预览工作流尚未运行，Windows / Win7 实机验收与 CDN 发布均未完成。工作流使用临时签名密钥，产物不能直接推广到正式通道。构建、下载、发布预览与能力边界详见 [Windows CEF 兼容方案](docs/windows-cef.md)。
 
+**当前范围与验证状态**统一维护在 [Rust 产品能力矩阵](../../docs/rust-capability-matrix.md)。历史 `VALIDATION.md` 记录不代表当前安装包已通过所有平台和真实账号验证；发布前按 [Rust 发布包验收](../../docs/acceptance/rust-desktop-release.md) 生成持久结构化证据。
+
 ## 核心能力与架构
 
 - **主聊天窗口与平台标题栏**：
   - 加载 `https://keepwork.com/chat`（或本地 Loopback `AIChat.html` 开发源码 / `deployment.json` 离线包）。
-  - 本地启动连接页以居中品牌标识、简短提示和轻量进度动画展示加载状态，并尊重减少动态效果的设置。本地启动与连接恢复页沿用上次聊天页的亮暗模式，无记录时默认亮色，系统外观不会覆盖；连接失败后才显示重试、检查更新和默认折叠的连接详情。保留原有超时与自动重试规则，旧宿主缺少连接状态时仍提供手动重新加载。
+  - 启动时先显示系统原生窗口，主 WebView 在后台初始化，收到受信任主文档的就绪回执后一次性切换到工作台。原生启动窗口沿用上次聊天页的亮暗模式，无记录时默认亮色；连接失败在原生窗口提供「重试」和「稍后」，保留原有超时与自动重试规则，关闭后不会因迟到的就绪事件重新弹出。
   - 进入受信任聊天入口后，在 SDK 等网络资源完成前预先应用该网页 origin 的主题：有效 URL `theme` 优先，手动模式读取该 origin 保存的亮暗选择，自动模式按本地时间 07:00 起至 19:00 前使用亮色、其余时段使用暗色。桌面对旧聊天页也提供此兼容处理，无需同步发布网页；预主题只读取网页偏好，后续网页主题与皮肤照常接管。
   - 在受信任顶层主框架内注入 Closed Shadow DOM `#keepwork-desktop-titlebar`：34px 单行 Web 标题栏，包含居中标题、地址胶囊与刷新按钮；Windows / Linux 同行显示校准居中的 K 图标及「文件 / 编辑 / 视图 / 帮助」菜单标题。Windows 使用无系统装饰的窗口，网页为此标题栏预留 34px 空间；macOS 保留系统应用菜单。
   - Web 下拉菜单由客户端自身在 Closed Shadow DOM 内统一绘制，使用 Rust `menu_payload` 提供的菜单数据，不依赖远端页面绘制；采用紧凑的菜单布局，支持展开后横向悬停切换、键盘导航、Esc 与点击外部关闭。标题栏与菜单同步页面深浅色和皮肤 CSS 变量，地址与刷新按钮保留在顶部原位置。
   - 标题栏、地址胶囊和菜单跟随页面实际配色，兼容 AIChat 默认深色、主题切换及稍后加载的皮肤样式；本地连接页与聊天页共用主题同步逻辑，解析页面中的 CSS 变量和混合颜色后应用到标题栏。亮暗模式按客户端配置档分别记忆在 `desktop-theme.json`，仅供本地启动与恢复页使用；此记忆独立于各网页 origin 的主题存储，不修改或覆盖网页偏好。聊天页加载后以其实测主题为准，本地启动与恢复页只读取记忆。
-  - 注入只读冻结的 `window.aichatDesktop`（Bridge v1）契约，对现有 Web 端 `desktop.js`、`keepwork_fs.js`、`desktop_menu.js` 保持 100% 兼容。
+  - 注入只读冻结的 `window.aichatDesktop`（Bridge v1）契约，保留现有 Web 端 `desktop.js`、`keepwork_fs.js`、`desktop_menu.js` 的共享合同；新增能力单独协商，缺少可选能力不会要求网页、桌面或 MCP 同步升级。
   - macOS 集成网页浏览器通过可选 `browserSurfaceVersion: 1` 在工具画布内显示独立的原生 WKWebView，支持 HTTP(S)、前进/后退和刷新。外站使用独立非持久网站数据，不注入桌面 Bridge、IPC 或 AIChat 凭据；切页、遮挡及关闭时隐藏或销毁视图。工作区 HTML 保留原有 iframe 预览调试。旧网页、旧桌面和其他平台沿用 iframe；新版网页明确提示无法确认外站嵌入结果并提供外部打开入口，不把 iframe 错误文档误报为加载成功。主窗口外链和登录弹窗策略不变。
   - `browserSurfaceViewportVersion: 1` 保留固定 CSS 视口，`browserSurfaceScaleVersion: 1` 使完整视口等比缩小到可用画布。1280×800 页面在较小面板中四边完整可见，内部布局尺寸不变；调整窗口或 Console 不重载网页。原生坐标变换同步绘制及点击位置，不以改网页缩放或伪造页面属性代替。仅支持旧 viewport-v1 的宿主明确按原尺寸滚动，缺少该能力时保持自适应并禁用固定预设。此选项不模拟平板 UA、触屏或物理屏幕；网站自身超出所选视口的内容仍由网页滚动。
 - **菜单协议 `aichat.desktop-menu.v1` 与命令路由（对齐 `apps/aichat-desktop`）**：
@@ -21,16 +23,20 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - **页面命令**（`new-chat`、`toggle-sidebar`、`toggle-files`、`open-settings`、`experience-simple`、`experience-professional`、`theme-light`、`theme-dark`）只投递给 AIChat 页面；**主机命令**（`open-folder`、`reload`、`check-updates`、`toggle-login`、`quit`、编辑/缩放/全屏/开发者工具、`mcp-status`/`mcp-dashboard`/`mcp-restart`、`open-browser`、`local-source`、`published-site` 等）由桌面进程原生执行，未知 id 一律拒绝。
   - 旧 id（`file:open-folder`、`view:reload`、`view:reset-zoom`、`help:check-updates` …）由 `canonical_host_command` 规范化，客户端 Web 菜单、原生托盘、macOS 系统菜单与历史页面调用方继续可用；页面命令沿用 `aichat.desktop-menu.v1` 投递，主机命令通过白名单校验的 IPC 执行。
 - **自我更新与自动更新（Self-Update / Auto-Update）**：
-  - **Keepwork MCP Runtime 更新（`:8089`）**：默认随客户端携带 Rust MCP；捆绑清单为 `engine: rust` 时关闭 Node feed 热更新，避免被 Node 运行时覆盖。显式选择 Node 兼容构建时，沿用 `https://cdn.keepwork.com/keepwork/mcp-stable/<platform>-<arch>.json`、大小/SHA-256/40 位源码 Commit 校验、暂存激活与启动失败回滚流程。
-  - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），后台自动下载更新包并校验 SHA-256，持久化 `update-metadata.json`（离线时保留上次检查缓存并标记 `stale: true`）。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
+  - **Keepwork MCP Runtime 更新（`:8089`）**：默认随客户端携带 Rust MCP，使用独立 `https://cdn.keepwork.com/keepwork/mcp-stable-rs/<platform>-<arch>.json` v2 feed；显式 Node 兼容构建沿用 `mcp-stable/<platform>-<arch>.json` v1。两条线路分别校验引擎/产品/目标、大小/SHA-256/40位源码commit及包内身份；Rust额外核对嵌入binary编译身份。下载只暂存，不打断正在运行的服务；用户点击「更新 MCP」可显式激活，下一次宿主启动且需要启动本地服务时，也可采用同引擎、严格新于已验证current/bundled基线的pending，保留原Node启动行为。同版本不同commit的候选只能显式应用，不随普通启动替换。激活前核对实际服务PID/owner，新候选健康和身份确认后才提升current；失败回退已验证可用版本并保留用户数据。缺少运行中peer版本、commit或引擎字段时显示未知，不借本地捆绑版本填充。不通过Node feed覆盖Rust，也不自动重发未知任务。源码与本地清单验证不表示Rust CDN已发布或真实安装升级已验收。
+  - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），与 MCP 独立并行检查。后台下载并校验大小与 SHA-256，持久化 `update-metadata.json`，下载就绪后通知；离线保留上次检查缓存并标记 `stale: true`。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
+  - **发布与旧客户端兼容**：Rust 发布器在所有版本化安装包通过 CDN 字节校验后，更新 `win32-x64`、`win32-arm64`、`darwin-arm64`、`darwin-x64` 四个清单。已有清单的顶层 legacy ZIP 字段保持原样，追加含独立 `version` / `publishedAt` 的 `installer`；新客户端优先使用该 EXE / DMG，没有旧清单时使用顶层原生安装包。禁止清单版本倒退或同版本替换安装包；已安装 Launcher 继续使用独立签名渠道。**旧 Rust 客户端仅识别顶层下载地址，需先手动安装包含本修复的新版，才能恢复后续自动更新。** 清单发布与实际安装升级须分别验收，源码修改不代表 CDN 已更新。
 - **自带的 Rust Keepwork MCP Server（`apps/mcp-rust`）**：
   - `aichat-rust` 默认运行 `apps/mcp-rust`，由 `scripts/bundle-mcp-rust.cjs` 构建原生守护进程并写入 `src-tauri/resources/mcp-runtime/<arch>/{runtime.json,bin/keepwork-mcp}`（Windows 为 `.exe`）。清单 v2 使用 `product: keepwork-mcp-runtime` 与 `engine: rust`；宿主直接执行原生入口。
   - 标准开发与 `make:mac` / `make:win:x64` / `make:win:arm64` 打包入口选择 Rust MCP；`bundle:mcp` 默认捆绑 Rust，`bundle:mcp-rust` 保留为同义入口。`apps/mcp-runtime` 的 Node 版通过 `bundle:mcp-node`、`make:mcp-node:mac` 和 `make:mcp-node:win:x64` 显式选择，仍须先准备并校验对应 Node staging。Rust 构建或校验失败时明确报错，不因缺少可选能力自动改用 Node。
-  - Rust 已提供本地文件、文件夹浏览、PTY、五个可移植 MCP 工具，以及分身和钉钉/飞书消息的部分能力。原生 Agent CLI、浏览器、电脑操作等仍未全面移植；按 `/health` 的实际能力降级，不能凭引擎或版本号推断支持。详见 [迁移契约](../../docs/rust-runtime-migration.md)。
-  - 既有共享 8089 服务继续按所有权和接管规则处理；默认候选为 Rust 不代表已有外部服务已被替换，实际引擎须检查 `/health.runtimeEngine` 与进程入口。
+  - Rust 已提供本地文件、文件夹浏览、PTY、五个可移植 MCP 工具、Dashboard/管理目录、原生 Agent CLI 会话与图片轮次、分身本地工具、钉钉/飞书消息与 owner 主动 Circles 操作。CLI 的 provider/账号与图片支持仍取决于原生合同；浏览器、电脑操作、自动多分身路由、无头消息 worker 等未全面移植。按 `/health` 和具体动作的实际能力降级，不能凭引擎或版本号推断支持。详见 [当前能力矩阵](../../docs/rust-capability-matrix.md) 与 [迁移契约](../../docs/rust-runtime-migration.md)。
+  - 既有共享 8089 服务继续按所有权和接管规则处理：桌面自动启动/心跳对 VS Code、Local Helper 等外部 owner 的兼容服务保持 attach，即使同引擎且本地候选较新也不终止；新版本接管仅限桌面管理的服务。身份不兼容时报告冲突。默认候选为 Rust 不代表已有外部服务已被替换，实际引擎须检查 `/health.runtimeEngine` 与进程入口。
   - macOS 的 HTTPS 聊天页通过受限原生通道访问 `http://localhost:8089` / `http://127.0.0.1:8089`，避免 WKWebView 混合内容限制导致 MCP 在线但分身不显示。只接受实际受信顶层文档，Origin 取自原生框架，Bearer 认证和分身 owner 保持原协议；不使用 Cookie、代理、重定向或自动重试。响应按需流式读取，单次请求体上限 32 MiB；显式 Cookie 凭据、手动重定向等不支持的语义明确报错。Basic / Digest / NTLM 等系统认证挑战以 `MCP_HTTP_AUTH_CHALLENGE_UNSUPPORTED` 拒绝，不重新发送请求或伪造服务器响应。其他地址、端口和平台沿用浏览器连接，不修改网页存储或迁移分身记录。
 - **双本地 Runtime 守护进程监管**：
   - 监管 MCP（`127.0.0.1:8089`，默认 Rust）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检。MCP 引擎选择不改变外部 VS Code / Local Helper 实例的所有权保护，也不放宽 Origin、鉴权、路径和任务执行边界。
+- **网页唤起与首次引导**：
+  - Bridge v1 可选 `launchIntents: true`，使用 `getLaunchIntent` / `onLaunchIntent` / `acknowledgeLaunchIntent` 与现有网页兼容；系统协议只接收 `keepwork-secondbrain://open` 和 `keepwork-secondbrain://onboarding`（可末尾 `/`），不接收query、fragment、目录、令牌或命令。
+  - 冷启动与已有实例保留有效意图，直到可信主框架准备好；打开失败不确认消费。普通open只唤回窗口，显式onboarding可恢复向导；首次引导成功确认后不在每次普通启动强制重开。旧网页可忽略能力，新网页在旧宿主仍可手动打开向导，均不需要同步更新MCP。系统协议注册和实际浏览器唤起须用最终安装包单独验收。
 - **透明置顶桌面宠物窗口（`pet.html`）**：
   - 跨屏拖动使用原生光标跟踪；切屏时网页暂停动画也能继续移动。macOS 在一次主线程调用中设置目标屏幕的画布位置与尺寸，避免不同屏幕高度导致偏移。超过 4px 才开始拖动，松手提交最终位置；旧轮响应不会移动或结束新一轮。旧宿主缺少原生跟踪标记时仍使用兼容轮询。
   - 右键或 macOS Control 点按宠物显示原生菜单：六档大小（0.5×–4×）、跟随 AIChat/抱抱龙外观、哈奇换宠入口、打开桌面、隐藏宠物和「完全退出…」。菜单不依赖登录或网络；缩放与外观持久保存，完全退出仍需确认气泡授权。打开或取消菜单保留当前草稿和语音状态，不触发左键展开或拖动；菜单显示失败在宠物中提示，可再次右键重试。
@@ -82,6 +88,7 @@ ATVV 只在按住语音键时传输，松手后才识别，不提供会议常开
 | `app/commands.rs` | 文件、终端、菜单、标题栏与主题 IPC |
 | `app/browser_surface.rs` / `browser_surface_macos.m` | 原生网页视图的发送者、URL、边界校验及隔离 WebKit 生命周期 |
 | `app/main_window.rs` | 主文档生命周期、连接恢复、本地源码切换与缩放 |
+| `app/native_startup.rs` | AppKit / Win32 / GTK 原生启动窗口、失败重试与就绪切换 |
 | `app/host_menu.rs` | 原生命令执行、系统菜单、托盘与退出流程 |
 | `app/pet_host.rs` | 宠物窗口、原生拖动跟踪、菜单操作与页面命令编排 |
 | `app/pet_audio_host.rs` | 文档绑定的录音 IPC、私有音频投递、采集停止与超时监控 |
@@ -98,9 +105,9 @@ ATVV 只在按住语音键时传输，松手后才识别，不提供会议常开
 
 ### 断网与页面连接恢复
 
-正常的 Tauri / WebView2 路径启动时先显示客户端自带的本地连接页，再由原生宿主使用同一 WebView 导航到原先配置的聊天入口。每次尝试最多等待 20 秒；如果页面未在期限内满足下述就绪条件，会返回本地提示页，分别显示页面连接失败原因和本机 MCP 服务状态。导航调用立即失败时也会返回提示页；等待期间 WebView 仍可能暂时显示系统错误文档或空白，当前流程不保证始终显示本地连接页。提示页只显示入口的 origin，不显示查询参数或片段。
+正常的 Tauri / WebView2 路径启动时显示系统原生启动窗口（macOS AppKit、Windows Win32、Linux GTK），主 WebView 使用原有配置档在后台打开已配置的聊天入口。每次尝试最多等待 20 秒；只有受信任主文档满足下述就绪条件后，才一次性切换到工作台，不把本地连接页、系统错误文档或导航空白暴露为启动界面。失败时继续使用原生窗口提示，并提供「重试」和「稍后」。后台启动不显示启动窗口；用户关闭或选择稍后后，迟到的就绪事件不会重新弹出主窗口，再次主动唤起时根据当前状态显示原生启动窗口或已就绪的工作台。
 
-在提示页点击「立即重试」、按 `CmdOrCtrl+R` 或使用菜单「重新加载」，都会重试原入口。失败后依次等待 5、15、30 秒自动重试，最多 3 次；提示页收到 `online` 事件时可提前触发下一次自动重试，并计入同一次数上限。达到上限后保留手动重试，手动重试会重新开始自动重试计数。重复触发不会并行加载，旧尝试的超时不会覆盖已成功打开的页面。恢复流程不会自动切换线上与本地源码入口，也不会更换本地服务端口。
+在原生窗口点击「重试」、按 `CmdOrCtrl+R` 或使用菜单「重新加载」，都会重试原入口。隐藏的本地连接页保留恢复调度：失败后依次等待 5、15、30 秒自动重试，最多 3 次；收到 `online` 事件时可提前触发下一次自动重试，并计入同一次数上限。达到上限后保留手动重试，手动重试会重新开始自动重试计数。重复触发不会并行加载，旧尝试的超时或就绪回执不会覆盖新尝试或已成功打开的页面。恢复流程不会自动切换线上与本地源码入口，也不会更换本地服务端口；诊断信息仅使用入口 origin，不显示查询参数或片段。
 
 已经正常打开的聊天页不会因断网或恢复联网被桌面端自动刷新；恢复流程不会重发聊天消息或其他操作。云端模型、登录、同步和远端资源仍需要网络。本机已有的 MCP、文件及终端能力独立于外网连接，但页面打不开时，其网页操作入口也可能不可用；本地网页入口需要事先准备和配置。
 
@@ -120,7 +127,7 @@ Rust 开发启动与 Node 一样，每次在 `src-tauri/target/dev-mcp-runtime/r
 
 如显式设置 `AICHAT_MCP_BUNDLED_DIR`（优先）或 `AICHAT_MCP_RUNTIME_DIR`，启动器会校验指定运行时与所选引擎一致；默认 Rust 入口不能借此静默加载 Node。目录设置只在下一次启动读取，不会动态切换运行中的 MCP。
 
-Rust MCP 0.2.18 提供原生 ACP（含 WorkBuddy/CodeBuddy）与 Codex 文字会话，以及审批、停止、状态流、AIChat 网页上下文工具桥和页面重连后的工具桥恢复；0.2.16 及更早的 listener 仍缺少原生 CLI 能力，须核验实际 `/health`，不能以桌面版本或源码升版推断已升级。Rust 尚未覆盖 Claude/Antigravity 原生执行、图片轮次、原生历史导入、Copilot 编辑器自定义模型，以及离线云端/Git 文件操作；这些动作在边界明确提示不可用，不自动切换引擎或 provider。背景文件操作只支持明确授权的本机空间，远程文件仍需原网页在线。完整范围见 [Rust MCP 说明](../mcp-rust/README.md#native-cli-sessions)。
+Rust MCP 当前提供原生 ACP（含 WorkBuddy/CodeBuddy）、Codex、Claude 与 Antigravity 会话，以及审批、停止、状态流、AIChat 网页上下文工具桥和页面重连后的工具桥恢复。Codex/Claude 与明确握手支持图片的 ACP 可使用图片轮次；Antigravity 仍为文字。Codex 原生历史导入已实现，其他 provider 的原生历史目录导入、账户切换、Copilot 编辑器自定义模型和离线云端/Git 文件操作仍未提供。背景文件操作只支持明确授权的本机空间，远程文件仍需原网页在线。可选能力缺失时局部说明不可用，不自动切换引擎或 provider；须核验实际 `/health`，不能以桌面版本或源码升版推断共享服务已更新。完整范围见 [能力矩阵](../../docs/rust-capability-matrix.md) 与 [Rust MCP 说明](../mcp-rust/README.md#native-cli-sessions)。
 
 开发页面固定使用 `http://127.0.0.1:1430`。重复启动会先检查开发服务的身份协议和真实项目目录，只复用同一 checkout 的服务。另一个项目、没有身份端点的旧 Vite 服务、无法确认身份的监听者会产生明确的端口占用错误；请在拥有该服务的终端中处理后重试。启动器不结束未知进程，也不自动换端口。关闭复用者不会关闭先前终端拥有的 Vite 服务；关闭原服务的终端后，需要重新启动开发服务。
 
@@ -143,7 +150,7 @@ Windows 发布工作流支持仓库 Secrets `WINDOWS_CERT_PFX_BASE64`（含代�
 pnpm typecheck
 pnpm build
 
-# Rust 单元测试与 5 个冒烟测试二进制
+# Rust 单元测试与冒烟测试（5 套核心测试及 macOS 原生启动场景）
 cargo test --manifest-path src-tauri/Cargo.toml --features dev-bins
 pnpm smoke
 
@@ -153,6 +160,10 @@ pnpm check
 # 自带 Rust MCP 运行时（从仓库根目录执行）
 node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
 ```
+
+`pnpm smoke` 保留原有 5 套 Rust 核心冒烟测试，并在 macOS 执行真实 Tauri / OS 原生窗口与 WKWebView 的隔离启动场景。该场景仅在 `dev-bins` 下编译，使用仅监听 Loopback 随机端口的私有 HTTP 服务、临时配置档与存储，不连接真实 `8089`，不启动运行时 supervisor、托盘、语音或账号流程。覆盖 pending → ready 时原生启动窗口与主窗口的显隐切换、后台启动、关闭或按 `Esc` 后迟到的就绪事件，以及 20 秒超时后通过原生重试恢复工作台。
+
+`pnpm check` 运行完整检查；上述隔离冒烟用于验证源码中的启动流程，不代表已安装发布包、真实账号或 Windows 实机验收。
 
 Rust binary 的 `--build-info` 返回编译时 `version`、`commit`、`target`、`sourceHash` 和 `capabilities`，不受宿主运行时身份环境变量覆写。捆绑脚本先验证所有目标的二进制身份、当前源码指纹及必需能力，再写资源；`--no-build` 也会拒绝旧版、同版过期或缺少能力的产物，不能用新 manifest 版本包装旧 binary。打包成功后仍须核验实际 `127.0.0.1:8089/health` 的运行身份与能力，并检查 `/agents/backends`；本地产物通过不代表运行中的共享服务已经更新，也不代表真实 CLI 生成验收通过。
 

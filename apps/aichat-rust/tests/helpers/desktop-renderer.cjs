@@ -173,6 +173,7 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
   window.postMessage = message => messages.push(message);
   const context = {
     window, document, Element, HTMLElement: Element, URL, URLSearchParams,
+    crypto: config.crypto,
     exports: {}, require: () => ({ invoke, mountDesktopMenus: context.mountDesktopMenus, mountDesktopTheme: context.mountDesktopTheme }),
     MutationObserver: class {
       constructor(callback) { this.callback = callback; this.targets = []; observers.push(this); }
@@ -189,6 +190,7 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
     matchMedia: window.matchMedia,
   };
   const bootstrap = { platform, iconDataUrl: "", menus: config.menus || [{ id: "file", label: "文件" }, { id: "edit", label: "编辑" }, { id: "view", label: "视图" }, { id: "help", label: "帮助" }], hostCommands: [], pageCommands: [] };
+  if (config.entryUrl) bootstrap.entryUrl = config.entryUrl;
   if (implementation === "typescript") {
     vm.runInNewContext(menuSource, context);
     vm.runInNewContext(themeSource, context);
@@ -199,7 +201,8 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
       .replace("{bootstrap}", JSON.stringify(bootstrap)).replace("{menu_chrome}", menuSource)
       .replace("{chrome_theme}", themeSource).replace("{page_theme}", pageThemeSource)
       .replace("{local_mcp_fetch}", localMcpSource);
-    vm.runInNewContext(javascript, context);
+    const launchJavascript = javascript.replace("{launch_capability}", JSON.stringify(config.launchCapability ?? "fixture-launch-token"));
+    vm.runInNewContext(launchJavascript, context);
   }
   const initialCalls = [...calls];
   calls.length = 0; // Theme synchronization is unrelated to window gestures.

@@ -89,9 +89,9 @@ test('the mcp_status tool output matches Node line for line', async () => {
   assert.equal(lines[12], 'Tools: run_terminal, grep_files, mcp_status, web_search, fetch_url');
 });
 
-test('the mcp_status schema is byte-identical to the Node daemon', async () => {
+test('the mcp_status schema is byte-identical to the Node daemon', async t => {
   const node = await h.startNode();
-  if (!node) return;
+  if (!node) return t.skip(h.nodeReferenceSkipReason);
   try {
     const rustInit = await h.mcpInitialize(rust.base);
     const nodeInit = await h.mcpInitialize(node.base);

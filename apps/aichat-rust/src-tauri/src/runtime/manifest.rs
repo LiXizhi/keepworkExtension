@@ -51,6 +51,9 @@ impl RuntimeManifest {
 pub struct RuntimeUpdateManifest {
     pub schema_version: u32,
     pub product: String,
+    /// Absent in the legacy Node feed. Rust updates require an explicit engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
     pub platform: String,
     pub arch: String,
     pub version: String,
@@ -66,6 +69,7 @@ pub struct RuntimeUpdateManifest {
 #[serde(rename_all = "camelCase")]
 pub struct ActiveRuntimeRecord {
     pub current: Option<String>,
+    pub previous: Option<String>,
     pub pending: Option<String>,
     pub failed: Option<String>,
     pub notified: Option<String>,
@@ -78,6 +82,7 @@ pub struct ActiveRuntimeRecord {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatusSnapshot {
     pub id: String,
+    pub engine: String,
     pub port: u16,
     pub state: String,
     pub owner: String,
@@ -98,6 +103,7 @@ impl RuntimeStatusSnapshot {
     pub fn initial(id: &str, port: u16) -> Self {
         Self {
             id: id.to_string(),
+            engine: String::new(),
             port,
             state: "stopped".to_string(),
             owner: String::new(),
@@ -228,7 +234,9 @@ pub fn validate_update_manifest(
     expected_platform: &str,
     expected_arch: &str,
 ) -> Result<(), String> {
-    if manifest.schema_version != 1 {
+    let rust = expected_product == "keepwork-mcp-runtime";
+    let schema = if rust { 2 } else { 1 };
+    if manifest.schema_version != schema {
         return Err(format!(
             "Unsupported update manifest schemaVersion: {}",
             manifest.schema_version
@@ -236,6 +244,15 @@ pub fn validate_update_manifest(
     }
     if manifest.product != expected_product {
         return Err(format!("Unexpected update product: {}", manifest.product));
+    }
+    if (rust && manifest.engine.as_deref() != Some("rust"))
+        || (!rust
+            && manifest
+                .engine
+                .as_deref()
+                .is_some_and(|engine| engine != "node"))
+    {
+        return Err("Update engine does not match the selected runtime".to_string());
     }
     if manifest.platform != expected_platform || manifest.arch != expected_arch {
         return Err(format!(
@@ -255,8 +272,95 @@ pub fn validate_update_manifest(
     if manifest.size == 0 || manifest.size > 500 * 1024 * 1024 {
         return Err(format!("Invalid update archive size: {}", manifest.size));
     }
-    if !manifest.url.starts_with("https://") && !manifest.url.starts_with("http://127.0.0.1:") {
-        return Err(format!("Untrusted update URL: {}", manifest.url));
+    validate_update_url(&manifest.url)?;
+    Ok(())
+}
+
+pub fn validate_update_url(raw: &str) -> Result<(), String> {
+    let url = url::Url::parse(raw).map_err(|_| "Invalid update URL")?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err("Update URL must not contain credentials or a fragment".into());
+    }
+    if url.scheme() != "https" && !(url.scheme() == "http" && url.host_str() == Some("127.0.0.1")) {
+        return Err("Update URL requires HTTPS or an explicit loopback fixture".into());
+    }
+    Ok(())
+}
+
+/// Check the archive itself, including its native binary identity, before making
+/// it eligible for activation. A valid outer digest alone cannot select an engine.
+pub fn validate_staged_runtime(
+    dir: &Path,
+    feed: &RuntimeUpdateManifest,
+) -> Result<RuntimeManifest, String> {
+    let runtime = validate_runtime_dir(dir, &feed.product)?;
+    if runtime.version != feed.version
+        || runtime.commit != feed.commit
+        || runtime.platform != feed.platform
+        || runtime.arch != feed.arch
+        || runtime.is_rust() != (feed.product == "keepwork-mcp-runtime")
+    {
+        return Err("Archive runtime identity does not match the update manifest".into());
+    }
+    if runtime.is_rust() {
+        validate_native_runtime_identity(dir, &runtime)?;
+    }
+    Ok(runtime)
+}
+
+pub(super) fn validate_native_runtime_identity(
+    dir: &Path,
+    runtime: &RuntimeManifest,
+) -> Result<(), String> {
+    let raw: serde_json::Value = serde_json::from_slice(
+        &fs::read(dir.join("runtime.json")).map_err(|_| "Missing runtime manifest")?,
+    )
+    .map_err(|_| "Invalid runtime manifest")?;
+    let entry = if runtime.platform == "windows" {
+        "bin/keepwork-mcp.exe"
+    } else {
+        "bin/keepwork-mcp"
+    };
+    if raw["schemaVersion"] != 2 || runtime.engine != "rust" || runtime.entry != entry {
+        return Err("Rust updates require a v2 native runtime manifest".into());
+    }
+    let bytes = fs::read(dir.join(entry)).map_err(|_| "Could not read staged binary")?;
+    let start_marker = b"{\"marker\":\"keepwork-mcp-build-v1\",";
+    let end_marker = b"\"endMarker\":\"keepwork-mcp-build-end\"}";
+    let start = bytes
+        .windows(start_marker.len())
+        .position(|part| part == start_marker)
+        .ok_or("Staged Rust binary has no compiled identity")?;
+    let end = bytes[start..]
+        .windows(end_marker.len())
+        .position(|part| part == end_marker)
+        .map(|offset| start + offset + end_marker.len())
+        .ok_or("Invalid compiled identity")?;
+    if end - start > 16_384 {
+        return Err("Compiled identity is too large".into());
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&bytes[start..end]).map_err(|_| "Invalid compiled identity")?;
+    let target = match (runtime.platform.as_str(), runtime.arch.as_str()) {
+        ("macos", "arm64") => "aarch64-apple-darwin",
+        ("macos", "x64") => "x86_64-apple-darwin",
+        ("windows", "arm64") => "aarch64-pc-windows-msvc",
+        ("windows", "x64") => "x86_64-pc-windows-msvc",
+        ("linux", "arm64") => "aarch64-unknown-linux-gnu",
+        ("linux", "x64") => "x86_64-unknown-linux-gnu",
+        _ => return Err("Unsupported Rust update target".into()),
+    };
+    if info["product"] != runtime.product
+        || info["engine"] != "rust"
+        || info["version"] != runtime.version
+        || info["commit"] != runtime.commit
+        || info["target"] != target
+        || !info["sourceHash"]
+            .as_str()
+            .is_some_and(|hash| is_valid_hex(hash, 64))
+        || (raw.get("sourceHash").is_some() && raw["sourceHash"] != info["sourceHash"])
+    {
+        return Err("Staged Rust binary identity does not match runtime.json".into());
     }
     Ok(())
 }

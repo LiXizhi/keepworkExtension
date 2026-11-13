@@ -24,7 +24,7 @@ async function completeWithServices(services, options) {
             options.onMessage?.(reply.content || '', { choices: [{ message: { content: reply.content || '' } }] });
             for (const call of reply.toolCalls || [])
                 options.onToolCallChunk?.(call);
-            return { choices: [{ message: { content: reply.content || '', tool_calls: reply.toolCalls } }] };
+            return { ...(0, completion_cjs_1.completionMetadata)(reply), choices: [{ message: { content: reply.content || '', tool_calls: reply.toolCalls } }] };
         },
         execute: async (call, args) => {
             const tool = registered.get(call.function.name);

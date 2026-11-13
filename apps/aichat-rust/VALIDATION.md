@@ -1,5 +1,66 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-13：自动更新的运行时所有权与冒烟修复（0.2.91）
+
+按 AGENTS 三角色流程继续处理下方 `0.2.86` 完整检查失败，不把原有失败记录改成通过。兼容的 VS Code / Local Helper 服务即使早于本机捆绑版本，也保持原 PID 和所有权；桌面仅附加并显示实际观测到的运行版本、引擎、commit 和构建时间，缺失字段保持未知。桌面与 MCP 的更新检查继续独立，外部服务不被自动更新、重启或退出流程误杀。
+
+替换桌面自有旧服务前复验 PID、owner、引擎、版本及 commit；身份变化、服务已升级或元数据变为未知时保留实际服务，不沿用第一次探测作停止决定。停止后仍有监听者时明确提示未启动替换服务。HTTP 健康失败不能证明端口空闲：首次启动和失败回滚的通用启动入口都要求 TCP 明确拒绝连接，端口仍占用或状态无法确认时保留监听者并报告冲突，不启动第二个候选。
+
+端口守卫拒绝与候选实际启动失败分别处理；候选从未尝试，或竞争监听者使验证结果不确定时，保留 pending/current，不把包误标失败或伪报激活成功。只有候选经实际存活子进程、PID 与健康身份核验后才提升 current；确认失败且端口空闲时继续回退已验证版本。不会自动重放结果未知的工具调用或用户任务。
+
+本轮回归使用临时配置档、随机回环端口、可控健康响应及测试自建子进程，覆盖外部 owner、复验期间身份变化、停止后监听仍在、HTTP 非成功或无效响应、候选与回滚受竞争监听阻断、pending 保留及正常启动/激活。五项桌面冒烟覆盖 desktop、runtime、PTY、pet 和 updates；更新冒烟仅下载并准备合成安装包，不启动安装器。额外真实 AppKit / WKWebView 冒烟验证原生启动窗口、前后台就绪、关闭 / Esc 后迟到就绪不弹窗，以及实际 20 秒失败后重试。
+
+继续修复过程中保留两类失败：原生冒烟的测试专用 NSApp 子类导致 Tao `sendEvent` 递归并栈溢出，改为仅替换测试进程的 activation selector；隔离网页入口的就绪回执同时绑定实际 source / entry，旧二进制结果不代替重新构建后的整套验证。`0.2.90` 完整检查还暴露 source server 文件服务 / 路径遍历夹具的端口探测后释放竞态。`0.2.91` 由该夹具直接绑定 `127.0.0.1:0`，将原 listener 交给私有 `serve_listener`，不释放后重绑；生产路径仍经过 `source_identity`、`bind_source_origin` 和注册表，来源稳定、范围耗尽、端口冲突及路径隔离规则保持原样。
+
+最终通过数与完整检查结果待 `0.2.91` 重新构建及执行结束后补充，不以早前版本或旧二进制结果替代。本轮未操作共享 8089、真实账号或硬件，未发布 CDN 或替换用户安装，不据此宣称 Windows / macOS 真实安装升级已验收。四处桌面版本保持同步 **0.2.91**。
+
+## 2026-11-13：AGENTS 三角色复核与冒烟修复
+
+完整检查曾实际触发 `primary_button_is_up_without_a_held_click`：该旧用例直接读取真人鼠标状态，却未控制“左键已松开”的前提。首轮失败及执行期间源码漂移保留在 `.test-runtime/rust-agents-final/desktop/`。经产品/QA确认，常规CI改为两项可控macOS/Windows掩码解析回归，并复用现有拖动/释放状态机；真实系统采样断言保留为显式ignored，须在解锁桌面且主键松开时单独执行。OS调用、fallback与生产拖动策略不变，不以重跑碰巧通过代替稳定修复；后续完整检查使用新的 `desktop-r2` 证据目录。
+
+并行任务持续写入版本和构建输入后，最终验证移到字节核对一致的隔离源码副本及独立编译缓存。隔离检查又复现浏览器超时夹具的空PID文件竞态：旧shell可能在重定向建文件后、写入PID前被正确超时终止。现将原等待循环拆为接收自有Child的helper，生产spawn/期限/kill/wait行为不变；测试直接以Child.id验证同一进程的超时、退出和已回收状态，无额外等待、重试或忽略。失败记录与修前源码保留，后续新源码指纹的完整检查及桌面/原生启动smoke回执见 `desktop-snapshot-r2`。
+
+产品 Agent 与 QA 重新确认兼容契约后，程序员 Agent 修复启动选择与身份显示：同一引擎启动按已验证 current/bundled 的最高版本选择，不自动采用较旧或同版不同 commit 的 pending；显式 Node 不被历史 Rust cache 选回。附加服务的缺失版本、commit、构建时间和引擎保持未知，重连不继承上一实例身份。已验证 Node 候选的旧健康响应可省略 engine，但仅限本次存活 Child、匹配 PID 和正确服务身份；Rust v2 不放宽其明确引擎合同。
+
+本轮先保留定向复现失败，再修复并执行完整 `pnpm --prefix apps/aichat-rust check`、五组桌面 smoke，以及 MCP 的单元/契约/构建、双引擎 wire、已提取 v2 包的真实二进制 smoke。MCP 冒烟脚本本身增加逐次 POST 的身份/所有权验证和有界清理回归。最终命令、计数、跳过及源码指纹以 `.test-runtime/rust-agents-final/` 与本轮 MCP 回执为准，旧版本通过记录不代替本轮。
+
+共享 TypeScript/布局/固定 vendor 与已提交 canonical 快照分别核验。相邻 AIChat 四个模块仍有未提交修改，默认 auto/canonical 检查保留该差异，未自动提交或同步外部进行中的工作；`check:shared` 不据此标成全绿。Windows 干净机、真实平台协议注册、账号和硬件不从本机夹具结果推定通过；未触碰共享 8089 或发布清单。
+
+## 2026-11-13：恢复桌面自动更新发布契约
+
+根因是 Rust 发布器仅上传版本化安装包并写入 GitHub 下载链接，没有刷新客户端仍订阅的 `aichat-desktop/<target>/latest-client.json`；旧清单的顶层 ZIP 也不能由 Rust 的 EXE / DMG 安装路径直接使用。保留启动后 15 秒及每 6 小时检查，桌面与 MCP 改为并行检查，桌面包下载并通过完整性校验后通知，安装仍须用户确认。
+
+发布契约：先上传并校验全部版本化安装包，再更新 Windows x64 / ARM64 与 macOS arm64 / x64 四个清单并验证 CDN 结果。已有清单顶层 legacy ZIP 字段全部保留，追加独立版本与发布日期的 `installer`；没有旧清单时顶层描述原生安装包。拒绝清单倒退或同版本不同安装包，不修改 Launcher 的签名 `stable.json`。新版 Rust 优先读取 `installer`，旧格式原生安装包保持可用；坏清单或下载失败保留缓存与实际错误，不能把不支持的 ZIP 宣称为可安装。旧 Rust 不识别 `installer`，须先手动安装本修复版才能接回后续自动更新，不宣称旧客户端可自动自救。
+
+验收覆盖：四平台清单、legacy 字段保留、版本与包身份防回退、发布顺序及各阶段失败阻断；客户端新旧清单、无更新、包大小 / 摘要失败、离线缓存，以及 MCP 检查阻塞时桌面仍完成检查。自动化使用本地清单与随机回环服务；结果以本轮实际测试回执为准。本段不表示已发布 CDN、已替换用户应用，或已完成 Windows / macOS 真实安装升级。
+
+本轮 `0.2.86` 实际验证：
+
+- `pnpm --prefix apps/aichat-rust typecheck` 与 `pnpm --prefix apps/aichat-rust build` 通过。
+- `cargo test --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins updates::tests --lib`：6 项通过，覆盖原生 / 历史 / 独立版本清单、ZIP 不支持、坏清单、下载失败缓存身份及 MCP 响应延迟时桌面仍下载完成。
+- `cargo run --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins --bin updates-smoke`：通过；仅准备隔离测试包，不启动真实安装。
+- `node --test apps/aichat-rust/tests/*.test.cjs`：424 项通过、5 项跳过；发布与更新定向 68 项全部通过。`node --test scripts/rust-validation-workflows.test.cjs`：4 项通过。
+- 完整 `pnpm --prefix apps/aichat-rust check` 未全通过：最新运行的 Rust 测试 202 项通过、1 项忽略，`runtime::update_tests::older_vscode_and_local_helper_peers_keep_ownership_even_when_a_newer_bundle_exists` 失败（预期 attached，实际 error）。该失败位于工作区原有运行时改动，本次未修改其实现；不可据此宣称完整应用检查通过。
+
+## 2026-11-13：Rust 产品优化、兼容检查与证据留存
+
+本轮增加可选 Bridge v1 `launchIntents`：严格系统协议、单实例转发、可信主文档私密能力票、pending/ack 和首次引导标记。Rust MCP 使用独立 `mcp-stable-rs` v2 feed；Node v1 保留。下载只暂存，应用更新及后续宿主启动沿用激活流程，候选健康通过后才提交 current；普通重启保留 previous，失败优先回退上一个已验证运行时。缺失/过期候选、较新实时服务、外部 owner 及 Local Model 无 PID 的旧健康接口分别有隔离回归；ZIP 提供条目和展开大小上限。
+
+PR 校验加入 Windows/macOS 原生回归、强制 Node/Rust 对照、真实二进制 target 的本地 v2 产物与失败日志。`rust-validation-evidence.cjs run/collect/verify` 保存源码指纹、命令、日志摘要与未执行 gate；源码变化和日志被改写会拒绝复用回执。最终执行结果保存在仓库 `.test-runtime/rust-optimization-final/`，按产品独立收集。完整执行入口与证据层级见 [Rust 发布验收清单](../../docs/acceptance/rust-desktop-release.md)。
+
+本机验证命令：
+
+```sh
+pnpm --prefix apps/aichat-rust check
+pnpm --prefix apps/aichat-rust smoke
+node --test scripts/rust-validation-workflows.test.cjs scripts/rust-validation-evidence.test.cjs
+node scripts/sync-aichat-runtime.cjs --check --mode packaged
+node scripts/build-node-reference.cjs
+KEEPWORK_MCP_REQUIRE_NODE_REFERENCE=1 node --test scripts/contract/*.test.cjs
+```
+
+所有本轮自动化使用隔离 profile、测试子进程或随机回环端口，不操作共享 8089、真实渠道或用户账号。不把 macOS 夹具扩展成 Windows 干净机、系统协议实际注册、官网唤起、真实模型首问、遥控器或麦克风验收。相邻 AIChat 的 canonical `text_tool_calls.mjs` 与已打包副本不同；显式 packaged 检查及对照构建不会修改 vendor，canonical 检查继续报告真实差异。未上传或提升任何 CDN 清单。
+
 ## 2026-11-13：macOS 发布页连接本机 MCP 与分身（0.2.82）
 
 用户提供的同页对比中，Chrome 能显示三个分身，已安装桌面 `0.2.78` 没有显示；本机内置 Rust MCP `0.2.44` 健康并声明 `personasApi`，但没有 AIChat presence。隔离实测确认：macOS 15.7.9 的 WKWebView 在 HTTPS 页面访问 HTTP loopback 时，在请求抵达服务器前失败。同一自有 HTML 改为 HTTP 来源即可访问；精确 ATS 例外及 WebContent ATS 例外均不能解决。没有采用关闭 WebKit 安全检查或迁移分身 owner 的方案。
