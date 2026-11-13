@@ -2,7 +2,9 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const workflow = name => fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
+const workflow = name => fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8').replace(/\r\n?/g, '\n');
 
 test('PRs validate both Rust products without entering installer or publication jobs', () => {
   const desktop = workflow('aichat-rust.yml');
@@ -65,3 +67,33 @@ test('root full validation includes both Rust products and exposes explicit pack
   assert.match(reference, /KEEPWORK_AICHAT_RUNTIME_MODE: 'packaged'/);
   assert.match(reference, /shell: false/);
 });
+
+if (!process.env.KEEPWORK_WORKFLOW_EOL_FIXTURE) {
+  test('workflow contracts pass with both LF and Windows CRLF checkouts', async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-workflow-eol-'));
+    try {
+      const preload = path.join(directory, 'checkout.cjs');
+      fs.writeFileSync(preload, String.raw`
+        const fs = require('node:fs');
+        const read = fs.readFileSync;
+        fs.readFileSync = function(file, ...args) {
+          const source = read.call(this, file, ...args);
+          if (typeof source !== 'string' || !/[\\/]\.github[\\/]workflows[\\/].*\.yml$/.test(String(file))) return source;
+          return source.replace(/\r?\n/g, process.env.KEEPWORK_WORKFLOW_EOL_FIXTURE === 'CRLF' ? '\r\n' : '\n');
+        };
+      `);
+      for (const eol of ['LF', 'CRLF']) {
+        await t.test(eol, () => {
+          const result = spawnSync(process.execPath, ['--require', preload, '--test', __filename], {
+            encoding: 'utf8', timeout: 30000,
+            env: { ...process.env, KEEPWORK_WORKFLOW_EOL_FIXTURE: eol },
+          });
+          assert.ifError(result.error);
+          assert.equal(result.status, 0, result.stdout + result.stderr);
+        });
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}

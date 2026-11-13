@@ -646,7 +646,7 @@ async fn explicit_apply_can_activate_an_equal_version_repack_after_native_health
         } else {
             "bin/keepwork-mcp"
         };
-        fs::hard_link(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
+        fs::copy(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
         fs::write(directory.join("runtime.json"), json!({
             "product":RUST_MCP_PRODUCT, "engine":"rust", "platform":mcp_feed_platform(),
             "arch":current_runtime_arch(), "version":"0.4.0", "commit":commit, "entry":entry,
@@ -1080,7 +1080,7 @@ async fn takeover_boundary_candidate_failure_preserves_foreign_listener_and_pend
         let directory = root.join("store").join(name);
         fs::create_dir_all(directory.join("bin")).unwrap();
         let entry = if cfg!(windows) { "bin/keepwork-mcp.exe" } else { "bin/keepwork-mcp" };
-        fs::hard_link(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
+        fs::copy(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
         let mut env = json!({
             "KP_UPDATE_FIXTURE_PORT":port.to_string(), "KP_UPDATE_FIXTURE_VERSION":version,
             "KP_UPDATE_FIXTURE_START_SIGNAL":signal.to_string_lossy()
@@ -1166,9 +1166,9 @@ async fn failed_activation_rolls_back_to_last_verified_runtime() {
         } else {
             "bin/keepwork-mcp"
         };
-        // A hard link to our own test executable keeps this fixture cross-platform
-        // and never calls a shared daemon or requires a cloud account.
-        fs::hard_link(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
+        // CI may put the executable and temp directory on different volumes.
+        // Copy our own test executable without touching a shared daemon.
+        fs::copy(std::env::current_exe().unwrap(), directory.join(entry)).unwrap();
         let mut env =
             json!({"KP_UPDATE_FIXTURE_PORT":port.to_string(),"KP_UPDATE_FIXTURE_VERSION":version});
         if fail {
@@ -1264,7 +1264,7 @@ async fn local_model_legacy_health_without_pid_still_starts() {
     } else {
         "bin/fixture"
     };
-    fs::hard_link(std::env::current_exe().unwrap(), bundle.join(entry)).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), bundle.join(entry)).unwrap();
     // A native test child serves the actual legacy local-model response shape;
     // no real local-model process or model download is required by this fixture.
     fs::write(bundle.join("runtime.json"), json!({"product":"keepwork-local-model-node-runtime", "engine":"rust",

@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.102"
+version = "0.2.105"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
@@ -83,6 +83,9 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 btleplug = "=0.13.5"

@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aichat-rust"
-version = "0.2.102"
+version = "0.2.105"
 dependencies = [
  "base64 0.22.1",
  "btleplug",

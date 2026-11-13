@@ -2,7 +2,7 @@ use aichat_rust_lib::{files::NativeFiles, terminal::TerminalSessionManager};
 use serde_json::json;
 use std::fs;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 fn main() {
@@ -11,6 +11,14 @@ fn main() {
 
     let files = NativeFiles::new(root.join("grants.json"));
     let manager = TerminalSessionManager::new(root.join("workspaces"));
+    struct Cleanup<'a>(&'a TerminalSessionManager, &'a std::path::Path);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            self.0.close_all();
+            let _ = fs::remove_dir_all(self.1);
+        }
+    }
+    let _cleanup = Cleanup(&manager, &root);
 
     let created = manager
         .handle(
@@ -23,6 +31,12 @@ fn main() {
     let session_id = created["id"].as_str().unwrap().to_string();
     assert!(session_id.starts_with("desktop:"));
 
+    // The marker must be produced by execution, never matched in PTY echo.
+    let command = if cfg!(windows) {
+        "Write-Output ('AICHAT_RUST_PTY_' + 'SMOKE_PASS')\r\n"
+    } else {
+        "printf 'AICHAT_RUST_PTY_%s\\n' SMOKE_PASS\n"
+    };
     manager
         .handle(
             "desktop:main",
@@ -37,13 +51,14 @@ fn main() {
             "desktop:main",
             &files,
             "write",
-            &json!({ "id": session_id, "data": "echo AICHAT_RUST_PTY_SMOKE_PASS\n" }),
+            &json!({ "id": session_id, "data": command }),
         )
         .unwrap();
 
     let mut output_acc = String::new();
     let mut cursor = 0usize;
-    for _ in 0..40 {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let last_chunk = loop {
         let chunk = manager
             .handle(
                 "desktop:main",
@@ -54,14 +69,17 @@ fn main() {
             .unwrap();
         cursor = chunk["cursor"].as_u64().unwrap() as usize;
         output_acc.push_str(chunk["output"].as_str().unwrap_or(""));
-        if output_acc.contains("AICHAT_RUST_PTY_SMOKE_PASS") {
-            break;
+        if output_acc.contains("AICHAT_RUST_PTY_SMOKE_PASS")
+            || chunk["closed"] == true
+            || Instant::now() >= deadline
+        {
+            break chunk;
         }
         thread::sleep(Duration::from_millis(50));
-    }
+    };
     assert!(
         output_acc.contains("AICHAT_RUST_PTY_SMOKE_PASS"),
-        "PTY smoke did not receive expected marker: {output_acc}"
+        "PTY smoke did not receive executed command marker; last chunk: {last_chunk}; output: {output_acc}"
     );
 
     manager
@@ -81,6 +99,5 @@ fn main() {
         )
         .unwrap();
 
-    let _ = fs::remove_dir_all(&root);
     println!("pty-smoke: OK");
 }

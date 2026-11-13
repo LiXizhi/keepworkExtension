@@ -15,6 +15,43 @@ fn restart_supervisor(root: &Path, port: u16) -> RuntimeSupervisor {
     })
 }
 
+#[tokio::test(start_paused = true)]
+async fn vacancy_probe_waits_for_delayed_refusal_and_keeps_unknown_ports_blocked() {
+    let supervisor = restart_supervisor(Path::new("unused-port-fixture"), 0);
+    let result = supervisor
+        .require_vacant_port_with(async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+        })
+        .await;
+    assert!(
+        result.is_ok(),
+        "delayed refusal still proves the port is vacant"
+    );
+
+    let timeout = supervisor
+        .require_vacant_port_with(std::future::pending())
+        .await
+        .unwrap_err();
+    assert!(
+        timeout.contains("超时"),
+        "an unknown port must never permit spawn: {timeout}"
+    );
+    let occupied = supervisor
+        .require_vacant_port_with(async { Ok(()) })
+        .await
+        .unwrap_err();
+    assert!(occupied.contains("仍有服务监听"));
+    let reset = supervisor
+        .require_vacant_port_with(async {
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+        })
+        .await
+        .unwrap_err();
+    assert!(reset.contains("无法确认端口"));
+    assert!(supervisor.child.lock().unwrap().is_none());
+}
+
 #[test]
 fn restart_reclaims_orphan_desktop_process_and_preserves_foreign_owners() {
     const CHILD_ENV: &str = "AICHAT_TEST_RESTART_HEALTH_CHILD";
@@ -556,7 +593,7 @@ fn rust_mcp_start_waits_one_minute_and_stops_after_five_attempts() {
     assert!(rust_start_retry_suffix(5).contains("停止自动重试"));
 
     let root = std::env::temp_dir().join(format!("aichat-rust-mcp-retry-{}", Uuid::new_v4()));
-    // A port that was just released refuses the health probe immediately.
+    // Use a released ephemeral port without depending on the shared daemon.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);

@@ -500,12 +500,22 @@ impl RuntimeSupervisor {
     }
 
     async fn require_vacant_port(&self) -> Result<(), String> {
-        match tokio::time::timeout(
-            Duration::from_millis(1200),
-            tokio::net::TcpStream::connect(("127.0.0.1", self.config.port)),
-        )
+        self.require_vacant_port_with(async {
+            tokio::net::TcpStream::connect(("127.0.0.1", self.config.port))
+                .await
+                .map(|_| ())
+        })
         .await
-        {
+    }
+
+    async fn require_vacant_port_with(
+        &self,
+        connection: impl std::future::Future<Output = std::io::Result<()>>,
+    ) -> Result<(), String> {
+        // Windows can take longer than the HTTP health timeout to reject a
+        // connection to a vacant loopback port. Wait for the OS result; a
+        // timeout still leaves occupancy unknown and must never permit spawn.
+        match tokio::time::timeout(Duration::from_secs(5), connection).await {
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => Ok(()),
             Ok(Ok(_)) => Err(format!(
                 "端口 {} 仍有服务监听，健康状态无法确认，未启动替换服务",
