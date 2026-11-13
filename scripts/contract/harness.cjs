@@ -58,6 +58,13 @@ function isolatedHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kp-contract-'));
 }
 
+// Published Node agent sessions persist real paths as lowercase identities on
+// Windows. Keep raw inputs in fixtures and compare the exact canonical output.
+function canonicalAgentRoot(root) {
+  const real = fs.realpathSync(root);
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
+
 async function waitForHealth(port, timeoutMs = 10_000, signal) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -259,6 +266,7 @@ module.exports = {
   nodeReferenceSkipReason,
   freePort,
   isolatedHome,
+  canonicalAgentRoot,
   waitForHealth,
   startRust,
   startNode,

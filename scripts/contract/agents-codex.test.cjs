@@ -129,7 +129,7 @@ test('Codex native attachment is read-only, shared across aliases and isolated b
   assert.equal(first.body.threadId, 'native-fixture-one');
   assert.equal(first.body.native, true);
   assert.equal(first.body.mode, 'ask');
-  assert.deepEqual(first.body.roots, [root]);
+  assert.deepEqual(first.body.roots, [h.canonicalAgentRoot(root)]);
   assert.equal(first.body.items.find((item) => item.type === 'userMessage')?.content[0].text, 'Original native CLI question');
   assert.equal(first.body.items.find((item) => item.type === 'agentMessage')?.text, 'Original native CLI answer');
   assert.deepEqual(first.body.pending, []);
