@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const Module=require('node:module');
 const ts=require('typescript');
-function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./personaSales'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./agentJobs','./agentJobProtocol'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
@@ -350,11 +350,11 @@ test('sales: only one worker starts and an interrupted round never replays after
     let scans=0;
     global.fetch=async(url,options)=>{
         assert.equal(options.headers.Authorization,'Bearer '+token);
-        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['marketing-campaigns:read','marketing-tasks:read','sales-reports:read','sales-reports:write']}}});
-        const {args}=JSON.parse(options.body);
-        if(args.path==='/marketing-campaigns/campaign')return Response.json({ok:true,result:campaign});
-        assert.equal(args.path,'/marketing-tasks');assert.equal(args.query.availability,'sales-due');scans++;
-        return Response.json({ok:true,result:{rows:[{id:'task',campaign_id:'campaign',status:'待认领',version:1}]}});
+        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['agent-jobs:read','agent-jobs:write','agent-jobs:role:SDR']}}});
+        const {command,args}=JSON.parse(options.body);
+        if(command==='agent_job_capabilities')return Response.json({ok:true,result:{protocol:'keepwork.agent-job.v1',roles:[{id:'SDR'}]}});
+        assert.equal(command,'next_job');assert.equal(args.role,'SDR');scans++;
+        return Response.json({ok:true,result:{job:{id:'task',kind:'first_touch',role:'SDR',status:'queued',version:1}}});
     };
     t.after(()=>{global.fetch=previousFetch;});
     const sale=await f.service.sales('owner','first',{action:'start',url:'http://localhost',token,credentialId:'credential',
