@@ -1,9 +1,8 @@
 import {randomUUID} from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
-const JOB_ROLES = ['线索研究员','SDR','客服','客户成功','运营','销售助理','运营分析'] as const;
-type JobRecord = {id:string; kind?:string; role?:string; status?:string; version?:number; subject_module?:string; subject_id?:string; payload_json?:string; payload?:Record<string,unknown>; [key:string]:unknown};
+import {AGENT_JOB_PROTOCOL,validAgentJobRole} from './agentJobProtocol';
+import type {AgentJobCapabilities,AgentJobRecord} from './agentJobProtocol';
 
 export type SalesState = {
     url:string; token:string; crmPersonaId:string; credentialId:string; expiresAt:string;
@@ -31,7 +30,7 @@ export function salesConfiguration(input:any, previous?:SalesState):SalesState {
     for (const key of ['crmPersonaId','credentialId'])
         if (typeof input[key]!=='string' || !/^[\w-]{1,160}$/.test(input[key])) throw Error('CRM 记录标识无效');
     const role=String(input.role||previous?.role||'SDR');
-    if (!(JOB_ROLES as readonly string[]).includes(role)) throw Error('销售分身角色无效');
+    if (!validAgentJobRole(role)) throw Error('销售分身角色无效');
     if (input.campaignId!==undefined && (typeof input.campaignId!=='string' || !/^[\w-]{1,160}$/.test(input.campaignId))) throw Error('CRM 活动标识无效');
     const objective=typeof input.objective==='string'?input.objective.trim():'';
     if (!objective || objective.length>4000) throw Error('销售目标需要 1–4000 字');
@@ -86,13 +85,17 @@ export async function verifySalesConnection(s:SalesState) {
     if (me.user?.agent?.id!==s.crmPersonaId) throw Error('CRM 分身身份不匹配');
     for (const grant of ['agent-jobs:read','agent-jobs:write'])
         if (!me.user.agent.permissions.includes(grant)) throw Error('销售分身缺少授权：'+grant);
+    const capabilities=await salesCommand(s,'agent_job_capabilities',{}) as AgentJobCapabilities;
+    if (capabilities.protocol && capabilities.protocol!==AGENT_JOB_PROTOCOL) throw Error('CRM 作业协议版本不兼容');
+    const role=s.role||'SDR';
+    if (Array.isArray(capabilities.roles) && !capabilities.roles.some(item=>item?.id===role)) throw Error('CRM 未授予此作业角色：'+role);
 }
 
 export const salesTools = [
-    ['crm_request','读取当前 CRM 作业或作业关联的客户、线索和咨询。只能读取本轮领取的作业范围。',{method:{type:'string',enum:['GET']},path:{type:'string'}}],
-    ['sales_report','完成当前 CRM 作业并报告已核对的结果。对外消息需要同时提供正文和审批内容，CRM 会创建消息和审批记录。',{content:{type:'string'},evidence:{type:'array',items:{type:'string'}},body:{type:'string'},channel:{type:'string'},customerId:{type:'string'},leadId:{type:'string'}}],
-    ['sales_learn','保存一条有证据的本地复盘，供后续作业参考；不会改变 CRM 权限或作业状态。',{observation:{type:'string'},nextAction:{type:'string'},evidence:{type:'array',items:{type:'string'}}}],
-    ['sales_ask_human','把当前作业交给人工。若需要审核对外消息，提供 body；CRM 会创建待审批消息，否则作业标记为结果未知。',{question:{type:'string'},recommendation:{type:'string'},evidence:{type:'array',items:{type:'string'}},body:{type:'string'},channel:{type:'string'},customerId:{type:'string'},leadId:{type:'string'}}],
+    ['job_read','读取本轮作业或作业关联记录。只能读取服务端能力目录授予的作业范围。',{method:{type:'string',enum:['GET']},path:{type:'string'}}],
+    ['job_result','提交当前作业的真实结果。对外消息同时提供正文和证据，由 CRM 创建消息和审批记录。',{content:{type:'string'},result:{type:'object'},evidence:{type:'array',items:{type:'string'}},body:{type:'string'},channel:{type:'string'},customerId:{type:'string'},leadId:{type:'string'}}],
+    ['job_learn','保存一条有证据的本地复盘；不会改变 CRM 权限或作业状态。',{observation:{type:'string'},nextAction:{type:'string'},evidence:{type:'array',items:{type:'string'}}}],
+    ['job_human','把当前作业交给人工。若需要审核对外消息，提供 body；CRM 会创建待审批消息，否则作业标记为结果未知。',{question:{type:'string'},recommendation:{type:'string'},evidence:{type:'array',items:{type:'string'}},body:{type:'string'},channel:{type:'string'},customerId:{type:'string'},leadId:{type:'string'}}],
 ].map(([name,description,properties])=>({type:'function',function:{name,description,parameters:{type:'object',properties}}}));
 
 export function salesSkillContext(root:string,prompt:string){
@@ -112,9 +115,9 @@ export function salesSkillContext(root:string,prompt:string){
     return blocks.join('\n');
 }
 
-export const salesInstructions = '你是一名持续工作的 CRM 作业执行分身。先读取本轮领取的作业和关联记录，按作业目标处理，最后必须用 sales_report 或 sales_ask_human 提交真实回执。'
+export const salesInstructions = '你是一名持续工作的 CRM 作业执行分身。先读取本轮领取的作业和关联记录，按作业目标处理，最后必须提交真实作业回执。'
     +'作业外的客户、线索、消息和权限不可读取；不要猜测记录编号、发送状态或审批结果。需要对外消息时只提交正文和依据，由 CRM 创建消息并进入审批或自动策略。'
-    +'sales_learn 只能保存有证据的复盘，不能替代作业完成。遇到403、版本冲突、超时或结果未知先停止并报告，不能换标识重做。没有待办时结束本轮。';
+    +'本地复盘只能保存有证据的内容，不能替代作业完成。遇到403、版本冲突、超时或结果未知先停止并报告，不能换标识重做。没有待办时结束本轮。';
 
 export class SalesCycle {
     evidence:Set<string>;
@@ -124,7 +127,7 @@ export class SalesCycle {
     asked=false;
     readonly job:string;
     readonly task:string;
-    constructor(readonly state:SalesState, readonly jobRecord:JobRecord,
+    constructor(readonly state:SalesState, readonly jobRecord:AgentJobRecord,
         private save:()=>void, private notify:(text:string,id:string)=>void) {
         this.job=String(jobRecord.id);
         this.task=this.job;
@@ -144,30 +147,31 @@ export class SalesCycle {
     private check(signal:AbortSignal) { if(signal.aborted || !this.state.enabled || Date.parse(this.state.expiresAt)<=Date.now())throw Error('销售工作已停止或授权已过期'); }
     async tool(name:string,a:any,signal:AbortSignal) {
         const s=this.state;this.check(signal);
-        if(name==='crm_request'){
+        if(name==='job_read'||name==='crm_request'){
             if(a?.method!=='GET'||typeof a.path!=='string'||!(a.path==='/agent-jobs/'+this.job||this.subjectPath(a.path)))throw Error('本轮只允许读取当前作业及其关联记录');
             const result=await salesRequest(s,{method:'GET',path:a.path},signal);this.evidence.add(a.path);return result;
         }
         const evidence:string[]=Array.isArray(a?.evidence)?[...new Set<string>(a.evidence)]:[];
         if(!evidence.length||evidence.length>12||evidence.some(e=>!this.evidence.has(e)))throw Error('请引用本轮已核对的 CRM 路径');
         const field=(key:string)=>{if(typeof a?.[key]!=='string'||!a[key].trim()||a[key].length>2400)throw Error('需要简明的'+key);return a[key].trim();};
-        if(name==='sales_learn'){
+        if(name==='job_learn'||name==='sales_learn'){
             const observation=field('observation'),nextAction=field('nextAction');
             const reportId='learning-'+randomUUID();s.learning=[...s.learning,{observation,nextAction,evidence,reportId}].slice(-12);this.save();this.notify('已保存复盘：'+observation,reportId);return {id:reportId,status:'已保存'};
         }
-        if(name!=='sales_report'&&name!=='sales_ask_human')throw Error('本轮未提供该工具');
-        const question=name==='sales_ask_human'?field('question'):'';
-        const content=name==='sales_report'?field('content'):question+'\n建议：'+field('recommendation');
+        if(!['job_result','job_human','sales_report','sales_ask_human'].includes(name))throw Error('本轮未提供该工具');
+        const human=name==='job_human'||name==='sales_ask_human';
+        const question=human?field('question'):'';
+        const content=human?question+'\n建议：'+field('recommendation'):field('content');
         const body=typeof a?.body==='string'?a.body.trim():'';
         if(body.length>4000)throw Error('对外消息正文不能超过4000字');
         const payload=this.payload();
         const customerId=String(a?.customerId||payload.customer_id||'');
         const leadId=String(a?.leadId||payload.lead_id||'');
-        const approval=body?{kind:'outbound_message',conclusion:name==='sales_report'?'作业对外消息':'人工审核对外消息',reason:question||'作业结果需要人工确认',content:{body,text:body,channel:String(a?.channel||payload.channel||'simulated'),customer_id:customerId||undefined,lead_id:leadId||undefined},evidence}:undefined;
-        const result={summary:content,evidence,job_kind:this.jobRecord.kind||null,learning:s.learning.slice(-3)};
-        const receipt=await salesCommand(s,'finish_job',{id:this.job,result, ...(approval?{approval}:{unknown:!approval&&name==='sales_ask_human'})},signal);
+        const approval=body?{kind:'outbound_message',conclusion:human?'人工审核对外消息':'作业对外消息',reason:question||'作业结果需要人工确认',content:{body,text:body,channel:String(a?.channel||payload.channel||'simulated'),customer_id:customerId||undefined,lead_id:leadId||undefined},evidence}:undefined;
+        const result={summary:content,details:a?.result&&typeof a.result==='object'&&!Array.isArray(a.result)?a.result:undefined,evidence,job_kind:this.jobRecord.kind||null,learning:s.learning.slice(-3)};
+        const receipt=await salesCommand(s,'finish_job',{id:this.job,result, ...(approval?{approval}:{unknown:!approval&&human})},signal);
         if(!receipt?.recordId&&!receipt?.record?.id)throw Error('CRM 未返回作业完成回执');
-        this.finishedJob=true;this.reported=true;this.asked=name==='sales_ask_human';this.outcome=content;
+        this.finishedJob=true;this.reported=true;this.asked=human;this.outcome=content;
         const id=String(receipt.approvalId||receipt.recordId||this.job);s.lastReport={id,content,evidence};
         s.status=receipt.pendingApproval?'待 CRM 审批':receipt.status==='人工待办'?'人工待处理':(this.asked?'人工待处理':'待巡查');
         this.save();this.notify((receipt.pendingApproval?'已提交 CRM 审批：':'已完成 CRM 作业：')+content,id);return receipt;
