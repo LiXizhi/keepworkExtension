@@ -25,7 +25,8 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 - **自我更新与自动更新（Self-Update / Auto-Update）**：
   - 版本号、字段语义、七牛 CDN 路径与发布顺序统一见 [CDN 版本与更新清单规范](../../docs/update-manifests.md)。
   - **Keepwork MCP Runtime 更新（`:8089`）**：默认随客户端携带 Rust MCP，使用独立 `https://cdn.keepwork.com/keepwork/mcp-stable-rs/<platform>-<arch>.json` v2 feed；显式 Node 兼容构建沿用 `mcp-stable/<platform>-<arch>.json` v1。两条线路分别校验引擎/产品/目标、大小/SHA-256/40位源码commit及包内身份；Rust额外核对嵌入binary编译身份。下载只暂存，不打断正在运行的服务；用户点击「更新 MCP」可显式激活，下一次宿主启动且需要启动本地服务时，也可采用同引擎、严格新于已验证current/bundled基线的pending，保留原Node启动行为。同版本不同commit的候选只能显式应用，不随普通启动替换。激活前核对实际服务PID/owner，新候选健康和身份确认后才提升current；失败回退已验证可用版本并保留用户数据。缺少运行中peer版本、commit或引擎字段时显示未知，不借本地捆绑版本填充。不通过Node feed覆盖Rust，也不自动重发未知任务。源码与本地清单验证不表示Rust CDN已发布或真实安装升级已验收。
-  - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 Rust 专用 `https://cdn.keepwork.com/keepwork/aichat-rust/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），与 MCP 独立并行检查。仅有 `win32-x64`（EXE）、`win32-arm64`（EXE）、`darwin-universal`（DMG）三个目标；Intel 与 Apple Silicon Mac 使用同一 Universal 清单。后台下载并校验大小与 SHA-256，持久化 `update-metadata.json`，下载就绪后通知；离线保留同一 feed URL 的上次检查缓存并标记 `stale: true`。切换地址或旧缓存没有来源时，不恢复旧渠道的可安装候选；新地址缺失时明确报告检查失败，不自动回退到 Electron / Launcher 渠道。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
+  - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 Rust 专用 `https://cdn.keepwork.com/keepwork/aichat-rust/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），与 MCP 独立并行检查。仅有 `win32-x64`（EXE）、`win32-arm64`（EXE）、`darwin-universal`（DMG）三个目标；Intel 与 Apple Silicon Mac 使用同一 Universal 清单。后台下载并校验大小与 SHA-256，持久化 `update-metadata.json`，下载就绪后通知；离线保留同一 feed URL 的上次检查缓存并标记 `stale: true`。切换地址或旧缓存没有来源时，不恢复旧渠道的可安装候选；新地址缺失时明确报告检查失败，不自动回退到 Electron / Launcher 渠道。已校验的更新会在用户选择「完全退出」时自动覆盖安装，安装完成后保持退出；关闭主窗口进入桌面宠物不触发安装。也可在独立「检查更新」窗口（`updates.html`）点击「重启并更新」，确认后自动替换并重新打开应用，无需操作安装向导或拖动 DMG 中的应用。下载完成本身不会打断聊天、终端或通话。
+  - **覆盖安装边界**：Windows 使用当前用户 NSIS 安装包更新当前安装目录；macOS 从已校验 DMG 准备新应用，再替换当前可写的已安装 `.app`。从只读磁盘映像、系统 App Translocation 或开发目录运行时不自动覆盖，请先安装到可写位置。覆盖只处理应用程序文件，保留用户配置、聊天数据和工作区；MCP 独立更新入口及外部宿主所有权检查保持有效。准备或替换失败会报告错误并保留可恢复内容，不把安装器启动当作升级成功；下一次实际启动的新程序版本才是已安装版本。应用替换失败恢复不等同于新版本启动后的完整健康回滚。
   - **发布与旧客户端兼容**：Rust 发布器在三个版本化安装包全部通过 CDN 字节校验后，仅更新 Rust 专用的三个清单，不改写历史 `aichat-desktop` 四个清单。新清单沿用 `schemaVersion: 1` / `product: aichat-desktop` 字段合同，macOS 使用 `arch: universal`；顶层原生包描述与 `installer` 指向同一包，客户端优先读取 `installer.version`。禁止清单版本倒退或同版本替换安装包。**旧 Rust 客户端仍读取旧地址，需要手动安装使用 Rust 专用地址的新版，或显式配置受支持的 feed 地址，才能迁入新渠道；新发布器不自动迁移旧指针。** 已安装 CEF / 外层 Launcher 继续使用独立签名渠道。清单发布与实际安装升级须分别验收，源码修改不代表三个新地址已在线上发布。
 - **自带的 Rust Keepwork MCP Server（`apps/mcp-rust`）**：
   - `aichat-rust` 默认运行 `apps/mcp-rust`，由 `scripts/bundle-mcp-rust.cjs` 构建原生守护进程并写入 `src-tauri/resources/mcp-runtime/<arch>/{runtime.json,bin/keepwork-mcp}`（Windows 为 `.exe`）。清单 v2 使用 `product: keepwork-mcp-runtime` 与 `engine: rust`；宿主直接执行原生入口。
@@ -144,11 +145,11 @@ AIChat 本地源码服务通过 `AICHAT_DESKTOP_LOCAL_SOURCE=1` 或「使用本�
 
 修改启动配置不会停止当前运行的服务；新选择在下次桌面进程启动时生效。默认运行时选择决定本次桌面启动使用的候选，不能证明已存在的共享 MCP 已切换。外部 VS Code / Local Helper 的服务仍受所有权与接管规则保护；验收必须检查实际 `127.0.0.1:8089/health` 的引擎与目标能力，不能仅检查打包目录。需要切换已有服务时，先确认所有者和活跃任务，再按实际启动方式受控重启；不能自动重放未确认结果的任务。
 
-### Windows 签名与交互安装
+### Windows 签名与自动安装
 
 Windows 发布工作流支持仓库 Secrets `WINDOWS_CERT_PFX_BASE64`（含代码签名私钥的 PFX，Base64 编码）和 `WINDOWS_CERT_PASSWORD`。配置后先对 Rust MCP 签名，再生成资源清单；Tauri 对桌面程序和 NSIS 安装包签名，最后验证安装包及解包后的程序签名和证书指纹。未配置证书时工作流明确告警，生成的仍是未签名测试包。证书须支持 CI 签名；依赖硬件或云签名服务的证书需要对应签名提供程序。
 
-安装器通过本版本程序的 `--stop-mcp <安装目录>` 模式停止该目录内的 MCP：原生 Windows API 核对可执行文件路径、保留同一进程句柄并等待退出，失败则中止安装，不按进程名全局结束服务，也不运行 PowerShell 脚本。新安装的登录自启动默认关闭，已有开关偏好保留。用户确认桌面更新后，通过 Windows Shell 打开可见安装向导，不传静默安装参数；更新包须位于下载目录且通过已有 SHA-256 校验。MCP ZIP 更新在 Rust 内解压，支持 Zip64 和 data descriptor。
+安装器通过本版本程序的 `--stop-mcp <安装目录>` 模式停止该目录内的 MCP：原生 Windows API 核对可执行文件路径、保留同一进程句柄并等待退出，失败则中止安装，不按进程名全局结束服务，也不运行 PowerShell 脚本。新安装的登录自启动默认关闭，已有开关偏好保留。新版本在后台下载并校验后，于完全退出时静默覆盖原安装目录；点击“重启并更新”则在覆盖后重新打开应用。安装器先核对原进程身份并等待退出，不强制结束桌面进程。更新包须位于下载目录且通过大小和 SHA-256 校验。开发版、便携版和兼容 Launcher 不走此原生覆盖路径。MCP ZIP 更新在 Rust 内解压，支持 Zip64 和 data descriptor。
 
 这些措施不能保证杀毒软件不误报。确有误报时应保留告警名称、被隔离文件路径和 SHA-256，向对应厂商提交样本复核；提交样本会向厂商上传二进制，应由发布负责人执行。现有 GrokX 的历史检测不能证明 Keepwork 的具体触发原因。
 

@@ -16,7 +16,8 @@ test('Windows install and uninstall stop the desktop supervisor before cleaning 
   for (const name of ['NSIS_HOOK_PREINSTALL', 'NSIS_HOOK_PREUNINSTALL']) {
     const body = source.match(new RegExp(`!macro ${name}\\b([\\s\\S]*?)!macroend`));
     assert.ok(body, `${name} must be defined`);
-    assert.match(body[1], /!insertmacro CheckIfAppIsRunning "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"\s+!insertmacro KEEPWORK_STOP_BUNDLED_MCP/);
+    assert.match(body[1], /!insertmacro CheckIfAppIsRunning "\$INSTDIR\\Keepwork\.exe" "\$\{PRODUCTNAME\}"\s+!insertmacro CheckIfAppIsRunning "\$INSTDIR\\aichat-rust\.exe" "\$\{PRODUCTNAME\}"\s+!insertmacro KEEPWORK_STOP_BUNDLED_MCP/,
+      `${name} must reject both native executable names before stopping any bundled service`);
   }
   assert.match(source, /--stop-mcp "\$INSTDIR"/);
   assert.doesNotMatch(source, /powershell|taskkill|ExecutionPolicy/i);

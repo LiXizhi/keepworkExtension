@@ -57,3 +57,14 @@ if (process.platform === "darwin") nativeArgs.push(`--executable=${executables.g
 execFileSync(process.execPath, nativeArgs, {
   cwd: appRoot, stdio: 'inherit', timeout: 100000, killSignal: 'SIGKILL',
 });
+
+// Exercise actual DMG mounting, bundle replacement and LaunchServices restart
+// against isolated temporary applications, never the installed user app.
+if (process.platform === "darwin") {
+  execFileSync("cargo", ["test", "--offline", "--manifest-path", manifestPath,
+    "--features", "dev-bins", "--lib",
+    "updates::macos_install::tests::native_dmg_overwrite_and_restart_smoke",
+    "--", "--ignored", "--test-threads=1"], {
+    cwd: appRoot, stdio: "inherit", timeout: 600000, killSignal: "SIGKILL",
+  });
+}

@@ -40,7 +40,14 @@ function collectRelease(directory, { target, version, commit }) {
   try {
     const binary = path.join(temporary, 'binary');
     fs.writeFileSync(binary, members.get(binaryName));
-    validateBinary(binary, { triple: TRIPLES[target] }, metadata);
+    const info = validateBinary(binary, { triple: TRIPLES[target] }, metadata);
+    if (info.builtAt !== undefined) {
+      for (const key of ['builtAt', 'builtAtSource']) {
+        if (runtime[key] !== info[key] || metadata[key] !== info[key]) {
+          throw Error('Rust compiled build timestamp mismatch: ' + key);
+        }
+      }
+    }
   } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
   return { metadata, archive, target, feedUrl: `${BASE}/${target}.json` };
 }

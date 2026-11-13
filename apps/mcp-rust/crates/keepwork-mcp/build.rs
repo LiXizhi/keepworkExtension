@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[path = "src/build_timestamp.rs"]
+mod build_timestamp;
 
 fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).expect("read Rust sources") {
@@ -14,6 +16,19 @@ fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Compilation clock precedes Unix epoch")
+        .as_secs();
+    let source_date_epoch = match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("Invalid SOURCE_DATE_EPOCH: {error}"),
+    };
+    let (built_at_unix, built_at_source) =
+        build_timestamp::select_timestamp(source_date_epoch.as_deref(), now)
+            .expect("Invalid build timestamp");
     // Cargo can reuse this executable after a checkout/cache has moved. Resolve
     // inputs from the current invocation rather than its compilation directory.
     let crate_dir =
@@ -89,9 +104,9 @@ fn main() {
         println!("cargo:rustc-env=KEEPWORK_MCP_BUILD_COMMIT={commit}");
     }
     let document = format!(
-        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\",\"agentImageTurnApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
+        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",\"builtAtUnix\":{},\"builtAtSource\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\",\"agentImageTurnApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
         std::env::var("CARGO_PKG_VERSION").unwrap(), commit.unwrap_or_default(),
-        std::env::var("TARGET").unwrap(), source_hash
+        std::env::var("TARGET").unwrap(), source_hash, built_at_unix, built_at_source
     );
     std::fs::write(
         Path::new(&std::env::var("OUT_DIR").unwrap()).join("build-info.json"),

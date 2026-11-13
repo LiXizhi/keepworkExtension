@@ -59,6 +59,9 @@ pub(super) async fn desktop_install_update(
     verify_main_sender(&window, &state)?;
     if install_desktop_from_ui(&app, &state)? == DesktopInstallOutcome::Launched {
         state.quitting.store(true, Ordering::Relaxed);
+        state.terminals.close_all();
+        state.mcp_supervisor.stop();
+        state.local_model_supervisor.stop();
         app.exit(0);
         return Ok(json!({ "ok": true, "restarting": true }));
     }
@@ -76,10 +79,10 @@ fn install_desktop_from_ui(
         || {
             broadcast_update_status(app, core);
             app.dialog()
-                .message("退出并更新桌面应用？应用将关闭并打开新版本安装向导。")
+                .message("重启并更新桌面应用？应用将退出，自动替换为已下载的新版本并重新打开。")
                 .title("更新桌面应用")
                 .buttons(MessageDialogButtons::OkCancelCustom(
-                    "退出并更新".into(),
+                    "重启并更新".into(),
                     "取消".into(),
                 ))
                 .blocking_show()
@@ -145,6 +148,9 @@ pub(super) async fn updates_window_apply_desktop(
     verify_updates_sender(&window, &state)?;
     if install_desktop_from_ui(&app, &state)? == DesktopInstallOutcome::Launched {
         state.quitting.store(true, Ordering::Relaxed);
+        state.terminals.close_all();
+        state.mcp_supervisor.stop();
+        state.local_model_supervisor.stop();
         app.exit(0);
     }
     Ok(state.updates.snapshot(&state.mcp_supervisor.snapshot()))

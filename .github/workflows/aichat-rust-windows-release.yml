@@ -159,6 +159,12 @@ jobs:
           if ($runtime.Count -ne 1) { throw 'Expected one daemon executable' }
           node apps/mcp-rust/scripts/smoke.cjs $runtime[0].FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test x64 automatic overwrite in an isolated installation
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/aichat-rust/package.json | ConvertFrom-Json).version
+          ./apps/aichat-rust/scripts/windows-self-update-smoke.ps1 -Installer "apps/aichat-rust/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/Keepwork_${version}_${{ matrix.arch }}-setup.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: aichat-rust-windows-${{ matrix.arch }}-rust
@@ -199,11 +205,15 @@ jobs:
         run: node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
       - name: Build macOS universal app and DMG
         working-directory: apps/aichat-rust
+        env:
+          # Seal the bundle for updater integrity checks; not Developer ID notarization.
+          APPLE_SIGNING_IDENTITY: '-'
         run: pnpm tauri build --ci --target universal-apple-darwin --bundles app,dmg
       - name: Verify the universal binary and its bundled runtime
         working-directory: apps/aichat-rust
         run: |
           APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app"
+          codesign --verify --deep --strict "$APP"
           ARCHS=$(lipo -archs "$APP/Contents/MacOS/Keepwork")
           echo "Detected architectures: $ARCHS"
           echo "$ARCHS" | grep -q "x86_64"

@@ -41,6 +41,8 @@ test('Rust v2 deliverable has matching archive, native identity and independent 
   const files = entries(zip); assert.deepEqual([...files.keys()].sort(), ['LICENSE', 'bin/keepwork-mcp', 'runtime.json']);
   assert.deepEqual(files.get('bin/keepwork-mcp'), data);
   const runtime = JSON.parse(files.get('runtime.json'));
+  assert.equal(runtime.builtAt, undefined);
+  assert.equal(result.manifest.builtAt, undefined);
   for (const key of ['schemaVersion', 'product', 'engine', 'version', 'commit', 'sourceHash', 'platform', 'arch']) assert.equal(runtime[key], result.manifest[key]);
   assert.equal(runtime.entry, 'bin/keepwork-mcp');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, 'macos-arm64.json'))), result.manifest);
@@ -50,4 +52,31 @@ test('Rust v2 deliverable has matching archive, native identity and independent 
   }
   assert.throws(() => packageRuntime({ binary, output, target: 'other', expected: info }), /Unsupported/);
   assert.throws(() => packageRuntime({ binary, output, target: info.target, expected: { ...info, sourceHash: 'c'.repeat(64) } }), /stale/);
+});
+
+test('compiled build timestamp survives repackaging and file mtime changes', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-rust-build-time-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const info = { marker: 'keepwork-mcp-build-v1', product: 'keepwork-mcp-runtime', engine: 'rust',
+    version: '0.3.0', commit: 'a'.repeat(40), sourceHash: 'b'.repeat(64), target: 'aarch64-apple-darwin',
+    builtAtUnix: 1700000000, builtAtSource: 'source-date-epoch',
+    capabilities: { agentSessionApi: 'v1', agentInventoryApi: 'v1', agentContextApi: 'v1', agentModeApi: 'v1' }, endMarker: 'keepwork-mcp-build-end' };
+  const binary = path.join(root, 'daemon');
+  fs.writeFileSync(binary, Buffer.from('binary\0' + JSON.stringify(info)));
+  for (const [index, mtime] of [0, 2000000000].entries()) {
+    fs.utimesSync(binary, mtime, mtime);
+    const result = packageRuntime({ binary, output: path.join(root, `release-${index}`), target: info.target, expected: info });
+    const runtime = JSON.parse(entries(fs.readFileSync(result.archive)).get('runtime.json'));
+    for (const value of [result.manifest, runtime]) {
+      assert.equal(value.builtAt, '2023-11-14T22:13:20Z');
+      assert.equal(value.builtAtSource, 'source-date-epoch');
+    }
+  }
+  const identity = require('../../../scripts/lib/rust-runtime-identity.cjs');
+  assert.equal(identity.buildTimestamp({}), undefined);
+  assert.equal(identity.buildTimestamp({ builtAtUnix: 0, builtAtSource: 'compile-clock' }), '1970-01-01T00:00:00Z');
+  for (const invalid of [-1, 1.5, '1700000000', null, Number.MAX_SAFE_INTEGER, 253402300800]) {
+    assert.throws(() => identity.buildTimestamp({ builtAtUnix: invalid, builtAtSource: 'compile-clock' }), /Invalid compiled/);
+  }
+  assert.throws(() => identity.buildTimestamp({ builtAtUnix: 1700000000, builtAtSource: 'file-mtime' }), /timestamp source/);
 });

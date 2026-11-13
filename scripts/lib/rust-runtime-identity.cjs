@@ -25,13 +25,30 @@ function sourceFingerprint(root) {
   return hash.digest('hex');
 }
 
+function buildTimestamp(info) {
+  // Old binaries never embedded a timestamp. Missing is unknown, not the
+  // packaging clock, file mtime, Git commit time or process startup time.
+  if (info.builtAtUnix === undefined) return undefined;
+  if (!Number.isSafeInteger(info.builtAtUnix) || info.builtAtUnix < 0 || info.builtAtUnix > 253402300799) {
+    throw new Error('Invalid compiled Rust build timestamp');
+  }
+  if (!['compile-clock', 'source-date-epoch'].includes(info.builtAtSource)) {
+    throw new Error('Invalid compiled Rust build timestamp source');
+  }
+  return new Date(info.builtAtUnix * 1000).toISOString().replace('.000Z', 'Z');
+}
+
 function readBuildInfo(binary) {
   const content = fs.readFileSync(binary);
   const start = content.indexOf(Buffer.from('{"marker":"keepwork-mcp-build-v1",'));
   const ending = Buffer.from('"endMarker":"keepwork-mcp-build-end"}');
   const end = start < 0 ? -1 : content.indexOf(ending, start);
   if (start < 0 || end < 0 || end - start > 16384) throw new Error('Rust binary has no valid embedded build identity');
-  return JSON.parse(content.subarray(start, end + ending.length).toString('utf8'));
+  const info = JSON.parse(content.subarray(start, end + ending.length).toString('utf8'));
+  const builtAt = buildTimestamp(info);
+  if (builtAt !== undefined) info.builtAt = builtAt;
+  else delete info.builtAt;
+  return info;
 }
 
 function validateBinary(binary, target, expected) {
@@ -50,4 +67,4 @@ function validateBinary(binary, target, expected) {
   }
 }
 
-module.exports = { sourceFingerprint, readBuildInfo, validateBinary };
+module.exports = { sourceFingerprint, readBuildInfo, validateBinary, buildTimestamp };

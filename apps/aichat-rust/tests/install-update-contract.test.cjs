@@ -21,7 +21,7 @@ test('Bridge installUpdate never selects or applies an MCP update in any readine
     'no ready desktop update returns the current snapshot without redirecting to MCP actions');
   for (const name of ['desktop_install_update', 'updates_window_apply_desktop']) {
     const desktop = command(name);
-    assert.match(desktop, /if install_desktop_from_ui\(&app, &state\)\? == DesktopInstallOutcome::Launched\s*\{\s*state\.quitting\.store\(true, Ordering::Relaxed\);\s*app\.exit\(0\)/);
+    assert.match(desktop, /if install_desktop_from_ui\(&app, &state\)\? == DesktopInstallOutcome::Launched\s*\{\s*state\.quitting\.store\(true, Ordering::Relaxed\);[\s\S]*?app\.exit\(0\)/);
   }
   for (const desktopReady of [false, true]) for (const mcpReady of [false, true]) {
     let mcpApplications = 0;
@@ -41,4 +41,18 @@ test('the explicit MCP update entry retains its native confirmation and sender b
   assert.match(mcp, /verify_updates_sender\(&window, &state\)\?/);
   assert.match(mcp, /blocking_show\(\)/);
   assert.match(mcp, /if confirmed\s*\{\s*let _ = state\.mcp_supervisor\.apply_staged_update\(\)\.await\?/);
+});
+
+
+test('automatic replacement is limited to an explicit full quit and preserves close-to-pet', () => {
+  const startup = fs.readFileSync(path.join(app, 'src-tauri/src/app/startup.rs'), 'utf8');
+  assert.match(startup, /ExitRequested \{ code: Some\(0\), api, \.\. \}/);
+  assert.match(startup, /core_for_events\.quitting\.load\(Ordering::Relaxed\)/);
+  assert.match(startup, /core\.updates\.install_on_exit\(\)/);
+  assert.match(startup, /InstanceAction::Replace => \{\s*core_for_lock\.replacing_instance\.store\(true/);
+  assert.match(startup, /&& !core_for_events\.replacing_instance\.load\(Ordering::Relaxed\)/);
+  const main = fs.readFileSync(path.join(app, 'src-tauri/src/app/main_window.rs'), 'utf8');
+  assert.doesNotMatch(main, /install_on_exit|launch_desktop_installer/);
+  assert.match(source, /重启并更新/);
+  assert.doesNotMatch(source, /打开新版本安装向导/);
 });

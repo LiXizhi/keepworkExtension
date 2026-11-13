@@ -61,6 +61,8 @@ pub struct AppCore {
     pub zoom: Mutex<f64>,
     pub signed_in: AtomicBool,
     pub quitting: AtomicBool,
+    /// Instance takeover exits must not also replace the application bundle.
+    pub replacing_instance: AtomicBool,
     pub channels: Mutex<Vec<ChannelStatus>>,
     pub lock: Mutex<Option<DesktopLock>>,
     pub page_connection: Mutex<PageConnection>,

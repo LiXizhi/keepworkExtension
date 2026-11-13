@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Keepwork independent update manifests",
   "description": "Publication contract. Existing desktop ZIP fields and unknown additive fields are preserved. A desktop installer has an independent version. builtAt is omitted when unknown; publishedAt is the first actual publication time.",
-  "oneOf": [{ "$ref": "#/$defs/desktop" }, { "$ref": "#/$defs/rust" }],
+  "oneOf": [{ "$ref": "#/$defs/desktop" }, { "$ref": "#/$defs/desktopVersionStatus" }, { "$ref": "#/$defs/rust" }],
   "$defs": {
     "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
     "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$" },
@@ -15,19 +15,75 @@
         "url": { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+/[^?#]+$" },
         "size": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "publishedAt": { "$ref": "#/$defs/timestamp" },
-        "builtAt": { "$ref": "#/$defs/timestamp" }
+        "publishedAt": { "$ref": "#/$defs/timestamp" }
       }
     },
+    "preciseBuildTime": {
+      "type": "object",
+      "properties": {
+        "builtAt": { "$ref": "#/$defs/timestamp" },
+        "builtAtSource": { "enum": ["compile-clock", "source-date-epoch"] }
+      },
+      "dependentRequired": { "builtAtSource": ["builtAt"] },
+      "not": { "anyOf": [
+        { "required": ["builtAtPrecision"] }, { "required": ["builtAtTimezone"] }
+      ] }
+    },
+    "runtimeBuildTime": {
+      "type": "object",
+      "if": { "anyOf": [
+        { "required": ["builtAtPrecision"] }, { "required": ["builtAtTimezone"] },
+        { "properties": { "builtAtSource": { "const": "recorded-build-session" } }, "required": ["builtAtSource"] }
+      ] },
+      "then": {
+        "required": ["builtAt", "builtAtPrecision", "builtAtSource", "builtAtTimezone"],
+        "properties": {
+          "builtAt": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$" },
+          "builtAtPrecision": { "const": "day" },
+          "builtAtSource": { "const": "recorded-build-session" },
+          "builtAtTimezone": { "const": "Asia/Shanghai" }
+        }
+      },
+      "else": { "$ref": "#/$defs/preciseBuildTime" }
+    },
     "installer": {
-      "allOf": [{ "$ref": "#/$defs/package" }],
+      "allOf": [{ "$ref": "#/$defs/package" }, { "$ref": "#/$defs/preciseBuildTime" }],
       "type": "object",
       "required": ["format", "publishedAt"],
       "properties": { "format": { "enum": ["exe", "dmg"] } }
     },
+    "desktopVersionStatus": {
+      "type": "object",
+      "description": "Discovery-only source version; no installable artifact. A later fully verified release may replace it without lowering the version.",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "kind", "product", "channel", "platform", "arch", "version", "commit", "publishedAt", "releaseStatus", "installable"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "kind": { "const": "version-status" },
+        "product": { "const": "aichat-desktop" },
+        "channel": { "const": "stable" },
+        "platform": { "enum": ["macos", "windows"] },
+        "arch": { "enum": ["universal", "x64", "arm64"] },
+        "version": { "$ref": "#/$defs/version" },
+        "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "publishedAt": { "$ref": "#/$defs/timestamp" },
+        "releaseStatus": { "const": "version-only" },
+        "installable": { "const": false },
+        "description": { "type": "string", "maxLength": 4096 }
+      },
+      "if": { "properties": { "platform": { "const": "macos" } } },
+      "then": { "properties": { "arch": { "const": "universal" } } },
+      "else": { "properties": { "arch": { "enum": ["x64", "arm64"] } } }
+    },
     "desktop": {
       "allOf": [
+        { "not": { "anyOf": [
+          { "properties": { "kind": { "const": "version-status" } }, "required": ["kind"] },
+          { "properties": { "releaseStatus": { "const": "version-only" } }, "required": ["releaseStatus"] },
+          { "properties": { "installable": { "const": false } }, "required": ["installable"] }
+        ] } },
         { "$ref": "#/$defs/package" },
+        { "$ref": "#/$defs/preciseBuildTime" },
         {
           "if": { "properties": { "arch": { "const": "universal" } }, "required": ["arch"] },
           "then": { "properties": { "platform": { "const": "macos" } } }
@@ -48,7 +104,7 @@
       "else": { "required": ["publishedAt"] }
     },
     "rust": {
-      "allOf": [{ "$ref": "#/$defs/package" }],
+      "allOf": [{ "$ref": "#/$defs/package" }, { "$ref": "#/$defs/runtimeBuildTime" }],
       "type": "object",
       "required": ["schemaVersion", "product", "engine", "platform", "arch", "commit", "sourceHash"],
       "properties": {

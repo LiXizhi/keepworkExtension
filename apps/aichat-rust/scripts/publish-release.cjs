@@ -6,7 +6,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const qiniu = require('../../../scripts/lib/qiniu-release.cjs');
 const { writeCdnSummary } = require('../../../scripts/lib/cdn-summary.cjs');
-const { validateDesktopManifest } = require('../../../scripts/lib/update-manifest.cjs');
+const { validateDesktopManifest, validateDesktopVersionStatus } = require('../../../scripts/lib/update-manifest.cjs');
 
 const START = '<!-- keepwork-cdn-downloads:start -->';
 const END = '<!-- keepwork-cdn-downloads:end -->';
@@ -57,14 +57,22 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
       || (previous.product && previous.product !== 'aichat-desktop'))) {
       throw new Error(`Invalid existing desktop update feed: ${target}`);
     }
-    if (previous) validateDesktopManifest(previous, { target, legacy: true });
+    const versionStatus = previous && (previous.kind === 'version-status'
+      || previous.releaseStatus === 'version-only' || previous.installable === false);
+    if (previous) {
+      if (versionStatus) validateDesktopVersionStatus(previous, { target });
+      else validateDesktopManifest(previous, { target, legacy: true });
+    }
+    // A status record describes a source version, not this new package. Do not
+    // carry its commit, timestamp, description or non-installable markers forward.
+    const inherited = versionStatus ? {} : previous;
     const legacyZip = previous?.format === 'zip' || /\.zip(?:[?#]|$)/i.test(previous?.url || '');
-    const oldInstaller = previous?.installer || (legacyZip ? undefined : previous);
+    const oldInstaller = previous?.installer || (legacyZip || versionStatus ? undefined : previous);
     const oldVersion = oldInstaller?.version || previous?.version;
-    if (oldInstaller && oldVersion) {
+    if ((oldInstaller || versionStatus) && oldVersion) {
       const comparison = compareVersions(oldVersion, version);
       if (comparison > 0) throw new Error(`Refusing desktop update downgrade: ${target}`);
-      if (comparison === 0 && (oldInstaller.url !== pkg.url || oldInstaller.size !== pkg.size
+      if (comparison === 0 && oldInstaller && (oldInstaller.url !== pkg.url || oldInstaller.size !== pkg.size
         || oldInstaller.sha256?.toLowerCase() !== pkg.sha256)) {
         throw new Error(`Same desktop version has a different installer: ${target}`);
       }
@@ -78,9 +86,9 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
     // clients use the additive installer, including its independent version.
     const manifest = legacyZip ? {
       schemaVersion: 1, product: 'aichat-desktop', platform: windows ? 'windows' : 'macos', arch: target.split('-')[1],
-      ...previous, installer,
+      ...inherited, installer,
     } : {
-      ...previous, schemaVersion: 1, product: 'aichat-desktop',
+      ...inherited, schemaVersion: 1, product: 'aichat-desktop',
       platform: windows ? 'windows' : 'macos', arch: target.split('-')[1],
       ...installer, installer,
     };

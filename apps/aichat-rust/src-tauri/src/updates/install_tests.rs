@@ -268,3 +268,30 @@ fn concurrent_desktop_entry_points_share_one_confirmation_and_status_remains_rea
     assert_eq!(outcome.unwrap(), DesktopInstallOutcome::Busy);
     assert_eq!(installations.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn overwrite_rejects_missing_digest_wrong_size_and_a_different_downloaded_file() {
+    for mutation in ["missing-digest", "wrong-size", "substituted-file"] {
+        let f = fixture(true);
+        if mutation == "substituted-file" {
+            let other = f.root.join("downloads/other.dmg");
+            fs::write(&other, b"verified fixture installer").unwrap();
+            assert!(f.manager.launch_desktop_installer(&other).unwrap_err().contains("候选"));
+        } else {
+            {
+                let mut state = f.manager.desktop_state.lock().unwrap();
+                if mutation == "missing-digest" { state.meta.sha256.clear(); }
+                else { state.meta.size += 1; }
+            }
+            assert!(f.manager.install_on_exit().unwrap_err().contains("完整性"));
+            assert!(!f.manager.desktop_install_busy.load(Ordering::Acquire));
+        }
+    }
+}
+
+#[test]
+fn full_quit_without_a_candidate_does_not_launch_an_installer() {
+    let f = fixture(false);
+    assert_eq!(f.manager.install_on_exit().unwrap(), DesktopInstallOutcome::Unavailable);
+    assert!(!f.manager.desktop_install_busy.load(Ordering::Acquire));
+}
