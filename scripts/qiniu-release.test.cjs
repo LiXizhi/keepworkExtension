@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { Readable, Writable } = require('node:stream');
 const test = require('node:test');
-const { createUploadToken, uploadEntry, uploadLargeEntry } = require('./lib/qiniu-release.cjs');
+const { createUploadToken, uploadEntry, uploadLargeEntry, resolveUploadTuning } = require('./lib/qiniu-release.cjs');
 
 function uploadPolicy(token) {
   return JSON.parse(Buffer.from(token.split(':')[2], 'base64url').toString('utf8'));
@@ -289,4 +289,40 @@ test('exhausted part retries drain active uploads before aborting and never star
   assert.equal(calls.filter((call) => call === 'abort').length, 1);
   assert.ok(!calls.includes('complete'));
   assert.ok(!calls.includes('part:5'));
+});
+
+
+test('resolveUploadTuning applies defaults without env overrides', () => {
+  assert.deepEqual(resolveUploadTuning({}), {
+    partSize: 8 * 1024 * 1024,
+    partConcurrency: 4,
+    partTimeoutMs: 120_000,
+  });
+});
+
+test('resolveUploadTuning accepts bounded integer env overrides', () => {
+  assert.deepEqual(resolveUploadTuning({
+    KP_QINIU_PART_SIZE_MB: '16',
+    KP_QINIU_PART_CONCURRENCY: '12',
+    KP_QINIU_PART_TIMEOUT_MS: '180000',
+  }), {
+    partSize: 16 * 1024 * 1024,
+    partConcurrency: 12,
+    partTimeoutMs: 180_000,
+  });
+});
+
+test('resolveUploadTuning rejects invalid or out-of-range env values', () => {
+  for (const env of [
+    { KP_QINIU_PART_SIZE_MB: '1.5' },
+    { KP_QINIU_PART_SIZE_MB: '0' },
+    { KP_QINIU_PART_SIZE_MB: '2049' },
+    { KP_QINIU_PART_CONCURRENCY: '0' },
+    { KP_QINIU_PART_CONCURRENCY: '33' },
+    { KP_QINIU_PART_CONCURRENCY: 'many' },
+    { KP_QINIU_PART_TIMEOUT_MS: '5000' },
+    { KP_QINIU_PART_TIMEOUT_MS: '600001' },
+  ]) {
+    assert.throws(() => resolveUploadTuning(env), /KP_QINIU_PART_/);
+  }
 });

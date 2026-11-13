@@ -69,13 +69,33 @@ test('wire contract CI builds and requires Node reference and retains failed com
   assert.match(source, /readBuildInfo\(process\.argv\[1\]\)\.target/);
   assert.match(source, /package-runtime\.cjs --target "\$runtime_target"/);
   assert.match(source, /archives=\(\.test-runtime\/mcp-rust\/package\/\*\.zip\)/);
-  assert.doesNotMatch(source, /matrix\.target|matrix\.runtime/, 'native artifact identity cannot be guessed from a moving runner label');
+  assert.match(source, /test "\$runtime_target" = "\$runtime_triple"/,
+    'every requested architecture must match the actual embedded binary identity');
+  assert.match(source, /--report-name "report-\$runtime_target\.json"/,
+    'the two Mac archives must not share one ambiguous acceptance report');
   for (const name of ['mcp-rust.yml', 'rust-desktop-validation.yml']) {
     const current = workflow(name);
     assert.match(current, /if: always\(\)\n\s+run:.*rust-validation-evidence\.cjs collect|if: always\(\)\n\s+run: \|[\s\S]*?rust-validation-evidence\.cjs collect/);
     assert.match(current, /if: always\(\)\n\s+uses: actions\/upload-artifact@v4/);
     assert.match(current, /retention-days: 30/);
   }
+});
+
+test('Rust MCP delivery has only Windows x64, native Windows ARM64 and a dual-slice Mac group', () => {
+  const source = workflow('mcp-rust.yml');
+  const groups = [...source.matchAll(/^            group: ([^\n]+)$/gm)].map(match => match[1]);
+  assert.deepEqual(groups, ['windows-x64', 'windows-arm64', 'macos-universal']);
+  assert.doesNotMatch(source, /ubuntu-latest|linux-(?:x64|arm64)|unknown-linux/);
+  assert.match(source, /group: windows-arm64\n\s+os: windows-11-arm\n\s+node-arch: arm64\n\s+native: aarch64-pc-windows-msvc/);
+  assert.match(source, /group: macos-universal[\s\S]*?build-targets: aarch64-apple-darwin x86_64-apple-darwin/);
+  assert.match(source, /for runtime_triple in \$RUST_BUILD_TARGETS; do/);
+  assert.match(source, /--id "source-checks-package-\$receipt_suffix"/,
+    'different architectures need different durable check IDs');
+  assert.match(source, /name: mcp-rust-validation-\$\{\{ matrix\.group \}\}/);
+  assert.doesNotMatch(source, /Expected exactly one runtime archive/);
+  const publisher = workflow('mcp-rust-publish.yml');
+  const choices = publisher.match(/options: \[([^\]]+)\]/)?.[1].split(',').map(value => value.trim());
+  assert.deepEqual(choices, ['macos-arm64', 'macos-x64', 'windows-x64', 'windows-arm64']);
 });
 
 test('root full validation includes both Rust products and exposes explicit packaged/canonical modes', () => {

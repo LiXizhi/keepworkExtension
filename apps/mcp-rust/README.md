@@ -30,6 +30,25 @@ v2, independent update streams and ownership boundaries, and the
 durable evidence. Dated validation below records its exact source/environment;
 it does not certify a current installed package, every platform or a real account.
 
+## Release platforms and independent CDN publication
+
+`Rust MCP daemon` (`.github/workflows/mcp-rust.yml`) builds three distribution
+groups matching the Rust desktop packages: Windows x64, Windows ARM64 and
+macOS Universal. The Mac group contains two native runtime slices; it does not
+claim to produce one fat daemon. The existing `macos-arm64` and `macos-x64`
+ZIP/feed contracts remain separate so installed clients can keep updating.
+Each ZIP has its own `report-<target>.json` acceptance report.
+
+After a successful build, explicitly run **Review or publish an accepted Rust
+MCP runtime** (`mcp-rust-publish.yml`) with its run ID, artifact, matching target,
+`report_path=report-<target>.json` and `publish=true`. Building or bundling MCP
+inside a desktop installer does not publish the independent CDN feed.
+New distribution excludes Linux; existing Linux CDN objects and historical
+manifest readers remain intact. The Ubuntu publisher runner is an upload host,
+not a Linux runtime product. See the maintained
+[release skill](../../.github/skills/rust-release/SKILL.md) for the complete
+publication, verification and merge-to-main procedure.
+
 ## Native CLI sessions
 
 The Rust daemon now implements `/agents/backends`, executable-only inventory,

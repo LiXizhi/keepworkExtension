@@ -4,8 +4,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, execFileSync } = require('node:child_process');
 const evidence = require('./rust-validation-evidence.cjs');
+const { packageRuntime } = require('../apps/mcp-rust/scripts/package-runtime.cjs');
+const { readRuntimeArchive } = require('./lib/runtime-archive.cjs');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rust-validation-'));
@@ -213,4 +215,135 @@ test('complete acceptance requires known clean source; absent cleanliness metada
   evidence.validateReport(report, { directory: output, requireComplete: true });
   delete report.sourceDirty;
   assert.throws(() => evidence.validateReport(report, { directory: output, requireComplete: true }), /clean source identity/);
+});
+
+function runtimeFixture(output, arch = 'arm64') {
+  fs.mkdirSync(output, { recursive: true });
+  const info = { marker: 'keepwork-mcp-build-v1', product: 'keepwork-mcp-runtime', engine: 'rust',
+    version: '0.3.0', commit: 'a'.repeat(40), sourceHash: 'b'.repeat(64),
+    target: arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin',
+    capabilities: { agentSessionApi: 'v1', agentInventoryApi: 'v1', agentContextApi: 'v1', agentModeApi: 'v1' },
+    endMarker: 'keepwork-mcp-build-end' };
+  const binary = path.join(output, `fixture-${arch}`);
+  fs.writeFileSync(binary, Buffer.from('nonexecutable identity fixture\0' + JSON.stringify(info)));
+  const packaged = packageRuntime({ binary, target: info.target, output: path.join(output, 'package'), expected: info });
+  return { ...packaged, info };
+}
+
+function runtimeContext(output, info) {
+  const context = { product: 'mcp-rust', version: info.version, commit: info.commit,
+    sourceDirty: false, sourceHash: 'c'.repeat(64), platform: 'macos', arch: 'arm64' };
+  fs.writeFileSync(path.join(output, 'context.json'), JSON.stringify(context));
+  fs.mkdirSync(path.join(output, 'checks'), { recursive: true });
+  const log = 'Synthetic source/fixture evidence for collector unit tests; no native/account acceptance.\n';
+  fs.writeFileSync(path.join(output, 'fixture.log'), log);
+  for (const [id, level] of [['source-checks-build', 'source'], ['fixture-contracts-host', 'fixture']]) {
+    const receipt = { id, level, status: 'passed', evidence: ['fixture.log'], sourceHash: context.sourceHash,
+      evidenceSha256: { 'fixture.log': crypto.createHash('sha256').update(log).digest('hex') } };
+    fs.writeFileSync(path.join(output, 'checks', id + '.json'), JSON.stringify(receipt));
+  }
+  return context;
+}
+
+function mutateRuntimeArchive(archive, mutate) {
+  const members = readRuntimeArchive(fs.readFileSync(archive));
+  const metadata = JSON.parse(members.get('runtime.json'));
+  mutate(metadata);
+  members.set('runtime.json', Buffer.from(JSON.stringify(metadata)));
+  const stage = fs.mkdtempSync(path.join(path.dirname(archive), 'rewrite-'));
+  try {
+    for (const [name, bytes] of members) {
+      const file = path.join(stage, name);
+      if (name.endsWith('/')) { fs.mkdirSync(file, { recursive: true }); continue; }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, bytes);
+    }
+    fs.rmSync(archive);
+    if (process.platform === 'win32') {
+      execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:KP_EVIDENCE_ZIP_SOURCE, $env:KP_EVIDENCE_ZIP_OUTPUT)"],
+      { env: { ...process.env, KP_EVIDENCE_ZIP_SOURCE: stage, KP_EVIDENCE_ZIP_OUTPUT: archive }, stdio: 'pipe' });
+    } else execFileSync('zip', ['-q', '-r', archive, '.'], { cwd: stage, stdio: 'pipe' });
+  } finally { fs.rmSync(stage, { recursive: true, force: true }); }
+}
+
+test('two macOS archives keep independent portable reports and their actual target identities', async t => {
+  const root = fixture(t), output = path.join(root, 'original');
+  const arm = runtimeFixture(output), intel = runtimeFixture(output, 'x64');
+  const context = runtimeContext(output, arm.info);
+  for (const [arch, runtime] of [['arm64', arm], ['x64', intel]]) {
+    const reportName = `report-macos-${arch}.json`;
+    const report = await evidence.collect({ output, product: 'mcp-rust', artifact: runtime.archive, reportName });
+    assert.equal(report.platform, 'macos');
+    assert.equal(report.arch, arch);
+    assert.equal(report.artifact.path, `package/macos-${arch}.zip`);
+    assert.deepEqual(report.runtime, { engine: 'rust', version: arm.info.version, commit: arm.info.commit,
+      owner: 'standalone', capabilities: arm.info.capabilities, source: 'build-info' });
+    assert.equal(report.overallStatus, 'pending');
+    assert.ok(report.checks.filter(check => ['native', 'packaged', 'live'].includes(check.level))
+      .every(check => check.status === 'pending'), 'packaging cannot satisfy unexecuted target-native or live gates');
+    if (arch === 'x64') {
+      for (const check of report.checks.filter(check => ['source', 'fixture'].includes(check.level))) {
+        assert.match(check.summary, /Executed on macos-arm64; archive target macos-x64/);
+      }
+    }
+    await evidence.verify(path.join(output, reportName));
+  }
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, 'context.json'))), context,
+    'the captured validation host must never become the package target');
+  assert.equal(fs.existsSync(path.join(output, 'report.json')), false);
+  const legacy = await evidence.collect({ output, product: 'mcp-rust', artifact: arm.archive });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(output, 'report.json'))).artifact.sha256, legacy.artifact.sha256);
+  const copied = path.join(root, 'downloaded artifact');
+  fs.cpSync(output, copied, { recursive: true });
+  fs.rmSync(output, { recursive: true });
+  for (const name of ['report.json', 'report-macos-arm64.json', 'report-macos-x64.json']) {
+    await evidence.verify(path.join(copied, name));
+  }
+});
+
+test('collector CLI uses a selected report filename and rejects output-directory escapes', async t => {
+  const output = fixture(t), runtime = runtimeFixture(output, 'x64');
+  runtimeContext(output, runtime.info);
+  const cli = spawnSync(process.execPath, [path.join(__dirname, 'rust-validation-evidence.cjs'),
+    'collect', '--product', 'mcp-rust', '--output', output, '--artifact', runtime.archive,
+    '--report-name', 'report-macos-x64.json'], { encoding: 'utf8' });
+  assert.equal(cli.status, 0, cli.stdout + cli.stderr);
+  assert.match(cli.stdout, /report-macos-x64\.json/);
+  assert.equal((await evidence.verify(path.join(output, 'report-macos-x64.json'))).arch, 'x64');
+  for (const name of ['', '../outside.json', '/tmp/outside.json', '..\\outside.json', 'folder/report.json',
+    '.hidden.json', 'report.txt', 'report.json\0', 'CON.json', 'aux.report.json']) {
+    assert.throws(() => evidence.parseArgs(['collect', '--report-name', name]), /filename|Missing value/);
+    await assert.rejects(evidence.collect({ output, product: 'mcp-rust', artifact: runtime.archive, reportName: name }), /filename/);
+  }
+  assert.throws(() => evidence.parseArgs(['run', '--report-name', 'report.json']), /only supported by collect/);
+});
+
+test('packaged runtime reports reject wrong context, metadata, target and embedded identity', async t => {
+  const output = fixture(t), runtime = runtimeFixture(output);
+  const context = runtimeContext(output, runtime.info);
+  const options = { output, product: 'mcp-rust', artifact: runtime.archive };
+  for (const change of [{ version: '9.0.0' }, { commit: 'd'.repeat(40) }]) {
+    fs.writeFileSync(path.join(output, 'context.json'), JSON.stringify({ ...context, ...change }));
+    await assert.rejects(evidence.collect(options), /identity\/target/);
+  }
+  fs.writeFileSync(path.join(output, 'context.json'), JSON.stringify(context));
+  const original = fs.readFileSync(runtime.archive);
+  for (const changes of [{ arch: 'universal' }, { arch: 'x64' }, { platform: 'other' },
+    { product: 'aichat-desktop' }, { engine: 'node' }, { sourceHash: 'd'.repeat(64) }, { entry: '../outside' }]) {
+    fs.writeFileSync(runtime.archive, original);
+    mutateRuntimeArchive(runtime.archive, metadata => Object.assign(metadata, changes));
+    await assert.rejects(evidence.collect(options), /identity|target|missing|stale/i, JSON.stringify(changes));
+  }
+  assert.equal(fs.existsSync(path.join(output, 'report.json')), false, 'invalid packages never leave a usable report');
+});
+
+test('cross-target packaging cannot inherit passed native, packaged or live acceptance from its host', async t => {
+  const output = fixture(t), runtime = runtimeFixture(output, 'x64');
+  runtimeContext(output, runtime.info);
+  for (const level of ['native', 'packaged', 'live']) {
+    const receipt = { id: 'host-only-observation', level, status: 'passed', evidence: ['fixture.log'] };
+    fs.writeFileSync(path.join(output, 'checks/host-only-observation.json'), JSON.stringify(receipt));
+    await assert.rejects(evidence.collect({ output, product: 'mcp-rust', artifact: runtime.archive }), /cannot reuse passed host/);
+  }
 });

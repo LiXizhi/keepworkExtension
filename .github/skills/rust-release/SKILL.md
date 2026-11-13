@@ -52,7 +52,7 @@ git tag -l 'v*' 'aichat-rust-v*' | sort -V | tail -5
 for t in darwin-universal win32-x64 win32-arm64; do
   curl -fsSL "https://cdn.keepwork.com/keepwork/aichat-rust/$t/latest-client.json"
 done
-for t in macos-arm64 windows-x64 linux-x64; do
+for t in windows-x64 windows-arm64 macos-arm64 macos-x64; do
   curl -fsSL "https://cdn.keepwork.com/keepwork/mcp-stable-rs/$t.json"
 done
 ```
@@ -99,29 +99,50 @@ gh run view <mcp_run_id> --json headSha,conclusion,url
 双产品模式的 `source-ref` 通常为 `v<desktop_version>`；`mcp-server` 模式可用已推送的 `main`
 或用户指定的 MCP 源 ref，不依赖桌面 tag。记录返回的完整 `headSha` 为 `mcp_commit`，
 确认等于预期源提交，并检查各平台 job 成功且产物存在。不能复用其他提交或其他版本的同名 artifact。
-当前构建矩阵如下；以后以 workflow 和实际产物为准：
 
-| MCP target | artifact_name | 包与报告 |
+### MCP 平台必须对应桌面的三个安装包
+
+默认发布范围与 **AIChat Rust release packages** 一致，**不包含 Linux**：
+
+| 构建组 / 桌面安装包 | artifact_name | 包与报告 |
 | --- | --- | --- |
-| macos-arm64 | `mcp-rust-validation-macos-latest` | `package/macos-arm64.zip`、`report.json` |
-| windows-x64 | `mcp-rust-validation-windows-latest` | `package/windows-x64.zip`、`report.json` |
-| linux-x64 | `mcp-rust-validation-ubuntu-latest` | `package/linux-x64.zip`、`report.json` |
+| Windows x64 | `mcp-rust-validation-windows-x64` | `package/windows-x64.zip`、`report-windows-x64.json` |
+| Windows ARM64 | `mcp-rust-validation-windows-arm64` | `package/windows-arm64.zip`、`report-windows-arm64.json` |
+| macOS Universal | `mcp-rust-validation-macos-universal` | `package/macos-arm64.zip`、`report-macos-arm64.json`；`package/macos-x64.zip`、`report-macos-x64.json` |
 
-发布 workflow 虽然列出六种 target，当前构建只产出上面三种。不要凭空声明其他架构已发布。
+桌面是三个安装包；独立 MCP feed 按架构分开，因此对应四个 MCP target，不能把 macOS Universal
+误写成只支持 ARM64，也不能虚构发布器尚不支持的 `macos-universal` ZIP。
+两产品版本号继续独立，这里的“对应”指平台和架构覆盖一致。
+
+`mcp-rust.yml` 只保留上述三个构建组，不构建或打包 Linux 发行产物。
+Windows ARM64 使用原生 ARM64 runner；macOS Universal 组分别构建并打包两套原生切片，
+不能把一个架构的 ZIP 复制改名当作另一个架构。目标架构的交叉编译成功不能冒充原生 live 验收通过。
+发布 workflow 的 Ubuntu runner 只是校验和上传宿主，不代表发布 Linux。
+历史 Linux CDN 归档和 feed 保留，不删除或改写；新发布入口不再接受 Linux target。
+
+每个目标使用实际 artifact 名称，包内必须有 `package/<target>.zip` 和对应的 `report-<target>.json`，
+且版本、提交、target 与二进制嵌入身份一致。可用以下命令列出构建产物，不根据 runner 名猜测架构：
+
+```bash
+gh api repos/LiXizhi/keepworkExtension/actions/runs/<mcp_run_id>/artifacts \
+  --jq '.artifacts[] | select(.expired == false) | .name'
+```
 
 ## 4. 执行 Review or publish an accepted Rust MCP runtime 上传 CDN
 
 使用上一步的 `mcp_run_id` 和各平台 artifact，**逐平台触发名为 Review or publish an accepted Rust MCP runtime 的 Action**
 （文件：`.github/workflows/mcp-rust-publish.yml`）。这一步才会把 MCP Rust 服务器上传 CDN。
-下面命令按上表执行三次；`mcp_version` 是 MCP 自己的版本，`mcp_commit` 是构建产物的完整 40 位提交。
+下面命令按上表逐个 MCP target 执行，默认共四个目标，不发布 Linux。
+`mcp_version` 是 MCP 自己的版本，`mcp_commit` 是构建产物的完整 40 位提交。
 发布 workflow 的 `--ref` 应包含当前发布脚本；已有旧产物需要新版发布脚本时，ref 可以与产物源 ref 不同，
 但 `run_id`、版本和 `commit` 必须始终匹配产物身份。
 
 ```bash
 gh workflow run mcp-rust-publish.yml --ref <publisher-ref> \
   -f run_id=<mcp_run_id> \
-  -f artifact_name=<上表完整 artifact_name> \
-  -f target=<macos-arm64 或 windows-x64 或 linux-x64> \
+  -f artifact_name=<该目标实际 artifact_name> \
+  -f target=<windows-x64 或 windows-arm64 或 macos-arm64 或 macos-x64> \
+  -f report_path=report-<target>.json \
   -f version=<mcp_version> \
   -f commit=<mcp_commit> \
   -f publish=true -f acceptance=deferred
@@ -130,6 +151,8 @@ gh workflow run mcp-rust-publish.yml --ref <publisher-ref> \
 每次记下 publish run ID，等待该 Action **completed successfully**，并确认 `review` 和 `publish` 两个 job
 均为 success；`publish` 不能是 skipped。`publish` 默认是 false，省略 `-f publish=true` 只做 review，
 即使整个 run 成功也没有上传。
+Mac 两个目标使用同一个 `mcp-rust-validation-macos-universal` artifact，但各自指定包对应的报告。
+历史构建若只有 `report.json`，明确传 `report_path=report.json` 并核对其目标身份；不能用 ARM64 报告发布 x64 包。
 
 ```bash
 gh run watch <mcp_publish_run_id> --exit-status
@@ -166,7 +189,7 @@ gh release view v<desktop_version> --json body,isDraft,assets
 for t in darwin-universal win32-x64 win32-arm64; do
   curl -fsSL "https://cdn.keepwork.com/keepwork/aichat-rust/$t/latest-client.json"
 done
-for t in macos-arm64 windows-x64 linux-x64; do
+for t in windows-x64 windows-arm64 macos-arm64 macos-x64; do
   curl -fsSL "https://cdn.keepwork.com/keepwork/mcp-stable-rs/$t.json"
 done
 curl -fsSL "https://cdn.keepwork.com/keepwork/mcp-stable-rs/<mcp_version>/<target>.zip" \
@@ -219,7 +242,7 @@ git push origin main
 双产品发布只有在以下步骤完成后才算结束：
 
 1. 桌面 Action 完成安装包与桌面 CDN 发布。
-2. **Rust MCP daemon** 构建成功，三个平台的版本和源提交正确。
+2. **Rust MCP daemon** 构建成功，覆盖桌面三个安装包对应的四个 MCP target，版本和源提交正确。
 3. **Review or publish an accepted Rust MCP runtime** 逐平台 completed successfully，
    且 publish job 成功完成 ZIP 上传和固定 feed 提升。
 4. 两个产品 CDN 已核验，GitHub Release 同时包含桌面和 MCP 下载地址。

@@ -1,8 +1,6 @@
 name: Build KeepWork 第二大脑
-run-name: ${{ inputs.publisher_id && format('publisher-{0}', inputs.publisher_id) || github.event.head_commit.message || 'Desktop build' }}
+run-name: ${{ inputs.publisher_id && format('publisher-{0}', inputs.publisher_id) || 'Desktop build' }}
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       publish:
@@ -35,21 +33,8 @@ defaults:
   run:
     shell: bash
 jobs:
-  verify-source:
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[publish desktop]') && !contains(github.event.head_commit.message, '[prepare desktop release]')
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25.x', cache: false }
-      - run: npm ci && npm ci --prefix apps/aichat-desktop
-      - run: npm run check --prefix apps/aichat-desktop
-      - run: go test ./...
-        working-directory: apps/aichat-desktop/launcher
   build:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[publish desktop]')
+    if: github.event_name == 'workflow_dispatch'
     environment: aichat-desktop-production
     strategy:
       fail-fast: false
@@ -101,7 +86,7 @@ jobs:
           echo "CSC_NAME=-" >> "$GITHUB_ENV"
           echo "KP_MAC_RELEASE_SIGNED=false" >> "$GITHUB_ENV"
       - name: Configure signed Mac release
-        if: matrix.platform == 'darwin' && (inputs.release_build || ((inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]'))) && (inputs.publish_target == '' || inputs.publish_target == 'all' || inputs.publish_target == format('macos-{0}', matrix.arch))))
+        if: matrix.platform == 'darwin' && (inputs.release_build || (inputs.publish && (inputs.publish_target == '' || inputs.publish_target == 'all' || inputs.publish_target == format('macos-{0}', matrix.arch))))
         env:
           KP_MAC_CSC_LINK: ${{ secrets.KP_MAC_CSC_LINK }}
           KP_MAC_CSC_KEY_PASSWORD: ${{ secrets.KP_MAC_CSC_KEY_PASSWORD }}
@@ -172,7 +157,7 @@ jobs:
             apps/aichat-desktop/release/publisher-build.json
             apps/aichat-desktop/release/installation-security.json
   publish:
-    if: inputs.publish || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish desktop]'))
+    if: inputs.publish
     needs: build
     runs-on: ubuntu-latest
     environment: aichat-desktop-production
@@ -186,6 +171,10 @@ jobs:
         env:
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          # Cross-border upload to Qiniu z2: bigger parts, more concurrency.
+          KP_QINIU_PART_SIZE_MB: '16'
+          KP_QINIU_PART_CONCURRENCY: '12'
+          KP_QINIU_PART_TIMEOUT_MS: '300000'
           PUBLISH_TARGET: ${{ inputs.publish_target }}
         run: |
           if [[ "$PUBLISH_TARGET" == "windows-x64" ]]; then targets=(win32-x64)

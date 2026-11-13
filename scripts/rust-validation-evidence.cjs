@@ -1,10 +1,12 @@
 /** Durable validation receipts. Never probes a user's daemon, account or devices. */
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const Ajv = require('ajv/dist/2020');
 const { readRuntimeArchive } = require('./lib/runtime-archive.cjs');
+const { validateBinary } = require('./lib/rust-runtime-identity.cjs');
 
 const repoRoot = path.resolve(__dirname, '..');
 const defaultOutput = path.join(repoRoot, '.test-runtime', 'rust-validation');
@@ -123,13 +125,18 @@ function parseArgs(argv) {
     const argument = argv[index];
     if (argument === '--') { options.command = argv.slice(index + 1); break; }
     if (['--metadata-only', '--require-complete'].includes(argument)) options[argument.slice(2)] = true;
-    else if (['--output', '--product', '--id', '--level', '--artifact'].includes(argument)) {
+    else if (['--output', '--product', '--id', '--level', '--artifact', '--report-name'].includes(argument)) {
       if (!argv[index + 1] || argv[index + 1].startsWith('--')) throw Error('Missing value for ' + argument);
-      options[argument.slice(2)] = argv[++index];
+      const key = argument === '--report-name' ? 'reportName' : argument.slice(2);
+      options[key] = argv[++index];
     } else if (action === 'verify' && !argument.startsWith('--') && !options.report) options.report = argument;
     else throw Error('Unknown evidence option: ' + argument);
   }
   if (!gates[options.product]) throw Error('Unknown Rust product: ' + options.product);
+  if (options.reportName !== undefined) {
+    if (action !== 'collect') throw Error('--report-name is only supported by collect');
+    reportFilename(options.reportName);
+  }
   options.output = path.resolve(options.output);
   return options;
 }
@@ -204,21 +211,55 @@ function pendingGate(id) {
   return { id, level: (gateLevels[id] || ['packaged'])[0], status: 'pending', evidence: [], reason: 'Not executed for this report; source and fixture checks do not establish this acceptance result.', ...(requirements.length ? { requirements } : {}) };
 }
 
-// A packaged Rust runtime archive answers its own identity; record it so publication
-// can compare the report against the exact bytes it is about to promote.
-function runtimeIdentity(artifact) {
-  if (!artifact?.path || !/\.zip$/i.test(artifact.path)) return null;
-  let runtime;
-  try {
-    runtime = JSON.parse(readRuntimeArchive(fs.readFileSync(artifact.path)).get('runtime.json')?.toString() || 'null');
-  } catch { return null; }
-  if (!runtime || runtime.engine !== 'rust' || !runtime.version) return null;
-  return { engine: runtime.engine, version: runtime.version, commit: runtime.commit || null,
-    owner: 'desktop', capabilities: runtime.capabilities || {}, source: 'build-info' };
+function reportFilename(name = 'report.json') {
+  if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.json$/.test(name)
+    || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
+    throw Error('--report-name requires a safe JSON filename in the output directory');
+  }
+  return name;
 }
 
-async function collect({ output, product, artifact }) {
+// Read the absolute archive before its path becomes portable. An archive target
+// may differ from the validation host, but must agree with its embedded binary.
+function runtimeIdentity(artifact, context) {
+  if (!artifact?.path || !/\.zip$/i.test(artifact.path)) return null;
+  const members = readRuntimeArchive(fs.readFileSync(artifact.path));
+  const runtime = JSON.parse(members.get('runtime.json')?.toString() || 'null');
+  const triples = {
+    'macos-arm64': 'aarch64-apple-darwin', 'macos-x64': 'x86_64-apple-darwin',
+    'windows-arm64': 'aarch64-pc-windows-msvc', 'windows-x64': 'x86_64-pc-windows-msvc',
+    'linux-arm64': 'aarch64-unknown-linux-gnu', 'linux-x64': 'x86_64-unknown-linux-gnu',
+  };
+  const target = runtime && `${runtime.platform}-${runtime.arch}`;
+  const triple = triples[target];
+  if (!runtime || runtime.schemaVersion !== 2 || runtime.product !== 'keepwork-mcp-runtime'
+    || runtime.engine !== 'rust' || !triple
+    || runtime.version !== context.version || runtime.commit !== context.commit
+    || !/^[a-f0-9]{40}$/.test(runtime.commit || '') || !/^[a-f0-9]{64}$/.test(runtime.sourceHash || '')) {
+    throw Error('Packaged Rust runtime identity/target does not match the captured source context');
+  }
+  const binaryName = `bin/keepwork-mcp${runtime.platform === 'windows' ? '.exe' : ''}`;
+  if (runtime.entry !== binaryName || !members.get(binaryName)?.length || !members.get('LICENSE')?.length) {
+    throw Error('Packaged Rust runtime archive is missing required members');
+  }
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rust-evidence-identity-'));
+  let info;
+  try {
+    const binary = path.join(temporary, 'binary');
+    fs.writeFileSync(binary, members.get(binaryName));
+    info = validateBinary(binary, { triple }, runtime);
+    if (info.builtAt !== undefined && (runtime.builtAt !== info.builtAt || runtime.builtAtSource !== info.builtAtSource)) {
+      throw Error('Packaged Rust compiled build timestamp does not match runtime.json');
+    }
+  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+  return { platform: runtime.platform, arch: runtime.arch,
+    identity: { engine: runtime.engine, version: runtime.version, commit: runtime.commit,
+      owner: 'standalone', capabilities: info.capabilities, source: 'build-info' } };
+}
+
+async function collect({ output, product, artifact, reportName = 'report.json' }) {
   if (!gates[product]) throw Error('Unknown Rust product: ' + product);
+  const name = reportFilename(reportName);
   const directory = path.join(output, 'checks');
   const checks = fs.existsSync(directory) ? fs.readdirSync(directory).filter(file => file.endsWith('.json')).sort().map(file => JSON.parse(fs.readFileSync(path.join(directory, file), 'utf8'))) : [];
   for (const gate of gates[product]) {
@@ -239,17 +280,30 @@ async function collect({ output, product, artifact }) {
   const context = fs.existsSync(contextPath) ? JSON.parse(fs.readFileSync(contextPath, 'utf8')) : sourceContext(product);
   if (context.product !== product) throw Error('Evidence product does not match the captured command context');
   const installer = artifact ? await artifactInfo(artifact) : null;
+  const packaged = product === 'mcp-rust' ? runtimeIdentity(installer, context) : null;
+  if (packaged && (packaged.platform !== context.platform || packaged.arch !== context.arch)) {
+    for (const check of checks) {
+      if (check.status === 'passed' && ['native', 'packaged', 'live'].includes(check.level)) {
+        throw Error('Cross-target archive cannot reuse passed host native/packaged/live acceptance: ' + check.id);
+      }
+      if (['source', 'fixture'].includes(check.level)) {
+        const note = `Executed on ${context.platform}-${context.arch}; archive target ${packaged.platform}-${packaged.arch}. This is not native target acceptance.`;
+        check.summary = check.summary ? `${check.summary} ${note}` : note;
+      }
+    }
+  }
   if (installer) {
     const relative = path.relative(output, installer.path);
     if (relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)) installer.path = relative.split(path.sep).join('/');
   }
   const report = {
     schemaVersion: 1, recordedAt: new Date().toISOString(), ...context,
-    artifact: installer, runtime: runtimeIdentity(installer), web: null, checks, overallStatus: overallStatus(checks),
+    ...(packaged ? { platform: packaged.platform, arch: packaged.arch } : {}),
+    artifact: installer, runtime: packaged?.identity || null, web: null, checks, overallStatus: overallStatus(checks),
   };
   validateReport(report, { directory: output });
   fs.mkdirSync(output, { recursive: true });
-  fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+  fs.writeFileSync(path.join(output, name), JSON.stringify(report, null, 2) + '\n');
   return report;
 }
 
@@ -269,7 +323,7 @@ if (require.main === module) (async () => {
   if (options.action === 'run') process.exitCode = await runCheck(options);
   else if (options.action === 'collect') {
     const report = await collect(options);
-    console.log('Saved ' + path.join(options.output, 'report.json') + ' (' + report.overallStatus + ')');
+    console.log('Saved ' + path.join(options.output, reportFilename(options.reportName)) + ' (' + report.overallStatus + ')');
   } else {
     if (!options.report) throw Error('verify requires a report JSON path');
     const report = await verify(options.report, { metadataOnly: !!options['metadata-only'], requireComplete: !!options['require-complete'] });

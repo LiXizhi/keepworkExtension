@@ -31,15 +31,41 @@ permissions:
 
 jobs:
   build:
-    name: Build and contract (${{ matrix.os }})
+    name: Build and contract (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - name: Windows x64
+            group: windows-x64
+            os: windows-latest
+            node-arch: x64
+            native: x86_64-pc-windows-msvc
+            targets: x86_64-pc-windows-msvc
+            build-targets: x86_64-pc-windows-msvc
+            suffix: .exe
+          - name: Windows ARM64
+            group: windows-arm64
+            os: windows-11-arm
+            node-arch: arm64
+            native: aarch64-pc-windows-msvc
+            targets: aarch64-pc-windows-msvc
+            build-targets: aarch64-pc-windows-msvc
+            suffix: .exe
+          - name: macOS Universal
+            group: macos-universal
+            os: macos-15
+            node-arch: arm64
+            native: aarch64-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build-targets: aarch64-apple-darwin x86_64-apple-darwin
+            suffix: ""
     env:
-      BIN: apps/mcp-rust/target/release/keepwork-mcp${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+      BIN: apps/mcp-rust/target/${{ matrix.native }}/release/keepwork-mcp${{ matrix.suffix }}
+      BIN_SUFFIX: ${{ matrix.suffix }}
+      RUST_BUILD_TARGETS: ${{ matrix.build-targets }}
       KEEPWORK_MCP_REQUIRE_NODE_REFERENCE: '1'
     defaults:
       run:
@@ -48,12 +74,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable-${{ matrix.native }}
           components: rustfmt, clippy
+          targets: ${{ matrix.targets }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          architecture: ${{ matrix.node-arch }}
       - uses: Swatinem/rust-cache@v2
         with:
+          key: mcp-${{ matrix.group }}
           workspaces: apps/mcp-rust -> target
       - name: Install Node reference dependencies for wire contracts
         run: |
@@ -71,43 +101,62 @@ jobs:
       - name: Unit and contract tests (Rust)
         run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-rust --level fixture --output .test-runtime/mcp-rust -- cargo test --locked --manifest-path apps/mcp-rust/Cargo.toml
       - name: Release build
-        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-build --level source --output .test-runtime/mcp-rust -- cargo build --release --locked --manifest-path apps/mcp-rust/Cargo.toml
+        run: |
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            receipt_suffix="${runtime_triple//_/-}"
+            node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "source-checks-build-$receipt_suffix" --level source --output .test-runtime/mcp-rust -- cargo build --release --locked --manifest-path apps/mcp-rust/Cargo.toml --target "$runtime_triple"
+          done
       - name: Wire contract against mandatory Node reference
-        timeout-minutes: 10
-        env:
-          KEEPWORK_MCP_TEST_BIN: ${{ github.workspace }}/${{ env.BIN }}
-        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-wire --level fixture --output .test-runtime/mcp-rust -- node --test --test-reporter=tap scripts/contract/*.test.cjs
+        timeout-minutes: 20
+        run: |
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            receipt_suffix="${runtime_triple//_/-}"
+            # The Mac Intel slice executes through Rosetta on the ARM runner;
+            # this is wire/fixture evidence, not Intel-machine live acceptance.
+            KEEPWORK_MCP_TEST_BIN="$GITHUB_WORKSPACE/apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX" \
+              node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "fixture-contracts-wire-$receipt_suffix" --level fixture --output .test-runtime/mcp-rust -- node --test --test-reporter=tap scripts/contract/*.test.cjs
+          done
       - name: Smoke (spawn, handshake, /admin/stop)
-        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-smoke --level fixture --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/smoke.cjs
+        run: |
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            receipt_suffix="${runtime_triple//_/-}"
+            node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "fixture-contracts-smoke-$receipt_suffix" --level fixture --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/smoke.cjs "apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX"
+          done
       - name: Package immutable Rust v2 runtime artifacts (no upload or promotion)
         run: |
-          runtime_target=$(node -e 'process.stdout.write(require("./scripts/lib/rust-runtime-identity.cjs").readBuildInfo(process.argv[1]).target)' "$BIN")
-          node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-package --level source --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/package-runtime.cjs --target "$runtime_target" --binary "$BIN" --out .test-runtime/mcp-rust/package
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            runtime_binary="apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX"
+            runtime_target=$(node -e 'process.stdout.write(require("./scripts/lib/rust-runtime-identity.cjs").readBuildInfo(process.argv[1]).target)' "$runtime_binary")
+            test "$runtime_target" = "$runtime_triple"
+            receipt_suffix="${runtime_triple//_/-}"
+            node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "source-checks-package-$receipt_suffix" --level source --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/package-runtime.cjs --target "$runtime_target" --binary "$runtime_binary" --out .test-runtime/mcp-rust/package
+          done
       - name: Size gate (<= 10 MiB)
         shell: bash
         run: |
-          bytes=$(wc -c < "$BIN")
-          echo "binary bytes: $bytes"
-          test "$bytes" -lt $((10 * 1024 * 1024))
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            bytes=$(wc -c < "apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX")
+            echo "$runtime_triple binary bytes: $bytes"
+            test "$bytes" -lt $((10 * 1024 * 1024))
+          done
       - name: Save honest release acceptance summary
         if: always()
         run: |
-          artifact=()
           shopt -s nullglob
           archives=(.test-runtime/mcp-rust/package/*.zip)
-          if [[ ${#archives[@]} -gt 1 ]]; then
-            printf '%s\n' 'Expected exactly one runtime archive for this native runner'
-            exit 1
+          if [[ ${#archives[@]} -eq 0 ]]; then
+            node scripts/rust-validation-evidence.cjs collect --product mcp-rust --output .test-runtime/mcp-rust
+          else
+            for archive in "${archives[@]}"; do
+              runtime_target="$(basename "$archive" .zip)"
+              node scripts/rust-validation-evidence.cjs collect --product mcp-rust --output .test-runtime/mcp-rust --artifact "$archive" --report-name "report-$runtime_target.json"
+            done
           fi
-          if [[ ${#archives[@]} -eq 1 ]]; then
-            artifact=(--artifact "${archives[0]}")
-          fi
-          node scripts/rust-validation-evidence.cjs collect --product mcp-rust --output .test-runtime/mcp-rust "${artifact[@]}"
       - name: Preserve first failures, TAP, native logs and pending gates
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mcp-rust-validation-${{ matrix.os }}
+          name: mcp-rust-validation-${{ matrix.group }}
           path: .test-runtime/mcp-rust/
           if-no-files-found: warn
           retention-days: 30

@@ -1,8 +1,6 @@
 name: Build and publish MCP NodeRuntime
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -18,6 +16,11 @@ env:
   KP_QINIU_DOMAIN: https://cdn.keepwork.com
   KP_QINIU_UPLOAD_HOST: https://up-z2.qiniup.com
   KP_QINIU_PREFIX: keepwork/mcp-runtime/
+  # GitHub-hosted runners upload cross-border; larger parts and more
+  # concurrency raise throughput to Qiniu z2.
+  KP_QINIU_PART_SIZE_MB: '16'
+  KP_QINIU_PART_CONCURRENCY: '12'
+  KP_QINIU_PART_TIMEOUT_MS: '300000'
 
 jobs:
   prepare:
@@ -101,8 +104,6 @@ jobs:
           overwrite: true
 
   publish:
-    # Build-only commits can verify CI without changing the live CDN feed.
-    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip publish]')
     needs: [prepare, build]
     runs-on: ubuntu-latest
     # Cross-region uploads can take over 35 minutes for a single platform ZIP.

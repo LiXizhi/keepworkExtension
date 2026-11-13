@@ -109,3 +109,17 @@ app/
 - [ZIP 与 JSON 生成](../apps/mcp-runtime/scripts/package-runtime.cjs)：固定文件名、构建时间、大小和 SHA-256。
 - [发布脚本](../apps/mcp-runtime/scripts/release.cjs)：仅覆盖这 6 个对象，刷新并校验 CDN 内容。
 - [发布测试](../apps/mcp-runtime/scripts/release.test.cjs)：验证固定地址、两次覆盖、hash 校验与 ZIP 文件权限。
+
+## 上传调参（CI）
+
+共享上传实现在 [scripts/lib/qiniu-release.cjs](../scripts/lib/qiniu-release.cjs)。
+GitHub 托管 runner 跨境上传到七牛时，可用环境变量调整分片策略（默认值不变）：
+
+| 环境变量 | 默认 | 范围 | 含义 |
+| --- | --- | --- | --- |
+| `KP_QINIU_PART_SIZE_MB` | 8 | 1–1024 | 分片大小（MiB） |
+| `KP_QINIU_PART_CONCURRENCY` | 4 | 1–32 | 单文件分片并发数 |
+| `KP_QINIU_PART_TIMEOUT_MS` | 120000 | 10000–600000 | 单分片超时（毫秒） |
+
+发布 workflow 当前设置为 16 MiB / 12 并发 / 300 秒超时。分片越大，
+失败重试的重传成本越高；调高 `KP_QINIU_PART_SIZE_MB` 时应同步放宽超时。

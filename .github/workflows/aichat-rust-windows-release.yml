@@ -12,17 +12,6 @@ on:
       - "package*.json"
       - "docs/acceptance/rust-release-evidence.schema.json"
       - ".github/workflows/*rust*.yml"
-  push:
-    branches: [master, main]
-    paths:
-      - "apps/aichat-rust/**"
-      - "apps/mcp-rust/**"
-      - "apps/mcp-runtime/**"
-      - "src/**"
-      - "scripts/**"
-      - "package*.json"
-      - "docs/acceptance/rust-release-evidence.schema.json"
-      - ".github/workflows/*rust*.yml"
 
 permissions:
   contents: read
@@ -317,6 +306,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          # Cross-border upload to Qiniu z2: bigger parts, more concurrency.
+          KP_QINIU_PART_SIZE_MB: '16'
+          KP_QINIU_PART_CONCURRENCY: '12'
+          KP_QINIU_PART_TIMEOUT_MS: '300000'
           TAG: ${{ github.ref_name }}
         run: |
           version="${{ steps.release.outputs.version }}"
