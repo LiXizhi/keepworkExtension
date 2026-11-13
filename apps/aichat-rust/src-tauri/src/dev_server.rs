@@ -493,6 +493,41 @@ mod tests {
 
     static TEST_PORT_LOCK: Mutex<()> = Mutex::new(());
 
+    fn isolated_origin_test() -> bool {
+        const CHILD_TEST: &str = "AICHAT_SOURCE_ORIGIN_TEST";
+        let thread = thread::current();
+        let name = thread.name().expect("named libtest thread");
+        if std::env::var(CHILD_TEST).as_deref() == Ok(name) {
+            return false;
+        }
+        // Other libtests spawn PTYs with fork/pre_exec. Even CLOEXEC sockets
+        // remain inherited until exec, so a concurrent child can retain our
+        // listener after stop joins its thread. Create these sockets only in a
+        // fresh, single-test process; do not retry or change a saved origin.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD_TEST, name)
+            .spawn()
+            .expect("spawn isolated origin test");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "isolated origin test failed: {status}");
+                    return true;
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated origin test did not finish: {result:?}");
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn registry_owner_releases_lock_while_an_inherited_descriptor_remains_open() {
@@ -537,30 +572,20 @@ mod tests {
         (root, registry)
     }
 
-    fn fixture() -> (PathBuf, PathBuf, u16) {
+    fn fixture() -> (PathBuf, PathBuf, u16, DevServer) {
         let (root, registry) = source_fixture();
-        // Keep fixtures outside both the user's 3001 range and the OS's
-        // ephemeral client range: parallel HTTP tests may consume an ephemeral
-        // port between our availability probe and the assertion that rebinds it.
-        let first = (0..1000)
-            .find_map(|_| {
-                let port = 20000 + (Uuid::new_v4().as_u128() % 9000) as u16;
-                let mut probes = Vec::new();
-                for next in port..port + 8 {
-                    if let Ok(probe) = TcpListener::bind(("127.0.0.1", next)) {
-                        probes.push(probe);
-                    } else {
-                        break;
-                    }
-                }
-                if probes.len() == 8 {
-                    Some(port)
-                } else {
-                    None
-                }
-            })
-            .expect("isolated test port range unavailable");
-        (root, registry, first)
+        // Allocate through production code and retain its real listener. A
+        // probe followed by close leaves a race before the actual first bind.
+        let first = 20000 + (Uuid::new_v4().as_u128() % 9000) as u16;
+        let server = DevServer::start_in_port_range(
+            &root.join("source"),
+            "AIChat.html",
+            &registry,
+            first,
+            8,
+        )
+        .expect("allocate isolated source listener");
+        (root, registry, first, server)
     }
 
     fn occupied_port_fixture() -> (PathBuf, PathBuf, u16, TcpListener) {
@@ -586,10 +611,10 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
-        let mut first =
-            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
-                .unwrap();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, mut first) = fixture();
         let original = first.url();
         first.stop();
         let mut second =
@@ -600,7 +625,134 @@ mod tests {
             original,
             "restarting must preserve the browser storage origin"
         );
+        let mut request = TcpStream::connect(("127.0.0.1", second.port)).unwrap();
+        request
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        request
+            .write_all(b"GET /AIChat.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        request.read_to_string(&mut response).unwrap();
+        assert!(response.contains("200 OK") && response.contains("<title>Origin</title>"));
         second.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_listener_conflict_preserves_origin_until_owned_child_releases_it() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, mut server) = fixture();
+        let original = server.url();
+        let before = fs::read(&registry).unwrap();
+
+        struct InheritedListener {
+            pid: libc::pid_t,
+            release: Option<fs::File>,
+        }
+        impl Drop for InheritedListener {
+            fn drop(&mut self) {
+                // Release only our child, and always reap it, including panic.
+                drop(self.release.take());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    let result =
+                        unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), libc::WNOHANG) };
+                    if result == self.pid {
+                        break;
+                    }
+                    if result < 0
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+                    {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        unsafe {
+                            libc::kill(self.pid, libc::SIGKILL);
+                            loop {
+                                let reaped = libc::waitpid(self.pid, std::ptr::null_mut(), 0);
+                                if reaped == self.pid
+                                    || std::io::Error::last_os_error().raw_os_error()
+                                        != Some(libc::EINTR)
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        let mut ready = [0; 2];
+        let mut release = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::pipe(release.as_mut_ptr()) }, 0);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            // The multithreaded parent has an active accept loop. Between fork
+            // and exec only async-signal-safe libc operations are permitted.
+            unsafe {
+                libc::close(ready[0]);
+                libc::close(release[1]);
+                libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                let mut byte = 0u8;
+                libc::read(release[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(ready[1]);
+            libc::close(release[0]);
+        }
+        let mut ready_file = unsafe { fs::File::from_raw_fd(ready[0]) };
+        let inherited = InheritedListener {
+            pid,
+            release: Some(unsafe { fs::File::from_raw_fd(release[1]) }),
+        };
+        let mut poll = libc::pollfd {
+            fd: ready_file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut poll, 1, 2000) },
+            1,
+            "owned child ready barrier timed out"
+        );
+        ready_file.read_exact(&mut [0u8]).unwrap();
+        server.stop();
+        assert!(
+            server.handle.is_none(),
+            "stop joined the sole accept thread"
+        );
+        let error =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .err()
+                .unwrap();
+        assert!(error.contains("saved origin was not changed"));
+        assert_eq!(fs::read(&registry).unwrap(), before);
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            0
+        );
+        eprintln!("controlled inherited listener: child_pid={pid}, origin={original}, parent_accept_thread_joined=true, restart_error={error}");
+        drop(inherited);
+        let mut restarted =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .unwrap();
+        assert_eq!(restarted.url(), original);
+        eprintln!("controlled inherited listener released: child_pid={pid}, same_origin_rebound={original}");
+        restarted.stop();
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -609,11 +761,12 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
-        let mut current = Some(
-            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
-        );
+        let mut current = Some(server);
         let original = current.as_ref().unwrap().url();
         let before = fs::read(&registry).unwrap();
         fs::write(source.join("other.html"), "other entry").unwrap();
@@ -651,6 +804,9 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if isolated_origin_test() {
+            return;
+        }
         let (root, registry, port, stranger) = occupied_port_fixture();
         let mut server =
             DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
@@ -683,10 +839,10 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
-        let mut server =
-            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
-                .unwrap();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, mut server) = fixture();
         let saved_port = server.port;
         server.stop();
         let before = fs::read(&registry).unwrap();
@@ -713,12 +869,15 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
         fs::create_dir_all(root.join("other")).unwrap();
         fs::write(root.join("other/AIChat.html"), "other source").unwrap();
         fs::write(source.join("other.html"), "other entry").unwrap();
-        let mut current = None;
+        let mut current = Some(server);
         let first = DevServer::select_source_in_port_range(
             &mut current,
             &source,
@@ -738,7 +897,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(repeated, first);
-        assert_eq!(current.as_ref().unwrap().port, port);
+        let first_port = current.as_ref().unwrap().port;
         DevServer::select_source_in_port_range(
             &mut current,
             &root.join("other"),
@@ -748,7 +907,8 @@ mod tests {
             8,
         )
         .unwrap();
-        assert_eq!(current.as_ref().unwrap().port, port + 1);
+        let other_source_port = current.as_ref().unwrap().port;
+        assert_ne!(other_source_port, first_port);
         DevServer::select_source_in_port_range(
             &mut current,
             &source,
@@ -758,9 +918,9 @@ mod tests {
             8,
         )
         .unwrap();
-        assert_eq!(
-            current.as_ref().unwrap().port,
-            port + 2,
+        assert!(
+            current.as_ref().unwrap().port != first_port
+                && current.as_ref().unwrap().port != other_source_port,
             "released reserved ports belong to their original source"
         );
         assert_eq!(
@@ -784,11 +944,12 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
-        let mut current = Some(
-            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
-        );
+        let mut current = Some(server);
         let url = current.as_ref().unwrap().url();
         fs::write(source.join("other.html"), "other entry").unwrap();
         fs::write(&registry, "broken JSON").unwrap();
@@ -823,6 +984,9 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if isolated_origin_test() {
+            return;
+        }
         let (root, registry, port, busy) = occupied_port_fixture();
         let source = root.join("source");
         let error = DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 1)
@@ -853,11 +1017,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         use std::os::unix::fs::PermissionsExt;
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
-        let mut current = Some(
-            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
-        );
+        let mut current = Some(server);
         let url = current.as_ref().unwrap().url();
         let before = fs::read(&registry).unwrap();
         fs::write(source.join("other.html"), "other entry").unwrap();
