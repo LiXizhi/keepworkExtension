@@ -3,7 +3,7 @@
 use super::events::broadcast_to_main;
 use super::sender::{verify_main_sender, verify_updates_sender};
 use super::state::AppCore;
-use crate::updates::UpdatesSnapshot;
+use crate::updates::{DesktopInstallOutcome, UpdatesSnapshot};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -57,35 +57,37 @@ pub(super) async fn desktop_install_update(
     state: tauri::State<'_, Arc<AppCore>>,
 ) -> Result<Value, String> {
     verify_main_sender(&window, &state)?;
-    let snap = state.updates.snapshot(&state.mcp_supervisor.snapshot());
-    if snap.mcp.can_apply {
-        let next_mcp = state.mcp_supervisor.apply_staged_update().await?;
-        let next_snap = state.updates.snapshot(&next_mcp);
-        broadcast_update_status(&app, &state);
-        return Ok(json!(next_snap));
-    }
-    if snap.desktop.can_apply {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-        if !app
-            .dialog()
-            .message("退出并更新桌面应用？应用将关闭并打开新版本安装向导。")
-            .title("更新桌面应用")
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "退出并更新".into(),
-                "取消".into(),
-            ))
-            .blocking_show()
-        {
-            return Ok(json!(snap));
-        }
-        let pkg = state.updates.prepare_desktop_install()?;
-        state.updates.launch_desktop_installer(&pkg)?;
+    if install_desktop_from_ui(&app, &state)? == DesktopInstallOutcome::Launched {
         state.quitting.store(true, Ordering::Relaxed);
         app.exit(0);
         return Ok(json!({ "ok": true, "restarting": true }));
     }
-    open_updates_window(&app, &state);
-    Ok(json!(snap))
+    Ok(json!(state
+        .updates
+        .snapshot(&state.mcp_supervisor.snapshot())))
+}
+
+fn install_desktop_from_ui(
+    app: &AppHandle,
+    core: &AppCore,
+) -> Result<DesktopInstallOutcome, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let result = core.updates.install_desktop_with_confirmation(
+        || {
+            broadcast_update_status(app, core);
+            app.dialog()
+                .message("退出并更新桌面应用？应用将关闭并打开新版本安装向导。")
+                .title("更新桌面应用")
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "退出并更新".into(),
+                    "取消".into(),
+                ))
+                .blocking_show()
+        },
+        |package| core.updates.launch_desktop_installer(package),
+    );
+    broadcast_update_status(app, core);
+    result
 }
 
 #[tauri::command]
@@ -141,19 +143,7 @@ pub(super) async fn updates_window_apply_desktop(
     state: tauri::State<'_, Arc<AppCore>>,
 ) -> Result<UpdatesSnapshot, String> {
     verify_updates_sender(&window, &state)?;
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-    let confirmed = app
-        .dialog()
-        .message("退出并更新桌面应用？应用将关闭并启动新版本安装。")
-        .title("更新桌面应用")
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "退出并更新".to_string(),
-            "取消".to_string(),
-        ))
-        .blocking_show();
-    if confirmed {
-        let pkg = state.updates.prepare_desktop_install()?;
-        state.updates.launch_desktop_installer(&pkg)?;
+    if install_desktop_from_ui(&app, &state)? == DesktopInstallOutcome::Launched {
         state.quitting.store(true, Ordering::Relaxed);
         app.exit(0);
     }

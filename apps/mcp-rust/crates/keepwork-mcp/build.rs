@@ -14,7 +14,10 @@ fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn main() {
-    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Cargo can reuse this executable after a checkout/cache has moved. Resolve
+    // inputs from the current invocation rather than its compilation directory.
+    let crate_dir =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let workspace = crate_dir.join("../..");
     let mut files = Vec::new();
     source_files(&crate_dir.join("src"), &mut files);
@@ -24,7 +27,7 @@ fn main() {
         .map(|path| {
             let name = format!(
                 "crate/{}",
-                path.strip_prefix(crate_dir)
+                path.strip_prefix(&crate_dir)
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/")
@@ -53,7 +56,7 @@ fn main() {
     let git_path = |name: &str| {
         Command::new("git")
             .args(["rev-parse", "--git-path", name])
-            .current_dir(crate_dir)
+            .current_dir(&crate_dir)
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -75,7 +78,7 @@ fn main() {
     }
     let commit = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(&crate_dir)
         .output()
         .ok()
         .filter(|output| output.status.success())

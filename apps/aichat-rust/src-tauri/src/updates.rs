@@ -11,8 +11,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+mod install_tests;
 
 pub const DEFAULT_DESKTOP_FEED_BASE: &str = "https://cdn.keepwork.com/keepwork/aichat-desktop";
 
@@ -68,6 +72,27 @@ struct DesktopUpdateRuntimeState {
     meta: PersistedDesktopUpdateMeta,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopInstallOutcome {
+    Unavailable,
+    Cancelled,
+    Busy,
+    Launched,
+}
+
+struct DesktopInstallPermit<'a> {
+    busy: &'a AtomicBool,
+    launched: bool,
+}
+
+impl Drop for DesktopInstallPermit<'_> {
+    fn drop(&mut self) {
+        if !self.launched {
+            self.busy.store(false, Ordering::Release);
+        }
+    }
+}
+
 pub fn now_iso_string() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -106,6 +131,7 @@ pub struct UpdateManager {
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     launcher_exe: Option<PathBuf>,
     desktop_state: Arc<Mutex<DesktopUpdateRuntimeState>>,
+    desktop_install_busy: AtomicBool,
 }
 
 impl UpdateManager {
@@ -145,6 +171,7 @@ impl UpdateManager {
                 error: String::new(),
                 meta,
             })),
+            desktop_install_busy: AtomicBool::new(false),
         }
     }
 
@@ -230,14 +257,8 @@ impl UpdateManager {
                 meta: PersistedDesktopUpdateMeta::default(),
             });
 
-        let can_apply_desktop = ds.state == "ready"
-            && !ds.meta.downloaded_path.is_empty()
-            && Path::new(&ds.meta.downloaded_path).is_file()
-            && is_version_newer(&ds.meta.latest_version, &self.desktop_version)
-            && !unsupported_zip(
-                Path::new(&ds.meta.downloaded_path),
-                self.launcher_exe.as_deref(),
-            );
+        let can_apply_desktop =
+            self.desktop_can_apply(&ds) && !self.desktop_install_busy.load(Ordering::Acquire);
 
         let desktop_comp = UpdateComponentStatus {
             id: "desktop".to_string(),
@@ -511,10 +532,74 @@ impl UpdateManager {
     }
 
     pub fn prepare_desktop_install(&self) -> Result<PathBuf, String> {
+        self.prepare_desktop_install_expected(None)
+    }
+
+    fn desktop_can_apply(&self, state: &DesktopUpdateRuntimeState) -> bool {
+        state.state == "ready"
+            && !state.meta.downloaded_path.is_empty()
+            && Path::new(&state.meta.downloaded_path).is_file()
+            && is_version_newer(&state.meta.latest_version, &self.desktop_version)
+            && !unsupported_zip(
+                Path::new(&state.meta.downloaded_path),
+                self.launcher_exe.as_deref(),
+            )
+    }
+
+    /// Shared by both desktop IPC entry points. MCP readiness is deliberately
+    /// absent from this operation, and no state lock is held during a dialog.
+    pub fn install_desktop_with_confirmation(
+        &self,
+        confirm: impl FnOnce() -> bool,
+        launch: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<DesktopInstallOutcome, String> {
+        if self
+            .desktop_install_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(DesktopInstallOutcome::Busy);
+        }
+        let mut permit = DesktopInstallPermit {
+            busy: &self.desktop_install_busy,
+            launched: false,
+        };
+        let candidate = {
+            let state = self.desktop_state.lock().map_err(|_| "Lock poisoned")?;
+            if !self.desktop_can_apply(&state) {
+                return Ok(DesktopInstallOutcome::Unavailable);
+            }
+            state.meta.clone()
+        };
+        if !confirm() {
+            return Ok(DesktopInstallOutcome::Cancelled);
+        }
+        let package = self.prepare_desktop_install_expected(Some(&candidate))?;
+        launch(&package)?;
+        // Once the installer was actually started, another desktop IPC call
+        // cannot launch it again while the host is completing its exit.
+        permit.launched = true;
+        Ok(DesktopInstallOutcome::Launched)
+    }
+
+    fn prepare_desktop_install_expected(
+        &self,
+        expected: Option<&PersistedDesktopUpdateMeta>,
+    ) -> Result<PathBuf, String> {
         let ds = self
             .desktop_state
             .lock()
             .map_err(|_| "Lock poisoned".to_string())?;
+        if let Some(expected) = expected {
+            let same_package = ds.meta.latest_version == expected.latest_version
+                && ds.meta.downloaded_path == expected.downloaded_path
+                && ds.meta.sha256 == expected.sha256
+                && ds.meta.size == expected.size
+                && ds.meta.url == expected.url;
+            if !same_package || !self.desktop_can_apply(&ds) {
+                return Err("桌面更新候选已改变或不再可安装，请重新检查后确认安装".into());
+            }
+        }
         if ds.state != "ready" || ds.meta.downloaded_path.is_empty() {
             return Err("当前没有已下载就绪的桌面端更新包".to_string());
         }

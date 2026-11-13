@@ -390,6 +390,27 @@ node --test apps/mcp-rust/scripts/dashboard-personas.test.cjs # isolated browser
 
 `--build-info` reports the compiled `version`, `commit`, `target`, `sourceHash`
 and `capabilities`; host identity environment variables cannot override them.
+The build script resolves its crate directory from Cargo's **runtime**
+`CARGO_MANIFEST_DIR`, then uses that directory consistently for source enumeration,
+workspace inputs and Git queries. Compiling a checkout path into the build-script
+executable with `env!("CARGO_MANIFEST_DIR")` is unsafe when Cargo caches are moved:
+a reused script could read the former checkout's source and commit. Absolute
+checkout paths are excluded from the source-hash input, so the same source and
+build-input bytes retain the same hash after relocation. When Git metadata is
+unavailable, the commit remains unknown/empty under the existing contract; it
+must never be borrowed from the original checkout or supplied through host identity
+variables. Release packaging still requires its existing valid provenance.
+
+The relocation regression must reuse an already compiled build script/cache from
+checkout A in checkout B, change B's source/commit without cleaning that cache,
+and verify that B's binary reports B's identity. Later changes in A must not
+affect B; equal input bytes in different directories must hash equally. A fresh
+build in B alone does not exercise the cached-script defect. These are build
+identity checks, not a change to HTTP/MCP compatibility or proof of live account,
+Windows or installed-package acceptance. This round's planned evidence directory
+is `.test-runtime/rust-agents-build-install-20261113/`; actual command results are
+recorded separately after execution.
+
 The desktop bundler validates every requested target against the current source
 and required capabilities before writing resources. `--no-build` still rejects
 older binaries, stale binaries with the same version and missing capabilities.
