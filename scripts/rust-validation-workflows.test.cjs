@@ -5,23 +5,43 @@ const path = require('node:path');
 // Git's Windows checkout may use CRLF. Validate the same workflow contract on
 // every host instead of treating a checkout's line endings as a CI regression.
 const workflow = name => fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8').replace(/\r\n/g, '\n');
+const jobBody = (source, job) => {
+  const start = source.search(new RegExp(`^  ${job}:$`, 'm'));
+  assert.ok(start >= 0, `workflow must define the ${job} job`);
+  const remainder = source.slice(start);
+  const next = remainder.slice(1).search(/^  [a-z][a-z-]*:$/m);
+  return next < 0 ? remainder : remainder.slice(0, next + 1);
+};
 
 test('PRs validate both Rust products without entering installer or publication jobs', () => {
-  const desktop = workflow('aichat-rust.yml');
+  const desktop = workflow('aichat-rust-windows-release.yml');
   const mcp = workflow('mcp-rust.yml');
+  assert.match(mcp, /^  pull_request:/m);
+  assert.match(mcp, /contents: read/);
+  assert.doesNotMatch(mcp, /contents: write|secrets\.|gh release|npm publish|vsce publish/);
   for (const source of [desktop, mcp]) {
     assert.match(source, /^  pull_request:/m);
-    assert.match(source, /contents: read/);
-    assert.doesNotMatch(source, /contents: write|secrets\.|gh release|npm publish|vsce publish/);
     assert.match(source, /"src\/\*\*"/);
     assert.match(source, /"scripts\/\*\*"/);
   }
-  for (const job of ['build-macos-universal', 'build-windows']) {
-    const body = desktop.slice(desktop.indexOf('  ' + job + ':')).split(/\n  [a-z][a-z-]*:/)[0];
+  assert.match(desktop, /^permissions:\n  contents: read$/m);
+  assert.match(desktop, /uses: \.\/\.github\/workflows\/rust-desktop-validation\.yml/);
+  for (const job of ['build', 'build-macos']) {
+    const body = jobBody(desktop, job);
     assert.match(body, /needs: validate/);
     assert.match(body, /if: github\.event_name != 'pull_request'/);
   }
-  assert.match(desktop, /uses: \.\/\.github\/workflows\/rust-desktop-validation\.yml/);
+  // Publication stays manual-dispatch on a tag; a PR or main push can never reach it.
+  const publish = jobBody(desktop, 'publish');
+  assert.match(publish, /^    if: startsWith\(github\.ref, 'refs\/tags\/v'\) \|\| /m);
+  assert.match(publish, /contents: write/);
+  // Anything that reads a secret or publishes must be gated off pull requests.
+  for (const job of ['build', 'build-macos', 'publish']) {
+    const body = jobBody(desktop, job);
+    if (/secrets\.|gh release/.test(body)) {
+      assert.match(body, /if: (github\.event_name != 'pull_request'|startsWith\(github\.ref, 'refs\/tags\/)/, job);
+    }
+  }
 });
 
 test('release and PR builds share real host Windows tests instead of inheriting macOS skips', () => {

@@ -2,13 +2,34 @@ name: AIChat Rust release packages
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/aichat-rust/**"
+      - "apps/mcp-rust/**"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "package*.json"
+      - "docs/acceptance/rust-release-evidence.schema.json"
+      - ".github/workflows/*rust*.yml"
+  push:
+    branches: [master, main]
+    paths:
+      - "apps/aichat-rust/**"
+      - "apps/mcp-rust/**"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "package*.json"
+      - "docs/acceptance/rust-release-evidence.schema.json"
+      - ".github/workflows/*rust*.yml"
 
 permissions:
   contents: read
 
 concurrency:
   group: aichat-rust-release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate:
@@ -16,6 +37,7 @@ jobs:
 
   build:
     needs: validate
+    if: github.event_name != 'pull_request'
     name: Windows Rust (${{ matrix.arch }})
     runs-on: windows-latest
     strategy:
@@ -173,6 +195,7 @@ jobs:
 
   build-macos:
     needs: validate
+    if: github.event_name != 'pull_request'
     name: macOS Rust (universal)
     runs-on: macos-latest
     env:
