@@ -1,6 +1,6 @@
 ---
 name: rust-release
-description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；执行桌面打包、Rust MCP daemon 构建、MCP CDN 上传和 feed 提升，并核对 GitHub Release 下载地址。新版本打包、补发或排查发布流水线时使用。
+description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；支持 /rust-release 双产品发布与 /rust-release mcp-server 仅发布 MCP Rust。执行构建、CDN 上传和 feed 提升，核对下载地址；新版本打包、补发或排查发布流水线时使用。
 ---
 
 # Rust 双产品发布
@@ -9,6 +9,27 @@ description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；执�
 除非用户明确限定“只发桌面”或“只发 MCP”，不能省略 `Rust MCP daemon` 构建 Action，
 以及 **Review or publish an accepted Rust MCP runtime** 上传 CDN 的 Action。
 用户只要求修改 Skill、总结或解释流程时，仅处理文档，不触发发布。
+
+## 调用命令与参数
+
+将下面命令作为聊天中的 Skill 调用指令解析，先确定发布范围，再选择后续步骤：
+
+| 调用方式 | 执行范围 |
+| --- | --- |
+| `/rust-release` 或 `/rust-release all` | 发布桌面端和 MCP Rust 服务器 |
+| `/rust-release mcp-server` | **仅发布 MCP Rust 服务器**，从其清单与线上 MCP feed 确定下一个版本 |
+| `/rust-release mcp-server X.Y.Z` | 仅发布 MCP Rust 服务器，使用明确指定的 MCP 版本 |
+
+`mcp-server` 模式的执行顺序：
+
+1. 检查 MCP 清单、线上 feed 和源提交；只同步 MCP 的两个版本文件，不修改桌面版本。
+2. 执行 **Rust MCP daemon**，或复用本次相同提交、相同 MCP 版本且已成功的构建产物。
+3. 逐平台执行 **Review or publish an accepted Rust MCP runtime**，显式传入 `publish=true`。
+4. 确认各平台 publish job 成功，核验 MCP CDN 的版本、提交、归档大小和 SHA-256，汇总发布地址。
+
+该模式执行第 1、3、4 节和第 5、6 节中的 MCP 部分，跳过第 2 节桌面发布。
+不触发桌面打包、不创建桌面 `v<desktop_version>` tag、不更新桌面 feed 或桌面 Release 的 Latest 标记。
+未知参数先澄清，不回退为默认双产品发布；指定版本不得被自动替换。
 
 | 产品 | 构建 Action / 文件 | CDN 发布 |
 | --- | --- | --- |
@@ -35,7 +56,8 @@ for t in macos-arm64 windows-x64 linux-x64; do
 done
 ```
 
-分别确定 `desktop_version`、`mcp_version` 和本次发布的完整提交 SHA。版本文件必须同步：
+按调用范围确定 `desktop_version`、`mcp_version` 和本次发布的完整提交 SHA。
+`mcp-server` 模式只需要 `mcp_version`，不要求提供桌面版本。受影响产品的版本文件必须同步：
 
 - 桌面：`apps/aichat-rust/package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中
   `aichat-rust` 包、`src-tauri/tauri.conf.json`。
@@ -62,17 +84,19 @@ gh workflow run aichat-rust-windows-release.yml --ref v<desktop_version>
 
 ## 3. 必须执行 Rust MCP daemon
 
-桌面 Action 启动后，还必须执行名字为 **Rust MCP daemon** 的 Action（`mcp-rust.yml`）。
-可与桌面构建并行；若本次提交已经有该 Action 的成功运行，核对 `headSha` 和产物后可复用，不重复构建。
+双产品模式可在桌面 Action 启动后并行执行 **Rust MCP daemon**（`mcp-rust.yml`）；
+`mcp-server` 模式直接执行它，不等待或触发桌面 Action。
+若本次提交已经有该 Action 的成功运行，核对 `headSha` 和产物后可复用，不重复构建。
 
 ```bash
-gh workflow run mcp-rust.yml --ref v<desktop_version>
+gh workflow run mcp-rust.yml --ref <source-ref>
 # 从本次 dispatch 返回的链接记录 mcp_run_id
 gh run watch <mcp_run_id> --exit-status
 gh run view <mcp_run_id> --json headSha,conclusion,url
 ```
 
-只发布 MCP 时，`--ref` 使用本次 MCP 发布的固定源 ref。记录返回的完整 `headSha` 为 `mcp_commit`，
+双产品模式的 `source-ref` 通常为 `v<desktop_version>`；`mcp-server` 模式可用已推送的 `main`
+或用户指定的 MCP 源 ref，不依赖桌面 tag。记录返回的完整 `headSha` 为 `mcp_commit`，
 确认等于预期源提交，并检查各平台 job 成功且产物存在。不能复用其他提交或其他版本的同名 artifact。
 当前构建矩阵如下；以后以 workflow 和实际产物为准：
 
@@ -131,7 +155,8 @@ gh run view <mcp_publish_run_id> --json conclusion,jobs,url
 
 ## 5. 核对两个产品的 CDN，并补 GitHub Release
 
-桌面：检查 Release 非 draft、三个安装包可下载、三个 `latest-client.json` 指向预期桌面版本。
+双产品模式检查桌面 Release 非 draft、三个安装包可下载、三个 `latest-client.json` 指向预期桌面版本。
+`mcp-server` 模式跳过桌面检查及下列桌面示例命令，只检查 MCP。
 MCP：对每个已发布 target 检查固定 feed 的 `version`、完整 `commit`、`url`、`size`、`sha256`，
 然后下载**实际归档**核对大小和 SHA-256。不能只看 workflow 绿灯或 HTTP HEAD 200。
 
@@ -150,8 +175,10 @@ wc -c <本地核验文件>
 ```
 
 若 feed 看起来仍是旧值，可加一次性 query 复查 CDN 缓存；不得因此跳过固定地址核验。
-旧版归档应保持可下载。将 MCP 各平台固定 feed、版本 ZIP 链接和 SHA-256 补到本次 GitHub Release 正文，
+旧版归档应保持可下载。双产品模式将 MCP 各平台固定 feed、版本 ZIP 链接和 SHA-256 补到本次桌面 GitHub Release 正文，
 保留桌面发布器的下载表及已有说明。用正文文件配合 `gh release edit --notes-file`，避免丢失原内容。
+`mcp-server` 模式将地址和校验结果写入 MCP 发布回执；若用户指定了 GitHub Release 目标，
+只更新该目标的 MCP 部分，不为独立 MCP 发布创建新的桌面版本。
 
 ## 6. 完成与失败处理
 
@@ -165,6 +192,8 @@ wc -c <本地核验文件>
 
 汇总两个独立版本号、源提交、构建与发布 run 链接、各平台 CDN 地址、验收模式及未验证项目。
 任何一个目标失败都明确列出，不把桌面成功说成双产品成功。
+`mcp-server` 模式以 MCP 构建、逐平台 CDN 发布和核验全部完成为结束条件；仅汇总 MCP 版本与结果，
+不把未执行的桌面步骤算作失败或待办。
 
 失败时先查日志和已上传结果；产物未改变时可重跑相同发布参数，避免重复构建。
 需要修改源码时升版并创建新 tag。保留已有 tag、Release 和 CDN 归档，不删改历史 tag。
