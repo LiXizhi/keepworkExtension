@@ -28,6 +28,7 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - 标准开发与 `make:mac` / `make:win:x64` / `make:win:arm64` 打包入口选择 Rust MCP；`bundle:mcp` 默认捆绑 Rust，`bundle:mcp-rust` 保留为同义入口。`apps/mcp-runtime` 的 Node 版通过 `bundle:mcp-node`、`make:mcp-node:mac` 和 `make:mcp-node:win:x64` 显式选择，仍须先准备并校验对应 Node staging。Rust 构建或校验失败时明确报错，不因缺少可选能力自动改用 Node。
   - Rust 已提供本地文件、文件夹浏览、PTY、五个可移植 MCP 工具，以及分身和钉钉/飞书消息的部分能力。原生 Agent CLI、浏览器、电脑操作等仍未全面移植；按 `/health` 的实际能力降级，不能凭引擎或版本号推断支持。详见 [迁移契约](../../docs/rust-runtime-migration.md)。
   - 既有共享 8089 服务继续按所有权和接管规则处理；默认候选为 Rust 不代表已有外部服务已被替换，实际引擎须检查 `/health.runtimeEngine` 与进程入口。
+  - macOS 的 HTTPS 聊天页通过受限原生通道访问 `http://localhost:8089` / `http://127.0.0.1:8089`，避免 WKWebView 混合内容限制导致 MCP 在线但分身不显示。只接受实际受信顶层文档，Origin 取自原生框架，Bearer 认证和分身 owner 保持原协议；不使用 Cookie、代理、重定向或自动重试。响应按需流式读取，单次请求体上限 32 MiB；显式 Cookie 凭据、手动重定向等不支持的语义明确报错。Basic / Digest / NTLM 等系统认证挑战以 `MCP_HTTP_AUTH_CHALLENGE_UNSUPPORTED` 拒绝，不重新发送请求或伪造服务器响应。其他地址、端口和平台沿用浏览器连接，不修改网页存储或迁移分身记录。
 - **双本地 Runtime 守护进程监管**：
   - 监管 MCP（`127.0.0.1:8089`，默认 Rust）与 `keepwork-local-model-node-runtime`（`127.0.0.1:18089`），60 秒心跳巡检。MCP 引擎选择不改变外部 VS Code / Local Helper 实例的所有权保护，也不放宽 Origin、鉴权、路径和任务执行边界。
 - **透明置顶桌面宠物窗口（`pet.html`）**：

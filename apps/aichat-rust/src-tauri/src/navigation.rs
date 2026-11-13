@@ -1,15 +1,26 @@
 //! Keep embedded browser navigations out of the main window's external-link guard.
 
 #[cfg(target_os = "macos")]
-pub fn install_frame_navigation(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    window.with_webview(|webview| {
+pub fn install_frame_navigation(
+    window: &tauri::WebviewWindow,
+    entry_url: &str,
+) -> tauri::Result<()> {
+    let entry = std::ffi::CString::new(entry_url).expect("a validated entry URL has no NUL");
+    window.with_webview(move |webview| {
         extern "C" {
             fn keepwork_install_frame_navigation(webview: *mut std::ffi::c_void) -> bool;
+            fn keepwork_install_local_mcp(
+                webview: *mut std::ffi::c_void,
+                entry: *const std::ffi::c_char,
+            ) -> bool;
         }
         // Tauri runs this closure on the native webview thread. WebKit's weak
         // navigation delegate is retained by an association on this webview.
         if !unsafe { keepwork_install_frame_navigation(webview.inner()) } {
             eprintln!("Could not install embedded browser navigation policy");
+        }
+        if !unsafe { keepwork_install_local_mcp(webview.inner(), entry.as_ptr()) } {
+            eprintln!("Could not install the local MCP network bridge");
         }
     })
 }

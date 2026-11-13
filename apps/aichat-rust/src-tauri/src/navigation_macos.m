@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 extern bool keepwork_allowed_subframe_navigation(const char *url);
+extern void keepwork_reset_local_mcp(void *webview);
 
 // Wry's URL-only navigation handler cannot distinguish a preview iframe from
 // the main document. Preserve its delegate for every event except subframe
@@ -12,6 +13,24 @@ extern bool keepwork_allowed_subframe_navigation(const char *url);
 @end
 
 @implementation KeepworkFrameNavigationDelegate
+- (void)webView:(WKWebView *)webview didStartProvisionalNavigation:(WKNavigation *)navigation {
+    keepwork_reset_local_mcp((__bridge void *)webview);
+    id<WKNavigationDelegate> downstream = self.downstream;
+    if ([downstream respondsToSelector:_cmd]) {
+        [downstream webView:webview didStartProvisionalNavigation:navigation];
+    }
+}
+
+- (void)webView:(WKWebView *)webview didCommitNavigation:(WKNavigation *)navigation {
+    // The previous document can still run while a provisional load is pending.
+    // Clear its last requests again before the newly committed document starts.
+    keepwork_reset_local_mcp((__bridge void *)webview);
+    id<WKNavigationDelegate> downstream = self.downstream;
+    if ([downstream respondsToSelector:_cmd]) {
+        [downstream webView:webview didCommitNavigation:navigation];
+    }
+}
+
 - (BOOL)respondsToSelector:(SEL)selector {
     return [super respondsToSelector:selector] || [self.downstream respondsToSelector:selector];
 }

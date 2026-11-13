@@ -15,6 +15,7 @@ const rawBridge = bridgeSource.match(/r#"([\s\S]*?)"#/)[1];
 const menuSource = fs.readFileSync(path.join(appRoot, "src/menuChrome.js"), "utf8").replace("export function", "function");
 const themeSource = fs.readFileSync(path.join(appRoot, "src/chromeTheme.js"), "utf8").replace("export function", "function");
 const pageThemeSource = fs.readFileSync(path.join(appRoot, "src/pageTheme.js"), "utf8").replace("export function", "function");
+const localMcpSource = fs.readFileSync(path.join(appRoot, "src/localMcpFetch.js"), "utf8").replace("export function", "function");
 
 // Model composed event bubbling across a CLOSED shadow root: listeners inside
 // see the real target; host/document/window listeners see only the host. A
@@ -196,7 +197,8 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
   } else {
     const javascript = rawBridge.replaceAll("{{", "{").replaceAll("}}", "}")
       .replace("{bootstrap}", JSON.stringify(bootstrap)).replace("{menu_chrome}", menuSource)
-      .replace("{chrome_theme}", themeSource).replace("{page_theme}", pageThemeSource);
+      .replace("{chrome_theme}", themeSource).replace("{page_theme}", pageThemeSource)
+      .replace("{local_mcp_fetch}", localMcpSource);
     vm.runInNewContext(javascript, context);
   }
   const initialCalls = [...calls];

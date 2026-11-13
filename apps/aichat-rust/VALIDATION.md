@@ -1,5 +1,19 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-13：macOS 发布页连接本机 MCP 与分身（0.2.82）
+
+用户提供的同页对比中，Chrome 能显示三个分身，已安装桌面 `0.2.78` 没有显示；本机内置 Rust MCP `0.2.44` 健康并声明 `personasApi`，但没有 AIChat presence。隔离实测确认：macOS 15.7.9 的 WKWebView 在 HTTPS 页面访问 HTTP loopback 时，在请求抵达服务器前失败。同一自有 HTML 改为 HTTP 来源即可访问；精确 ATS 例外及 WebContent ATS 例外均不能解决。没有采用关闭 WebKit 安全检查或迁移分身 owner 的方案。
+
+主窗口现在安装受限 `WKScriptMessageHandlerWithReply`；HTTPS 可信顶层页的既有 `fetch` 在访问精确 `localhost:8089` / `127.0.0.1:8089` 时使用该通道。原生独立核对实际 WebView、主框架 URL 与 securityOrigin，强制真实 Origin、固定回环目标、保留 Bearer 与 owner，拒绝 Cookie、代理、重定向及非法头；其他请求仍由原浏览器执行。响应按消费拉取，每块最多 64 KiB、缓冲最多 1 MiB、最多 32 个请求，请求体最多 32 MiB。取消不重发，导航开始和提交均清理旧请求。Basic / Digest / NTLM 认证挑战明确返回 `MCP_HTTP_AUTH_CHALLENGE_UNSUPPORTED`，避免 Foundation 自动重新发送请求；Bearer 401 保留原始 HTTP 状态和正文。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check` 最终通过：TypeScript、前端构建，Rust **168 通过 / 1 默认忽略**，Node **384 通过 / 4 平台跳过 / 0 失败**。日志 `/tmp/keepwork-macos-mcp-check.log`。初次沙盒运行禁止回环夹具；放行隔离测试后的一次运行遇到既有鼠标按键采样测试，最终重跑通过。
+- 新增 JS 合同测试 **10/10**；真实 WKWebView 夹具 **1/1**，实际加载生产 JS shim 与原生实现，仅在测试副本替换随机端口。覆盖旧 health 的可选字段缺失、旧 MCP initialize/session、分身列表、二进制、SSE/NDJSON、Abort、标准 Response 读取及 iframe/来源/端口/头部/重定向隔离。Bearer 401 与 Basic / Digest / NTLM 场景均断言每个 POST 只收到一次。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过；日志 `/tmp/keepwork-macos-mcp-build.log`。`git diff --check` 通过。
+
+所有自动回归使用自有 HTML、临时配置和随机回环 mock，未替换已安装应用或改变真实分身数据；尚未对登录账号执行修复版整窗验收。四处桌面版本同步 **0.2.82**；网页和 MCP 服务不要求同步升级。安装包发布使用 `aichat-rust-v0.2.82` 标签及 `AIChat Rust release packages` 工作流，三个平台的安装包完成 CDN 大小与 SHA-256 校验后才公开 GitHub Release；完整下载地址写入 Release 正文及 Actions 发布摘要，沿用按版本禁止覆盖的 CDN 路径。
+
 ## 2026-11-13：聊天页面等待 SDK 时的真实首屏（0.2.81）
 
 用户截图的黑色画布来自已进入 `localhost:3001` 的 AIChat 文档：`startup-progress` 已出现，但 `initTheme` 仍在等待包初始化、Tailwind、SDK 和工作台模块，因此基础 CSS 的默认深色先绘制。前两轮仅覆盖本地连接页及已应用主题的页面，遗漏了此阶段。

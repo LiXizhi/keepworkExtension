@@ -42,6 +42,8 @@ pub fn build_main_window_init_script_for_entry(
         include_str!("../../src/chromeTheme.js").replacen("export function", "function", 1);
     let page_theme =
         include_str!("../../src/pageTheme.js").replacen("export function", "function", 1);
+    let local_mcp_fetch =
+        include_str!("../../src/localMcpFetch.js").replacen("export function", "function", 1);
 
     format!(
         r#"(() => {{
@@ -50,6 +52,8 @@ pub fn build_main_window_init_script_for_entry(
   {menu_chrome}
   {chrome_theme}
   {page_theme}
+  {local_mcp_fetch}
+  installLocalMcpFetch(bootstrap);
   installPageTheme(bootstrap.entryUrl);
   window.__AICHAT_DESKTOP_BOOTSTRAP__ = bootstrap;
 
