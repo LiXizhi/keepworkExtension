@@ -2,7 +2,9 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const workflow = name => fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8');
+// Git's Windows checkout may use CRLF. Validate the same workflow contract on
+// every host instead of treating a checkout's line endings as a CI regression.
+const workflow = name => fs.readFileSync(path.join(__dirname, '../.github/workflows', name), 'utf8').replace(/\r\n/g, '\n');
 
 test('PRs validate both Rust products without entering installer or publication jobs', () => {
   const desktop = workflow('aichat-rust.yml');

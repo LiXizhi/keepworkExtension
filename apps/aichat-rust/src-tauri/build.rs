@@ -12,7 +12,8 @@ fn main() {
             native.file("src/app/startup_smoke_macos.m");
             println!("cargo:rerun-if-changed=src/app/startup_smoke_macos.m");
         }
-        native.file("src/navigation_macos.m")
+        native
+            .file("src/navigation_macos.m")
             .file("src/local_mcp_macos.m")
             .file("src/browser_surface_macos.m")
             .file("src/app/native_startup_macos.m")
@@ -50,7 +51,7 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
         || std::env::var("PROFILE").as_deref() != Ok("debug")
     {
-        tauri_build::build();
+        tauri_build::try_build(build_attributes()).expect("Tauri build failed");
         return;
     }
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
@@ -64,7 +65,7 @@ fn main() {
         &out,
     )
     .unwrap_or_else(|error| panic!("Cannot prepare macOS development MCP resources: {error}"));
-    match tauri_build::try_build(tauri_build::Attributes::new()) {
+    match tauri_build::try_build(build_attributes()) {
         Ok(()) => {
             guard.commit().unwrap_or_else(|error| {
                 panic!("Cannot finish macOS development MCP resource copy: {error}")
@@ -77,4 +78,27 @@ fn main() {
             panic!("Tauri build failed: {error}");
         }
     }
+}
+
+// tauri-winres links its resource manifest only into binary targets. Library
+// unit tests and integration tests also import Common Controls v6 through Tauri,
+// so the Windows loader must see the same manifest before their harness starts.
+// Embed it through the MSVC linker for all targets, and omit the resource copy
+// to avoid duplicate RT_MANIFEST entries in the packaged application.
+fn build_attributes() -> tauri_build::Attributes {
+    let attributes = tauri_build::Attributes::new();
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let manifest = std::path::PathBuf::from(
+            std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+        )
+        .join("windows-app-manifest.xml");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+        return attributes
+            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+    }
+    attributes
 }
