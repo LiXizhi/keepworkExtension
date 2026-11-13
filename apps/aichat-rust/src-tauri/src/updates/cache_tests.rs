@@ -11,6 +11,133 @@ impl Drop for ScratchDirectory {
 }
 
 #[tokio::test]
+async fn request_diagnostics_keep_connection_causes_without_custom_feed_secrets() {
+    use std::error::Error;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let url = format!(
+        "http://private-user:private-password@127.0.0.1:{port}/latest-client.json?token=private-query#private-fragment"
+    );
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap()
+        .get(&url)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(error.is_connect());
+    let mut cause = error.source().expect("connect failures expose a source");
+    while let Some(next) = cause.source() {
+        cause = next;
+    }
+    let cause = cause.to_string();
+    let diagnostic = crate::update_network::describe_request_error(error);
+    assert!(diagnostic.contains(&cause), "{diagnostic}");
+    for secret in [
+        "private-user",
+        "private-password",
+        "private-query",
+        "private-fragment",
+        "token=",
+    ] {
+        assert!(!diagnostic.contains(secret), "{diagnostic}");
+    }
+}
+
+#[tokio::test]
+async fn desktop_connection_and_http_failures_preserve_cached_metadata() {
+    for missing_route in [false, true] {
+        let scratch = ScratchDirectory(
+            std::env::temp_dir().join(format!("aichat-update-network-{}", Uuid::new_v4())),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = if missing_route {
+            Some(tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(4), async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0; 4096];
+                    assert!(socket.read(&mut request).await.unwrap() > 0);
+                    socket
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await
+                        .unwrap();
+                })
+                .await
+                .expect("HTTP failure fixture exceeded its deadline");
+            }))
+        } else {
+            drop(listener);
+            None
+        };
+        let feed = format!(
+            "http://private-user:private-password@127.0.0.1:{port}/latest-client.json?token=private-query#private-fragment"
+        );
+        let metadata_file = scratch.0.join("metadata.json");
+        let downloads = scratch.0.join("downloads");
+        fs::create_dir_all(&downloads).unwrap();
+        let payload = b"previous verified installer";
+        let package = downloads.join("installer.dmg");
+        fs::write(&package, payload).unwrap();
+        let cached = PersistedDesktopUpdateMeta {
+            feed_url: feed.clone(),
+            latest_version: "0.3.0".into(),
+            published_at: "2026-11-13T08:00:00Z".into(),
+            checked_at: "123".into(),
+            url: "https://cdn.keepwork.com/installer.dmg".into(),
+            sha256: sha256_hex(payload),
+            size: payload.len() as u64,
+            downloaded_path: package.to_string_lossy().into(),
+        };
+        atomic_json_write(&metadata_file, &cached).unwrap();
+        let saved_bytes = fs::read(&metadata_file).unwrap();
+        let manager =
+            UpdateManager::new("0.2.0".into(), metadata_file.clone(), downloads, feed, None);
+        tokio::time::timeout(Duration::from_secs(5), manager.check_desktop_update())
+            .await
+            .expect("failed update check exceeded its deadline");
+        if let Some(server) = server {
+            server.await.unwrap();
+        }
+        let failed = manager
+            .snapshot(&RuntimeStatusSnapshot::initial("mcp", 8089))
+            .desktop;
+        assert_eq!(failed.state, "ready", "{}", failed.error);
+        assert!(failed.stale && failed.can_apply);
+        assert_eq!(failed.latest_version, "0.3.0");
+        assert_eq!(failed.published_at, "2026-11-13T08:00:00Z");
+        assert_eq!(fs::read(metadata_file).unwrap(), saved_bytes);
+        assert_eq!(
+            fs::read(manager.prepare_desktop_install().unwrap()).unwrap(),
+            payload
+        );
+        if missing_route {
+            assert_eq!(failed.error, "检查桌面更新失败（HTTP 404）");
+        } else {
+            assert!(
+                failed.error.starts_with("无法连接桌面更新服务器："),
+                "{}",
+                failed.error
+            );
+            assert!(failed.error.contains("connect"), "{}", failed.error);
+        }
+        for secret in [
+            "private-user",
+            "private-password",
+            "private-query",
+            "private-fragment",
+            "token=",
+        ] {
+            assert!(!failed.error.contains(secret), "{}", failed.error);
+        }
+    }
+}
+
+#[tokio::test]
 async fn manifest_checks_bust_cache_without_changing_channels_or_installer_urls() {
     for query in ["", "?token=a%2Bb%2Fc%3D&channel=stable"] {
         let scratch = ScratchDirectory(

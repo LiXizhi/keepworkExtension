@@ -42,6 +42,7 @@ fn quit_desktop(app: &AppHandle, core: &Arc<AppCore>) {
 /// 读取本机 MCP `/admin/status`（2 秒超时）；服务未运行时返回 None。
 async fn fetch_mcp_admin_status() -> Option<Value> {
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()
         .ok()?;

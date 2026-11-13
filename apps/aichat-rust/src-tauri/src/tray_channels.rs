@@ -117,6 +117,8 @@ pub fn describe(channels: &[ChannelStatus], signed_in: bool, main_visible: bool)
 
 pub async fn fetch_tray_channels(port: u16, mcp_home: &Path) -> Vec<ChannelStatus> {
     let client = match reqwest::Client::builder()
+        // Local daemon requests (including its token) must never reach a proxy.
+        .no_proxy()
         .timeout(Duration::from_millis(1800))
         .build()
     {

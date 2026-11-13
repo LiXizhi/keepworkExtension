@@ -256,6 +256,71 @@ async fn missing_feed_preserves_only_the_same_source_release_cache() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn unavailable_feed_keeps_diagnostic_causes_and_cached_release_identity() {
+    let root = root();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let config = RuntimeConfig {
+        id: "mcp".into(),
+        products: vec![RUST_MCP_PRODUCT.into()],
+        port: 0,
+        health_path: "/health".into(),
+        updates_enabled: true,
+        bundled_dir: root.join("bundle"),
+        store_dir: root.join("store"),
+        feed_url: format!("http://127.0.0.1:{port}/feed?token=private-query"),
+    };
+    let record = ActiveRuntimeRecord {
+        latest_version: Some("0.3.0".into()),
+        latest_built_at: Some("2026-11-13T08:00:00Z".into()),
+        latest_source: Some(config.update_source()),
+        ..Default::default()
+    };
+    let active = config.store_dir.join("active.json");
+    atomic_json_write(&active, &record).unwrap();
+    let saved_bytes = fs::read(&active).unwrap();
+    let supervisor = RuntimeSupervisor::new(config);
+    let (failed, newly_staged) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        supervisor.check_for_update(),
+    )
+    .await
+    .expect("failed runtime update check exceeded its deadline");
+    assert!(!newly_staged);
+    assert_eq!(failed.update_state, "error");
+    assert!(
+        failed.update_error.starts_with("更新清单暂不可用："),
+        "{}",
+        failed.update_error
+    );
+    assert!(
+        failed.update_error.contains("connect"),
+        "{}",
+        failed.update_error
+    );
+    assert!(
+        !failed.update_error.contains("private-query"),
+        "{}",
+        failed.update_error
+    );
+    assert!(
+        !failed.update_error.contains("token="),
+        "{}",
+        failed.update_error
+    );
+    assert_eq!(failed.latest_version, "0.3.0");
+    assert_eq!(failed.latest_built_at, "2026-11-13T08:00:00Z");
+    let card = crate::updates::UpdateManager::build_mcp_component(&failed);
+    assert!(card.stale);
+    assert_eq!(card.state, "error");
+    assert_eq!(fs::read(active).unwrap(), saved_bytes);
+    assert!(supervisor.child.lock().unwrap().is_none());
+    drop(supervisor);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn rust_archive_checks_actual_binary_and_manifest_target() {
     let root = root();

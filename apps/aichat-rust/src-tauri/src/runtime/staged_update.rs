@@ -5,6 +5,7 @@ use super::{
     validate_staged_runtime, validate_update_manifest, validate_update_url, RuntimeStatusSnapshot,
     RuntimeSupervisor, RuntimeUpdateManifest,
 };
+use crate::update_network::describe_request_error;
 use futures_util::StreamExt;
 use std::fs;
 use std::time::Duration;
@@ -16,7 +17,8 @@ async fn bounded_body(response: reqwest::Response, limit: u64) -> Result<Vec<u8>
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("读取更新响应失败：{error}"))?;
+        let chunk = chunk
+            .map_err(|error| format!("读取更新响应失败：{}", describe_request_error(error)))?;
         if bytes.len() as u64 + chunk.len() as u64 > limit {
             return Err("更新响应超出大小限制".into());
         }
@@ -53,13 +55,13 @@ impl RuntimeSupervisor {
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|error| error.to_string())?;
+            .map_err(describe_request_error)?;
         let response = client
             .get(&self.config.feed_url)
             .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .send()
             .await
-            .map_err(|error| format!("更新清单暂不可用：{error}"))?;
+            .map_err(|error| format!("更新清单暂不可用：{}", describe_request_error(error)))?;
         if !response.status().is_success() {
             return Err(format!(
                 "更新清单暂不可用（HTTP {}）",
@@ -160,7 +162,7 @@ impl RuntimeSupervisor {
             .get(&remote.url)
             .send()
             .await
-            .map_err(|error| format!("下载失败：{error}"))?;
+            .map_err(|error| format!("下载失败：{}", describe_request_error(error)))?;
         if !response.status().is_success() {
             return Err(format!(
                 "下载更新包失败（HTTP {}）",

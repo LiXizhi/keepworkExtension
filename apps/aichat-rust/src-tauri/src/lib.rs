@@ -24,6 +24,7 @@ pub mod terminal;
 pub mod theme;
 pub mod tray_channels;
 pub mod updates;
+mod update_network;
 
 #[cfg(test)]
 mod clipboard_acl_tests;

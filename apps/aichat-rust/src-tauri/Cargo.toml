@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.114"
+version = "0.2.115"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
@@ -97,6 +97,8 @@ libc = "0.2"
 gtk = "0.18"
 
 [target.'cfg(windows)'.dependencies]
+# Match Windows browser connectivity while retaining WebPKI roots and TLS verification.
+reqwest = { version = "0.12", default-features = false, features = ["system-proxy", "rustls-tls-native-roots"] }
 junction = "1"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility", "Devices_Bluetooth", "Devices_Enumeration", "Foundation"] }
 windows-collections = "0.3"

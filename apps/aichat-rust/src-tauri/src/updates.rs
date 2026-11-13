@@ -1,4 +1,5 @@
 use crate::files::atomic_json_write;
+use crate::update_network::describe_request_error;
 use crate::runtime::{
     current_runtime_arch, current_runtime_platform, is_valid_hex, is_version_newer, parse_semver,
     sha256_hex, RuntimeStatusSnapshot, RuntimeSupervisor,
@@ -416,7 +417,7 @@ impl UpdateManager {
             .timeout(Duration::from_secs(15 * 60));
         #[cfg(test)]
         let builder = builder.no_proxy();
-        let client = builder.build().map_err(|e| e.to_string())?;
+        let client = builder.build().map_err(describe_request_error)?;
 
         let resp = client
             .get(&self.feed_url)
@@ -427,7 +428,7 @@ impl UpdateManager {
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| format!("无法连接桌面更新服务器：{e}"))?;
+            .map_err(|e| format!("无法连接桌面更新服务器：{}", describe_request_error(e)))?;
         if !resp.status().is_success() {
             return Err(format!(
                 "检查桌面更新失败（HTTP {}）",
@@ -437,7 +438,7 @@ impl UpdateManager {
         let body: Value = resp
             .json()
             .await
-            .map_err(|e| format!("解析桌面更新清单失败：{e}"))?;
+            .map_err(|e| format!("解析桌面更新清单失败：{}", describe_request_error(e)))?;
 
         // Historical feeds describe a ZIP at the top level and the interactive
         // platform installer in this additive field. Its version is independent
@@ -567,7 +568,7 @@ impl UpdateManager {
             .get(&url)
             .send()
             .await
-            .map_err(|e| format!("下载桌面更新包失败：{e}"))?;
+            .map_err(|e| format!("下载桌面更新包失败：{}", describe_request_error(e)))?;
         if !pkg_resp.status().is_success() {
             return Err(format!(
                 "下载桌面更新包失败（HTTP {}）",
@@ -577,7 +578,7 @@ impl UpdateManager {
         let pkg_bytes = pkg_resp
             .bytes()
             .await
-            .map_err(|e| format!("读取桌面更新包数据失败：{e}"))?;
+            .map_err(|e| format!("读取桌面更新包数据失败：{}", describe_request_error(e)))?;
 
         if size > 0 && pkg_bytes.len() as u64 != size {
             return Err(format!(
