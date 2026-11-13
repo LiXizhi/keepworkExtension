@@ -9,7 +9,8 @@ mod fixture {
         time::{Duration, Instant},
     };
     use webview2_com::{
-        take_pwstr, wait_with_pump, CreateCoreWebView2ControllerCompletedHandler,
+        take_pwstr, wait_with_pump, BrowserProcessExitedEventHandler,
+        CreateCoreWebView2ControllerCompletedHandler,
         CreateCoreWebView2EnvironmentCompletedHandler, DownloadStartingEventHandler,
         ExecuteScriptCompletedHandler, Microsoft::Web::WebView2::Win32::*,
         NavigationCompletedEventHandler,
@@ -555,12 +556,76 @@ mod fixture {
             evaluate(&main, "localStorage.getItem('owner-secret')")?,
             json!("private")
         );
-        println!("native Windows browser surface tests passed (raster scale {raster})");
+        // Close is asynchronous: wait for the fixture's browser to release its
+        // user data folder before Node removes it. Keep the environment alive
+        // while pumping; releasing it early would also remove the exit event.
+        let environment5: ICoreWebView2Environment5 = environment.cast()?;
+        let mut browser_pid = 0;
+        unsafe {
+            main.BrowserProcessId(&mut browser_pid)?;
+        }
+        let (send, receive) = mpsc::channel();
+        let exited = BrowserProcessExitedEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
+                let _ = send.send(Err("Missing browser exit event".to_owned()));
+                return Ok(());
+            };
+            let result = (|| -> windows::core::Result<_> {
+                let mut pid = 0;
+                let mut kind = COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL;
+                unsafe {
+                    args.BrowserProcessId(&mut pid)?;
+                    args.BrowserProcessExitKind(&mut kind)?;
+                }
+                Ok((pid, kind))
+            })()
+            .map_err(|error| error.to_string());
+            let _ = send.send(result);
+            Ok(())
+        }));
+        let mut exit_token = 0;
+        unsafe {
+            environment5.add_BrowserProcessExited(&exited, &mut exit_token)?;
+        }
         reset(&owner);
         unsafe {
             owner.Close()?;
             DestroyWindow(hwnd);
         }
+        drop(controller3);
+        drop(view4);
+        drop(settings);
+        drop(page);
+        drop(surface);
+        drop(main);
+        drop(owner);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let exit_result = loop {
+            match receive.try_recv() {
+                Ok(result) => break result.map_err(std::io::Error::other),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break Err(std::io::Error::other("Browser exit handler disconnected"));
+                }
+                Err(mpsc::TryRecvError::Empty) if Instant::now() >= deadline => {
+                    break Err(std::io::Error::other(
+                        "Timed out waiting for the fixture browser to release its profile",
+                    ));
+                }
+                Err(mpsc::TryRecvError::Empty) => pump(Duration::from_millis(20)),
+            }
+        };
+        unsafe {
+            environment5.remove_BrowserProcessExited(exit_token)?;
+        }
+        let (exited_pid, exit_kind) = exit_result?;
+        assert_eq!(exited_pid, browser_pid, "only the fixture browser may exit");
+        assert_eq!(
+            exit_kind, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
+            "the fixture browser must shut down normally"
+        );
+        drop(environment5);
+        drop(environment);
+        println!("native Windows browser surface tests passed (raster scale {raster}); browser process exited");
         Ok(())
     }
 }
