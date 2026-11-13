@@ -850,8 +850,15 @@ impl RuntimeSupervisor {
             *guard = Some(child);
         }
 
-        for _ in 0..40 {
-            if let Some(probe) = self.probe_health().await {
+        // Cold native startup can exceed four seconds on busy machines. Use
+        // one wall-clock budget rather than counting probes whose connection
+        // refusal latency differs substantially between operating systems.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while tokio::time::Instant::now() < deadline {
+            let Ok(probe) = tokio::time::timeout_at(deadline, self.probe_health()).await else {
+                break;
+            };
+            if let Some(probe) = probe {
                 // The independently shipped local-model health contract omits
                 // PID and MCP build fields. Strict candidate identity is MCP-only.
                 let candidate_matches = self.config.id != "mcp"
@@ -872,7 +879,10 @@ impl RuntimeSupervisor {
                     return Ok(pid);
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + Duration::from_millis(100)).min(deadline),
+            )
+            .await;
         }
 
         self.stop_owned_process();

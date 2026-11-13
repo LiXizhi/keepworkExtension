@@ -245,6 +245,15 @@ test('browse lists only directories with pagination fields', async () => {
     const body = await json(
       `${engine.base}/fs/browse?path=${encodeURIComponent(browseRoot)}&limit=1`,
     );
+    assert.equal(body.body.path, browseRoot);
+    assert.equal(body.body.parent, path.dirname(browseRoot));
+    assert.equal(body.body.entries[0].path, path.join(browseRoot, 'sub'));
+    const drive = path.parse(browseRoot).root;
+    const breadcrumbs = [{ name: drive, path: drive }];
+    for (const part of browseRoot.slice(drive.length).split(path.sep)) {
+      breadcrumbs.push({ name: part, path: path.join(breadcrumbs.at(-1).path, part) });
+    }
+    assert.deepEqual(body.body.breadcrumbs, breadcrumbs);
     return {
       status: body.status,
       ok: body.body.ok,
@@ -258,4 +267,21 @@ test('browse lists only directories with pagination fields', async () => {
   assert.deepEqual(result.names, ['sub']);
   assert.equal(result.total, 1);
   assert.equal(result.nextOffset, null);
+});
+
+test('browse resolves dot segments and preserves the selected directory link', async () => {
+  await both(async engine => {
+    const target = path.join(engine.home, 'BrowseTarget');
+    const alias = path.join(engine.home, 'BrowseAlias');
+    fs.mkdirSync(path.join(target, 'sub'), { recursive: true });
+    fs.symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const requested = alias + path.sep + 'sub' + path.sep + '..' + path.sep + '.';
+    const result = await json(`${engine.base}/fs/browse?path=${encodeURIComponent(requested)}`);
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.path, alias, 'folder selection must retain its link name');
+    assert.equal(result.body.parent, path.dirname(alias));
+    assert.deepEqual(result.body.breadcrumbs.at(-1), { name: 'BrowseAlias', path: alias });
+    assert.equal(result.body.entries[0].path, path.join(alias, 'sub'));
+    return { names: result.body.entries.map(entry => entry.name) };
+  });
 });

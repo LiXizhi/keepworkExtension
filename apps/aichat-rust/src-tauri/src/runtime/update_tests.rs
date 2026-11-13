@@ -608,6 +608,9 @@ fn native_health_fixture() {
     let Ok(port) = std::env::var("KP_UPDATE_FIXTURE_PORT") else {
         return;
     };
+    if let Ok(delay) = std::env::var("KP_UPDATE_FIXTURE_START_DELAY_MS") {
+        std::thread::sleep(Duration::from_millis(delay.parse().unwrap()));
+    }
     let signal = std::env::var("KP_UPDATE_FIXTURE_START_SIGNAL").ok();
     if let Some(signal) = &signal {
         fs::write(signal, b"started").unwrap();
@@ -617,10 +620,14 @@ fn native_health_fixture() {
         return;
     }
     if std::env::var_os("KP_UPDATE_FIXTURE_FAIL").is_some() {
-        if signal.is_some() {
-            // Give the parent-controlled competing listener time to appear
-            // after this candidate has actually been launched.
-            std::thread::sleep(Duration::from_millis(250));
+        if let Ok(ready) = std::env::var("KP_UPDATE_FIXTURE_LISTENER_READY_SIGNAL") {
+            // Exit only after the competing listener has bound its port. A
+            // fixed sleep races the parent's scheduling on busy native runners.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !Path::new(&ready).is_file() {
+                assert!(std::time::Instant::now() < deadline, "competing listener did not become ready");
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
         return;
     }
@@ -666,7 +673,8 @@ async fn explicit_apply_can_activate_an_equal_version_repack_after_native_health
             "arch":current_runtime_arch(), "version":"0.4.0", "commit":commit, "entry":entry,
             "args":["--exact","runtime::update_tests::native_health_fixture","--nocapture"],
             "env":{"KP_UPDATE_FIXTURE_PORT":port.to_string(), "KP_UPDATE_FIXTURE_VERSION":"0.4.0",
-                "KP_UPDATE_FIXTURE_COMMIT":commit}
+                "KP_UPDATE_FIXTURE_COMMIT":commit,
+                "KP_UPDATE_FIXTURE_START_DELAY_MS":if name == "repack" { "5000" } else { "0" }}
         }).to_string()).unwrap();
     }
     let supervisor = RuntimeSupervisor::new(RuntimeConfig {
@@ -696,7 +704,8 @@ async fn explicit_apply_can_activate_an_equal_version_repack_after_native_health
     let applied = supervisor.apply_staged_update().await.unwrap();
     assert_eq!(applied.state, "running", "{}", applied.error);
     assert_eq!(applied.version, "0.4.0");
-    assert_eq!(applied.commit, "b".repeat(40));
+    assert_eq!(applied.commit, "b".repeat(40), "{applied:?}");
+    assert!(applied.update_error.is_empty(), "{applied:?}");
     assert_ne!(
         applied.pid, original.pid,
         "explicit apply starts the verified replacement process"
@@ -709,6 +718,40 @@ async fn explicit_apply_can_activate_an_equal_version_repack_after_native_health
     assert_eq!(active.previous.as_deref(), Some("current"));
     assert!(active.pending.is_none());
     supervisor.stop();
+    drop(supervisor);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn unhealthy_candidate_is_terminated_within_the_native_start_budget() {
+    let root = root();
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let bundle = root.join("bundle");
+    fs::create_dir_all(bundle.join("bin")).unwrap();
+    let entry = if cfg!(windows) { "bin/keepwork-mcp.exe" } else { "bin/keepwork-mcp" };
+    fs::copy(std::env::current_exe().unwrap(), bundle.join(entry)).unwrap();
+    fs::write(bundle.join("runtime.json"), json!({
+        "product":RUST_MCP_PRODUCT,"engine":"rust","platform":mcp_feed_platform(),
+        "arch":current_runtime_arch(),"version":"0.4.0","commit":"a".repeat(40),"entry":entry,
+        "args":["--exact","runtime::update_tests::native_health_fixture","--nocapture"],
+        "env":{"KP_UPDATE_FIXTURE_PORT":port.to_string(),"KP_UPDATE_FIXTURE_SLEEP":"1"}
+    }).to_string()).unwrap();
+    let supervisor = RuntimeSupervisor::new(RuntimeConfig {
+        id:"mcp".into(),products:vec![RUST_MCP_PRODUCT.into()],port,health_path:"/health".into(),
+        updates_enabled:false,bundled_dir:bundle.clone(),store_dir:root.join("store"),feed_url:String::new(),
+    });
+    let manifest = supervisor.selected_runtime(&bundle).unwrap();
+    // Vacancy checking has its own five-second budget before the candidate
+    // starts. Even Windows connection refusals must not stretch verification
+    // into the old forty independent HTTP timeouts.
+    let result = tokio::time::timeout(
+        Duration::from_secs(25), supervisor.spawn_and_verify(&bundle, &manifest)
+    ).await.expect("candidate verification must remain bounded");
+    assert!(matches!(result, Err(RuntimeStartError::CandidateFailed(_))));
+    assert!(supervisor.child.lock().unwrap().is_none(), "the unverified child must be reaped");
     drop(supervisor);
     fs::remove_dir_all(root).unwrap();
 }
@@ -1085,6 +1128,7 @@ async fn takeover_boundary_candidate_failure_preserves_foreign_listener_and_pend
         listener.local_addr().unwrap().port()
     };
     let candidate_started = root.join("candidate-started");
+    let listener_ready = root.join("listener-ready");
     let rollback_started = root.join("rollback-started");
     write_bundle(&root.join("bundle"), &fixture_manifest("0.1.0"));
     for (name, version, fail, signal) in [
@@ -1099,7 +1143,10 @@ async fn takeover_boundary_candidate_failure_preserves_foreign_listener_and_pend
             "KP_UPDATE_FIXTURE_PORT":port.to_string(), "KP_UPDATE_FIXTURE_VERSION":version,
             "KP_UPDATE_FIXTURE_START_SIGNAL":signal.to_string_lossy()
         });
-        if fail { env["KP_UPDATE_FIXTURE_FAIL"] = json!("1"); }
+        if fail {
+            env["KP_UPDATE_FIXTURE_FAIL"] = json!("1");
+            env["KP_UPDATE_FIXTURE_LISTENER_READY_SIGNAL"] = json!(listener_ready);
+        }
         fs::write(directory.join("runtime.json"), json!({
             "product":RUST_MCP_PRODUCT,"engine":"rust", "platform":mcp_feed_platform(),
             "arch":current_runtime_arch(),"version":version,"commit":"a".repeat(40),"entry":entry,
@@ -1108,15 +1155,16 @@ async fn takeover_boundary_candidate_failure_preserves_foreign_listener_and_pend
     }
     let signal = candidate_started.clone();
     let server = tokio::spawn(async move {
-        // Startup performs two explicit refusal probes before launching. Allow
-        // their bounded Winsock deadlines as well as initial health discovery.
-        let deadline = std::time::Instant::now()
-            + Duration::from_secs(if cfg!(windows) { 15 } else { 5 });
+        // Initial HTTP probe and both pre-spawn TCP guards can each wait for
+        // Windows connection refusal. The child marker, not elapsed time,
+        // determines when it is safe to install the competing listener.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !signal.is_file() {
             assert!(std::time::Instant::now() < deadline, "candidate must start before the foreign listener appears");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        fs::write(listener_ready, b"ready").unwrap();
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
@@ -1144,8 +1192,10 @@ async fn takeover_boundary_candidate_failure_preserves_foreign_listener_and_pend
     let status = supervisor.ensure_started(true).await;
     let live = supervisor.probe_health().await;
     server.abort();
-    let _ = server.await;
-    assert!(candidate_started.is_file(), "the candidate must be launched before the competing listener");
+    let server_result = server.await;
+    assert!(server_result.is_err_and(|error| error.is_cancelled()),
+        "competing listener task must remain running until cleanup");
+    assert!(candidate_started.is_file(), "the candidate must be launched before the competing listener: {status:?}");
     assert!(!rollback_started.exists(), "rollback must not launch over a foreign listener");
     assert_eq!(status.state, "attached", "{}", status.error);
     assert_eq!(status.owner, "local-helper");

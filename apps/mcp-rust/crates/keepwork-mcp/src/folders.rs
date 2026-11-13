@@ -141,10 +141,24 @@ pub fn folder_locations() -> Value {
 fn absolute_folder(raw: &str) -> Result<PathBuf, String> {
     let expanded = crate::paths::expand_user_path(raw);
     let path = Path::new(&expanded);
-    if !crate::paths::is_abs_disk_path(&expanded) {
+    if !path.has_root() {
         return Err("An absolute directory path is required".to_string());
     }
-    Ok(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    // On Windows, /folder is absolute to the current drive, as in path.resolve.
+    let path = std::path::absolute(path).map_err(|error| error.to_string())?;
+    // Match Node's path.resolve: preserve the selected symlink/junction name.
+    // canonicalize would change that name and expose \\?\ Windows prefixes.
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    Ok(resolved)
 }
 
 /// Numeric-aware ordering close to Node's `localeCompare(..., { numeric: true })`.
@@ -316,5 +330,20 @@ mod tests {
     #[test]
     fn relative_paths_are_rejected() {
         assert!(browse_folders("relative/dir", false, "", None, None).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_relative_root_uses_the_current_drive() {
+        let cwd = std::env::current_dir().unwrap();
+        let root_relative: PathBuf = cwd.components().skip(1).collect();
+        assert!(root_relative.has_root());
+        assert!(!root_relative.is_absolute());
+        let value = browse_folders(root_relative.to_str().unwrap(), false, "", None, None).unwrap();
+        assert_eq!(value["path"], cwd.to_string_lossy().as_ref());
+        assert_eq!(
+            value["parent"],
+            cwd.parent().unwrap().to_string_lossy().as_ref()
+        );
     }
 }
