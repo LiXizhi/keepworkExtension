@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
 mod install_tests;
 #[cfg(target_os = "macos")]
 mod macos_install;
@@ -418,6 +420,9 @@ impl UpdateManager {
 
         let resp = client
             .get(&self.feed_url)
+            // CDN edges may reuse cached feeds despite no-cache. Keep the
+            // nonce request-only so persisted channel identity stays stable.
+            .query(&[("kp_update_check", uuid::Uuid::new_v4().to_string())])
             .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .timeout(Duration::from_secs(30))
             .send()
