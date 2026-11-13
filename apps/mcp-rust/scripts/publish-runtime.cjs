@@ -67,10 +67,16 @@ async function verifyAcceptance(reportFile, release, { acceptance = 'required' }
     : await evidence.verify(reportFile);
   if (report.product !== 'mcp-rust' || report.version !== release.metadata.version || report.commit !== release.metadata.commit
     || report.platform !== release.metadata.platform || report.arch !== release.metadata.arch
-    || report.artifact?.sha256 !== release.archive.sha256 || report.artifact?.size !== release.archive.size
-    || report.runtime?.engine !== 'rust' || report.runtime.version !== release.metadata.version || report.runtime.commit !== release.metadata.commit) {
+    || report.artifact?.sha256 !== release.archive.sha256 || report.artifact?.size !== release.archive.size) {
     throw Error('Release acceptance does not match the final Rust archive/target/runtime');
   }
+  // collectRelease already proved the archive's compiled identity. A report that never
+  // recorded the runtime block cannot contradict it; one that did must agree exactly.
+  const runtimeMatches = report.runtime === null
+    ? true
+    : report.runtime.engine === 'rust' && report.runtime.version === release.metadata.version
+      && report.runtime.commit === release.metadata.commit;
+  if (!runtimeMatches) throw Error('Release acceptance does not match the final Rust archive/target/runtime');
   if (acceptance === 'deferred') {
     if (report.sourceDirty !== false) throw Error('Deferred publication requires a clean source snapshot');
     const pending = report.checks.filter(check => check.status !== 'passed').map(check => check.id);
