@@ -71,7 +71,7 @@ fn fixture(count: usize, text_size: usize) -> Fixture {
                 },
             );
         }
-        manager.persist(&sessions).unwrap();
+        manager.persist(&mut sessions).unwrap();
     }
     manager.persistence_stats.reset();
     Fixture { directory, manager }
@@ -229,6 +229,158 @@ fn sidecar_failure_preserves_registry_and_remains_retryable() {
         fixture.manager.persistence_stats.snapshot()["registryWrites"],
         1
     );
+}
+
+#[test]
+fn an_uncommitted_native_history_does_not_block_other_sessions_or_lose_its_outcome() {
+    let fixture = fixture(2, 100);
+    let history_before = std::fs::read(sidecar(&fixture, 0)).unwrap();
+    std::fs::write(sidecar(&fixture, 0), "broken history").unwrap();
+    assert!(fixture
+        .manager
+        .edit_native("session-0", None, |s| {
+            s.data["items"][0]["text"] = json!("observed native answer");
+            s.data["status"] = json!("completed");
+            s.data["error"] = json!("");
+            Ok(())
+        })
+        .is_err());
+    assert_eq!(
+        fixture.manager.view("session-0", &"a".repeat(64)).unwrap()["status"],
+        "error"
+    );
+
+    append(&fixture.manager, "session-1", "unaffected answer");
+    let rows: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(&fixture.manager.file).unwrap()).unwrap();
+    let pending = rows.iter().find(|row| row["id"] == "session-0").unwrap();
+    assert_eq!(
+        pending["status"], "error",
+        "older readers must not see a false durable success"
+    );
+    assert!(pending["error"]
+        .as_str()
+        .unwrap()
+        .contains("NATIVE_STATE_PERSIST_FAILED"));
+    let metadata = &pending[NATIVE_OBSERVED_STATE];
+    let digest = metadata["identity"].as_str().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(
+        !metadata.to_string().contains(&"a".repeat(64)),
+        "older readers may pass through unknown metadata; do not duplicate private owner values"
+    );
+    let reloaded = AgentManager::open(fixture.manager.file.clone(), 0);
+    assert_eq!(
+        reloaded.view("session-0", &"a".repeat(64)).unwrap()["status"],
+        "error"
+    );
+    assert!(
+        reloaded.view("session-1", &"a".repeat(64)).unwrap()["items"][0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("unaffected answer")
+    );
+
+    std::fs::write(sidecar(&fixture, 0), history_before).unwrap();
+    let recovered = reloaded.view("session-0", &"a".repeat(64)).unwrap();
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(recovered["items"][0]["text"], "observed native answer");
+    assert!(recovered.get(NATIVE_PERSISTENCE_ERROR).is_none());
+    assert!(recovered.get(NATIVE_OBSERVED_STATE).is_none());
+    let reopened = AgentManager::open(fixture.manager.file.clone(), 0);
+    assert_eq!(
+        reopened.view("session-0", &"a".repeat(64)).unwrap()["status"],
+        "completed"
+    );
+}
+
+#[test]
+fn recovery_metadata_cannot_restore_an_observation_into_a_different_request() {
+    let fixture = fixture(1, 100);
+    let original = fixture.manager.sessions.lock().unwrap()["session-0"]
+        .data
+        .clone();
+    for key in [
+        "id",
+        "owner",
+        "backend",
+        "threadId",
+        "conversationId",
+        "turnId",
+        "lastRequestId",
+        "cursor",
+    ] {
+        let mut row = original.clone();
+        row[NATIVE_OBSERVED_STATE] = json!({
+            "status":"completed", "error":"",
+            "identity":native_observation_identity(&row),
+        });
+        row[NATIVE_PERSISTENCE_ERROR] = json!(native_persistence_error("fixture fault"));
+        row["status"] = json!("error");
+        row["error"] = row[NATIVE_PERSISTENCE_ERROR].clone();
+        row[key] = match key {
+            "owner" => json!("b".repeat(64)),
+            "cursor" => json!(1),
+            _ => json!("different-request"),
+        };
+        std::fs::write(
+            &fixture.manager.file,
+            serde_json::to_vec(&vec![row.clone()]).unwrap(),
+        )
+        .unwrap();
+        let reopened = AgentManager::open(fixture.manager.file.clone(), 0);
+        let view = reopened
+            .view(row["id"].as_str().unwrap(), row["owner"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            view["status"], "error",
+            "stale {key} must not claim completion"
+        );
+        assert!(view["error"]
+            .as_str()
+            .unwrap()
+            .contains("NATIVE_STATE_PERSIST_FAILED"));
+        assert!(view.get(NATIVE_OBSERVED_STATE).is_none());
+        assert!(view.get(NATIVE_PERSISTENCE_ERROR).is_none());
+        assert!(
+            reopened.sessions.lock().unwrap()[row["id"].as_str().unwrap()]
+                .harness
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn missing_or_legacy_object_identity_never_restores_a_native_success() {
+    let fixture = fixture(1, 100);
+    let original = fixture.manager.sessions.lock().unwrap()["session-0"]
+        .data
+        .clone();
+    for identity in [
+        Value::Null,
+        json!({"owner":original["owner"]}),
+        json!("invalid-digest"),
+    ] {
+        let mut row = original.clone();
+        row[NATIVE_OBSERVED_STATE] = json!({"status":"completed","error":"","identity":identity});
+        row[NATIVE_PERSISTENCE_ERROR] = json!(native_persistence_error("fixture fault"));
+        row["status"] = json!("error");
+        row["error"] = row[NATIVE_PERSISTENCE_ERROR].clone();
+        std::fs::write(
+            &fixture.manager.file,
+            serde_json::to_vec(&vec![row]).unwrap(),
+        )
+        .unwrap();
+        let reopened = AgentManager::open(fixture.manager.file.clone(), 0);
+        assert_eq!(
+            reopened.view("session-0", &"a".repeat(64)).unwrap()["status"],
+            "error"
+        );
+        assert!(reopened.sessions.lock().unwrap()["session-0"]
+            .harness
+            .is_none());
+    }
 }
 
 #[test]

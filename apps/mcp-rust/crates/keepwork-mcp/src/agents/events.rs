@@ -33,15 +33,14 @@ impl AgentManager {
         let mut sessions = self.sessions.lock().expect("agent sessions");
         // One provider can own many sessions. Commit their disconnect together:
         // edit() would rewrite every history once per affected session.
-        const FIELDS: [&str; 5] = ["pending", "status", "error", "updatedAt", "cursor"];
-        let mut originals = Vec::new();
+        let mut changed = Vec::new();
         for (id, session) in sessions.iter_mut().filter(|(_, session)| {
             session
                 .harness
                 .as_ref()
                 .is_some_and(|child| Arc::ptr_eq(child, harness))
         }) {
-            originals.push((id.clone(), FIELDS.map(|key| session.data.get(key).cloned())));
+            changed.push(id.clone());
             session.data["pending"] = json!([]);
             if ACTIVE.contains(&session.data["status"].as_str().unwrap_or("")) {
                 session.data["status"] = json!("interrupted");
@@ -50,29 +49,21 @@ impl AgentManager {
             session.data["updatedAt"] = json!(now());
             session.data["cursor"] = json!(session.data["cursor"].as_u64().unwrap_or(0) + 1);
         }
-        if originals.is_empty() {
+        if changed.is_empty() {
             return Ok(());
         }
-        let changed: std::collections::HashSet<&str> =
-            originals.iter().map(|(id, _)| id.as_str()).collect();
-        if let Err(error) = self.persist_with_histories(&sessions, |id| changed.contains(id)) {
-            for (id, original) in originals {
-                let data = sessions.get_mut(&id).unwrap().data.as_object_mut().unwrap();
-                for (key, value) in FIELDS.into_iter().zip(original) {
-                    match value {
-                        Some(value) => {
-                            data.insert(key.into(), value);
-                        }
-                        None => {
-                            data.remove(key);
-                        }
-                    }
-                }
-            }
-            return Err(error);
-        }
-        for (id, _) in originals {
+        let affected: std::collections::HashSet<&str> =
+            changed.iter().map(String::as_str).collect();
+        let persistence_error = self
+            .persist_with_histories(&mut sessions, |id| affected.contains(id))
+            .err();
+        for id in changed {
             let session = sessions.get_mut(&id).unwrap();
+            if let Some(error) = &persistence_error {
+                session.data[NATIVE_PERSISTENCE_ERROR] = json!(native_persistence_error(error));
+            }
+            // The provider has really exited even when the registry is
+            // unavailable. Never retain a dead harness or actionable prompts.
             session.harness = None;
             session.pending.clear();
             let result = self.render(&session.data);
@@ -80,7 +71,10 @@ impl AgentManager {
                 .events
                 .send_replace(json!({"cursor":result["cursor"],"session":result}));
         }
-        Ok(())
+        match persistence_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn find_native(&self, harness: &Arc<Harness>, params: &Value) -> Option<String> {
@@ -109,7 +103,7 @@ impl AgentManager {
         {
             return;
         }
-        let _ = self.edit(session_id, |s| {
+        let _ = self.edit_native(session_id, None, |s| {
             let kind = update["sessionUpdate"].as_str().unwrap_or("");
             let turn = s.data["turnId"].as_str().unwrap_or("unknown").to_string();
             if s.native["_textTurn"] != turn {
@@ -183,7 +177,7 @@ impl AgentManager {
         });
     }
     fn codex_update(&self, session_id: &str, method: &str, params: &Value) {
-        let _ = self.edit(session_id, |s| {
+        let _ = self.edit_native(session_id, None, |s| {
             match method {
                 "turn/started" => {
                     s.data["turnId"] = params["turn"]["id"].clone();
@@ -712,7 +706,7 @@ mod tests {
                 watches.push((id.into(), session.events.subscribe()));
                 sessions.insert(id.into(), session);
             }
-            manager.persist(&sessions).unwrap();
+            manager.persist(&mut sessions).unwrap();
         }
         manager.persist_calls.store(0, Ordering::Relaxed);
         let mut events = exiting.subscribe();
@@ -804,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_exit_persist_failure_rolls_back_without_publishing_success() {
+    async fn provider_exit_persist_failure_publishes_error_then_recovers_observed_exit() {
         let source = include_str!("../../../../../../scripts/contract/fixtures/agent-cli.cjs");
         let (exiting, _file) = harness::fixture(source, Protocol::Acp).await;
         let directory =
@@ -822,7 +816,7 @@ mod tests {
                 watches.push(session.events.subscribe());
                 sessions.insert(id.into(), session);
             }
-            manager.persist(&sessions).unwrap();
+            manager.persist(&mut sessions).unwrap();
         }
         let before = std::fs::read(&registry).unwrap();
         std::fs::create_dir(registry.with_extension("json.tmp")).unwrap();
@@ -836,16 +830,62 @@ mod tests {
             let sessions = manager.sessions.lock().unwrap();
             for (id, data) in &originals {
                 let session = &sessions[id];
-                assert_eq!(&session.data, data);
-                assert!(Arc::ptr_eq(session.harness.as_ref().unwrap(), &exiting));
-                assert!(session.pending.contains_key("approval"));
+                assert_eq!(session.data["status"], "interrupted");
+                assert_eq!(session.data["items"], data["items"]);
+                assert_eq!(session.data["submissions"], data["submissions"]);
+                assert!(session.harness.is_none());
+                assert!(session.pending.is_empty());
+                assert_eq!(snapshot(&session.data)["status"], "error");
+                assert!(snapshot(&session.data)["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("NATIVE_STATE_PERSIST_FAILED"));
             }
         }
-        for receiver in &watches {
-            assert!(!receiver.has_changed().unwrap());
+        for receiver in &mut watches {
+            assert!(receiver.has_changed().unwrap());
+            let frame = receiver.borrow_and_update();
+            assert_eq!(frame["session"]["status"], "error");
+            assert!(frame["session"].get(NATIVE_PERSISTENCE_ERROR).is_none());
         }
+        std::fs::remove_dir(registry.with_extension("json.tmp")).unwrap();
+        let recovered = manager.view("running", &"a".repeat(64)).unwrap();
+        assert_eq!(recovered["status"], "interrupted");
+        assert_eq!(recovered["error"], "fixture disconnected");
+        let reloaded = AgentManager::open(registry.clone(), 0);
+        assert_eq!(
+            reloaded.view("running", &"a".repeat(64)).unwrap()["status"],
+            "interrupted"
+        );
+        assert_eq!(
+            reloaded.view("waiting", &"a".repeat(64)).unwrap()["status"],
+            "interrupted"
+        );
+        assert!(watches[0].has_changed().unwrap());
         exiting.shutdown().await;
         drop(manager);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_stale_finish_never_changes_a_new_turn_even_when_storage_is_unavailable() {
+        let directory = std::env::temp_dir().join(format!("keepwork-stale-finish-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let manager = AgentManager::open(directory.join("sessions.json"), 0);
+        let mut session = exit_session(&directory, "session", "running", None);
+        session.data["turnId"] = json!("new-turn");
+        let original = session.data.clone();
+        let watcher = session.events.subscribe();
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("session".into(), session);
+        std::fs::create_dir(manager.file.with_extension("json.tmp")).unwrap();
+        manager.finish("session", "old-turn", "completed", None);
+        assert_eq!(manager.sessions.lock().unwrap()["session"].data, original);
+        assert!(!watcher.has_changed().unwrap());
+        assert_eq!(manager.persist_calls.load(Ordering::Relaxed), 0);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

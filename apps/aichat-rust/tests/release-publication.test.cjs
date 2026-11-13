@@ -14,8 +14,8 @@ const names = [
   `Keepwork_${version}_universal.dmg`,
 ];
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-const updateTargets = ['win32-x64', 'win32-arm64', 'darwin-x64', 'darwin-arm64'];
-const feedUrl = target => `https://cdn.keepwork.com/keepwork/aichat-desktop/${target}/latest-client.json`;
+const updateTargets = ['win32-x64', 'win32-arm64', 'darwin-universal'];
+const feedUrl = target => `https://cdn.keepwork.com/keepwork/aichat-rust/${target}/latest-client.json`;
 const preflightFeeds = () => updateTargets.map(target => `preflight-feed:${target}`);
 const publishFeeds = () => [
   ...updateTargets.map(target => `upload-feed:${target}`), 'refresh-feeds', 'verify-feeds',
@@ -64,6 +64,8 @@ function publication(entries, {
           return;
         }
         assert.deepEqual(actualConfig, { ...config, insertOnly: true });
+        assert.ok(entries.some(installer => installer.url === entry.url && installer.remoteKey === entry.remoteKey),
+          `unexpected publication upload ${entry.url}`);
         events.push(`upload:${entry.name}`);
         if (failAt === 'upload') throw new Error('fixture upload failure');
       },
@@ -155,6 +157,9 @@ test('CLI dry-run previews all three CDN links without credentials, GitHub acces
     '--release-dir', dir, '--version', version, '--dry-run',
   ], { encoding: 'utf8', env: {} });
   for (const entry of entries) assert.ok(output.includes(entry.url));
+  for (const target of updateTargets) assert.ok(output.includes(feedUrl(target)));
+  assert.equal((output.match(/latest-client\.json/g) || []).length, 3);
+  assert.doesNotMatch(output, /aichat-desktop|aichat-cef|darwin-(x64|arm64)/);
   assert.match(output, /Windows.*x64/i);
   assert.match(output, /Windows.*ARM64/i);
   assert.match(output, /macOS.*Universal/i);

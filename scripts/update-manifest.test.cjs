@@ -21,6 +21,30 @@ test('formal schema and publication validators accept native, additive legacy an
   assert.equal(legacy.version, '0.1.12'); assert.equal(legacy.installer.version, '1.2.3');
 });
 
+test('the three Rust desktop targets accept native packages including one universal Mac manifest', () => {
+  const universal = { ...desktop(), arch: 'universal' };
+  const windowsPackage = { ...pkg, format: 'exe', fileName: 'Keepwork_1.2.3_x64-setup.exe',
+    url: 'https://cdn.keepwork.com/keepwork/aichat-rust/1.2.3/Keepwork_1.2.3_x64-setup.exe' };
+  for (const arch of ['x64', 'arm64']) {
+    const value = { ...desktop(), ...windowsPackage, platform: 'windows', arch,
+      installer: { ...windowsPackage } };
+    assert.doesNotThrow(() => validateDesktopManifest(value, { target: `win32-${arch}` }));
+    assert.ok(schema(value), JSON.stringify(schema.errors));
+  }
+  assert.doesNotThrow(() => validateDesktopManifest(universal, { target: 'darwin-universal' }));
+  assert.ok(schema(universal), JSON.stringify(schema.errors));
+  for (const target of ['darwin-x64', 'darwin-arm64', 'win32-universal']) {
+    assert.throws(() => validateDesktopManifest(universal, { target }));
+  }
+  const impossibleWindows = { ...desktop(), ...windowsPackage, platform: 'windows', arch: 'universal',
+    installer: { ...windowsPackage } };
+  assert.throws(() => validateDesktopManifest(impossibleWindows, { target: 'win32-universal' }));
+  assert.equal(schema(impossibleWindows), false, 'Universal is a Mac desktop architecture only');
+  const impossibleRuntime = { ...runtime(), arch: 'universal' };
+  assert.throws(() => validateRustManifest(impossibleRuntime));
+  assert.equal(schema(impossibleRuntime), false, 'Universal desktop installers do not change per-architecture MCP feeds');
+});
+
 test('legacy desktop identity omissions stay readable but explicit conflicting identity fails', () => {
   const value = desktop();
   for (const key of ['product', 'schemaVersion', 'platform', 'arch']) delete value[key];

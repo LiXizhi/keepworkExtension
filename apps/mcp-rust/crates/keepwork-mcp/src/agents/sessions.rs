@@ -74,7 +74,19 @@ impl AgentManager {
         if offset > 10_000 {
             return Err("Invalid list cursor".into());
         }
-        let sessions = self.sessions.lock().expect("agent sessions");
+        let mut sessions = self.sessions.lock().expect("agent sessions");
+        let recovering: std::collections::HashSet<_> = sessions
+            .iter()
+            .filter(|(_, s)| {
+                s.data["owner"] == owner
+                    && s.data["removed"] != true
+                    && s.data.get(NATIVE_PERSISTENCE_ERROR).is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !recovering.is_empty() {
+            let _ = self.persist_with_histories(&mut sessions, |id| recovering.contains(id));
+        }
         let mut rows = sessions
             .values()
             .filter(|s| s.data["owner"] == owner && s.data["removed"] != true)
@@ -649,7 +661,7 @@ impl AgentManager {
                     needs_native_history: false,
                 },
             );
-            if let Err(error) = self.persist_changed(&sessions, &session_id) {
+            if let Err(error) = self.persist_changed(&mut sessions, &session_id) {
                 sessions.remove(&session_id);
                 return Err(error);
             }
@@ -1235,7 +1247,7 @@ impl AgentManager {
     }
 
     fn reject_submission(&self, session_id: &str, request_id: &str, error: &str, unknown: bool) {
-        let _ = self.edit(session_id, |s| {
+        let _ = self.edit_native(session_id, None, |s| {
             s.data["submissions"][request_id]["state"] =
                 json!(if unknown { "unknown" } else { "rejected" });
             s.data["status"] = json!(if unknown { "uncertain" } else { "error" });
@@ -1252,10 +1264,7 @@ impl AgentManager {
         status: &str,
         error: Option<String>,
     ) {
-        let _ = self.edit(session_id, |s| {
-            if s.data["turnId"] != turn_id {
-                return Ok(());
-            }
+        let _ = self.edit_native(session_id, Some(turn_id), |s| {
             s.data["status"] = json!(status);
             s.data["pending"] = json!([]);
             s.pending.clear();

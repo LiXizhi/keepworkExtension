@@ -1,5 +1,38 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-13：目录授权事务与原生会话终态保存恢复（本轮验收范围）
+
+本轮目标为桌面 `0.2.103` / Rust MCP `0.2.52`。产品、程序员与测试 Agent 分别确认合同、执行最小修复并使用隔离故障注入验证；本段记录本轮范围，不预填最终完整检查或冒烟通过数。保留下方已有记录及未提交的历史验证文字，不改写旧失败。
+
+桌面 `NativeFiles::grant/revoke` 旧实现先修改内存授权列表再落盘。保存失败后，grant可能在下一次请求直接返回未持久化的已有授权；revoke可能使内存和磁盘分歧，后续变成false且重启恢复旧授权。现在先构造候选列表、保存成功后再替换内存。失败返回明确错误，原roots、已成功授权的opaque IDs和磁盘基线保持一致，存储恢复后可显式重试；成功撤销继续沿原 `removed=true` 路径关闭桌面终端，不扩大或改变PTY、路径、软链、Bridge v1合同。未知ID撤销保持无副作用的false，已持久化的重复授权保留原ID。
+
+Rust MCP的另一个缺陷由本轮新故障注入定位：在明确观察到自有CLI结束后阻断registry/sidecar提交，旧事件处理忽略保存错误、将内存终态回滚为running，而native run已经移除。它与上轮Claude输出上限的历史5秒未知失败是不同证据，不能互相作为根因。
+
+修复保留已观察的真实native状态、items及原request/turn身份。存储未确认时，旧客户端快照在已知终态上显示既有 `error` 状态和 `NATIVE_STATE_PERSIST_FAILED`，明确“结果未持久确认、不可自动重放”；native仍活跃时保留active状态并阻止重复运行。私有恢复标记不成为新的必需API字段。已退出harness即使保存失败也应detach，并清除失效pending；旧turn的迟到finish不修改新turn，也不为无变化事件落盘。
+
+恢复仅重试本地文件提交：owned session GET可以补存已知结果，成功后清理私有错误标记、发布新cursor，恢复原先真实completed等终态。局部history损坏只修复当前changed session，其他session仍可正常提交；持久化行以旧客户端可读的错误状态及私有observed metadata保存待恢复结果，重启后仅能从确已落盘且身份匹配的metadata恢复，不能从已丢失的纯RAM或旧running猜测成功。普通用户intent/edit仍保持原事务回滚与“先持久化再派发”；重复nonce只返回原receipt，存储未恢复不派发新turn，恢复后用户可明确提交新nonce，不自动重放旧请求。
+
+验收包括：临时授权store确定性保存失败后的多root/ID/磁盘一致性、拒绝未提交新授权、重试/重启与原撤权终端顺序；真实fake CLI终止屏障之后的registry与局部history写入故障、watch可观察错误/新cursor、重复nonce派发一次、其它session继续、恢复后精确已知completed及重新读取/重启一致，以及stale finish不覆盖新turn。故障只注入临时store，不使用磁盘耗尽、真实账号或用户目录；原生执行和普通intent保存失败分别验证，不放宽安全边界。
+
+本轮证据根为 `.tmp/rust-terminal-recovery-20261113/`，修前红灯、修后定向与最终检查/冒烟分别留存新日志及源码身份。最终计数由冻结源码上的实际执行另行填写。Windows原生交互、真实账号、系统权限提示及最终安装升级继续独立待验；未据此宣称共享8089已变更或已发布。
+
+## 2026-11-13：首屏完成后显示与本地资源条件缓存（0.2.102）
+
+修复 `#app` 刚出现子元素就提前显示的问题：实际 AIChat 在 `renderShell()` 后仍初始化配置、会话和工作台。现在正常 Idle / Connecting 保持同一主窗口隐藏，优先等待网页已有的 `data-workbench-ready` 与启动进度条移除，再等待当前适用的 CSS、首屏字体及布局计算；先移除原生层，再一次显示工作台，不依赖隐藏 WebView 可能暂停的动画帧。失败或真实 20 秒页面期限到达后，在同一窗口显示恢复操作；重试再次隐藏。旧网页保留有效内容回退，登录和回放等可操作提示允许显示，不要求在隐藏窗口完成交互，不等待 MCP、图片、工具 iframe 或全部后台请求。账号、前后台意图、旧尝试身份与不重放规则保持原样。
+
+缓存审计确认：主窗口唤回复用已有文档，不重新导航；正常 WebView 不开启隐私模式或清空持久网站数据。完全退出后仍需重新执行网页初始化。实际只读 HEAD 确认公开 SDK 与 Tailwind 静态资源响应包含 `public, max-age=31536000` 及 ETag；`/chat` 拒绝该 HEAD 请求（403），未验证其入口响应缓存，也未测量用户 WebView 的实际缓存命中率。网页包配置使用 `no-cache` 可验证后复用，部分皮肤请求显式 `no-store` 仍会读取，本轮没有修改外部 AIChat 仓库或账号数据缓存。
+
+本地源码 / 离线包服务器原来对全部文件 `no-store`；现在成功静态响应使用 `private, no-cache` 与内容 SHA-256 ETag。路径、实际文件及字节验证先于条件命中，未改返回无正文 304，同大小修改立即 200，删除与链接逃逸仍拒绝并 no-store。条件头只在 HTTP 头区域解析，GET 正文不能伪装校验头；保留 HEAD、弱 ETag / 列表 / 通配符语义，不长期无条件缓存入口或清单，不修改 MCP/API 响应。
+
+最终实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建通过；Rust **234 通过 / 2 忽略 / 0 失败**，Node **440 通过 / 5 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-ready-cache-check-final.log`。
+- `pnpm --prefix apps/aichat-rust smoke`：5 套核心冒烟通过；真实 Tauri / AppKit / WKWebView 启动 **27 阶段通过**。首屏预先存在 loading 子元素，实际脚本持续运行时保持隐藏；完成标记与正文已就绪但关键 CSS 延迟 500ms 时仍隐藏，样式完成后显示。还覆盖后台、原生失败界面关闭 / Esc、后台迟到 ready、真实 20 秒超时、原生重试重新隐藏及成功显示。日志 `/private/tmp/keepwork-ready-cache-smoke-final.log`。
+- `node --test apps/aichat-rust/tests/page-connection.test.cjs apps/aichat-rust/tests/native-startup.test.cjs`：定向 **42/42 通过**，覆盖新旧标志、忙碌外壳、CSS / 字体、可见与隐藏交互提示、pagehide / URL 变化 / 迟到 ticket、监听清理及既有恢复调度。
+- 缓存真实 HTTP 回归包含 200 → 304、弱 / 多标签 / 通配符、HEAD、同大小编辑、删除、词法越界、已缓存链接转向根外，以及 GET 正文中的伪条件头；这些用例在最终完整检查中通过。Windows / Linux 原生显示和持久缓存命中未实机验证，旧网页兼容使用隔离夹具，不声称所有线上配对已验证。
+
+四处桌面版本同步 **0.2.102**，`git diff --check` 通过。原生场景使用测试专属临时配置 / 非持久 WebView / 私有随机 Loopback，不连接共享 8089。没有重启用户现有桌面进程、修改其缓存或发布安装包；运行新构建后生效。
+
 ## 2026-11-13：初始化与工作台共用主窗口（0.2.101）
 
 启动改为在既有 `main` 窗口内显示原生加载层，就绪后原位移除；不创建独立 `startup` 窗口，也不替换主窗口或 WebView。初始化、失败提示和重试保持窗口位置与尺寸；关闭、稍后、后台启动及迟到就绪继续遵循原有隐藏意图。保留可信主文档回执、20 秒超时、自动重试上限与旧网页兼容规则，无需同时更新 AIChat 网页或 MCP。

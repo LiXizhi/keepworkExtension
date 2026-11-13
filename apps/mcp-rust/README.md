@@ -50,6 +50,30 @@ daemon or treats installation detection as a successful model turn.
   restart never replay an uncertain prompt. Restarted in-flight turns remain
   uncertain and can be inspected; native history is resumed only when the
   provider advertises the required contract.
+- Native observations and user intents have different save-failure semantics.
+  An observed native terminal result or confirmed harness exit must not roll back
+  into a permanently running turn when registry/history persistence fails. The
+  manager retains the actual observed data and items in memory; a private storage
+  marker projects a terminal session as the existing public `error` state with
+  `NATIVE_STATE_PERSIST_FAILED`, stating that the result is not durably confirmed
+  and must not be replayed. An actual active run remains active, preventing a
+  second concurrent turn. These markers add no required client request fields.
+  A confirmed exited harness is detached and its obsolete pending entries are
+  cleared even when saving fails; stale completion for an older turn is a no-op.
+- Recovery retries local file commits only. Reading the owned session may retry
+  the saved observation without submitting a provider prompt. A successful commit
+  clears the marker, publishes a new cursor and restores the known terminal
+  status, such as `completed`. Repair of a corrupt history sidecar is limited to
+  the changed session, so unrelated sessions can still commit. Pending registry
+  rows retain a legacy-visible error plus private observed metadata for later
+  repair, including after restart when that metadata was durably saved and its
+  owner/request/turn identity matches. Lost RAM or an old `running` row alone is
+  not evidence of success. Ordinary user edits still roll back on save failure;
+  a new turn requires its intent to persist before dispatch. The original request
+  ID and receipts remain intact, duplicate IDs never execute again, and storage
+  recovery never silently replays an uncertain request. This round's isolated
+  fault-injection evidence is under `.tmp/rust-terminal-recovery-20261113/`; it is
+  separate from the earlier unclassified Claude output-cap timeout observation.
 - `/agents/sessions/:id/image-turns` accepts 1–4 inline PNG/JPEG/WebP/GIF data
   URLs, at most 4 MiB decoded in total (7,000,000-byte HTTP body). Codex and
   Claude receive native image blocks; ACP requires `promptCapabilities.image`

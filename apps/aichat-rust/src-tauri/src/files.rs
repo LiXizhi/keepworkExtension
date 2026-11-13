@@ -202,8 +202,13 @@ impl NativeFiles {
             path: real_str,
             name,
         };
-        guard.push(grant.clone());
-        self.save_locked(&guard)?;
+        // Publish a root only after the grant has been durably committed. A
+        // failed save must remain retryable instead of becoming an existing
+        // in-memory grant on the next explicit selection.
+        let mut candidate = guard.clone();
+        candidate.push(grant.clone());
+        self.save_locked(&candidate)?;
+        *guard = candidate;
         Ok(grant)
     }
 
@@ -212,11 +217,12 @@ impl NativeFiles {
             .grants
             .lock()
             .map_err(|_| "Lock poisoned".to_string())?;
-        let before = guard.len();
-        guard.retain(|item| item.id != root_id);
-        let changed = guard.len() != before;
+        let mut candidate = guard.clone();
+        candidate.retain(|item| item.id != root_id);
+        let changed = candidate.len() != guard.len();
         if changed {
-            self.save_locked(&guard)?;
+            self.save_locked(&candidate)?;
+            *guard = candidate;
         }
         Ok(changed)
     }
@@ -732,6 +738,130 @@ impl NativeFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct GrantFixture {
+        root: PathBuf,
+        store: PathBuf,
+    }
+
+    impl GrantFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("aichat-rust-grant-{}", Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            let store = root.join("folder-grants.json");
+            Self { root, store }
+        }
+        fn folder(&self, name: &str) -> PathBuf {
+            let folder = self.root.join(name);
+            fs::create_dir_all(&folder).unwrap();
+            folder
+        }
+    }
+
+    impl Drop for GrantFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct GrantCommitFault<'a> {
+        fixture: &'a GrantFixture,
+        backup: PathBuf,
+    }
+
+    impl<'a> GrantCommitFault<'a> {
+        fn new(fixture: &'a GrantFixture) -> Self {
+            let backup = fixture.root.join("persisted-grants.json");
+            fs::rename(&fixture.store, &backup).unwrap();
+            // Replacing a directory with the temporary JSON file fails on all
+            // platforms, without chmod, disk exhaustion or user profile access.
+            fs::create_dir(&fixture.store).unwrap();
+            Self { fixture, backup }
+        }
+    }
+
+    impl Drop for GrantCommitFault<'_> {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir(&self.fixture.store);
+            let _ = fs::rename(&self.backup, &self.fixture.store);
+        }
+    }
+
+    #[test]
+    fn native_grant_transaction_failed_grant_stays_unpublished_and_retries_persistence() {
+        let fixture = GrantFixture::new();
+        let files = NativeFiles::new(fixture.store.clone());
+        let first = files.grant(&fixture.folder("first")).unwrap();
+        let second = files.grant(&fixture.folder("second")).unwrap();
+        let baseline = files.roots();
+        let bytes = fs::read(&fixture.store).unwrap();
+        let candidate = fixture.folder("candidate");
+        {
+            let fault = GrantCommitFault::new(&fixture);
+            let initial = files.grant(&candidate);
+            let retry = files.grant(&candidate);
+            assert!(initial.is_err());
+            assert!(
+                retry.is_err(),
+                "a failed grant cannot bypass persistence as an existing grant: {retry:?}"
+            );
+            assert_eq!(
+                files.roots(),
+                baseline,
+                "failed grants must never become usable roots"
+            );
+            assert_eq!(fs::read(&fault.backup).unwrap(), bytes);
+            assert_eq!(files.grant(&fixture.folder("first")).unwrap(), first);
+            assert!(files.resolve(&first.id, "", false, false).is_ok());
+            assert!(files.resolve(&second.id, "", false, false).is_ok());
+        }
+        assert_eq!(NativeFiles::new(fixture.store.clone()).roots(), baseline);
+        let granted = files.grant(&candidate).unwrap();
+        assert_eq!(files.grant(&candidate).unwrap(), granted);
+        assert_eq!(files.roots(), vec![first, second, granted]);
+        assert_eq!(
+            NativeFiles::new(fixture.store.clone()).roots(),
+            files.roots()
+        );
+    }
+
+    #[test]
+    fn native_grant_transaction_failed_revoke_preserves_ids_and_can_be_retried() {
+        let fixture = GrantFixture::new();
+        let files = NativeFiles::new(fixture.store.clone());
+        let first = files.grant(&fixture.folder("first")).unwrap();
+        let second = files.grant(&fixture.folder("second")).unwrap();
+        let baseline = files.roots();
+        let bytes = fs::read(&fixture.store).unwrap();
+        {
+            let fault = GrantCommitFault::new(&fixture);
+            let initial = files.revoke(&first.id);
+            let retry = files.revoke(&first.id);
+            assert!(initial.is_err());
+            assert!(
+                retry.is_err(),
+                "a failed revoke must remain a retryable mutation: {retry:?}"
+            );
+            assert_eq!(files.roots(), baseline);
+            assert!(files.resolve(&first.id, "", false, false).is_ok());
+            assert!(files.resolve(&second.id, "", false, false).is_ok());
+            assert_eq!(fs::read(&fault.backup).unwrap(), bytes);
+            assert!(
+                !files.revoke("unknown-root-id").unwrap(),
+                "unknown roots require no store write even while commits fail"
+            );
+        }
+        assert_eq!(NativeFiles::new(fixture.store.clone()).roots(), baseline);
+        assert!(files.revoke(&first.id).unwrap());
+        assert!(!files.revoke(&first.id).unwrap());
+        assert!(files.resolve(&first.id, "", false, false).is_err());
+        assert_eq!(files.roots(), vec![second]);
+        assert_eq!(
+            NativeFiles::new(fixture.store.clone()).roots(),
+            files.roots(),
+            "successfully revoked grants must not reappear after restart"
+        );
+    }
 
     #[test]
     fn enforces_grant_confinement_size_limits_and_symlink_safety() {

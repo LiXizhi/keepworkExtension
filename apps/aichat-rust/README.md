@@ -25,8 +25,8 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 - **自我更新与自动更新（Self-Update / Auto-Update）**：
   - 版本号、字段语义、七牛 CDN 路径与发布顺序统一见 [CDN 版本与更新清单规范](../../docs/update-manifests.md)。
   - **Keepwork MCP Runtime 更新（`:8089`）**：默认随客户端携带 Rust MCP，使用独立 `https://cdn.keepwork.com/keepwork/mcp-stable-rs/<platform>-<arch>.json` v2 feed；显式 Node 兼容构建沿用 `mcp-stable/<platform>-<arch>.json` v1。两条线路分别校验引擎/产品/目标、大小/SHA-256/40位源码commit及包内身份；Rust额外核对嵌入binary编译身份。下载只暂存，不打断正在运行的服务；用户点击「更新 MCP」可显式激活，下一次宿主启动且需要启动本地服务时，也可采用同引擎、严格新于已验证current/bundled基线的pending，保留原Node启动行为。同版本不同commit的候选只能显式应用，不随普通启动替换。激活前核对实际服务PID/owner，新候选健康和身份确认后才提升current；失败回退已验证可用版本并保留用户数据。缺少运行中peer版本、commit或引擎字段时显示未知，不借本地捆绑版本填充。不通过Node feed覆盖Rust，也不自动重发未知任务。源码与本地清单验证不表示Rust CDN已发布或真实安装升级已验收。
-  - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），与 MCP 独立并行检查。后台下载并校验大小与 SHA-256，持久化 `update-metadata.json`，下载就绪后通知；离线保留上次检查缓存并标记 `stale: true`。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
-  - **发布与旧客户端兼容**：Rust 发布器在所有版本化安装包通过 CDN 字节校验后，更新 `win32-x64`、`win32-arm64`、`darwin-arm64`、`darwin-x64` 四个清单。已有清单的顶层 legacy ZIP 字段保持原样，追加含独立 `version` / `publishedAt` 的 `installer`；新客户端优先使用该 EXE / DMG，没有旧清单时使用顶层原生安装包。禁止清单版本倒退或同版本替换安装包；已安装 Launcher 继续使用独立签名渠道。**旧 Rust 客户端仅识别顶层下载地址，需先手动安装包含本修复的新版，才能恢复后续自动更新。** 清单发布与实际安装升级须分别验收，源码修改不代表 CDN 已更新。
+  - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 Rust 专用 `https://cdn.keepwork.com/keepwork/aichat-rust/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），与 MCP 独立并行检查。仅有 `win32-x64`（EXE）、`win32-arm64`（EXE）、`darwin-universal`（DMG）三个目标；Intel 与 Apple Silicon Mac 使用同一 Universal 清单。后台下载并校验大小与 SHA-256，持久化 `update-metadata.json`，下载就绪后通知；离线保留同一 feed URL 的上次检查缓存并标记 `stale: true`。切换地址或旧缓存没有来源时，不恢复旧渠道的可安装候选；新地址缺失时明确报告检查失败，不自动回退到 Electron / Launcher 渠道。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
+  - **发布与旧客户端兼容**：Rust 发布器在三个版本化安装包全部通过 CDN 字节校验后，仅更新 Rust 专用的三个清单，不改写历史 `aichat-desktop` 四个清单。新清单沿用 `schemaVersion: 1` / `product: aichat-desktop` 字段合同，macOS 使用 `arch: universal`；顶层原生包描述与 `installer` 指向同一包，客户端优先读取 `installer.version`。禁止清单版本倒退或同版本替换安装包。**旧 Rust 客户端仍读取旧地址，需要手动安装使用 Rust 专用地址的新版，或显式配置受支持的 feed 地址，才能迁入新渠道；新发布器不自动迁移旧指针。** 已安装 CEF / 外层 Launcher 继续使用独立签名渠道。清单发布与实际安装升级须分别验收，源码修改不代表三个新地址已在线上发布。
 - **自带的 Rust Keepwork MCP Server（`apps/mcp-rust`）**：
   - `aichat-rust` 默认运行 `apps/mcp-rust`，由 `scripts/bundle-mcp-rust.cjs` 构建原生守护进程并写入 `src-tauri/resources/mcp-runtime/<arch>/{runtime.json,bin/keepwork-mcp}`（Windows 为 `.exe`）。清单 v2 使用 `product: keepwork-mcp-runtime` 与 `engine: rust`；宿主直接执行原生入口。
   - 标准开发与 `make:mac` / `make:win:x64` / `make:win:arm64` 打包入口选择 Rust MCP；`bundle:mcp` 默认捆绑 Rust，`bundle:mcp-rust` 保留为同义入口。`apps/mcp-runtime` 的 Node 版通过 `bundle:mcp-node`、`make:mcp-node:mac` 和 `make:mcp-node:win:x64` 显式选择，仍须先准备并校验对应 Node staging。Rust 构建或校验失败时明确报错，不因缺少可选能力自动改用 Node。
@@ -216,7 +216,7 @@ xcrun swiftc -parse-as-library -module-cache-path /private/tmp/aichat-wk-module-
 
 版本安装包使用存储端禁止覆盖策略；同版本重跑只接受内容一致的已有 CDN 文件。CDN 返回 404 也不会授权覆盖源站已有对象。发生内容冲突时应复用原构建产物或发布新版本，不能覆盖 GitHub 附件来绕过校验。
 
-此发布流程新增按版本存放的安装包路径 `https://cdn.keepwork.com/keepwork/aichat-rust/<版本>/<安装包文件名>`，已有桌面自动更新 feed 保持原地址。只有对应版本完成实际上传和校验后，该版本的下载链接才可视为已发布。
+此发布流程使用按版本存放的安装包路径 `https://cdn.keepwork.com/keepwork/aichat-rust/<版本>/<安装包文件名>`，以及 Rust 专用的 `win32-x64`、`win32-arm64`、`darwin-universal` 三个自动更新 feed；历史 Electron / Launcher 地址保持原状。只有对应版本完成实际上传和校验后，该版本的下载链接与更新清单才可视为已发布。
 
 从仓库根目录预览本地安装包的发布计划（不上传）：
 

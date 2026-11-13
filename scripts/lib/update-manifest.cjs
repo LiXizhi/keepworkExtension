@@ -33,7 +33,8 @@ function validateDesktopManifest(value, { target, legacy = false } = {}) {
     || (!legacy || value.product !== undefined) && value.product !== 'aichat-desktop') throw Error('Invalid desktop update schema/product');
   const platform = value.platform ?? (legacy && target?.startsWith('darwin-') ? 'macos' : legacy && target?.startsWith('win32-') ? 'windows' : undefined);
   const arch = value.arch ?? (legacy && target ? target.split('-')[1] : undefined);
-  if (!['macos', 'windows'].includes(platform) || !['arm64', 'x64'].includes(arch)) throw Error('Invalid desktop update target');
+  const supportedArch = ['arm64', 'x64'].includes(arch) || platform === 'macos' && arch === 'universal';
+  if (!['macos', 'windows'].includes(platform) || !supportedArch) throw Error('Invalid desktop update target');
   const expected = `${platform === 'macos' ? 'darwin' : 'win32'}-${arch}`;
   if (target && target !== expected) throw Error('Desktop update target mismatch');
   packageFields(value);
