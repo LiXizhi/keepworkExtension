@@ -309,3 +309,76 @@ for (const implementation of ["typescript", "rust-init-script"]) {
     assert.deepEqual(themeCalls(bar), []);
   });
 }
+
+for (const implementation of ["typescript", "rust-init-script"]) {
+  test(`${implementation}: titlebar follows AIChat language changes`, () => {
+    const bar = renderer(implementation, "windows");
+    bar.document.documentElement.lang = "en";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.element(".title").textContent, "KeepWork Second Brain");
+    assert.deepEqual(bar.elements("button[data-menu-id]").map(button => button.textContent), ["File", "Edit", "View", "Help"]);
+    assert.equal(bar.element(".refresh").getAttribute("aria-label"), "Reload page");
+    bar.document.documentElement.lang = "zh-CN";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.element(".title").textContent, "KeepWork 第二大脑");
+    assert.equal(bar.element('button[data-menu-id="file"]').textContent, "文件");
+  });
+  test(`${implementation}: macOS title follows language changes`, () => {
+    const bar = renderer(implementation, "darwin");
+    bar.document.documentElement.lang = "en";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.element(".title").textContent, "KeepWork Second Brain");
+  });
+}
+
+for (const implementation of ["typescript", "rust-init-script"]) {
+  test(`${implementation}: macOS serializes native menu language changes`, async () => {
+    const resolvers = [];
+    const bar = renderer(implementation, "darwin", false, false, {
+      invoke(command) {
+        if (command === "desktop_set_menu_language") return new Promise(resolve => resolvers.push(resolve));
+        return Promise.resolve(true);
+      },
+    });
+    assert.deepEqual(bar.initialCalls.filter(c => c.command === "desktop_set_menu_language").map(c => c.args.language), ["zh-CN"]);
+    bar.document.documentElement.lang = "en";
+    bar.mutation(bar.document.documentElement, "lang");
+    assert.equal(bar.calls.filter(c => c.command === "desktop_set_menu_language").length, 0);
+    resolvers.shift()(true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(bar.calls.filter(c => c.command === "desktop_set_menu_language").map(c => c.args.language), ["en"]);
+    bar.document.documentElement.lang = "zh-CN";
+    bar.fire(bar.document, "aichat:language-changed");
+    resolvers.shift()(true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(bar.calls.filter(c => c.command === "desktop_set_menu_language").map(c => c.args.language), ["en", "zh-CN"]);
+    resolvers.shift()(true);
+    await new Promise(resolve => setImmediate(resolve));
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.calls.filter(c => c.command === "desktop_set_menu_language").length, 2);
+  });
+  test(`${implementation}: Windows never sends native menu language updates`, () => {
+    const bar = renderer(implementation, "windows");
+    bar.document.documentElement.lang = "en";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal([...bar.initialCalls, ...bar.calls].some(c => c.command === "desktop_set_menu_language"), false);
+  });
+}
+
+test("macOS native menu localizes every Chinese label without changing command wiring", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const root = path.resolve(__dirname, "..");
+  const source = fs.readFileSync(path.join(root, "src-tauri/src/app/host_menu.rs"), "utf8");
+  const menu = source.split("pub(super) fn setup_mac_native_menu")[1].split("fn show_host_error")[0];
+  const translations = fs.readFileSync(path.join(root, "src-tauri/src/menu.rs"), "utf8").split("pub fn mac_menu_text")[1].split("/// 页面命令")[0];
+  const labels = [...menu.matchAll(/mac_menu_text\(language,\s*"([^"]+)"\)/g)].map(m => m[1]);
+  assert.ok(labels.length >= 33);
+  for (const label of labels) assert.ok(translations.includes(`"${label}" =>`), label);
+  for (const [id, shortcut] of [["new-chat", "CmdOrCtrl+N"], ["file:close-window", "CmdOrCtrl+W"], ["zoom-in", "CmdOrCtrl+="], ["tray:quit", "CmdOrCtrl+Q"]]) {
+    const entry = menu.slice(menu.indexOf(`"${id}"`));
+    assert.ok(entry.indexOf(`"${shortcut}"`) < 250, id);
+  }
+  assert.match(menu, /core\.settings\(\)\.pet_visible/);
+  assert.match(menu, /core\.login_startup\.is_enabled\(\)/);
+});

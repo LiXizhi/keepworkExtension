@@ -177,7 +177,7 @@ export function mountDesktopTitlebar(options: {
       icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3.5 3h3v4.5L11 3h3.5L8.5 9l6 6H11L6.5 10.5V15H3.5z" fill="currentColor" opacity="0.72"/></svg>`;
       left.appendChild(icon);
     }
-    mountDesktopMenus({ host, shadow, left, invoke, menus: options.menus });
+
   }
 
   const center = document.createElement("div");
@@ -244,6 +244,8 @@ export function mountDesktopTitlebar(options: {
     }
     shadow.append(controls);
   }
+
+  mountDesktopMenus({ host, shadow, left, invoke, menus: isMac ? [] : options.menus, nativeMenu: isMac });
 
   let pendingMaximize: { x: number; y: number } | null = null;
   const isInteractive = (event: MouseEvent): boolean => {

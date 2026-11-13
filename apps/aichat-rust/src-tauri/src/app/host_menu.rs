@@ -299,7 +299,8 @@ pub(super) fn setup_native_menu_and_tray(
     )?;
     let check_updates =
         MenuItem::with_id(app, "help:check-updates", "检查更新…", true, None::<&str>)?;
-    let remote_voice = MenuItem::with_id(app, "remote-voice", "遥控器语音输入…", true, None::<&str>)?;
+    let remote_voice =
+        MenuItem::with_id(app, "remote-voice", "遥控器语音输入…", true, None::<&str>)?;
     let tray_version = MenuItem::with_id(
         app,
         "tray:version",
@@ -335,149 +336,7 @@ pub(super) fn setup_native_menu_and_tray(
     )?;
 
     #[cfg(target_os = "macos")]
-    {
-        let mac_check_updates =
-            MenuItem::with_id(app, "help:check-updates", "检查更新…", true, None::<&str>)?;
-        let mac_version = MenuItem::with_id(
-            app,
-            "help:version",
-            format!("版本 {APP_VERSION}"),
-            false,
-            None::<&str>,
-        )?;
-        let mac_quit = MenuItem::with_id(app, "tray:quit", "完全退出", true, Some("CmdOrCtrl+Q"))?;
-        let mac_open_folder = MenuItem::with_id(
-            app,
-            "file:open-folder",
-            "打开文件夹…",
-            true,
-            Some("CmdOrCtrl+O"),
-        )?;
-        let mac_toggle_pet = CheckMenuItem::with_id(
-            app,
-            "view:toggle-pet",
-            "显示桌面宠物",
-            true,
-            core.settings().pet_visible,
-            None::<&str>,
-        )?;
-        let mac_toggle_startup = CheckMenuItem::with_id(
-            app,
-            "view:toggle-login-startup",
-            "开机自动启动",
-            true,
-            core.login_startup.is_enabled(),
-            None::<&str>,
-        )?;
-        let mac_mcp_dashboard = MenuItem::with_id(
-            app,
-            "help:mcp-dashboard",
-            "打开本地 MCP 面板",
-            true,
-            None::<&str>,
-        )?;
-        let mac_restart_mcp = MenuItem::with_id(
-            app,
-            "help:restart-mcp",
-            "重启本地 MCP 服务",
-            true,
-            None::<&str>,
-        )?;
-
-        let app_sub = Submenu::with_items(
-            app,
-            "Keepwork",
-            true,
-            &[
-                &mac_check_updates,
-                &mac_version,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::hide(app, Some("隐藏 Keepwork"))?,
-                &PredefinedMenuItem::hide_others(app, Some("隐藏其他"))?,
-                &PredefinedMenuItem::show_all(app, Some("全部显示"))?,
-                &PredefinedMenuItem::separator(app)?,
-                &mac_quit,
-            ],
-        )?;
-        let file_sub = Submenu::with_items(
-            app,
-            "文件",
-            true,
-            &[
-                &MenuItem::with_id(app, "new-chat", "新建对话", true, Some("CmdOrCtrl+N"))?,
-                &mac_open_folder,
-                &PredefinedMenuItem::separator(app)?,
-                &MenuItem::with_id(app, "reload", "重新加载", true, Some("CmdOrCtrl+R"))?,
-                &PredefinedMenuItem::separator(app)?,
-                &MenuItem::with_id(
-                    app,
-                    "file:close-window",
-                    "关闭窗口",
-                    true,
-                    Some("CmdOrCtrl+W"),
-                )?,
-            ],
-        )?;
-        let edit_sub = Submenu::with_items(
-            app,
-            "编辑",
-            true,
-            &[
-                &PredefinedMenuItem::undo(app, Some("撤销"))?,
-                &PredefinedMenuItem::redo(app, Some("重做"))?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::cut(app, Some("剪切"))?,
-                &PredefinedMenuItem::copy(app, Some("复制"))?,
-                &PredefinedMenuItem::paste(app, Some("粘贴"))?,
-                &PredefinedMenuItem::select_all(app, Some("全选"))?,
-                &PredefinedMenuItem::separator(app)?,
-                &remote_voice,
-            ],
-        )?;
-        let view_sub = Submenu::with_items(
-            app,
-            "视图",
-            true,
-            &[
-                &MenuItem::with_id(app, "view:reload", "重新加载", true, Some("CmdOrCtrl+R"))?,
-                &PredefinedMenuItem::separator(app)?,
-                &MenuItem::with_id(app, "zoom-in", "放大", true, Some("CmdOrCtrl+="))?,
-                &MenuItem::with_id(app, "zoom-out", "缩小", true, Some("CmdOrCtrl+-"))?,
-                &MenuItem::with_id(app, "zoom-reset", "实际大小", true, Some("CmdOrCtrl+0"))?,
-                &PredefinedMenuItem::separator(app)?,
-                &MenuItem::with_id(app, "fullscreen", "全屏", true, Some("F11"))?,
-                &PredefinedMenuItem::separator(app)?,
-                &MenuItem::with_id(app, "open-settings", "设置", true, None::<&str>)?,
-                &MenuItem::with_id(app, "toggle-sidebar", "历史侧栏", true, None::<&str>)?,
-                &MenuItem::with_id(app, "toggle-files", "文件面板", true, None::<&str>)?,
-                &PredefinedMenuItem::separator(app)?,
-                &mac_toggle_pet,
-                &mac_toggle_startup,
-            ],
-        )?;
-        let mac_help_version = MenuItem::with_id(
-            app,
-            "help:desktop-version",
-            format!("桌面版本 {APP_VERSION}"),
-            false,
-            None::<&str>,
-        )?;
-        let help_sub = Submenu::with_items(
-            app,
-            "帮助",
-            true,
-            &[
-                &mac_mcp_dashboard,
-                &mac_restart_mcp,
-                &mac_check_updates,
-                &PredefinedMenuItem::separator(app)?,
-                &mac_help_version,
-            ],
-        )?;
-        let mac_menu =
-            Menu::with_items(app, &[&app_sub, &file_sub, &edit_sub, &view_sub, &help_sub])?;
-        let _ = app.set_menu(mac_menu);
-    }
+    setup_mac_native_menu(app, core, "zh-CN")?;
 
     #[cfg(target_os = "windows")]
     let tray_icon_bytes: &[u8] = include_bytes!("../../icons/titlebar-k.png");
@@ -526,6 +385,239 @@ pub(super) fn setup_native_menu_and_tray(
         })
         .build(app)?;
 
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn setup_mac_native_menu(
+    app: &AppHandle,
+    core: &Arc<AppCore>,
+    language: &str,
+) -> tauri::Result<()> {
+    use crate::menu::mac_menu_text;
+    let mac_check_updates = MenuItem::with_id(
+        app,
+        "help:check-updates",
+        mac_menu_text(language, "检查更新…"),
+        true,
+        None::<&str>,
+    )?;
+    let mac_version = MenuItem::with_id(
+        app,
+        "help:version",
+        format!("{} {APP_VERSION}", mac_menu_text(language, "版本")),
+        false,
+        None::<&str>,
+    )?;
+    let mac_quit = MenuItem::with_id(
+        app,
+        "tray:quit",
+        mac_menu_text(language, "完全退出"),
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
+    let mac_open_folder = MenuItem::with_id(
+        app,
+        "file:open-folder",
+        mac_menu_text(language, "打开文件夹…"),
+        true,
+        Some("CmdOrCtrl+O"),
+    )?;
+    let mac_toggle_pet = CheckMenuItem::with_id(
+        app,
+        "view:toggle-pet",
+        mac_menu_text(language, "显示桌面宠物"),
+        true,
+        core.settings().pet_visible,
+        None::<&str>,
+    )?;
+    let mac_toggle_startup = CheckMenuItem::with_id(
+        app,
+        "view:toggle-login-startup",
+        mac_menu_text(language, "开机自动启动"),
+        true,
+        core.login_startup.is_enabled(),
+        None::<&str>,
+    )?;
+    let mac_mcp_dashboard = MenuItem::with_id(
+        app,
+        "help:mcp-dashboard",
+        mac_menu_text(language, "打开本地 MCP 面板"),
+        true,
+        None::<&str>,
+    )?;
+    let mac_restart_mcp = MenuItem::with_id(
+        app,
+        "help:restart-mcp",
+        mac_menu_text(language, "重启本地 MCP 服务"),
+        true,
+        None::<&str>,
+    )?;
+
+    let app_sub = Submenu::with_items(
+        app,
+        "Keepwork",
+        true,
+        &[
+            &mac_check_updates,
+            &mac_version,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, Some(mac_menu_text(language, "隐藏 Keepwork")))?,
+            &PredefinedMenuItem::hide_others(app, Some(mac_menu_text(language, "隐藏其他")))?,
+            &PredefinedMenuItem::show_all(app, Some(mac_menu_text(language, "全部显示")))?,
+            &PredefinedMenuItem::separator(app)?,
+            &mac_quit,
+        ],
+    )?;
+    let file_sub = Submenu::with_items(
+        app,
+        mac_menu_text(language, "文件"),
+        true,
+        &[
+            &MenuItem::with_id(
+                app,
+                "new-chat",
+                mac_menu_text(language, "新建对话"),
+                true,
+                Some("CmdOrCtrl+N"),
+            )?,
+            &mac_open_folder,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "reload",
+                mac_menu_text(language, "重新加载"),
+                true,
+                Some("CmdOrCtrl+R"),
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "file:close-window",
+                mac_menu_text(language, "关闭窗口"),
+                true,
+                Some("CmdOrCtrl+W"),
+            )?,
+        ],
+    )?;
+    let edit_sub = Submenu::with_items(
+        app,
+        mac_menu_text(language, "编辑"),
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some(mac_menu_text(language, "撤销")))?,
+            &PredefinedMenuItem::redo(app, Some(mac_menu_text(language, "重做")))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, Some(mac_menu_text(language, "剪切")))?,
+            &PredefinedMenuItem::copy(app, Some(mac_menu_text(language, "复制")))?,
+            &PredefinedMenuItem::paste(app, Some(mac_menu_text(language, "粘贴")))?,
+            &PredefinedMenuItem::select_all(app, Some(mac_menu_text(language, "全选")))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "remote-voice",
+                mac_menu_text(language, "遥控器语音输入…"),
+                true,
+                None::<&str>,
+            )?,
+        ],
+    )?;
+    let view_sub = Submenu::with_items(
+        app,
+        mac_menu_text(language, "视图"),
+        true,
+        &[
+            &MenuItem::with_id(
+                app,
+                "view:reload",
+                mac_menu_text(language, "重新加载"),
+                true,
+                Some("CmdOrCtrl+R"),
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "zoom-in",
+                mac_menu_text(language, "放大"),
+                true,
+                Some("CmdOrCtrl+="),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "zoom-out",
+                mac_menu_text(language, "缩小"),
+                true,
+                Some("CmdOrCtrl+-"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "zoom-reset",
+                mac_menu_text(language, "实际大小"),
+                true,
+                Some("CmdOrCtrl+0"),
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "fullscreen",
+                mac_menu_text(language, "全屏"),
+                true,
+                Some("F11"),
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "open-settings",
+                mac_menu_text(language, "设置"),
+                true,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                "toggle-sidebar",
+                mac_menu_text(language, "历史侧栏"),
+                true,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                "toggle-files",
+                mac_menu_text(language, "文件面板"),
+                true,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &mac_toggle_pet,
+            &mac_toggle_startup,
+        ],
+    )?;
+    let mac_help_version = MenuItem::with_id(
+        app,
+        "help:desktop-version",
+        format!("{} {APP_VERSION}", mac_menu_text(language, "桌面版本")),
+        false,
+        None::<&str>,
+    )?;
+    let help_sub = Submenu::with_items(
+        app,
+        mac_menu_text(language, "帮助"),
+        true,
+        &[
+            &mac_mcp_dashboard,
+            &mac_restart_mcp,
+            &MenuItem::with_id(
+                app,
+                "help:check-updates",
+                mac_menu_text(language, "检查更新…"),
+                true,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &mac_help_version,
+        ],
+    )?;
+    let mac_menu = Menu::with_items(app, &[&app_sub, &file_sub, &edit_sub, &view_sub, &help_sub])?;
+    app.set_menu(mac_menu)?;
     Ok(())
 }
 

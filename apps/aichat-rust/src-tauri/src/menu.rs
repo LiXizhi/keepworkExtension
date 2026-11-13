@@ -1,6 +1,49 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// Labels for the macOS application menu. Unknown languages fall back to Chinese.
+pub fn mac_menu_text<'a>(language: &str, text: &'a str) -> &'a str {
+    if language != "en" {
+        return text;
+    }
+    match text {
+        "检查更新…" => "Check for updates…",
+        "完全退出" => "Quit",
+        "打开文件夹…" => "Open folder…",
+        "显示桌面宠物" => "Show desktop pet",
+        "开机自动启动" => "Launch at login",
+        "打开本地 MCP 面板" => "Open local MCP dashboard",
+        "重启本地 MCP 服务" => "Restart local MCP service",
+        "隐藏 Keepwork" => "Hide Keepwork",
+        "隐藏其他" => "Hide Others",
+        "全部显示" => "Show All",
+        "文件" => "File",
+        "新建对话" => "New chat",
+        "重新加载" => "Reload",
+        "关闭窗口" => "Close window",
+        "编辑" => "Edit",
+        "撤销" => "Undo",
+        "重做" => "Redo",
+        "剪切" => "Cut",
+        "复制" => "Copy",
+        "粘贴" => "Paste",
+        "全选" => "Select All",
+        "视图" => "View",
+        "放大" => "Zoom in",
+        "缩小" => "Zoom out",
+        "实际大小" => "Actual size",
+        "全屏" => "Full screen",
+        "设置" => "Settings",
+        "历史侧栏" => "Chat history",
+        "文件面板" => "Files",
+        "帮助" => "Help",
+        "版本" => "Version",
+        "桌面版本" => "Desktop version",
+        "遥控器语音输入…" => "Remote voice input…",
+        _ => text,
+    }
+}
+
 /// 页面命令：由 AIChat 页面自行执行的菜单动作，桌面进程只负责投递
 /// （与 `apps/aichat-desktop` 的 `PAGE_COMMANDS` 保持一致）。
 pub const PAGE_COMMANDS: &[&str] = &[
@@ -275,6 +318,51 @@ pub fn menu_payload(menu_id: &str, state: &MenuContextState) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mac_menu_labels_cover_both_languages_and_preserve_unknown_text() {
+        let labels = [
+            ("文件", "File"),
+            ("编辑", "Edit"),
+            ("视图", "View"),
+            ("帮助", "Help"),
+            ("隐藏 Keepwork", "Hide Keepwork"),
+            ("隐藏其他", "Hide Others"),
+            ("全部显示", "Show All"),
+            ("检查更新…", "Check for updates…"),
+            ("版本", "Version"),
+            ("桌面版本", "Desktop version"),
+            ("完全退出", "Quit"),
+            ("打开文件夹…", "Open folder…"),
+            ("显示桌面宠物", "Show desktop pet"),
+            ("开机自动启动", "Launch at login"),
+            ("打开本地 MCP 面板", "Open local MCP dashboard"),
+            ("重启本地 MCP 服务", "Restart local MCP service"),
+            ("新建对话", "New chat"),
+            ("重新加载", "Reload"),
+            ("关闭窗口", "Close window"),
+            ("撤销", "Undo"),
+            ("重做", "Redo"),
+            ("剪切", "Cut"),
+            ("复制", "Copy"),
+            ("粘贴", "Paste"),
+            ("全选", "Select All"),
+            ("遥控器语音输入…", "Remote voice input…"),
+            ("放大", "Zoom in"),
+            ("缩小", "Zoom out"),
+            ("实际大小", "Actual size"),
+            ("全屏", "Full screen"),
+            ("设置", "Settings"),
+            ("历史侧栏", "Chat history"),
+            ("文件面板", "Files"),
+        ];
+        for (chinese, english) in labels {
+            assert_eq!(mac_menu_text("en", chinese), english);
+            assert_eq!(mac_menu_text("zh-CN", chinese), chinese);
+            assert_eq!(mac_menu_text("unknown", chinese), chinese);
+        }
+        assert_eq!(mac_menu_text("en", "custom"), "custom");
+    }
 
     fn context() -> MenuContextState {
         MenuContextState {

@@ -676,6 +676,7 @@ pub fn run() {
             updates_window::desktop_install_update,
             commands::desktop_run_menu_command,
             commands::desktop_open_menu,
+            commands::desktop_set_menu_language,
             commands::desktop_titlebar_action,
             commands::desktop_sync_theme,
             pet_host::desktop_pet_action,

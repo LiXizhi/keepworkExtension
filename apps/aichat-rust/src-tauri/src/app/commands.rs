@@ -240,6 +240,24 @@ fn menu_context(state: &AppCore) -> MenuContextState {
 }
 
 #[tauri::command]
+pub(super) fn desktop_set_menu_language(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    language: String,
+) -> Result<(), String> {
+    verify_main_sender(&window, &state)?;
+    if language != "en" && language != "zh-CN" {
+        return Err("Unsupported menu language".into());
+    }
+    #[cfg(target_os = "macos")]
+    super::host_menu::setup_mac_native_menu(&app, &state, &language).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+    Ok(())
+}
+
+#[tauri::command]
 pub(super) async fn desktop_open_menu(
     app: AppHandle,
     window: WebviewWindow,

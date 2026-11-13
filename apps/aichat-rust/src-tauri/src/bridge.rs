@@ -341,7 +341,7 @@ pub fn build_main_window_init_script_with_launch_capability(
         img.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3.5 3h3v4.5L11 3h3.5L8.5 9l6 6H11L6.5 10.5V15H3.5z" fill="currentColor" opacity="0.72"/></svg>`;
         left.appendChild(img);
       }}
-      mountDesktopMenus({{ host, shadow, left, invoke, menus: bootstrap.menus || [] }});
+
     }}
 
     const center = document.createElement("div");
@@ -398,6 +398,8 @@ pub fn build_main_window_init_script_with_launch_capability(
     shadow.append(controls);
   }}
 
+
+    mountDesktopMenus({{ host, shadow, left, invoke, menus: isMac ? [] : (bootstrap.menus || []), nativeMenu: isMac }});
 
     let pendingMaximize = null;
     const isInteractive = (event) => {{

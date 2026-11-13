@@ -4,4 +4,5 @@ export function mountDesktopMenus(options: {
   left: HTMLElement;
   invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
   menus: Array<{ id: string; label: string }>;
+  nativeMenu?: boolean;
 }): { close(): void };
