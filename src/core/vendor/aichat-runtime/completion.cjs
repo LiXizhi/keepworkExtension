@@ -126,6 +126,35 @@ function finalizedNativeCalls(snapshots, iteration) {
     }
     return calls.map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
 }
+function equalArguments(left, right, depth = 0) {
+    if (left === right)
+        return true;
+    if (depth > 64 || !left || !right || typeof left !== 'object' || typeof right !== 'object')
+        return false;
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+            && Object.keys(left).length === left.length && Object.keys(right).length === right.length
+            && left.every((value, index) => equalArguments(value, right[index], depth + 1));
+    }
+    if (Object.prototype.toString.call(left) !== '[object Object]' || Object.prototype.toString.call(right) !== '[object Object]')
+        return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && equalArguments(left[key], right[key], depth + 1));
+}
+function mirrorsNativeCalls(textCalls, calls, tools) {
+    if (!textCalls || textCalls.errors.size || textCalls.calls.length !== calls.length)
+        return false;
+    try {
+        return calls.every((call, index) => {
+            const textCall = textCalls.calls[index], name = call.function?.name;
+            return (tools || []).some(tool => tool.function?.name === name) && name === textCall.function.name
+                && equalArguments(parseArguments(call.function?.arguments), parseArguments(textCall.function.arguments));
+        });
+    }
+    catch {
+        return false;
+    }
+}
 async function runCompletion(options, { request, execute, emit = () => { } }) {
     const messages = options.messages || [], signal = options.abortController?.signal;
     const receipts = new Map();
@@ -149,14 +178,17 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
         const incomplete = response?.truncated || response?.error
             || reasons.some(reason => ['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'error', 'cancelled', 'aborted'].includes(reason))
             || ['incomplete', 'failed', 'cancelled'].includes(response?.status);
-        const recovered = !calls.length && !incomplete
-            ? (0, text_tool_calls_cjs_1.recoverTextToolCalls)(content, finalSummary ? [] : options.tools, iteration) : null;
-        if (recovered) {
-            calls = recovered.calls;
-            content = recovered.content;
+        const textCalls = !incomplete ? (0, text_tool_calls_cjs_1.recoverTextToolCalls)(content, finalSummary ? [] : options.tools, iteration) : null;
+        const recovered = !calls.length ? textCalls : null;
+        const nativeMirror = calls.length && mirrorsNativeCalls(textCalls, calls, options.tools);
+        if (recovered || nativeMirror) {
+            if (recovered)
+                calls = recovered.calls;
+            content = textCalls.content;
             options.onMessage?.(content, { result: content, tool_calls: calls, replaceContent: true });
-            for (const call of calls)
-                options.onToolCallChunk?.(call);
+            if (recovered)
+                for (const call of calls)
+                    options.onToolCallChunk?.(call);
         }
         await emit({ type: 'message', content, iteration, message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) } });
         if (!calls.length)

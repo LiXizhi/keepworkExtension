@@ -165,6 +165,8 @@ node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwi
 
 `pnpm check` 运行完整检查；上述隔离冒烟用于验证源码中的启动流程，不代表已安装发布包、真实账号或 Windows 实机验收。
 
+标准冒烟一次构建所有目标，并从 Cargo 的 JSON 产物记录取得实际可执行文件路径，兼容自定义输出目录。单独运行 `scripts/startup-native-smoke.cjs --no-build` 且使用自定义 Cargo 配置时，应显式传入 `--executable=<已构建的 startup-smoke 路径>`。
+
 Rust binary 的 `--build-info` 返回编译时 `version`、`commit`、`target`、`sourceHash` 和 `capabilities`，不受宿主运行时身份环境变量覆写。捆绑脚本先验证所有目标的二进制身份、当前源码指纹及必需能力，再写资源；`--no-build` 也会拒绝旧版、同版过期或缺少能力的产物，不能用新 manifest 版本包装旧 binary。打包成功后仍须核验实际 `127.0.0.1:8089/health` 的运行身份与能力，并检查 `/agents/backends`；本地产物通过不代表运行中的共享服务已经更新，也不代表真实 CLI 生成验收通过。
 
 ### macOS 原生语音采集回归

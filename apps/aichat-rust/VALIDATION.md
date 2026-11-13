@@ -1,6 +1,30 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
-## 2026-11-13：自动更新的运行时所有权与冒烟修复（0.2.91）
+## 2026-11-13：原生启动内容组居中（0.2.96）
+
+按图标、间距和两行文字的实际宽度计算整个内容组的水平位置；正常态同时校正垂直重心，文字内部仍左对齐。失败态按钮位置、窗口尺寸和生命周期不变。已有 AppKit 夹具增加组中心与内容区中心偏差不超过 1pt 的断言，浅色 / 深色真实离屏预览已复核。
+
+- `node --test apps/aichat-rust/tests/native-startup.test.cjs`：**4/4 通过**，包括原生布局、键盘与回调生命周期。
+- `node apps/aichat-rust/scripts/startup-native-smoke.cjs`：编译 `0.2.96`，真实 Tauri / AppKit / WKWebView **14 阶段全部通过**，含 20 秒超时、原生重试、关闭 / Esc 后迟到就绪与后台隐藏。日志 `.test-runtime/native-startup-centered/smoke.log`。
+- 四处产品版本同步 `0.2.96`，`git diff --check` 通过。本轮只调整 macOS 布局，未重跑与本变更无关的运行时选版矩阵；沿用上述隔离原生冒烟的验证边界。
+
+## 2026-11-13：紧凑原生启动与 AGENTS 冒烟闭环（0.2.95）
+
+本轮由产品 Agent 确认前后台、失败恢复、旧网页及运行时兼容契约，程序员修复后由测试 Agent 验证。原生启动采用 360×176 紧凑布局；主 WebView 在可信文档就绪前隐藏。启动可见性在单实例监听前初始化，避免后台启动期间收到的用户唤起被后续 setup 覆盖；关闭、Esc 和稍后保留隐藏意图，迟到就绪不反弹。
+
+运行时检查覆盖正常启动防降级、同版本重打包仅显式应用、按选定引擎比较缓存、缺失对端元数据保持未知等规则。补齐外部 VS Code / Local Helper 所有权保护；二次探测的 PID、owner 或身份变化时停止接管并报告最新状态，不继续启动第二个实例。无本地基线时允许合法 feed 下载暂存，下载不等于激活。标准冒烟曾遇到并行提取启动函数后遗留的 `arch` 作用域编译错误，已修复；失败原始日志保留。
+
+最终在 **macOS 15.7.9 / arm64** 执行：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建通过；Rust **220 通过 / 2 条件忽略 / 0 失败**，Node **424 通过 / 5 Windows 平台跳过 / 0 失败**。Rust 忽略项分别需要物理鼠标状态和实际联网 ASR，不计为已实测。
+- `pnpm --prefix apps/aichat-rust smoke`：一次 Cargo 构建全部相关二进制，从 `compiler-artifact.executable` 获取实际路径，再执行 **desktop / runtime / PTY / pet / updates 五套核心冒烟，全部通过**；随后运行同次构建的 macOS 原生启动冒烟，**14 个阶段全部通过**。最终构建日志报告 `aichat-rust v0.2.95`，四处版本同步。
+- 原生冒烟使用真实 Tauri 事件循环、AppKit Window、WKWebView、现有私密 IPC 和生产窗口生命周期函数。实际观测原生窗及主窗 `is_visible`，覆盖前台 pending → ready、后台始终隐藏、准备期间原生 Close / Esc 后迟到 ready、真实 **20 秒**超时失败及点击原生 Retry 后恢复；Idle 状态唤起后开始导航不丢失前台意图。
+
+原始证据存放于仓库 `.test-runtime/native-startup-agents/`：`check-final.log`、`smoke-final.log` 及单独原生干跑 `native-startup-smoke-final.log`。此前 Prohibited 策略禁止测试窗显示、测试动态子类与 Tao 派发冲突，以及作用域编译失败，分别保存在 `native-startup-smoke-prohibited-failed.log`、`native-startup-smoke-passive-subclass-failed.log`、`smoke-compile-scope-failed.log`，没有将这些失败计为通过。`git diff --check` 通过。
+
+原生夹具仅在 `dev-bins` 编译，使用随机私有 Loopback 服务和临时配置 / 非持久 WebView 存储，未启动共享 daemon 或账号流程。为避免影响用户键盘焦点，夹具采用不可聚焦测试窗口，并只在本测试进程临时抑制应用激活、退出后恢复；因此本轮不证明生产焦点恢复、已安装包冷启动、真实账号、遥控器、麦克风或 Windows / Linux 实机行为。冒烟的一次构建避免逐域重新编译，但共享 Cargo target 不构成不可变发布快照，本轮不作发布验收结论。
+
+## 2026-11-13：自动更新的运行时所有权与冒烟修复（0.2.95）
 
 按 AGENTS 三角色流程继续处理下方 `0.2.86` 完整检查失败，不把原有失败记录改成通过。兼容的 VS Code / Local Helper 服务即使早于本机捆绑版本，也保持原 PID 和所有权；桌面仅附加并显示实际观测到的运行版本、引擎、commit 和构建时间，缺失字段保持未知。桌面与 MCP 的更新检查继续独立，外部服务不被自动更新、重启或退出流程误杀。
 
@@ -12,19 +36,27 @@
 
 继续修复过程中保留两类失败：原生冒烟的测试专用 NSApp 子类导致 Tao `sendEvent` 递归并栈溢出，改为仅替换测试进程的 activation selector；隔离网页入口的就绪回执同时绑定实际 source / entry，旧二进制结果不代替重新构建后的整套验证。`0.2.90` 完整检查还暴露 source server 文件服务 / 路径遍历夹具的端口探测后释放竞态。`0.2.91` 由该夹具直接绑定 `127.0.0.1:0`，将原 listener 交给私有 `serve_listener`，不释放后重绑；生产路径仍经过 `source_identity`、`bind_source_origin` 和注册表，来源稳定、范围耗尽、端口冲突及路径隔离规则保持原样。
 
-最终通过数与完整检查结果待 `0.2.91` 重新构建及执行结束后补充，不以早前版本或旧二进制结果替代。本轮未操作共享 8089、真实账号或硬件，未发布 CDN 或替换用户安装，不据此宣称 Windows / macOS 真实安装升级已验收。四处桌面版本保持同步 **0.2.91**。
+最终 `0.2.95` 实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：退出码 0，TypeScript 与前端构建通过，Rust **220 通过 / 0 失败 / 2 忽略**，Node **424 通过 / 0 失败 / 5 跳过**。两个 Rust 忽略项分别要求真实鼠标已松开和线上 ASR，不计作本轮通过。日志 `/tmp/keepwork-update-0.2.95-check.log`。
+- `pnpm --prefix apps/aichat-rust smoke`：退出码 0，重新构建后 desktop、runtime、PTY、pet、updates **五项全部通过**；真实 AppKit / WKWebView **14 个状态检查全部通过**，含实际 20 秒超时及原生按钮重试。日志 `/tmp/keepwork-update-0.2.95-smoke.log`。
+- 检查及冒烟前后的 **155 项源码 / 构建输入摘要完全一致**：`/tmp/keepwork-update-current-source.json` 与 `/tmp/keepwork-update-final-source.json` 比较 `changed=[]`。旧 `verified-source.json` 属于更早版本，不作为最终验证依据；本轮没有以旧二进制或早前通过结果代替重新构建验证。
+
+四处桌面版本同步 **0.2.95**。本轮未操作共享 8089、真实账号或硬件，未发布 CDN 或替换用户安装，不据此宣称 Windows / macOS 真实安装升级已验收；旧 Rust 客户端仍需先安装包含修复的新版，才能接回后续自动更新。
 
 ## 2026-11-13：AGENTS 三角色复核与冒烟修复
 
 完整检查曾实际触发 `primary_button_is_up_without_a_held_click`：该旧用例直接读取真人鼠标状态，却未控制“左键已松开”的前提。首轮失败及执行期间源码漂移保留在 `.test-runtime/rust-agents-final/desktop/`。经产品/QA确认，常规CI改为两项可控macOS/Windows掩码解析回归，并复用现有拖动/释放状态机；真实系统采样断言保留为显式ignored，须在解锁桌面且主键松开时单独执行。OS调用、fallback与生产拖动策略不变，不以重跑碰巧通过代替稳定修复；后续完整检查使用新的 `desktop-r2` 证据目录。
 
-并行任务持续写入版本和构建输入后，最终验证移到字节核对一致的隔离源码副本及独立编译缓存。隔离检查又复现浏览器超时夹具的空PID文件竞态：旧shell可能在重定向建文件后、写入PID前被正确超时终止。现将原等待循环拆为接收自有Child的helper，生产spawn/期限/kill/wait行为不变；测试直接以Child.id验证同一进程的超时、退出和已回收状态，无额外等待、重试或忽略。失败记录与修前源码保留，后续新源码指纹的完整检查及桌面/原生启动smoke回执见 `desktop-snapshot-r2`。
+并行任务持续写入版本和构建输入后，最终验证移到字节核对一致的隔离源码副本及独立编译缓存。隔离检查又复现浏览器超时夹具的空PID文件竞态：旧shell可能在重定向建文件后、写入PID前被正确超时终止。现将原等待循环拆为接收自有Child的helper，生产spawn/期限/kill/wait行为不变；测试直接以Child.id验证同一进程的超时、退出和已回收状态，无额外等待、重试或忽略。失败记录与修前源码保留。`desktop-snapshot-r2` 中 CEF 测试选中 Xcode Python 3.9 的环境失败也保留，后续完整检查显式使用已安装的 Python 3.12，不放宽归档安全过滤。
 
 产品 Agent 与 QA 重新确认兼容契约后，程序员 Agent 修复启动选择与身份显示：同一引擎启动按已验证 current/bundled 的最高版本选择，不自动采用较旧或同版不同 commit 的 pending；显式 Node 不被历史 Rust cache 选回。附加服务的缺失版本、commit、构建时间和引擎保持未知，重连不继承上一实例身份。已验证 Node 候选的旧健康响应可省略 engine，但仅限本次存活 Child、匹配 PID 和正确服务身份；Rust v2 不放宽其明确引擎合同。
 
 本轮先保留定向复现失败，再修复并执行完整 `pnpm --prefix apps/aichat-rust check`、五组桌面 smoke，以及 MCP 的单元/契约/构建、双引擎 wire、已提取 v2 包的真实二进制 smoke。MCP 冒烟脚本本身增加逐次 POST 的身份/所有权验证和有界清理回归。最终命令、计数、跳过及源码指纹以 `.test-runtime/rust-agents-final/` 与本轮 MCP 回执为准，旧版本通过记录不代替本轮。
 
-共享 TypeScript/布局/固定 vendor 与已提交 canonical 快照分别核验。相邻 AIChat 四个模块仍有未提交修改，默认 auto/canonical 检查保留该差异，未自动提交或同步外部进行中的工作；`check:shared` 不据此标成全绿。Windows 干净机、真实平台协议注册、账号和硬件不从本机夹具结果推定通过；未触碰共享 8089 或发布清单。
+共享 TypeScript/布局/固定 vendor 与已提交 canonical 快照分别核验。初次默认 auto/canonical 检查因相邻 AIChat 四个模块的进行中修改失败，保留该结果；同期任务提交并同步 vendor 后，最终 `npm run check:shared` 已通过。此复核未提交或同步外部进行中的工作。
+
+最终文档与四处桌面版本同步为 **0.2.96**，在独立源码/编译缓存副本重新执行完整检查后再执行冒烟。桌面可核验回执位于 `.test-runtime/rust-agents-final/desktop-0.2.96/report.json`，MCP **0.2.48** 位于 `mcp-snapshot/report.json`；日志保留源码指纹、命令、摘要和平台跳过，不将失败回执覆盖成通过。Windows 干净机、真实平台协议注册、账号和硬件不从本机夹具结果推定通过；未触碰共享 8089 或发布清单。
 
 ## 2026-11-13：恢复桌面自动更新发布契约
 

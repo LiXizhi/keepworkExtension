@@ -49,7 +49,11 @@ static void assertState(KeepworkStartupView *view, BOOL failed) {
     assert(!NSIntersectsRect(view.titleLabel.frame, view.summaryLabel.frame));
     assert(!NSIntersectsRect(view.iconView.frame, view.titleLabel.frame));
     assert(!NSIntersectsRect(view.iconView.frame, view.summaryLabel.frame));
+    NSRect identity = NSUnionRect(view.iconView.frame,
+        NSUnionRect(view.titleLabel.frame, view.summaryLabel.frame));
+    assert(fabs(NSMidX(identity) - NSMidX(view.bounds)) <= 1);
     if (!failed) {
+        assert(fabs(NSMidY(identity) - NSMidY(view.bounds)) <= 1);
         assert(NSMidY(view.spinner.frame) == NSMidY(view.summaryLabel.frame));
         assert(!NSIntersectsRect(view.spinner.frame, view.summaryLabel.frame));
     } else {

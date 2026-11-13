@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
 #include <stdbool.h>
+#include <math.h>
 
 typedef void (*KeepworkStartupAction)(void *, bool);
 typedef void (*KeepworkStartupRelease)(void *);
@@ -35,13 +36,18 @@ typedef void (*KeepworkStartupRelease)(void *);
 }
 - (void)layout {
     [super layout];
-    // Keep the compact identity group together, below the native close button.
-    CGFloat top = self.failed ? NSHeight(self.bounds) - 54 : NSHeight(self.bounds) / 2 + 20;
-    CGFloat textWidth = NSWidth(self.bounds) - 120;
-    self.iconView.frame = NSMakeRect(28, top - 48, 48, 48);
-    self.titleLabel.frame = NSMakeRect(92, top - 22, textWidth, 24);
-    self.spinner.frame = NSMakeRect(92, top - 47, 12, 12);
-    self.summaryLabel.frame = NSMakeRect(self.failed ? 92 : 110, top - 52,
+    // Center the visible identity, using its text rather than an empty label
+    // column. The two text lines keep their shared left edge beside the icon.
+    CGFloat top = self.failed ? NSHeight(self.bounds) - 54 : NSHeight(self.bounds) / 2 + 25;
+    CGFloat textWidth = MIN(NSWidth(self.bounds) - 120, ceil(MAX(
+        self.titleLabel.cell.cellSize.width,
+        self.summaryLabel.cell.cellSize.width + (self.failed ? 0 : 18))));
+    CGFloat left = floor((NSWidth(self.bounds) - 48 - 16 - textWidth) / 2);
+    CGFloat textLeft = left + 48 + 16;
+    self.iconView.frame = NSMakeRect(left, top - 48, 48, 48);
+    self.titleLabel.frame = NSMakeRect(textLeft, top - 22, textWidth, 24);
+    self.spinner.frame = NSMakeRect(textLeft, top - 47, 12, 12);
+    self.summaryLabel.frame = NSMakeRect(textLeft + (self.failed ? 0 : 18), top - 52,
         textWidth - (self.failed ? 0 : 18), 22);
     self.retryButton.frame = NSMakeRect(NSWidth(self.bounds) - 112, 22, 84, 30);
     self.hideButton.frame = NSMakeRect(NSWidth(self.bounds) - 204, 22, 84, 30);
