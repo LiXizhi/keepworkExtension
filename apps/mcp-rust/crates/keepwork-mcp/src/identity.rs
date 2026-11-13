@@ -42,6 +42,19 @@ fn compiled_built_at(document: &str) -> Option<String> {
         .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
+/// `--build-info` must report the same record packaging reads from the binary.
+/// The embedded document stores only `builtAtUnix`; derive the display form here
+/// so executed and statically embedded records stay identical.
+pub fn build_info_document() -> String {
+    let Ok(mut info) = serde_json::from_str::<Value>(BUILD_INFO) else {
+        return BUILD_INFO.to_string();
+    };
+    if let (Some(object), Some(built_at)) = (info.as_object_mut(), compiled_built_at(BUILD_INFO)) {
+        object.insert("builtAt".to_string(), Value::String(built_at));
+    }
+    info.to_string()
+}
+
 impl Identity {
     pub fn from_env(host_kind: Option<String>, host_version: Option<String>) -> Self {
         Self {

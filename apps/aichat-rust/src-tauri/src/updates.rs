@@ -945,6 +945,17 @@ mod tests {
         }
     }
 
+    // Cache-busting queries are request-only, so fixtures route on the path.
+    fn request_path(request: &str) -> &str {
+        request
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .split('?')
+            .next()
+            .unwrap_or_default()
+    }
+
     fn update_server(
         make_manifest: impl FnOnce(&str) -> Value,
         payload: Vec<u8>,
@@ -969,10 +980,10 @@ mod tests {
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap();
                 let request = String::from_utf8_lossy(&buf[..n]);
-                let bytes = if request.starts_with("GET /latest-client.json ") {
+                let bytes = if request_path(&request) == "/latest-client.json" {
                     manifest.as_bytes()
                 } else {
-                    assert!(request.starts_with("GET /installer.dmg "), "{request}");
+                    assert_eq!(request_path(&request), "/installer.dmg", "{request}");
                     payload.as_slice()
                 };
                 let header = format!(
@@ -1204,8 +1215,9 @@ mod tests {
                     let mut buf = [0u8; 2048];
                     let n = stream.read(&mut buf).unwrap();
                     let request = String::from_utf8_lossy(&buf[..n]);
-                    assert!(
-                        request.starts_with("GET /latest-client.json "),
+                    assert_eq!(
+                        request_path(&request),
+                        "/latest-client.json",
                         "an older or equal ZIP must never be downloaded: {request}"
                     );
                     let (status, bytes) = if count == 0 {
