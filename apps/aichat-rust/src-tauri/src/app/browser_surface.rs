@@ -86,6 +86,28 @@ pub(super) async fn desktop_browser_surface(
 ) -> Result<Value, String> {
     verify_main_sender(&window, &state)?;
     let command = validate_command(&op, &args)?;
+    #[cfg(windows)]
+    {
+        crate::browser_surface_policy::windows_contract(&command)?;
+        let zoom = *state.zoom.lock().map_err(|_| "Browser zoom unavailable")?;
+        let (send, receive) = tokio::sync::oneshot::channel();
+        window
+            .with_webview(move |webview| {
+                crate::browser_surface_windows::dispatch(
+                    &webview.environment(),
+                    &webview.controller(),
+                    command,
+                    zoom,
+                    Box::new(move |result| {
+                        let _ = send.send(result);
+                    }),
+                );
+            })
+            .map_err(|error| error.to_string())?;
+        receive
+            .await
+            .map_err(|_| "Native browser closed".to_owned())?
+    }
     #[cfg(target_os = "macos")]
     {
         let mut command = command;
@@ -135,11 +157,18 @@ pub(super) async fn desktop_browser_surface(
         }
         Ok(result)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = command;
         Err("Native browser surface is unavailable on this platform".into())
     }
+}
+
+#[cfg(windows)]
+pub(super) fn reset(window: &WebviewWindow) {
+    let _ = window.with_webview(|webview| {
+        crate::browser_surface_windows::reset(&webview.controller());
+    });
 }
 
 #[cfg(target_os = "macos")]

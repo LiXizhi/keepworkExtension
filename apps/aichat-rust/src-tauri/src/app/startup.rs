@@ -470,7 +470,7 @@ pub fn run() {
                 // snapshot, so it must leave that state intact.
                 if payload.event() == PageLoadEvent::Started {
                     core_for_page_load.launch_intents.lock().unwrap().invalidate_document();
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", windows))]
                     super::browser_surface::reset(&window);
                     if let Some(identity) = core_for_page_load.pet_audio.reset_page() {
                         notify_pet_audio_stopped(window.app_handle(), identity, "录音页面已重新加载", false);
@@ -561,6 +561,8 @@ pub fn run() {
             let core_for_close = Arc::clone(&core_for_setup);
             main_win.on_window_event(move |event| {
                 if matches!(event, WindowEvent::Destroyed) {
+                    #[cfg(windows)]
+                    crate::browser_surface_windows::reset_all();
                     if let Some(identity) = core_for_close.pet_audio.reset_page() {
                         notify_pet_audio_stopped(&app_for_close, identity, "录音页面已关闭", false);
                     }

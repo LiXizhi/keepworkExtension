@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aichat-rust"
-version = "0.2.116"
+version = "0.2.117"
 dependencies = [
  "base64 0.22.1",
  "btleplug",
@@ -45,6 +45,7 @@ dependencies = [
  "tokio-tungstenite",
  "url",
  "uuid",
+ "webview2-com",
  "windows",
  "windows-collections",
  "windows-sys 0.61.2",

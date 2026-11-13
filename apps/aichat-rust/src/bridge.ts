@@ -79,7 +79,8 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     floatingPet: true,
     startupSignIn: true,
     ...(launchEnabled ? { launchIntents: true as const } : {}),
-    ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceVersion: 1 as const, browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
+    ...(["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { browserSurfaceVersion: 1 as const } : {}),
+    ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
   });
 
   const petListeners = new Set<(payload: Record<string, unknown>) => void>();

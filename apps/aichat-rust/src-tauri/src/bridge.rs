@@ -165,7 +165,8 @@ pub fn build_main_window_init_script_with_launch_capability(
     petVoiceAudioVersion: 1,
     startupSignIn: true,
     ...(launchEnabled ? {{ launchIntents: true }} : {{}}),
-    ...(bootstrap.platform === "darwin" ? {{ browserSurfaceVersion: 1, browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
+    ...(["darwin", "win32"].includes(bootstrap.platform) ? {{ browserSurfaceVersion: 1 }} : {{}}),
+    ...(bootstrap.platform === "darwin" ? {{ browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
   }});
 
   if (!window.aichatDesktop) {{

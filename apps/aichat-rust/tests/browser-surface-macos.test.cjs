@@ -4,33 +4,78 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
+const ts = require('typescript');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execute = promisify(execFile);
 const { renderer } = require('./helpers/desktop-renderer.cjs');
 
-test('browser surface bridge advertises only implemented platforms and forwards native lifecycle events', async () => {
-  const main = renderer('rust-init-script', 'darwin');
-  const bridge = main.window.aichatDesktop;
-  assert.equal(bridge.capabilities.browserSurfaceVersion, 1);
-  assert.equal(bridge.capabilities.browserSurfaceViewportVersion, 1);
-  assert.equal(bridge.capabilities.browserSurfaceScaleVersion, 1);
-  const events = [];
-  const unsubscribe = bridge.onBrowserSurface(value => events.push(value));
-  const payload = { id: 'owned-surface', event: 'loaded', url: 'https://example.com/' };
-  main.fire(main.window, '__aichat_desktop_event__', { detail: { event: 'browser-surface', payload } });
-  assert.deepEqual(events, [payload]);
-  unsubscribe();
-  main.fire(main.window, '__aichat_desktop_event__', { detail: { event: 'browser-surface', payload } });
-  assert.equal(events.length, 1);
-  await bridge.browserSurface('reload', { id: 'owned-surface' });
-  assert.deepEqual(main.calls.at(-1), { command: 'desktop_browser_surface', args: { op: 'reload', args: { id: 'owned-surface' } } });
-  for (const platform of ['win32', 'linux']) {
-    assert.equal(renderer('rust-init-script', platform).window.aichatDesktop.capabilities.browserSurfaceVersion, undefined);
-    assert.equal(renderer('rust-init-script', platform).window.aichatDesktop.capabilities.browserSurfaceViewportVersion, undefined);
-    assert.equal(renderer('rust-init-script', platform).window.aichatDesktop.capabilities.browserSurfaceScaleVersion, undefined);
+function bridgeFixture(implementation, platform, subframe = false) {
+  if (implementation === 'injected') {
+    const main = renderer('rust-init-script', platform, subframe);
+    return { ...main, emit: detail => main.fire(main.window, '__aichat_desktop_event__', { detail }) };
   }
-});
+  const calls = [], listeners = new Map();
+  const window = {
+    location: new URL('https://keepwork.com/chat'),
+    __AICHAT_DESKTOP_BOOTSTRAP__: { platform },
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    postMessage() {},
+  };
+  window.top = subframe ? {} : window;
+  const exports = {};
+  const source = ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '../src/bridge.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  vm.runInNewContext(source, {
+    exports, window, URL,
+    require: name => name.endsWith('/core')
+      ? { invoke: (command, args = {}) => { calls.push(JSON.parse(JSON.stringify({ command, args }))); return Promise.resolve(true); } }
+      : { listen: () => Promise.resolve(() => {}) },
+  });
+  exports.installAIChatDesktopBridge();
+  return { window, calls, emit: detail => listeners.get('__aichat_desktop_event__')?.({ detail }) };
+}
+
+for (const implementation of ['injected', 'typescript']) {
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    test(`${implementation} browser surface capabilities and lifecycle (${platform})`, async () => {
+      const main = bridgeFixture(implementation, platform);
+      const bridge = main.window.aichatDesktop;
+      assert.equal(bridge.version, 1);
+      assert.ok(Object.isFrozen(bridge));
+      assert.ok(Object.isFrozen(bridge.capabilities));
+      assert.equal(bridge.capabilities.browserSurfaceVersion, platform === 'linux' ? undefined : 1);
+      assert.equal(bridge.capabilities.browserSurfaceViewportVersion, platform === 'darwin' ? 1 : undefined);
+      assert.equal(bridge.capabilities.browserSurfaceScaleVersion, platform === 'darwin' ? 1 : undefined);
+
+      const events = [];
+      const unsubscribe = bridge.onBrowserSurface(value => events.push(value));
+      const payload = { id: 'owned-surface', event: 'loaded', url: 'https://example.com/', title: 'Browser fixture', canGoBack: true };
+      main.emit({ event: 'browser-surface', payload });
+      main.emit({ event: 'unrelated-event', payload });
+      assert.deepEqual(events, [payload]);
+      unsubscribe();
+      main.emit({ event: 'browser-surface', payload });
+      assert.equal(events.length, 1);
+
+      for (const op of ['open', 'navigate', 'bounds', 'back', 'forward', 'reload', 'hide', 'close']) {
+        const args = { id: 'owned-surface', ...(op === 'open' || op === 'navigate' ? { url: 'https://example.com/' } : {}),
+          ...(op === 'open' || op === 'bounds' ? { bounds: { x: 10, y: 80, width: 800, height: 500 } } : {}) };
+        await bridge.browserSurface(op, args);
+        assert.deepEqual(main.calls.at(-1), { command: 'desktop_browser_surface', args: { op, args } });
+      }
+      // Browser support remains optional for old pages and unrelated Bridge v1 calls.
+      await bridge.roots();
+      assert.equal(main.calls.at(-1).command, 'desktop_roots');
+    });
+
+    test(`${implementation} subframes receive no desktop browser bridge (${platform})`, () => {
+      assert.equal(bridgeFixture(implementation, platform, true).window.aichatDesktop, undefined);
+    });
+  }
+}
 
 test('macOS native browser renders frame-protected sites without granting the desktop bridge', { skip: process.platform !== 'darwin', timeout: 90000 }, async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-browser-surface-'));

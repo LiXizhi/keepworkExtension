@@ -1,5 +1,28 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-13：Windows 原生浏览器 v1（0.2.117，Windows 实机待验收）
+
+本轮桌面版本 `0.2.117` 已同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 与 `src-tauri/tauri.conf.json`，补齐正常 Windows Tauri / WebView2 路径的基础 `browserSurfaceVersion: 1`。跨平台完整检查、网页宿主契约及隔离 Windows API 类型检查的实际结果如下；尚无 Windows 实机验证，不宣称其原生绘制、输入或安装包已验收，也未发布网页或桌面安装包。
+
+本次只读排查确认两个独立问题：桌面此前仅在 macOS 声明并实现原生浏览器，其他平台直接返回不支持；当时线上 `/chat` 指向 AIChat release `b05d609fb478`，实际菜单脚本仅有文件、工具、终端。本地 AIChat 源码已包含不按操作系统隐藏的「打开浏览器」入口。桌面能力修复与网页入口发布需分别验收：本轮桌面修改不会替换线上网页菜单，网页也不要求与 MCP 同步发布。
+
+实现与兼容边界：
+
+- Windows 只声明基础 surface-v1，沿用 `open` / `navigate` / `back` / `forward` / `reload` / `bounds` / `hide` / `close` 及 `loading` / `loaded` / `title` / `error` 事件合同。自适应视图不声明可选 viewport-v1 或 scale-v1；直接请求 `viewport` 或缩放语义必须明确失败，网页现有能力检测继续禁用固定尺寸预设。macOS 的完整视口与缩放合同保持原样，Linux 与 CEF 兼容宿主不宣称支持。
+- Windows 平台实现在 `src-tauri/src/browser_surface_windows.rs`，通过现有 WebView2 environment 创建独立的原生 controller，每个视图采用随机 profile 名并强制 InPrivate 模式。外站不注册为 Tauri WebView，不注入 AIChat 桌面初始化脚本、Bridge 或 IPC，不共享主页面 cookies / localStorage；关闭 host objects / web message，拒绝原生权限请求和下载。旧 WebView2 缺少私密 profile 支持时返回浏览器功能错误，不回退到共享主页面 profile。主窗口外链与登录弹窗继续沿用原策略。
+- 命令继续验证可信主窗口发送者、受控实例 ID、URL、数量及边界；外站导航仅允许既有 HTTP(S) / 空白页策略，拒绝带用户名或密码的 URL。事件只回给所属主文档与实例，URL 敏感参数脱敏、移除片段，回传字段保持长度上限。
+- 工具切页、遮挡和隐藏时收起原生视图，恢复显示不重放导航；关闭工具或主文档重新加载时销毁旧视图。异步创建和迟到事件不能复活已关闭或失效的主文档实例。
+- 新网页与新宿主使用原生视图；旧网页与新宿主继续按既有功能运行；新网页与缺少能力的旧宿主继续使用 iframe，并保留外站嵌入结果未知的提示。缺少或未知可选字段不影响普通聊天、登录、文件和终端。
+
+实际验证：
+
+- `pnpm --prefix apps/aichat-rust check` 在允许测试监听 loopback 的授权环境完整通过：TypeScript、前端构建通过；Rust **263 通过 / 0 失败 / 3 忽略**，Node **482 通过 / 0 失败 / 8 平台或环境跳过**，其中 Windows 原生夹具在当前 macOS 环境跳过。macOS 原生浏览器实际夹具执行通过，不能据此推断 Windows 绘制或输入通过。
+- `node --test /Users/chenliao/CODE/apps/official/apps/tools/AIChat/tests/unit/browser_surface_host.test.mjs`：网页宿主契约 **11/11 通过**。
+- Windows x64 / ARM64 隔离 crate 直接引用生产 `security`、浏览器策略和 Windows 实现模块及新增原生 smoke 源码，`cargo check --offline --target <target>` 通过；这是生产模块和 smoke 的 API 类型检查，不是完整 Windows 应用构建、链接或运行。完整应用 Windows 交叉检查在 `ring` 的 C 编译阶段被本机缺少 Windows SDK `assert.h` 阻断，未报告为通过。
+- 首次受限沙箱内的 `pnpm ... check` 记录 **197 通过 / 66 失败**，出现 loopback `EPERM` 等环境限制；允许临时本地测试服务后完整重跑得到上述通过结果。保留首次失败事实，不将其计入最终通过结果。
+
+仍待在 Windows 实机验证 XFO DENY / CSP frame-ancestors none 页面绘制、前进后退刷新、原生点击与键盘输入、缩放 / DPI 与边界、遮挡隐藏恢复、下载和外部协议阻止、权限与网站数据隔离，以及最终 Windows 安装包。跨平台契约、macOS 原生夹具和隔离类型检查不能代替这些原生交互验收。线上浏览器入口仍需独立网页发布验收；本轮未发布网页或桌面安装包。
+
 ## 2026-11-13：目录授权事务与原生会话终态保存恢复（本轮验收范围）
 
 本轮目标为桌面 `0.2.103` / Rust MCP `0.2.52`。产品、程序员与测试 Agent 分别确认合同、执行最小修复并使用隔离故障注入验证；本段记录本轮范围，不预填最终完整检查或冒烟通过数。保留下方已有记录及未提交的历史验证文字，不改写旧失败。

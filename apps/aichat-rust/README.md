@@ -16,8 +16,10 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - Web 下拉菜单由客户端自身在 Closed Shadow DOM 内统一绘制，使用 Rust `menu_payload` 提供的菜单数据，不依赖远端页面绘制；采用紧凑的菜单布局，支持展开后横向悬停切换、键盘导航、Esc 与点击外部关闭。标题栏与菜单同步页面深浅色和皮肤 CSS 变量，地址与刷新按钮保留在顶部原位置。
   - 标题栏、地址胶囊和菜单跟随页面实际配色，兼容 AIChat 默认深色、主题切换及稍后加载的皮肤样式；本地连接页与聊天页共用主题同步逻辑，解析页面中的 CSS 变量和混合颜色后应用到标题栏。亮暗模式按客户端配置档分别记忆在 `desktop-theme.json`，仅供本地启动与恢复页使用；此记忆独立于各网页 origin 的主题存储，不修改或覆盖网页偏好。聊天页加载后以其实测主题为准，本地启动与恢复页只读取记忆。
   - 注入只读冻结的 `window.aichatDesktop`（Bridge v1）契约，保留现有 Web 端 `desktop.js`、`keepwork_fs.js`、`desktop_menu.js` 的共享合同；新增能力单独协商，缺少可选能力不会要求网页、桌面或 MCP 同步升级。
-  - macOS 集成网页浏览器通过可选 `browserSurfaceVersion: 1` 在工具画布内显示独立的原生 WKWebView，支持 HTTP(S)、前进/后退和刷新。外站使用独立非持久网站数据，不注入桌面 Bridge、IPC 或 AIChat 凭据；切页、遮挡及关闭时隐藏或销毁视图。工作区 HTML 保留原有 iframe 预览调试。旧网页、旧桌面和其他平台沿用 iframe；新版网页明确提示无法确认外站嵌入结果并提供外部打开入口，不把 iframe 错误文档误报为加载成功。主窗口外链和登录弹窗策略不变。
-  - `browserSurfaceViewportVersion: 1` 保留固定 CSS 视口，`browserSurfaceScaleVersion: 1` 使完整视口等比缩小到可用画布。1280×800 页面在较小面板中四边完整可见，内部布局尺寸不变；调整窗口或 Console 不重载网页。原生坐标变换同步绘制及点击位置，不以改网页缩放或伪造页面属性代替。仅支持旧 viewport-v1 的宿主明确按原尺寸滚动，缺少该能力时保持自适应并禁用固定预设。此选项不模拟平板 UA、触屏或物理屏幕；网站自身超出所选视口的内容仍由网页滚动。
+  - macOS / Windows 正常 Tauri 路径通过可选 `browserSurfaceVersion: 1` 在工具画布内显示独立的原生网页视图（WKWebView / WebView2），支持 HTTP(S)、前进/后退和刷新。外站使用独立的临时网站数据，不注入桌面 Bridge、IPC 或 AIChat 凭据；切页、遮挡及关闭时隐藏或销毁视图。工作区 HTML 保留原有 iframe 预览调试。旧网页、没有此能力的桌面及 CEF 兼容宿主沿用 iframe；新版网页明确提示无法确认外站嵌入结果并提供外部打开入口，不把 iframe 错误文档误报为加载成功。主窗口外链和登录弹窗策略不变。Windows 原生绘制和交互尚待实机验收，范围见 [VALIDATION.md](VALIDATION.md)。
+  - Windows 本轮仅声明基础 `browserSurfaceVersion: 1`，采用自适应画布尺寸；不声明 `browserSurfaceViewportVersion` 或 `browserSurfaceScaleVersion`。网页根据缺少的能力禁用固定视口预设，直接要求 `viewport` / 缩放语义的请求明确失败，不静默忽略。每个原生视图使用独立随机 profile 和 WebView2 InPrivate 模式，关闭 host objects / web message，拒绝原生权限请求与下载；旧 WebView2 不支持私密 profile 时返回该浏览器功能的错误，不回退到共享主页面 profile。CEF 兼容宿主不因此获得桌面 Bridge 或原生浏览器能力。
+  - macOS 的 `browserSurfaceViewportVersion: 1` 保留固定 CSS 视口，`browserSurfaceScaleVersion: 1` 使完整视口等比缩小到可用画布。1280×800 页面在较小面板中四边完整可见，内部布局尺寸不变；调整窗口或 Console 不重载网页。原生坐标变换同步绘制及点击位置，不以改网页缩放或伪造页面属性代替。仅支持旧 viewport-v1 的宿主明确按原尺寸滚动，缺少该能力时保持自适应并禁用固定预设。此选项不模拟平板 UA、触屏或物理屏幕；网站自身超出所选视口的内容仍由网页滚动。
+  - 会话「+ → 打开浏览器」入口属于独立发布的 AIChat 网页；其源码中的入口不按操作系统隐藏，也不依赖原生浏览器能力。有入口的网页配对旧桌面可继续使用 iframe；只安装新桌面不会把入口添加到仍运行旧菜单代码的线上网页。本轮尚未发布 AIChat 网页或桌面安装包。
 - **菜单协议 `aichat.desktop-menu.v1` 与命令路由（对齐 `apps/aichat-desktop`）**：
   - 菜单载荷同时提供桌面版形状 `menu: { id, label, items }` 与冗余兼容字段 `menuId` / `items` / `anchor` / `x` / `y`，菜单项标签与 `CmdOrCtrl` 加速键、`shortcut`（macOS `⌘ ⇧ ⌥`）与桌面版逐项一致。
   - **页面命令**（`new-chat`、`toggle-sidebar`、`toggle-files`、`open-settings`、`experience-simple`、`experience-professional`、`theme-light`、`theme-dark`）只投递给 AIChat 页面；**主机命令**（`open-folder`、`reload`、`check-updates`、`toggle-login`、`quit`、编辑/缩放/全屏/开发者工具、`mcp-status`/`mcp-dashboard`/`mcp-restart`、`open-browser`、`local-source`、`published-site` 等）由桌面进程原生执行，未知 id 一律拒绝。
@@ -88,7 +90,7 @@ ATVV 只在按住语音键时传输，松手后才识别，不提供会议常开
 | `app/sender.rs` | 主窗口、宠物和更新窗口的 IPC 发送者验证 |
 | `app/events.rs` | 主页面事件分发 |
 | `app/commands.rs` | 文件、终端、菜单、标题栏与主题 IPC |
-| `app/browser_surface.rs` / `browser_surface_macos.m` | 原生网页视图的发送者、URL、边界校验及隔离 WebKit 生命周期 |
+| `app/browser_surface.rs` / `browser_surface_macos.m` / `browser_surface_windows.rs` | 原生网页视图的发送者、URL、边界校验及隔离 WKWebView / WebView2 生命周期 |
 | `app/main_window.rs` | 主文档生命周期、连接恢复、本地源码切换与缩放 |
 | `app/native_startup.rs` | AppKit / Win32 / GTK 主窗口内原生加载层、失败重试与原位移除 |
 | `app/host_menu.rs` | 原生命令执行、系统菜单、托盘与退出流程 |
