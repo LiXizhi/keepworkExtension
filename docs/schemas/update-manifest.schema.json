@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Keepwork independent update manifests",
+  "description": "Publication contract. Existing desktop ZIP fields and unknown additive fields are preserved. A desktop installer has an independent version. builtAt is omitted when unknown; publishedAt is the first actual publication time.",
+  "oneOf": [{ "$ref": "#/$defs/desktop" }, { "$ref": "#/$defs/rust" }],
+  "$defs": {
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$" },
+    "package": {
+      "type": "object",
+      "required": ["version", "fileName", "url", "size", "sha256"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "fileName": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://[^/@?#]+/[^?#]+$" },
+        "size": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "publishedAt": { "$ref": "#/$defs/timestamp" },
+        "builtAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "installer": {
+      "allOf": [{ "$ref": "#/$defs/package" }],
+      "type": "object",
+      "required": ["format", "publishedAt"],
+      "properties": { "format": { "enum": ["exe", "dmg"] } }
+    },
+    "desktop": {
+      "allOf": [{ "$ref": "#/$defs/package" }],
+      "type": "object",
+      "required": ["schemaVersion", "product", "platform", "arch", "format"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "product": { "const": "aichat-desktop" },
+        "platform": { "enum": ["macos", "windows"] },
+        "arch": { "enum": ["arm64", "x64"] },
+        "format": { "enum": ["zip", "dmg", "exe"] },
+        "installer": { "$ref": "#/$defs/installer" }
+      },
+      "if": { "properties": { "format": { "const": "zip" } } },
+      "then": { "required": ["installer"] },
+      "else": { "required": ["publishedAt"] }
+    },
+    "rust": {
+      "allOf": [{ "$ref": "#/$defs/package" }],
+      "type": "object",
+      "required": ["schemaVersion", "product", "engine", "platform", "arch", "commit", "sourceHash"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "product": { "const": "keepwork-mcp-runtime" },
+        "engine": { "const": "rust" },
+        "platform": { "enum": ["macos", "windows", "linux"] },
+        "arch": { "enum": ["arm64", "x64"] },
+        "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "sourceHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

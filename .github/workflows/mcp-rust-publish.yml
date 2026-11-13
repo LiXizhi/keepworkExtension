@@ -1,0 +1,106 @@
+name: Review or publish an accepted Rust MCP runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Run containing the final archive and portable release evidence
+        type: string
+        required: true
+      artifact_name:
+        description: Artifact name containing the package and evidence directory
+        type: string
+        required: true
+      target:
+        type: choice
+        required: true
+        options: [macos-arm64, macos-x64, windows-x64, windows-arm64, linux-x64, linux-arm64]
+      version:
+        description: Independent MCP product version (X.Y.Z)
+        type: string
+        required: true
+      commit:
+        description: Full commit embedded in the final runtime binary
+        type: string
+        required: true
+      publish:
+        description: Promote the stable CDN feed after release approval (default is review only)
+        type: boolean
+        default: false
+      package_path:
+        description: Package directory inside the artifact
+        type: string
+        default: package
+      report_path:
+        description: Complete portable acceptance report inside the artifact
+        type: string
+        default: report.json
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mcp-rust-stable-feed-publish
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          name: ${{ inputs.artifact_name }}
+          path: accepted-runtime
+      - name: Validate the final archive without uploading
+        env:
+          PACKAGE_PATH: ${{ inputs.package_path }}
+          TARGET: ${{ inputs.target }}
+          VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: >-
+          node apps/mcp-rust/scripts/publish-runtime.cjs
+          --release-dir "accepted-runtime/$PACKAGE_PATH" --target "$TARGET"
+          --version "$VERSION" --commit "$RELEASE_COMMIT" --dry-run
+
+  publish:
+    if: inputs.publish
+    needs: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: rust-runtime-stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install release evidence verifier dependencies
+        run: npm ci --ignore-scripts
+      - name: Check manifest and publication safety contracts
+        run: node --test scripts/update-manifest.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/publish-runtime.test.cjs
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          name: ${{ inputs.artifact_name }}
+          path: accepted-runtime
+      - name: Verify complete acceptance, upload immutable archive, then promote the independent feed
+        env:
+          PACKAGE_PATH: ${{ inputs.package_path }}
+          REPORT_PATH: ${{ inputs.report_path }}
+          TARGET: ${{ inputs.target }}
+          VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
+          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+        run: >-
+          node apps/mcp-rust/scripts/publish-runtime.cjs
+          --release-dir "accepted-runtime/$PACKAGE_PATH" --target "$TARGET"
+          --version "$VERSION" --commit "$RELEASE_COMMIT"
+          --report "accepted-runtime/$REPORT_PATH" --publish true

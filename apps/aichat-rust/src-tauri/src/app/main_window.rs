@@ -58,27 +58,24 @@ pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
             )
         };
         let main = handle.get_webview_window("main");
-        let startup = handle.get_window("startup");
         match presentation {
             Presentation::Hidden => {
+                // Normal initialization stays off screen. Preserve the user's
+                // foreground intent separately so readiness may reveal it once.
                 if let Some(window) = main {
-                    let _ = window.hide();
-                }
-                if let Some(window) = startup {
                     let _ = window.hide();
                 }
             }
             Presentation::Startup => {
-                if let Some(window) = main {
-                    let _ = window.hide();
-                }
-                if let Some(window) = startup.as_ref() {
+                // Only a failed attempt exposes recovery controls, in the same
+                // main window. Retrying returns to hidden preparation.
+                if let Some(window) = main.as_ref() {
                     let _ = window.set_theme(Some(core.theme.current().native()));
                 }
                 if let Err(error) = native_startup::update(&handle, failed) {
                     eprintln!("[desktop] Cannot update native startup: {error}");
                 }
-                if let Some(window) = startup {
+                if let Some(window) = main {
                     let was_visible = window.is_visible().unwrap_or(false);
                     let _ = window.show();
                     if focus || !was_visible {
@@ -88,16 +85,21 @@ pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
                 }
             }
             Presentation::Main => {
-                // Show the ready document before dismissing the native surface.
                 if let Some(window) = main {
                     let was_visible = window.is_visible().unwrap_or(false);
+                    // Remove loading UI before revealing the fully prepared
+                    // document, including a cold launch from a hidden window.
+                    if let Err(error) = native_startup::remove(&handle) {
+                        eprintln!("[desktop] Cannot remove native startup: {error}");
+                        return;
+                    }
                     if window.show().is_ok() {
                         if focus || !was_visible {
                             let _ = window.unminimize();
                             let _ = window.set_focus();
-                        }
-                        if let Some(window) = startup {
-                            let _ = window.hide();
+                            if let Some(webview) = handle.get_webview("main") {
+                                let _ = webview.set_focus();
+                            }
                         }
                     }
                 }

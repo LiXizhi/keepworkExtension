@@ -108,6 +108,141 @@ fn feeds_preserve_node_v1_and_require_explicit_rust_v2() {
 }
 
 #[test]
+fn cached_release_metadata_requires_the_exact_update_source_without_migrating_runtimes() {
+    for mismatch in [
+        "legacy", "product", "engine", "platform", "arch", "feed", "same",
+    ] {
+        let root = root();
+        let config = RuntimeConfig {
+            id: "mcp".into(),
+            products: vec![RUST_MCP_PRODUCT.into()],
+            port: 0,
+            health_path: "/health".into(),
+            updates_enabled: true,
+            bundled_dir: root.join("bundle"),
+            store_dir: root.join("store"),
+            feed_url: default_mcp_feed_url(true),
+        };
+        let mut source = config.update_source();
+        match mismatch {
+            "product" => source.product = "keepwork-mcp-node-runtime".into(),
+            "engine" => source.engine = "node".into(),
+            "platform" => source.platform = "another-platform".into(),
+            "arch" => source.arch = "another-arch".into(),
+            "feed" => source.feed_url.push_str("?another-stream=1"),
+            _ => {}
+        }
+        let record = ActiveRuntimeRecord {
+            current: Some("current".into()),
+            previous: Some("previous".into()),
+            pending: Some("pending".into()),
+            failed: Some("failed".into()),
+            notified: Some("pending".into()),
+            latest_version: Some("0.5.0".into()),
+            latest_built_at: Some("2026-11-13T08:00:00Z".into()),
+            latest_source: (mismatch != "legacy").then_some(source),
+            checked_at: Some("123".into()),
+        };
+        for (directory, version) in [
+            ("current", "0.3.0"),
+            ("previous", "0.2.0"),
+            ("pending", "0.4.0"),
+        ] {
+            write_bundle(
+                &config.store_dir.join(directory),
+                &fixture_manifest(version),
+            );
+        }
+        let active = config.store_dir.join("active.json");
+        atomic_json_write(&active, &record).unwrap();
+        let saved_bytes = fs::read(&active).unwrap();
+        let supervisor = RuntimeSupervisor::new(config);
+        let snapshot = supervisor.snapshot();
+        if mismatch == "same" {
+            assert_eq!(snapshot.latest_version, "0.5.0");
+            assert_eq!(snapshot.latest_built_at, "2026-11-13T08:00:00Z");
+        } else {
+            assert!(snapshot.latest_version.is_empty(), "{mismatch}");
+            assert!(snapshot.latest_built_at.is_empty(), "{mismatch}");
+        }
+        assert_eq!(snapshot.pending_version, "0.4.0", "{mismatch}");
+        assert_eq!(snapshot.update_state, "staged", "{mismatch}");
+        assert_eq!(fs::read(active).unwrap(), saved_bytes, "{mismatch}");
+        assert_eq!(
+            RuntimeSupervisor::load_active_record(&root.join("store")),
+            record,
+            "source metadata migration must not rewrite activation identities"
+        );
+        for directory in ["current", "previous", "pending"] {
+            assert!(root
+                .join("store")
+                .join(directory)
+                .join("runtime.json")
+                .is_file());
+        }
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn missing_feed_preserves_only_the_same_source_release_cache() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let root = root();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let feed_url = format!(
+        "http://127.0.0.1:{}/feed",
+        listener.local_addr().unwrap().port()
+    );
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 2048];
+        let length = socket.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /feed "));
+        socket
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let config = RuntimeConfig {
+        id: "mcp".into(),
+        products: vec![RUST_MCP_PRODUCT.into()],
+        port: 0,
+        health_path: "/health".into(),
+        updates_enabled: true,
+        bundled_dir: root.join("bundle"),
+        store_dir: root.join("store"),
+        feed_url,
+    };
+    let record = ActiveRuntimeRecord {
+        latest_version: Some("0.3.0".into()),
+        latest_built_at: Some("2026-11-13T08:00:00Z".into()),
+        latest_source: Some(config.update_source()),
+        ..Default::default()
+    };
+    let active = config.store_dir.join("active.json");
+    atomic_json_write(&active, &record).unwrap();
+    let saved_bytes = fs::read(&active).unwrap();
+    let supervisor = RuntimeSupervisor::new(config);
+    assert_eq!(supervisor.snapshot().latest_version, "0.3.0");
+    let (failed, newly_staged) = supervisor.check_for_update().await;
+    server.await.unwrap();
+    assert!(!newly_staged);
+    assert_eq!(failed.update_state, "error");
+    assert!(failed.update_error.contains("404"));
+    assert_eq!(failed.latest_version, "0.3.0");
+    assert_eq!(failed.latest_built_at, "2026-11-13T08:00:00Z");
+    let card = crate::updates::UpdateManager::build_mcp_component(&failed);
+    assert!(card.stale);
+    assert_eq!(card.state, "error");
+    assert!(!card.can_apply);
+    assert_eq!(fs::read(active).unwrap(), saved_bytes);
+    assert!(supervisor.child.lock().unwrap().is_none());
+    drop(supervisor);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn rust_archive_checks_actual_binary_and_manifest_target() {
     let root = root();
     let feed = fixture_manifest("0.3.0");
@@ -382,6 +517,10 @@ async fn native_feed_stages_without_activation_and_rejects_corrupt_digest() {
     assert_eq!(status.update_state, "staged");
     let record = RuntimeSupervisor::load_active_record(&root.join("store"));
     assert_eq!(record.pending.as_deref(), Some(feed.sha256.as_str()));
+    assert_eq!(
+        record.latest_source,
+        Some(supervisor.config.update_source())
+    );
     assert!(record.current.is_none());
     assert!(
         supervisor.child.lock().unwrap().is_none(),

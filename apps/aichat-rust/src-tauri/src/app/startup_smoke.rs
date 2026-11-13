@@ -31,12 +31,21 @@ use std::{
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>Isolated startup fixture</title>
-<div id="app"></div><script>
+<div id="startup-progress" role="progressbar">Loading fixture packages</div>
+<div id="app"><div class="loading" aria-busy="true">Loading workspace…</div></div><script>
 const poll = setInterval(async () => {
   try {
     const response = await fetch('/gate', { cache: 'no-store' });
     if (!(await response.json()).ready) return;
-    document.getElementById('app').textContent = 'Isolated workspace is ready';
+    document.getElementById('app').innerHTML = '<main class="app-shell"><button id="workspace-action">Isolated workspace is ready</button></main>';
+    document.documentElement.dataset.workbenchReady = 'true';
+    document.getElementById('startup-progress').remove();
+    // The content/marker are complete before this stylesheet is requested. The
+    // desktop must still wait for the critical first-screen style to finish.
+    const stylesheet = document.createElement('link');
+    stylesheet.rel = 'stylesheet';
+    stylesheet.href = '/screen.css';
+    document.head.appendChild(stylesheet);
     clearInterval(poll);
   } catch (_) {}
 }, 50);
@@ -61,6 +70,9 @@ connection.status().then(async status => {
 struct FixtureState {
     ready: AtomicBool,
     entries: AtomicUsize,
+    gates: AtomicUsize,
+    styles_started: AtomicUsize,
+    styles_finished: AtomicUsize,
     statuses: AtomicUsize,
     retries: AtomicUsize,
     unexpected: AtomicUsize,
@@ -105,11 +117,23 @@ impl Fixture {
                         (200, "text/html", PAGE.to_string())
                     }
                     "/recovery" => (200, "text/html", SHELL.to_string()),
-                    "/gate" => (
-                        200,
-                        "application/json",
-                        json!({"ready":server.ready.load(Ordering::Relaxed)}).to_string(),
-                    ),
+                    "/gate" => {
+                        server.gates.fetch_add(1, Ordering::Relaxed);
+                        (
+                            200,
+                            "application/json",
+                            json!({"ready":server.ready.load(Ordering::Relaxed)}).to_string(),
+                        )
+                    }
+                    "/screen.css" => {
+                        // The page requests CSS only after its gate response
+                        // and ready marker; delaying this sequential worker
+                        // cannot block a gate needed to complete the page.
+                        server.styles_started.fetch_add(1, Ordering::Relaxed);
+                        thread::sleep(Duration::from_millis(500));
+                        server.styles_finished.fetch_add(1, Ordering::Relaxed);
+                        (200, "text/css", ".app-shell { font: 16px system-ui; padding: 24px; } #workspace-action { min-height: 40px; }".into())
+                    }
                     "/status-confirmed" => {
                         server.statuses.fetch_add(1, Ordering::Relaxed);
                         (200, "text/plain", "ok".into())
@@ -240,23 +264,35 @@ where
 struct ViewState {
     phase: Phase,
     main: bool,
-    startup: bool,
+    overlay: bool,
 }
 
 async fn snapshot(app: &AppHandle) -> Result<ViewState, String> {
     ui(app, |app, core| {
+        // Single-window invariant: a separate startup window must never exist.
+        if app.get_window("startup").is_some() {
+            return Err("A second startup window was created".into());
+        }
+        if app.windows().len() != 1 || app.webview_windows().len() != 1 {
+            return Err("Startup must use exactly one main window and one WebView".into());
+        }
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        let visible = main.is_visible().map_err(|e| e.to_string())?;
+        let native = main.ns_window().map_err(|e| e.to_string())?;
+        if !unsafe { keepwork_startup_smoke_main_intact(native) } {
+            return Err("Startup replaced its main window, content view, or WebView".into());
+        }
+        let overlay = unsafe { keepwork_startup_smoke_overlay_present(native) };
+        if overlay && !unsafe { keepwork_startup_smoke_overlay_covers(native) } {
+            return Err("Startup overlay does not opaquely cover its WebView".into());
+        }
+        if visible && !overlay && !unsafe { keepwork_startup_smoke_document_focused(native) } {
+            return Err("Ready document did not receive keyboard focus after startup".into());
+        }
         Ok(ViewState {
             phase: core.page_connection.lock().unwrap().snapshot("").phase,
-            main: app
-                .get_webview_window("main")
-                .ok_or("Missing main window")?
-                .is_visible()
-                .map_err(|e| e.to_string())?,
-            startup: app
-                .get_window("startup")
-                .ok_or("Missing startup window")?
-                .is_visible()
-                .map_err(|e| e.to_string())?,
+            main: visible,
+            overlay,
         })
     })
     .await
@@ -267,21 +303,28 @@ async fn wait_view(
     label: &str,
     phase: Phase,
     main: bool,
-    startup: bool,
+    overlay: Option<bool>,
     seconds: u64,
 ) -> Result<(), String> {
     let until = Instant::now() + Duration::from_secs(seconds);
     loop {
         let actual = snapshot(app).await?;
-        if actual.phase != Phase::Ready && actual.main {
+        if matches!(actual.phase, Phase::Idle | Phase::Connecting) && actual.main {
             return Err(format!(
-                "Unready document became visible during {label}: {actual:?}"
+                "Loading window became visible during {label}: {actual:?}"
             ));
         }
-        if actual.phase == phase && actual.main == main && actual.startup == startup {
+        if actual.phase == Phase::Unavailable && actual.main && !actual.overlay {
+            return Err(format!(
+                "Unready document exposed without the overlay during {label}: {actual:?}"
+            ));
+        }
+        if actual.phase == phase && actual.main == main
+            && overlay.map_or(true, |expected| actual.overlay == expected)
+        {
             println!(
                 "{}",
-                json!({"case":label,"phase":format!("{phase:?}"),"mainVisible":actual.main,"nativeVisible":actual.startup})
+                json!({"case":label,"phase":format!("{phase:?}"),"mainVisible":actual.main,"overlayPresent":actual.overlay})
             );
             return Ok(());
         }
@@ -290,6 +333,45 @@ async fn wait_view(
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
+}
+
+async fn loading_stays_hidden(
+    app: &AppHandle,
+    fixture: &FixtureState,
+    label: &str,
+) -> Result<(), String> {
+    let gates = fixture.gates.load(Ordering::Relaxed);
+    wait_count(&fixture.gates, gates + 2, "loading document scripts").await?;
+    let until = Instant::now() + Duration::from_millis(300);
+    loop {
+        let actual = snapshot(app).await?;
+        if actual.phase != Phase::Connecting || actual.main {
+            return Err(format!(
+                "Initial loading content was treated as a complete first screen during {label}: {actual:?}"
+            ));
+        }
+        if Instant::now() >= until {
+            println!("{}", json!({"case":label,"phase":"Connecting","mainVisible":false,"loadingObserved":true}));
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
+
+async fn recovery_failure(app: &AppHandle) -> Result<(), String> {
+    ui(app, |app, core| {
+        let target = main_window::current_entry_url(core);
+        let url = target.parse().map_err(|e: url::ParseError| e.to_string())?;
+        {
+            let mut connection = core.page_connection.lock().unwrap();
+            let generation = connection.attempt(&url).ok_or("Missing pending recovery attempt")?;
+            if !connection.fail(generation, "Controlled native recovery fixture") {
+                return Err("Cannot enter controlled recovery failure".into());
+            }
+        }
+        main_window::sync_window_presentation(app, false);
+        Ok(())
+    }).await
 }
 
 async fn wait_count(counter: &AtomicUsize, expected: usize, label: &str) -> Result<(), String> {
@@ -306,12 +388,18 @@ async fn wait_count(counter: &AtomicUsize, expected: usize, label: &str) -> Resu
 extern "C" {
     fn keepwork_startup_smoke_passive_application() -> bool;
     fn keepwork_startup_smoke_restore_application();
+    fn keepwork_startup_smoke_capture_main(window: *mut std::ffi::c_void) -> bool;
+    fn keepwork_startup_smoke_main_intact(window: *mut std::ffi::c_void) -> bool;
+    fn keepwork_startup_smoke_overlay_present(window: *mut std::ffi::c_void) -> bool;
+    fn keepwork_startup_smoke_overlay_covers(window: *mut std::ffi::c_void) -> bool;
+    fn keepwork_startup_smoke_document_focused(window: *mut std::ffi::c_void) -> bool;
     fn keepwork_startup_smoke_action(window: *mut std::ffi::c_void, action: u32) -> bool;
 }
 
 async fn native_action(app: &AppHandle, action: u32) -> Result<(), String> {
     ui(app, move |app, _| {
-        let window = app.get_window("startup").ok_or("Missing native startup")?;
+        // The overlay lives inside the main window; actions target that window.
+        let window = app.get_window("main").ok_or("Missing main window")?;
         let native = window.ns_window().map_err(|e| e.to_string())?;
         if unsafe { keepwork_startup_smoke_action(native, action) } {
             Ok(())
@@ -351,7 +439,7 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
         "idle-wake-before-begin",
         Phase::Connecting,
         false,
-        true,
+        None,
         8,
     )
     .await?;
@@ -374,12 +462,26 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
         "foreground-pending",
         Phase::Connecting,
         false,
-        true,
+        None,
         8,
     )
     .await?;
+    loading_stays_hidden(&app, &fixture, "foreground-loading-shell-hidden").await?;
+    let styles = fixture.styles_started.load(Ordering::Relaxed);
     fixture.ready.store(true, Ordering::Relaxed);
-    wait_view(&app, "foreground-ready", Phase::Ready, true, false, 8).await?;
+    wait_count(&fixture.styles_started, styles + 1, "critical first-screen stylesheet request").await?;
+    ui(&app, move |app, _| {
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        if main.is_visible().map_err(|e| e.to_string())? {
+            return Err("The first-screen marker exposed an unstyled workspace".into());
+        }
+        Ok(())
+    }).await?;
+    if fixture.styles_finished.load(Ordering::Relaxed) != styles {
+        return Err("The delayed stylesheet finished before pending-style visibility was observed".into());
+    }
+    wait_view(&app, "first-screen-marker-awaits-css", Phase::Connecting, false, None, 2).await?;
+    wait_view(&app, "foreground-ready", Phase::Ready, true, Some(false), 8).await?;
 
     reload(&app, &fixture, false).await?;
     wait_view(
@@ -387,12 +489,19 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
         "background-pending",
         Phase::Connecting,
         false,
-        false,
+        None,
         8,
     )
     .await?;
+    loading_stays_hidden(&app, &fixture, "background-loading-shell-hidden").await?;
     fixture.ready.store(true, Ordering::Relaxed);
-    wait_view(&app, "background-ready", Phase::Ready, false, false, 8).await?;
+    wait_view(&app, "background-ready", Phase::Ready, false, None, 8).await?;
+    ui(&app, |app, core| {
+        main_window::show_main_window(app, core);
+        Ok(())
+    })
+    .await?;
+    wait_view(&app, "background-ready-wake", Phase::Ready, true, Some(false), 8).await?;
 
     for (action, label) in [(0, "native-close"), (1, "native-escape")] {
         reload(&app, &fixture, true).await?;
@@ -401,7 +510,21 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
             &format!("{label}-pending"),
             Phase::Connecting,
             false,
+            None,
+            8,
+        )
+        .await?;
+        loading_stays_hidden(&app, &fixture, &format!("{label}-loading-shell-hidden")).await?;
+        // Exercise close/Escape on a visible failure surface. These controlled
+        // failures avoid repeating a 20-second wait; the actual production
+        // timeout is separately exercised below.
+        recovery_failure(&app).await?;
+        wait_view(
+            &app,
+            &format!("{label}-recovery-visible"),
+            Phase::Unavailable,
             true,
+            Some(true),
             8,
         )
         .await?;
@@ -409,19 +532,23 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
         wait_view(
             &app,
             &format!("{label}-hidden"),
-            Phase::Connecting,
+            Phase::Unavailable,
             false,
-            false,
+            Some(true),
             8,
         )
         .await?;
+        // A subsequent background reconnect must preserve that explicit close
+        // intent, even when its real document completes successfully later.
+        reload(&app, &fixture, false).await?;
+        loading_stays_hidden(&app, &fixture, &format!("{label}-background-retry-hidden")).await?;
         fixture.ready.store(true, Ordering::Relaxed);
         wait_view(
             &app,
             &format!("{label}-late-ready"),
             Phase::Ready,
             false,
-            false,
+            None,
             8,
         )
         .await?;
@@ -430,13 +557,14 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
     let statuses = fixture.statuses.load(Ordering::Relaxed);
     reload(&app, &fixture, true).await?;
     let started = Instant::now();
-    wait_view(&app, "timeout-pending", Phase::Connecting, false, true, 8).await?;
+    wait_view(&app, "timeout-pending", Phase::Connecting, false, None, 8).await?;
+    loading_stays_hidden(&app, &fixture, "timeout-loading-shell-hidden").await?;
     wait_view(
         &app,
         "real-20-second-failure",
         Phase::Unavailable,
-        false,
         true,
+        Some(true),
         LOAD_TIMEOUT_SECONDS + 6,
     )
     .await?;
@@ -449,9 +577,13 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
         "hidden recovery after timeout",
     )
     .await?;
-    fixture.ready.store(true, Ordering::Relaxed);
+    let entries = fixture.entries.load(Ordering::Relaxed);
     native_action(&app, 2).await?;
-    wait_view(&app, "native-retry-ready", Phase::Ready, true, false, 8).await?;
+    wait_count(&fixture.entries, entries + 1, "native retry navigation").await?;
+    wait_view(&app, "native-retry-pending", Phase::Connecting, false, None, 8).await?;
+    loading_stays_hidden(&app, &fixture, "native-retry-loading-shell-hidden").await?;
+    fixture.ready.store(true, Ordering::Relaxed);
+    wait_view(&app, "native-retry-ready", Phase::Ready, true, Some(false), 8).await?;
     if fixture.unexpected.load(Ordering::Relaxed) != 0 {
         return Err(
             "Unexpected IPC failure, runtime probe, or network path reached the fixture".into(),
@@ -525,45 +657,6 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                 if !unsafe { keepwork_startup_smoke_passive_application() } {
                     return Err("Cannot suppress activation for isolated smoke".into());
                 }
-                let callback_app = handle.clone();
-                let callback_core = setup_core.clone();
-                native_startup::create(&handle, tauri::Theme::Light, move |action| match action {
-                    native_startup::Action::Retry => {
-                        main_window::reload_main_window(&callback_app, &callback_core)
-                    }
-                    native_startup::Action::Hide => {
-                        main_window::hide_main_window(&callback_app, &callback_core)
-                    }
-                })?;
-                let startup = handle.get_window("startup").ok_or("Missing startup")?;
-                startup.set_focusable(false)?;
-                startup.set_ignore_cursor_events(true)?;
-                let close_app = handle.clone();
-                let close_core = setup_core.clone();
-                handle
-                    .get_window("startup")
-                    .ok_or("Missing startup")?
-                    .on_window_event(move |event| {
-                        if let WindowEvent::CloseRequested { api, .. } = event {
-                            api.prevent_close();
-                            main_window::hide_main_window(&close_app, &close_core);
-                        }
-                    });
-                // Wake the idle background instance before reserving its first
-                // attempt. Later setup must preserve this foreground intent.
-                main_window::show_main_window(&handle, &setup_core);
-                {
-                    let mut connection = setup_core.page_connection.lock().unwrap();
-                    if connection.presentation() != Presentation::Startup {
-                        return Err("Idle wake was lost".into());
-                    }
-                    connection
-                        .begin(&main_window::current_entry_url(&setup_core), false)
-                        .ok_or("Cannot reserve attempt")?;
-                    if connection.presentation() != Presentation::Startup {
-                        return Err("Begin overwrote foreground intent".into());
-                    }
-                }
                 let page_core = setup_core.clone();
                 let allowed_shell = shell.clone();
                 let allowed_entry = main_window::current_entry_url(&setup_core);
@@ -592,6 +685,43 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                     .build()?;
                 main.set_focusable(false)?;
                 main.set_ignore_cursor_events(true)?;
+                let native = main.ns_window()?;
+                if !unsafe { keepwork_startup_smoke_capture_main(native) } {
+                    return Err("Cannot capture the fixture's only main window/WebView".into());
+                }
+                let callback_app = handle.clone();
+                let callback_core = setup_core.clone();
+                native_startup::install(&handle, tauri::Theme::Light, move |action| match action {
+                    native_startup::Action::Retry => {
+                        main_window::reload_main_window(&callback_app, &callback_core)
+                    }
+                    native_startup::Action::Hide => {
+                        main_window::hide_main_window(&callback_app, &callback_core)
+                    }
+                })?;
+                let close_app = handle.clone();
+                let close_core = setup_core.clone();
+                main.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        main_window::hide_main_window(&close_app, &close_core);
+                    }
+                });
+                // Wake the idle background instance before reserving its first
+                // attempt. Later setup must preserve this foreground intent.
+                main_window::show_main_window(&handle, &setup_core);
+                {
+                    let mut connection = setup_core.page_connection.lock().unwrap();
+                    if connection.presentation() != Presentation::Hidden {
+                        return Err("Idle wake was lost".into());
+                    }
+                    connection
+                        .begin(&main_window::current_entry_url(&setup_core), false)
+                        .ok_or("Cannot reserve attempt")?;
+                    if connection.presentation() != Presentation::Hidden {
+                        return Err("Begin overwrote foreground intent".into());
+                    }
+                }
                 main_window::sync_window_presentation(&handle, false);
                 let test_app = handle.clone();
                 tauri::async_runtime::spawn(async move {

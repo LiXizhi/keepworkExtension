@@ -67,6 +67,16 @@ pub struct RuntimeUpdateManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeUpdateSource {
+    pub product: String,
+    pub engine: String,
+    pub platform: String,
+    pub arch: String,
+    pub feed_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ActiveRuntimeRecord {
     pub current: Option<String>,
     pub previous: Option<String>,
@@ -75,6 +85,10 @@ pub struct ActiveRuntimeRecord {
     pub notified: Option<String>,
     pub latest_version: Option<String>,
     pub latest_built_at: Option<String>,
+    /// Optional for legacy records. Unknown or other-stream metadata stays on
+    /// disk, but must not be shown as this stream's remote release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_source: Option<RuntimeUpdateSource>,
     pub checked_at: Option<String>,
 }
 

@@ -10,7 +10,7 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 
 - **主聊天窗口与平台标题栏**：
   - 加载 `https://keepwork.com/chat`（或本地 Loopback `AIChat.html` 开发源码 / `deployment.json` 离线包）。
-  - 启动时先显示系统原生窗口，主 WebView 在后台初始化，收到受信任主文档的就绪回执后一次性切换到工作台。原生启动窗口沿用上次聊天页的亮暗模式，无记录时默认亮色；连接失败在原生窗口提供「重试」和「稍后」，保留原有超时与自动重试规则，关闭后不会因迟到的就绪事件重新弹出。
+  - 启动与工作台共用同一个主窗口：初始化时保持隐藏，等可信首屏及关键样式准备好后一次显示，保留窗口位置、尺寸和最大化状态。连接失败在同一窗口提供「重试」和「稍后」，恢复界面沿用上次聊天页的亮暗模式，无记录时默认亮色；重试期间再次隐藏。后台启动保持隐藏，关闭后不会因迟到的就绪事件重新弹出；再次打开复用原有页面。
   - 进入受信任聊天入口后，在 SDK 等网络资源完成前预先应用该网页 origin 的主题：有效 URL `theme` 优先，手动模式读取该 origin 保存的亮暗选择，自动模式按本地时间 07:00 起至 19:00 前使用亮色、其余时段使用暗色。桌面对旧聊天页也提供此兼容处理，无需同步发布网页；预主题只读取网页偏好，后续网页主题与皮肤照常接管。
   - 在受信任顶层主框架内注入 Closed Shadow DOM `#keepwork-desktop-titlebar`：34px 单行 Web 标题栏，包含居中标题、地址胶囊与刷新按钮；Windows / Linux 同行显示校准居中的 K 图标及「文件 / 编辑 / 视图 / 帮助」菜单标题。Windows 使用无系统装饰的窗口，网页为此标题栏预留 34px 空间；macOS 保留系统应用菜单。
   - Web 下拉菜单由客户端自身在 Closed Shadow DOM 内统一绘制，使用 Rust `menu_payload` 提供的菜单数据，不依赖远端页面绘制；采用紧凑的菜单布局，支持展开后横向悬停切换、键盘导航、Esc 与点击外部关闭。标题栏与菜单同步页面深浅色和皮肤 CSS 变量，地址与刷新按钮保留在顶部原位置。
@@ -23,6 +23,7 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - **页面命令**（`new-chat`、`toggle-sidebar`、`toggle-files`、`open-settings`、`experience-simple`、`experience-professional`、`theme-light`、`theme-dark`）只投递给 AIChat 页面；**主机命令**（`open-folder`、`reload`、`check-updates`、`toggle-login`、`quit`、编辑/缩放/全屏/开发者工具、`mcp-status`/`mcp-dashboard`/`mcp-restart`、`open-browser`、`local-source`、`published-site` 等）由桌面进程原生执行，未知 id 一律拒绝。
   - 旧 id（`file:open-folder`、`view:reload`、`view:reset-zoom`、`help:check-updates` …）由 `canonical_host_command` 规范化，客户端 Web 菜单、原生托盘、macOS 系统菜单与历史页面调用方继续可用；页面命令沿用 `aichat.desktop-menu.v1` 投递，主机命令通过白名单校验的 IPC 执行。
 - **自我更新与自动更新（Self-Update / Auto-Update）**：
+  - 版本号、字段语义、七牛 CDN 路径与发布顺序统一见 [CDN 版本与更新清单规范](../../docs/update-manifests.md)。
   - **Keepwork MCP Runtime 更新（`:8089`）**：默认随客户端携带 Rust MCP，使用独立 `https://cdn.keepwork.com/keepwork/mcp-stable-rs/<platform>-<arch>.json` v2 feed；显式 Node 兼容构建沿用 `mcp-stable/<platform>-<arch>.json` v1。两条线路分别校验引擎/产品/目标、大小/SHA-256/40位源码commit及包内身份；Rust额外核对嵌入binary编译身份。下载只暂存，不打断正在运行的服务；用户点击「更新 MCP」可显式激活，下一次宿主启动且需要启动本地服务时，也可采用同引擎、严格新于已验证current/bundled基线的pending，保留原Node启动行为。同版本不同commit的候选只能显式应用，不随普通启动替换。激活前核对实际服务PID/owner，新候选健康和身份确认后才提升current；失败回退已验证可用版本并保留用户数据。缺少运行中peer版本、commit或引擎字段时显示未知，不借本地捆绑版本填充。不通过Node feed覆盖Rust，也不自动重发未知任务。源码与本地清单验证不表示Rust CDN已发布或真实安装升级已验收。
   - **桌面客户端自动更新（Desktop Self-Updater）**：启动后 15 秒及每 6 小时检查 `https://cdn.keepwork.com/keepwork/aichat-desktop/<target>/latest-client.json`（或 `AICHAT_UPDATE_FEED_URL`），与 MCP 独立并行检查。后台下载并校验大小与 SHA-256，持久化 `update-metadata.json`，下载就绪后通知；离线保留上次检查缓存并标记 `stale: true`。用户在独立「检查更新」窗口（`updates.html`）点击「更新桌面应用」并确认后退出并启动新版本安装。
   - **发布与旧客户端兼容**：Rust 发布器在所有版本化安装包通过 CDN 字节校验后，更新 `win32-x64`、`win32-arm64`、`darwin-arm64`、`darwin-x64` 四个清单。已有清单的顶层 legacy ZIP 字段保持原样，追加含独立 `version` / `publishedAt` 的 `installer`；新客户端优先使用该 EXE / DMG，没有旧清单时使用顶层原生安装包。禁止清单版本倒退或同版本替换安装包；已安装 Launcher 继续使用独立签名渠道。**旧 Rust 客户端仅识别顶层下载地址，需先手动安装包含本修复的新版，才能恢复后续自动更新。** 清单发布与实际安装升级须分别验收，源码修改不代表 CDN 已更新。
@@ -88,7 +89,7 @@ ATVV 只在按住语音键时传输，松手后才识别，不提供会议常开
 | `app/commands.rs` | 文件、终端、菜单、标题栏与主题 IPC |
 | `app/browser_surface.rs` / `browser_surface_macos.m` | 原生网页视图的发送者、URL、边界校验及隔离 WebKit 生命周期 |
 | `app/main_window.rs` | 主文档生命周期、连接恢复、本地源码切换与缩放 |
-| `app/native_startup.rs` | AppKit / Win32 / GTK 原生启动窗口、失败重试与就绪切换 |
+| `app/native_startup.rs` | AppKit / Win32 / GTK 主窗口内原生加载层、失败重试与原位移除 |
 | `app/host_menu.rs` | 原生命令执行、系统菜单、托盘与退出流程 |
 | `app/pet_host.rs` | 宠物窗口、原生拖动跟踪、菜单操作与页面命令编排 |
 | `app/pet_audio_host.rs` | 文档绑定的录音 IPC、私有音频投递、采集停止与超时监控 |
@@ -105,13 +106,19 @@ ATVV 只在按住语音键时传输，松手后才识别，不提供会议常开
 
 ### 断网与页面连接恢复
 
-正常的 Tauri / WebView2 路径启动时显示系统原生启动窗口（macOS AppKit、Windows Win32、Linux GTK），主 WebView 使用原有配置档在后台打开已配置的聊天入口。每次尝试最多等待 20 秒；只有受信任主文档满足下述就绪条件后，才一次性切换到工作台，不把本地连接页、系统错误文档或导航空白暴露为启动界面。失败时继续使用原生窗口提示，并提供「重试」和「稍后」。后台启动不显示启动窗口；用户关闭或选择稍后后，迟到的就绪事件不会重新弹出主窗口，再次主动唤起时根据当前状态显示原生启动窗口或已就绪的工作台。
+正常的 Tauri / WebView2 路径从启动到工作台始终使用同一个主窗口。初始化期间主窗口保持隐藏，底层 WebView 使用原有配置档准备已配置的聊天入口。每次页面尝试最多等待 20 秒；只有受信任主文档满足下述就绪条件后，才移除原生覆盖层并一次显示工作台。失败时在同一窗口显示原生恢复操作「重试」和「稍后」，重试期间再次隐藏。后台启动与用户隐藏意图继续优先；迟到的就绪事件不会重新弹窗，尚未完成初始化时主动唤回也不提前展示 loading。
 
-在原生窗口点击「重试」、按 `CmdOrCtrl+R` 或使用菜单「重新加载」，都会重试原入口。隐藏的本地连接页保留恢复调度：失败后依次等待 5、15、30 秒自动重试，最多 3 次；收到 `online` 事件时可提前触发下一次自动重试，并计入同一次数上限。达到上限后保留手动重试，手动重试会重新开始自动重试计数。重复触发不会并行加载，旧尝试的超时或就绪回执不会覆盖新尝试或已成功打开的页面。恢复流程不会自动切换线上与本地源码入口，也不会更换本地服务端口；诊断信息仅使用入口 origin，不显示查询参数或片段。
+在恢复界面点击「重试」、按 `CmdOrCtrl+R` 或使用菜单「重新加载」，都会重试原入口。隐藏的本地连接页保留恢复调度：失败后依次等待 5、15、30 秒自动重试，最多 3 次；收到 `online` 事件时可提前触发下一次自动重试，并计入同一次数上限。达到上限后保留手动重试，手动重试会重新开始自动重试计数。重复触发不会并行加载，旧尝试的超时或就绪回执不会覆盖新尝试或已成功打开的页面。恢复流程不会自动切换线上与本地源码入口，也不会更换本地服务端口；诊断信息仅使用入口 origin，不显示查询参数或片段。
 
 已经正常打开的聊天页不会因断网或恢复联网被桌面端自动刷新；恢复流程不会重发聊天消息或其他操作。云端模型、登录、同步和远端资源仍需要网络。本机已有的 MCP、文件及终端能力独立于外网连接，但页面打不开时，其网页操作入口也可能不可用；本地网页入口需要事先准备和配置。
 
-就绪检测先等待主文档 `DOMContentLoaded`。对已知 AIChat 入口（`https://keepwork.com/chat` 或本地 Loopback 的 `AIChat.html`），如果此时存在空的 `#app`，还会在同一 20 秒期限内等待其出现首个子元素或非空文本，覆盖 HTML 已缓存但 SDK 等脚本未加载导致空白的情况。其他自定义入口或没有 `#app` 的旧页面沿用主文档就绪规则。检测不等待登录、MCP、模型服务或全部子资源，也不要求网页升级 Bridge v1；出现首屏内容后便停止检测。这个基础检测不验证首屏内每个功能是否可用，也不代表支持完整离线聊天。
+就绪检测先等待主文档 `DOMContentLoaded`。对已知 AIChat 入口（`https://keepwork.com/chat` 或本地 Loopback 的 `AIChat.html`），优先读取网页已有的 `data-workbench-ready` 完成标志，并等待 `#startup-progress` 移除，不把初始外壳或 loading 占位当作完成。旧网页缺少标志时保留有效内容回退，忙碌根节点、纯加载控件和空聊天外壳继续等待；其他自定义入口或没有 `#app` 的旧页面保留主文档回退。显示前还等待当前适用的样式表及首屏字体完成，并计算布局，不依赖隐藏 WebView 可能暂停的动画帧。关键样式加载失败沿用 20 秒超时恢复。登录、回放确认等需要用户操作的可见界面可直接显示，不等用户在隐藏窗口完成交互。检测不等待图片、工具子框架、MCP 或全部后台请求，也不要求网页升级 Bridge v1；首屏就绪后即停止监听，不自动重放操作。
+
+### 缓存与重复打开
+
+托盘、宠物和单实例唤回直接显示已有页面，不重新导航或初始化。正常主 WebView 使用系统的持久网站数据，不主动清空缓存；远端资源是否能复用取决于各自响应头。完全退出后重新启动仍需执行网页初始化，不能把资源缓存等同于保存运行中的 JavaScript 状态。
+
+本地源码与离线部署包的成功静态响应使用 `Cache-Control: private, no-cache` 和内容 SHA-256 ETag：每次验证当前文件，未改变时返回无正文的 `304`，修改后立即返回新内容，包含同大小编辑、入口 HTML 和包清单。删除、越界和链接逃逸继续拒绝且 `no-store`，不从缓存恢复无效路径。不改变稳定源码 origin、网页账号隔离或 MCP/API 缓存策略。网页主动使用 `fetch(..., {cache: "no-store"})` 的资源仍会重新读取，服务器的条件缓存不能覆盖这项选择。
 
 ## 开发与验证命令
 
@@ -161,7 +168,7 @@ pnpm check
 node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
 ```
 
-`pnpm smoke` 保留原有 5 套 Rust 核心冒烟测试，并在 macOS 执行真实 Tauri / OS 原生窗口与 WKWebView 的隔离启动场景。该场景仅在 `dev-bins` 下编译，使用仅监听 Loopback 随机端口的私有 HTTP 服务、临时配置档与存储，不连接真实 `8089`，不启动运行时 supervisor、托盘、语音或账号流程。覆盖 pending → ready 时原生启动窗口与主窗口的显隐切换、后台启动、关闭或按 `Esc` 后迟到的就绪事件，以及 20 秒超时后通过原生重试恢复工作台。
+`pnpm smoke` 保留原有 5 套 Rust 核心冒烟测试，并在 macOS 执行真实 Tauri / OS 原生窗口与 WKWebView 的隔离启动场景。该场景仅在 `dev-bins` 下编译，使用仅监听 Loopback 随机端口的私有 HTTP 服务、临时配置档与存储，不连接真实 `8089`，不启动运行时 supervisor、托盘、语音或账号流程。覆盖已有 loading 外壳和延迟关键样式时主窗口持续隐藏、首屏完成后一次显示、主窗口及 WebView 身份保持、恢复层覆盖和就绪后的文档焦点；也覆盖后台启动、失败恢复界面关闭或按 `Esc` 后迟到的就绪事件，以及 20 秒超时后在原窗口重试并隐藏准备。
 
 `pnpm check` 运行完整检查；上述隔离冒烟用于验证源码中的启动流程，不代表已安装发布包、真实账号或 Windows 实机验收。
 

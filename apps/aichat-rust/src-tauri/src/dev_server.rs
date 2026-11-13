@@ -1,5 +1,6 @@
 use crate::files::{atomic_json_write, inside, validate_relative_path};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -219,15 +220,36 @@ fn content_type_for(path: &Path) -> &'static str {
 }
 
 fn write_http_response(
-    mut stream: TcpStream,
+    stream: TcpStream,
     status: &str,
     content_type: &str,
     body: &[u8],
     head_only: bool,
 ) {
+    write_http_response_with_etag(stream, status, content_type, body, head_only, None);
+}
+
+fn write_http_response_with_etag(
+    mut stream: TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    etag: Option<&str>,
+) {
+    let cache = match etag {
+        Some(etag) => format!("Cache-Control: private, no-cache\r\nETag: {etag}\r\n"),
+        None => "Cache-Control: no-store\r\n".to_string(),
+    };
+    // 304 has no body. Omit its optional Content-Length rather than report the
+    // length of an empty body as the size of the cached representation.
+    let length = if status.starts_with("304 ") {
+        String::new()
+    } else {
+        format!("Content-Length: {}\r\n", body.len())
+    };
     let header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{length}{cache}X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
     );
     let _ = stream.write_all(header.as_bytes());
     if !head_only {
@@ -323,12 +345,35 @@ fn handle_client(mut stream: TcpStream, root_dir: &Path, entry_file: &str) {
 
     match fs::read(&real_target) {
         Ok(bytes) => {
-            write_http_response(
+            // Validate the path and read the current bytes BEFORE checking the
+            // validator. Changes (including same-size edits), deletion and
+            // symlink escapes must never resurrect a cached response.
+            let etag = format!("\"{:x}\"", Sha256::digest(&bytes));
+            let not_modified =
+                req.lines()
+                    .skip(1)
+                    .take_while(|line| !line.is_empty())
+                    .any(|line| {
+                        let Some((name, value)) = line.split_once(':') else {
+                            return false;
+                        };
+                        name.eq_ignore_ascii_case("if-none-match")
+                            && value.split(',').any(|tag| {
+                                let tag = tag.trim();
+                                tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == etag
+                            })
+                    });
+            write_http_response_with_etag(
                 stream,
-                "200 OK",
+                if not_modified {
+                    "304 Not Modified"
+                } else {
+                    "200 OK"
+                },
                 content_type_for(&real_target),
-                &bytes,
-                method == "HEAD",
+                if not_modified { &[] } else { &bytes },
+                method == "HEAD" || not_modified,
+                Some(&etag),
             );
         }
         Err(_) => {
@@ -1056,6 +1101,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conditional_cache_reuses_bytes_but_revalidates_edits_deletion_and_paths() {
+        let root = std::env::temp_dir().join(format!("aichat-source-cache-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("AIChat.html"), "first-screen").unwrap();
+        fs::write(root.join("manifest.json"), r#"{"version":1}"#).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (source, entry) = source_identity(&root, "AIChat.html").unwrap();
+        let mut server = DevServer::serve_listener(listener, source, entry).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let body_is_not_a_header = client
+            .get(server.url())
+            .body("If-None-Match: *\r\n")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(body_is_not_a_header.status().as_u16(), 200);
+        assert_eq!(body_is_not_a_header.text().await.unwrap(), "first-screen");
+
+        for (file, original, edited) in [
+            ("AIChat.html", "first-screen", "ready-screen"),
+            ("manifest.json", r#"{"version":1}"#, r#"{"version":2}"#),
+        ] {
+            let url = format!("http://127.0.0.1:{}/{file}", server.port);
+            let initial = client.get(&url).send().await.unwrap();
+            assert_eq!(initial.status().as_u16(), 200);
+            assert_eq!(initial.headers()["cache-control"], "private, no-cache");
+            let etag = initial.headers()["etag"].to_str().unwrap().to_string();
+            assert_eq!(initial.text().await.unwrap(), original);
+            for validator in [etag.clone(), format!("\"other\", W/{etag}"), "*".into()] {
+                let cached = client
+                    .get(&url)
+                    .header("If-None-Match", validator)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(cached.status().as_u16(), 304);
+                assert_eq!(cached.headers()["etag"], etag);
+                assert_eq!(cached.headers()["cache-control"], "private, no-cache");
+                assert!(cached.bytes().await.unwrap().is_empty());
+            }
+            let head = client.head(&url).send().await.unwrap();
+            assert_eq!(head.headers()["etag"], etag);
+            assert_eq!(head.headers()["content-length"], original.len().to_string());
+            assert!(head.bytes().await.unwrap().is_empty());
+            let head_cached = client
+                .head(&url)
+                .header("If-None-Match", &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(head_cached.status().as_u16(), 304);
+            assert!(head_cached.bytes().await.unwrap().is_empty());
+
+            assert_eq!(
+                original.len(),
+                edited.len(),
+                "same-size edits still invalidate cache"
+            );
+            fs::write(root.join(file), edited).unwrap();
+            let changed = client
+                .get(&url)
+                .header("If-None-Match", &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(changed.status().as_u16(), 200);
+            assert_ne!(changed.headers()["etag"], etag);
+            assert_eq!(changed.text().await.unwrap(), edited);
+            fs::remove_file(root.join(file)).unwrap();
+            let deleted = client
+                .get(&url)
+                .header("If-None-Match", &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(deleted.status().as_u16(), 404);
+            assert_eq!(deleted.headers()["cache-control"], "no-store");
+            assert!(deleted.headers().get("etag").is_none());
+        }
+        let escape = client
+            .get(format!("http://127.0.0.1:{}/%2e%2e%2fsecret", server.port))
+            .header("If-None-Match", "*")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(escape.status().as_u16(), 403);
+        assert_eq!(escape.headers()["cache-control"], "no-store");
+        assert!(escape.headers().get("etag").is_none());
+        #[cfg(unix)]
+        {
+            let outside = root.with_extension("outside");
+            fs::write(root.join("public.txt"), "public bytes").unwrap();
+            fs::write(&outside, "private bytes").unwrap();
+            let link = root.join("link.txt");
+            std::os::unix::fs::symlink(root.join("public.txt"), &link).unwrap();
+            let url = format!("http://127.0.0.1:{}/link.txt", server.port);
+            let before = client.get(&url).send().await.unwrap();
+            assert_eq!(before.status().as_u16(), 200);
+            let etag = before.headers()["etag"].to_str().unwrap().to_string();
+            assert_eq!(before.text().await.unwrap(), "public bytes");
+            fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let escaped = client
+                .get(&url)
+                .header("If-None-Match", etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(escaped.status().as_u16(), 403);
+            assert_eq!(escaped.headers()["cache-control"], "no-store");
+            assert!(escaped.headers().get("etag").is_none());
+            assert_eq!(escaped.text().await.unwrap(), "Forbidden");
+            fs::remove_file(outside).unwrap();
+        }
+        server.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn serves_local_aichat_source_on_loopback_and_blocks_traversal() {
         let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("js")).unwrap();
@@ -1082,7 +1247,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "no-store"
+            "private, no-cache"
         );
         let text = res.text().await.unwrap();
         assert!(text.contains("<title>AIChat</title>"));

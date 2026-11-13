@@ -66,7 +66,7 @@ impl PageConnection {
     }
 
     pub fn presentation(&self) -> Presentation {
-        if !self.foreground {
+        if !self.foreground || matches!(self.phase, Phase::Idle | Phase::Connecting) {
             Presentation::Hidden
         } else if self.phase == Phase::Ready {
             Presentation::Main
@@ -169,9 +169,9 @@ mod tests {
         state.set_foreground(false);
         assert_eq!(state.presentation(), Presentation::Hidden);
         state.set_foreground(true);
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         let generation = state.begin(url.as_str(), false).unwrap();
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert!(state.document_ready(generation, &url));
         assert_eq!(state.presentation(), Presentation::Main);
 
@@ -185,22 +185,22 @@ mod tests {
     }
 
     #[test]
-    fn foreground_launch_exposes_only_native_startup_until_the_current_document_is_ready() {
+    fn foreground_launch_stays_hidden_until_the_current_first_screen_is_ready() {
         let mut state = PageConnection::default();
         let url = Url::parse("https://keepwork.com/chat").unwrap();
         state.set_foreground(true);
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
 
         let generation = state.begin(url.as_str(), false).unwrap();
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert_eq!(state.attempt(&url), Some(generation));
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
 
         assert!(!state.document_ready(
             generation,
             &Url::parse("https://keepwork.com/other").unwrap()
         ));
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert!(state.document_ready(generation, &url));
         assert_eq!(state.presentation(), Presentation::Main);
     }
@@ -227,12 +227,12 @@ mod tests {
     }
 
     #[test]
-    fn closing_native_startup_prevents_a_late_success_from_reopening_the_application() {
+    fn dismissing_a_pending_launch_prevents_late_success_from_reopening_the_application() {
         let mut state = PageConnection::default();
         let url = Url::parse("http://127.0.0.1:3001/AIChat.html").unwrap();
         state.set_foreground(true);
         let generation = state.begin(url.as_str(), false).unwrap();
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
 
         state.set_foreground(false);
         assert_eq!(state.presentation(), Presentation::Hidden);
@@ -248,14 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn waking_a_connecting_or_failed_instance_keeps_chat_hidden_and_preserves_the_attempt() {
+    fn waking_an_instance_waits_for_loading_but_reveals_failure_recovery() {
         let mut state = PageConnection::default();
         let url = Url::parse("https://keepwork.com/chat").unwrap();
         state.set_foreground(false);
         let generation = state.begin(url.as_str(), false).unwrap();
 
         state.set_foreground(true);
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert_eq!(state.attempt(&url), Some(generation));
         assert!(state.begin(url.as_str(), false).is_none());
 
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_retry_keeps_native_startup_visible_and_clears_only_the_previous_error() {
+    fn manual_retry_hides_recovery_again_and_preserves_the_requested_entry() {
         let mut state = PageConnection::default();
         let url = Url::parse("https://keepwork.com/chat?session=preserved#draft").unwrap();
         state.set_foreground(true);
@@ -278,24 +278,26 @@ mod tests {
         assert!(state.fail(first, "offline"));
         assert_eq!(state.presentation(), Presentation::Startup);
         let automatic = state.begin(url.as_str(), true).unwrap();
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert!(state.fail(automatic, "still offline"));
+        assert_eq!(state.presentation(), Presentation::Startup);
         assert_eq!(state.snapshot(url.as_str()).auto_retries, 1);
 
         let manual = state.begin(url.as_str(), false).unwrap();
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         let snapshot = state.snapshot(url.as_str());
         assert_eq!(snapshot.phase, Phase::Connecting);
         assert_eq!(snapshot.error, "");
         assert_eq!(snapshot.auto_retries, 0);
         assert_eq!(state.target(), url.as_str());
         assert!(!state.document_ready(automatic, &url));
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert!(state.document_ready(manual, &url));
         assert_eq!(state.presentation(), Presentation::Main);
     }
 
     #[test]
-    fn replacing_a_ready_entry_returns_to_native_startup_and_rejects_old_readiness() {
+    fn replacing_a_ready_entry_hides_the_window_and_rejects_old_readiness() {
         let mut state = PageConnection::default();
         let original = Url::parse("https://keepwork.com/chat").unwrap();
         let replacement = Url::parse("http://127.0.0.1:3001/AIChat.html").unwrap();
@@ -305,12 +307,35 @@ mod tests {
         assert_eq!(state.presentation(), Presentation::Main);
 
         let current = state.begin(replacement.as_str(), false).unwrap();
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert!(!state.document_ready(first, &original));
         assert!(!state.document_ready(first, &replacement));
         assert!(!state.fail(first, "old timeout"));
-        assert_eq!(state.presentation(), Presentation::Startup);
+        assert_eq!(state.presentation(), Presentation::Hidden);
         assert!(state.document_ready(current, &replacement));
+        assert_eq!(state.presentation(), Presentation::Main);
+    }
+
+    #[test]
+    fn closing_failure_recovery_prevents_timeout_retry_or_late_ready_from_reopening_it() {
+        let mut state = PageConnection::default();
+        let url = Url::parse("https://keepwork.com/chat?session=kept#draft").unwrap();
+        state.set_foreground(true);
+        let first = state.begin(url.as_str(), false).unwrap();
+        assert_eq!(state.presentation(), Presentation::Hidden);
+        assert!(state.fail(first, "20-second timeout"));
+        assert_eq!(state.presentation(), Presentation::Startup);
+
+        state.set_foreground(false);
+        assert_eq!(state.presentation(), Presentation::Hidden);
+        assert!(!state.document_ready(first, &url));
+        let retry = state.begin(url.as_str(), true).unwrap();
+        assert_eq!(state.presentation(), Presentation::Hidden);
+        assert!(state.document_ready(retry, &url));
+        assert_eq!(state.presentation(), Presentation::Hidden);
+        assert!(!state.fail(first, "late original timeout"));
+        assert_eq!(state.presentation(), Presentation::Hidden);
+        state.set_foreground(true);
         assert_eq!(state.presentation(), Presentation::Main);
     }
 

@@ -9,7 +9,7 @@ pub use manifest::{
     current_runtime_arch, current_runtime_platform, is_valid_hex, is_version_newer,
     mcp_feed_platform, parse_semver, validate_runtime_dir, validate_runtime_dir_any,
     validate_staged_runtime, validate_update_manifest, validate_update_url, ActiveRuntimeRecord,
-    RuntimeManifest, RuntimeStatusSnapshot, RuntimeUpdateManifest,
+    RuntimeManifest, RuntimeStatusSnapshot, RuntimeUpdateManifest, RuntimeUpdateSource,
 };
 
 use crate::files::atomic_json_write;
@@ -91,6 +91,21 @@ impl RuntimeConfig {
     pub fn product(&self) -> &str {
         self.products.first().map(String::as_str).unwrap_or("")
     }
+
+    pub(super) fn update_source(&self) -> RuntimeUpdateSource {
+        RuntimeUpdateSource {
+            product: self.product().into(),
+            engine: if self.product() == RUST_MCP_PRODUCT {
+                "rust"
+            } else {
+                "node"
+            }
+            .into(),
+            platform: mcp_feed_platform().into(),
+            arch: current_runtime_arch().into(),
+            feed_url: self.feed_url.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -137,11 +152,9 @@ impl RuntimeSupervisor {
         }
         .into();
         let record = Self::load_active_record(&config.store_dir);
-        if let Some(v) = record.latest_version {
-            snap.latest_version = v;
-        }
-        if let Some(b) = record.latest_built_at {
-            snap.latest_built_at = b;
+        if record.latest_source.as_ref() == Some(&config.update_source()) {
+            snap.latest_version = record.latest_version.clone().unwrap_or_default();
+            snap.latest_built_at = record.latest_built_at.clone().unwrap_or_default();
         }
         let supervisor = Self {
             config,

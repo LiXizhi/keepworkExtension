@@ -6,6 +6,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const qiniu = require('../../../scripts/lib/qiniu-release.cjs');
 const { writeCdnSummary } = require('../../../scripts/lib/cdn-summary.cjs');
+const { validateDesktopManifest } = require('../../../scripts/lib/update-manifest.cjs');
 
 const START = '<!-- keepwork-cdn-downloads:start -->';
 const END = '<!-- keepwork-cdn-downloads:end -->';
@@ -56,6 +57,7 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
       || (previous.product && previous.product !== 'aichat-desktop'))) {
       throw new Error(`Invalid existing desktop update feed: ${target}`);
     }
+    if (previous) validateDesktopManifest(previous, { target, legacy: true });
     const legacyZip = previous?.format === 'zip' || /\.zip(?:[?#]|$)/i.test(previous?.url || '');
     const oldInstaller = previous?.installer || (legacyZip ? undefined : previous);
     const oldVersion = oldInstaller?.version || previous?.version;
@@ -74,11 +76,15 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
     };
     // Historical download consumers still require the top-level ZIP. Native
     // clients use the additive installer, including its independent version.
-    const manifest = legacyZip ? { ...previous, installer } : {
+    const manifest = legacyZip ? {
+      schemaVersion: 1, product: 'aichat-desktop', platform: windows ? 'windows' : 'macos', arch: target.split('-')[1],
+      ...previous, installer,
+    } : {
       ...previous, schemaVersion: 1, product: 'aichat-desktop',
       platform: windows ? 'windows' : 'macos', arch: target.split('-')[1],
       ...installer, installer,
     };
+    validateDesktopManifest(manifest, { target });
     const filePath = path.join(path.dirname(entries[0].filePath), 'update-feeds', target, 'latest-client.json');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -86,6 +92,7 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
     return {
       name: `${target}/latest-client.json`, filePath, remoteKey, url: cdnUrl(remoteKey),
       size: fs.statSync(filePath).size, sha256: qiniu.sha256(filePath),
+      mimeType: 'application/json', cacheControl: 'public, max-age=60, must-revalidate',
     };
   });
 }

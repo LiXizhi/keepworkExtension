@@ -6,6 +6,10 @@
 typedef void (*KeepworkStartupAction)(void *, bool);
 typedef void (*KeepworkStartupRelease)(void *);
 
+// A native overlay rendered INSIDE the main window, above the WKWebView. The
+// main window is the only startup surface; this view is added as a subview and
+// removed in place when the trusted document is ready. It never replaces the
+// window's content view and never owns a second OS window.
 @interface KeepworkStartupView : NSView
 @property(nonatomic, strong) NSImageView *iconView;
 @property(nonatomic, strong) NSTextField *titleLabel;
@@ -31,26 +35,47 @@ typedef void (*KeepworkStartupRelease)(void *);
     if (self.actionCallback) self.actionCallback(self.callbackContext, false);
 }
 - (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)isOpaque { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    [NSColor.windowBackgroundColor setFill];
+    NSRectFill(dirtyRect);
+}
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    self.needsDisplay = YES;
+}
+// Drag the window by the overlay background only. This is a view-level trait,
+// so removing the overlay restores normal chat text selection; it must never
+// become a window-wide movableByWindowBackground setting.
+- (BOOL)mouseDownCanMoveWindow { return YES; }
 - (void)cancelOperation:(id)sender {
     [self hide:sender];
 }
 - (void)layout {
     [super layout];
-    // Center the visible identity, using its text rather than an empty label
-    // column. The two text lines keep their shared left edge beside the icon.
-    CGFloat top = self.failed ? NSHeight(self.bounds) - 54 : NSHeight(self.bounds) / 2 + 25;
-    CGFloat textWidth = MIN(NSWidth(self.bounds) - 120, ceil(MAX(
+    // Center the identity group as one unit in the full window, keeping the two
+    // text lines on a shared left edge beside the icon. On failure the group
+    // shifts up so the centered action row fits below it without moving the
+    // window. Layout is independent of the webview zoom factor.
+    CGFloat width = NSWidth(self.bounds);
+    CGFloat height = NSHeight(self.bounds);
+    CGFloat textWidth = MIN(width - 120, ceil(MAX(
         self.titleLabel.cell.cellSize.width,
         self.summaryLabel.cell.cellSize.width + (self.failed ? 0 : 18))));
-    CGFloat left = floor((NSWidth(self.bounds) - 48 - 16 - textWidth) / 2);
+    CGFloat groupWidth = 48 + 16 + textWidth;
+    CGFloat left = floor((width - groupWidth) / 2);
     CGFloat textLeft = left + 48 + 16;
+    CGFloat top = height / 2 + (self.failed ? 50 : 25);
     self.iconView.frame = NSMakeRect(left, top - 48, 48, 48);
     self.titleLabel.frame = NSMakeRect(textLeft, top - 22, textWidth, 24);
-    self.spinner.frame = NSMakeRect(textLeft, top - 47, 12, 12);
     self.summaryLabel.frame = NSMakeRect(textLeft + (self.failed ? 0 : 18), top - 52,
         textWidth - (self.failed ? 0 : 18), 22);
-    self.retryButton.frame = NSMakeRect(NSWidth(self.bounds) - 112, 22, 84, 30);
-    self.hideButton.frame = NSMakeRect(NSWidth(self.bounds) - 204, 22, 84, 30);
+    self.spinner.frame = NSMakeRect(textLeft, top - 47, 12, 12);
+    CGFloat rowWidth = 84 + 12 + 84;
+    CGFloat rowLeft = floor((width - rowWidth) / 2);
+    CGFloat rowTop = top - 100;
+    self.hideButton.frame = NSMakeRect(rowLeft, rowTop, 84, 30);
+    self.retryButton.frame = NSMakeRect(rowLeft + 96, rowTop, 84, 30);
 }
 - (void)setFailed:(BOOL)failed {
     _failed = failed;
@@ -75,16 +100,36 @@ static NSTextField *KeepworkStartupLabel(NSString *text, CGFloat size, NSFontWei
     return label;
 }
 
+static KeepworkStartupView *KeepworkStartupFindView(NSWindow *window) {
+    if (!window) return nil;
+    for (NSView *subview in window.contentView.subviews) {
+        if ([subview isKindOfClass:KeepworkStartupView.class]) {
+            return (KeepworkStartupView *)subview;
+        }
+    }
+    return nil;
+}
+
+static NSView *KeepworkStartupFindDocument(NSView *view) {
+    Class webViewClass = NSClassFromString(@"WKWebView");
+    if (webViewClass && [view isKindOfClass:webViewClass]) return view;
+    for (NSView *child in view.subviews) {
+        NSView *document = KeepworkStartupFindDocument(child);
+        if (document) return document;
+    }
+    return nil;
+}
+
 bool keepwork_startup_install(void *rawWindow, void *context,
     KeepworkStartupAction action, KeepworkStartupRelease release) {
     if (![NSThread isMainThread] || !rawWindow) return false;
     NSWindow *window = (__bridge NSWindow *)rawWindow;
+    if (KeepworkStartupFindView(window)) return true;
+    // Match the main window's existing overlay titlebar; do not hide the
+    // minimize/zoom buttons or take over window-wide dragging.
     window.titleVisibility = NSWindowTitleHidden;
     window.titlebarAppearsTransparent = YES;
     window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
-    window.movableByWindowBackground = YES;
-    [window standardWindowButton:NSWindowMiniaturizeButton].hidden = YES;
-    [window standardWindowButton:NSWindowZoomButton].hidden = YES;
     KeepworkStartupView *view = [[KeepworkStartupView alloc] initWithFrame:window.contentView.bounds];
     view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     view.iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
@@ -116,17 +161,35 @@ bool keepwork_startup_install(void *rawWindow, void *context,
     view.callbackContext = context;
     view.actionCallback = action;
     view.releaseCallback = release;
-    window.contentView = view;
+    // Add above the WKWebView sibling; never replace the content view.
+    [window.contentView addSubview:view];
     [window makeFirstResponder:view];
-    window.backgroundColor = NSColor.controlBackgroundColor;
     [view setFailed:NO];
     return true;
 }
 
 bool keepwork_startup_update(void *rawWindow, bool failed) {
     if (![NSThread isMainThread] || !rawWindow) return false;
-    NSWindow *window = (__bridge NSWindow *)rawWindow;
-    if (![window.contentView isKindOfClass:KeepworkStartupView.class]) return false;
-    [(KeepworkStartupView *)window.contentView setFailed:failed];
+    KeepworkStartupView *view = KeepworkStartupFindView((__bridge NSWindow *)rawWindow);
+    if (!view) return false;
+    [view setFailed:failed];
     return true;
+}
+
+bool keepwork_startup_remove(void *rawWindow) {
+    if (![NSThread isMainThread] || !rawWindow) return false;
+    NSWindow *window = (__bridge NSWindow *)rawWindow;
+    KeepworkStartupView *view = KeepworkStartupFindView(window);
+    if (!view) return true;
+    [view removeFromSuperview];
+    // Return keyboard focus to the document container now that the overlay is
+    // gone, so the ready workspace receives input immediately.
+    NSView *document = KeepworkStartupFindDocument(window.contentView);
+    if (document) [window makeFirstResponder:document];
+    return true;
+}
+
+bool keepwork_startup_is_installed(void *rawWindow) {
+    if (![NSThread isMainThread] || !rawWindow) return false;
+    return KeepworkStartupFindView((__bridge NSWindow *)rawWindow) != nil;
 }

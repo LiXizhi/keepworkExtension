@@ -24,7 +24,12 @@ async function completeWithServices(services, options) {
             options.onMessage?.(reply.content || '', { choices: [{ message: { content: reply.content || '' } }] });
             for (const call of reply.toolCalls || [])
                 options.onToolCallChunk?.(call);
-            return { ...(0, completion_cjs_1.completionMetadata)(reply), choices: [{ message: { content: reply.content || '', tool_calls: reply.toolCalls } }] };
+            const metadata = (0, completion_cjs_1.completionMetadata)(reply);
+            // Match the SDK adapter: each completed inference, not streamed
+            // progress or the whole tool loop, supplies its real final state.
+            options.onComplete?.(reply.content || '', { ...metadata, result: reply.content || '',
+                ...(Array.isArray(reply.toolCalls) ? { tool_calls: reply.toolCalls } : {}) });
+            return { ...metadata, choices: [{ message: { content: reply.content || '', tool_calls: reply.toolCalls } }] };
         },
         execute: async (call, args) => {
             const tool = registered.get(call.function.name);

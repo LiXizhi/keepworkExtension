@@ -227,10 +227,8 @@ impl UpdateManager {
             },
             latest_version: if !mcp.pending_version.is_empty() {
                 mcp.pending_version.clone()
-            } else if !mcp.latest_version.is_empty() {
-                mcp.latest_version.clone()
             } else {
-                mcp.version.clone()
+                mcp.latest_version.clone()
             },
             published_at: mcp.latest_built_at.clone(),
             state: state.to_string(),
@@ -266,11 +264,7 @@ impl UpdateManager {
             installed_version: self.desktop_version.clone(),
             running_version: None,
             owner: None,
-            latest_version: if !ds.meta.latest_version.is_empty() {
-                ds.meta.latest_version.clone()
-            } else {
-                self.desktop_version.clone()
-            },
+            latest_version: ds.meta.latest_version.clone(),
             published_at: ds.meta.published_at.clone(),
             state: ds.state.clone(),
             progress: ds.progress,
@@ -340,6 +334,7 @@ impl UpdateManager {
 
         let resp = client
             .get(&self.feed_url)
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .timeout(Duration::from_secs(30))
             .send()
             .await
@@ -400,15 +395,6 @@ impl UpdateManager {
 
         let checked_at = now_iso_string();
 
-        if (package.get("fileName").is_some() || is_version_newer(&version, &self.desktop_version))
-            && unsupported_zip(Path::new(&file_name), self.launcher_exe.as_deref())
-        {
-            return Err(
-                "更新清单未提供可安装的原生更新包（仅提供 ZIP），请下载安装新版桌面应用"
-                    .to_string(),
-            );
-        }
-
         if !is_version_newer(&version, &self.desktop_version) {
             if let Ok(mut ds) = self.desktop_state.lock() {
                 ds.checking = false;
@@ -422,6 +408,13 @@ impl UpdateManager {
                 self.save_meta(&ds.meta);
             }
             return Ok(());
+        }
+
+        if unsupported_zip(Path::new(&file_name), self.launcher_exe.as_deref()) {
+            return Err(
+                "更新清单未提供可安装的原生更新包（仅提供 ZIP），请下载安装新版桌面应用"
+                    .to_string(),
+            );
         }
 
         // Check if already downloaded and verified
@@ -891,6 +884,89 @@ mod tests {
         assert!(!snap.desktop.can_apply);
         assert!(snap.desktop.error.contains("installer"));
         assert!(!root.join("downloads").exists());
+    }
+
+    #[tokio::test]
+    async fn older_and_equal_zip_feeds_clear_a_previous_failure_without_downloading() {
+        for remote_version in ["0.1.12", "0.2.98"] {
+            let root = std::env::temp_dir().join(format!("aichat-updater-{}", Uuid::new_v4()));
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+            let manifest = serde_json::json!({
+                "version": remote_version,
+                "format": "zip", "fileName": "legacy.zip",
+                "url": format!("{base}/legacy.zip"),
+                "sha256": sha256_hex(b"historical ZIP"), "size": 14,
+                "publishedAt": "2026-10-30T08:00:00Z",
+            })
+            .to_string();
+            let server = thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut count = 0;
+                while count < 2 && std::time::Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut buf = [0u8; 2048];
+                    let n = stream.read(&mut buf).unwrap();
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    assert!(
+                        request.starts_with("GET /latest-client.json "),
+                        "an older or equal ZIP must never be downloaded: {request}"
+                    );
+                    let (status, bytes) = if count == 0 {
+                        ("404 Not Found", &b""[..])
+                    } else {
+                        ("200 OK", manifest.as_bytes())
+                    };
+                    let header = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    stream.write_all(header.as_bytes()).unwrap();
+                    stream.write_all(bytes).unwrap();
+                    count += 1;
+                }
+                assert_eq!(count, 2);
+            });
+            let manager = UpdateManager::new(
+                "0.2.98".into(),
+                root.join("meta.json"),
+                root.join("downloads"),
+                format!("{base}/latest-client.json"),
+                None,
+            );
+            let mcp = RuntimeStatusSnapshot::initial("mcp", 8089);
+
+            manager.check_desktop_update().await;
+            let failed = manager.snapshot(&mcp);
+            assert_eq!(failed.desktop.state, "error");
+            assert!(failed.desktop.error.contains("404"));
+
+            manager.check_desktop_update().await;
+            server.join().unwrap();
+            let recovered = manager.snapshot(&mcp);
+            assert_eq!(recovered.desktop.state, "up-to-date", "{remote_version}");
+            assert!(
+                recovered.desktop.error.is_empty(),
+                "{}",
+                recovered.desktop.error
+            );
+            assert!(!recovered.desktop.stale);
+            assert!(!recovered.desktop.can_apply);
+            assert_eq!(recovered.desktop.latest_version, remote_version);
+            assert_eq!(recovered.desktop.published_at, "2026-10-30T08:00:00Z");
+            assert!(recovered.desktop.checked_at.is_some());
+            assert!(!root.join("downloads").exists());
+            assert!(manager.prepare_desktop_install().is_err());
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]

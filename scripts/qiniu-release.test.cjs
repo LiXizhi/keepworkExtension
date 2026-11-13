@@ -73,6 +73,67 @@ test('form and multipart uploads carry insert-only policy only when explicitly e
   }
 });
 
+test('form and multipart uploads preserve default metadata and apply explicit JSON cache metadata', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qiniu-upload-metadata-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const requests = [];
+  t.mock.method(https, 'request', (requestUrl, options, callback) => {
+    const chunks = [];
+    const request = new Writable({
+      write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); },
+      final(done) {
+        requests.push({ method: options.method, type: options.headers['Content-Type'], body: Buffer.concat(chunks) });
+        const body = options.method === 'PUT' ? { etag: 'part-etag' }
+          : new URL(requestUrl).pathname.endsWith('/uploads') ? { uploadId: 'metadata-upload' }
+            : { key: 'release/latest.json' };
+        process.nextTick(() => {
+          const response = Readable.from([Buffer.from(JSON.stringify(body))]); response.statusCode = 200;
+          callback(response); done();
+        });
+      },
+    });
+    request.setTimeout = () => request;
+    return request;
+  });
+  const config = { accessKey: 'fixture-access', secretKey: 'fixture-secret', bucket: 'haqi', uploadHost: 'https://upload.example.test' };
+  for (const size of [7, 4 * 1024 * 1024 + 1]) {
+    const filePath = path.join(dir, `${size}.json`);
+    fs.closeSync(fs.openSync(filePath, 'w')); fs.truncateSync(filePath, size);
+    for (const explicit of [false, true]) {
+      requests.length = 0;
+      const metadata = explicit ? { mimeType: 'application/json', cacheControl: 'public, max-age=60, must-revalidate' } : {};
+      await uploadEntry(config, { filePath, name: 'latest.json', remoteKey: 'release/latest.json', size, ...metadata });
+      if (size > 4 * 1024 * 1024) {
+        const complete = requests.find(request => request.type === 'application/json');
+        const body = JSON.parse(complete.body.toString());
+        assert.equal(body.mimeType, explicit ? 'application/json' : 'application/octet-stream');
+        assert.deepEqual(body.parts, [{ partNumber: 1, etag: 'part-etag' }]);
+        if (explicit) assert.equal(body.cacheControl, metadata.cacheControl);
+        else assert.equal(Object.hasOwn(body, 'cacheControl'), false);
+        assert.equal(requests.find(request => request.method === 'PUT').type, 'application/octet-stream', 'part bytes remain binary');
+      } else {
+        const form = requests[0].body.toString();
+        assert.match(form, new RegExp('Content-Type: ' + (explicit ? 'application/json' : 'application/octet-stream') + '\\r\\n'));
+        if (explicit) assert.ok(form.includes('name="cacheControl"\r\n\r\npublic, max-age=60, must-revalidate\r\n'));
+        else assert.equal(form.includes('name="cacheControl"'), false);
+      }
+    }
+  }
+});
+
+test('invalid object metadata fails before making an upload request', async (t) => {
+  let requests = 0;
+  t.mock.method(https, 'request', () => { requests += 1; throw Error('Unexpected upload'); });
+  for (const size of [7, 4 * 1024 * 1024 + 1]) {
+    for (const metadata of [{ mimeType: 'application/json\r\nInjected: true' }, { mimeType: '' },
+      { cacheControl: 'max-age=60\r\nInjected: true' }, { cacheControl: '' }]) {
+      await assert.rejects(uploadEntry({ accessKey: 'fixture-access', secretKey: 'fixture-secret', bucket: 'haqi', uploadHost: 'https://upload.example.test' },
+        { filePath: '/not-read-by-this-test', name: 'latest.json', remoteKey: 'release/latest.json', size, ...metadata }), /Invalid Qiniu object/);
+    }
+  }
+  assert.equal(requests, 0);
+});
+
 test('multipart requests mint a fresh upload token, including after a failed part attempt', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qiniu-multipart-'));
   const filePath = path.join(dir, 'client.zip');

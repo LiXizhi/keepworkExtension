@@ -1,6 +1,7 @@
-// The production AppKit view is exercised in a hidden, isolated NSWindow.
-// No application activation, WebView, service, account or user profile is used.
+// Exercise the production AppKit overlay above one real, ephemeral WKWebView.
+// The only window stays hidden; no activation, network, service or profile is used.
 #import <Cocoa/Cocoa.h>
+#import <WebKit/WebKit.h>
 #include <assert.h>
 #include "../../src-tauri/src/app/native_startup_macos.m"
 
@@ -69,6 +70,23 @@ static void assertState(KeepworkStartupView *view, BOOL failed) {
     assertNativeTree(view);
 }
 
+static void assertOverlay(NSWindow *window, NSView *container, WKWebView *webview,
+    KeepworkStartupView *overlay) {
+    assert(window.contentView == container);
+    assert(webview.superview == container && webview.window == window);
+    assert(container.subviews.lastObject == overlay);
+    assert(overlay.superview == container);
+    assert(NSEqualRects(overlay.frame, container.bounds));
+    assert(overlay.isOpaque);
+    assert([container hitTest:NSMakePoint(4, 4)] == overlay);
+    NSBitmapImageRep *pixels = [overlay bitmapImageRepForCachingDisplayInRect:overlay.bounds];
+    assert(pixels);
+    [overlay cacheDisplayInRect:overlay.bounds toBitmapImageRep:pixels];
+    // A transparent NSView would leave alpha zero here and expose the loading
+    // document underneath even though its controls appeared above the WebView.
+    assert([pixels colorAtX:4 y:4].alphaComponent > 0.99);
+}
+
 int main(void) {
     FixtureActions actions = {0};
     @autoreleasepool {
@@ -76,19 +94,31 @@ int main(void) {
         [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
         assert(!keepwork_startup_install(NULL, &actions, action, releaseContext));
         assert(!keepwork_startup_update(NULL, false));
+        assert(!keepwork_startup_remove(NULL));
+        assert(!keepwork_startup_is_installed(NULL));
         assert(actions.releases == 0);
-        NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 360, 176)
+        NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 480)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskFullSizeContentView
             backing:NSBackingStoreBuffered defer:NO];
         window.releasedWhenClosed = NO;
+        NSView *container = window.contentView;
+        WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+        configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+        WKWebView *webview = [[WKWebView alloc] initWithFrame:container.bounds configuration:configuration];
+        webview.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [container addSubview:webview];
+        BOOL originalDragging = window.movableByWindowBackground;
         assert(!window.visible);
         assert(!keepwork_startup_update((__bridge void *)window, true));
         assert(keepwork_startup_install((__bridge void *)window, &actions, action, releaseContext));
+        assert(keepwork_startup_is_installed((__bridge void *)window));
         assert(window.titleVisibility == NSWindowTitleHidden);
         assert(window.titlebarAppearsTransparent);
-        assert(window.movableByWindowBackground);
+        assert(window.movableByWindowBackground == originalDragging);
         @autoreleasepool {
-            KeepworkStartupView *view = (KeepworkStartupView *)window.contentView;
+            KeepworkStartupView *view = KeepworkStartupFindView(window);
+            assert(view);
+            assertOverlay(window, container, webview, view);
             NSRect originalFrame = window.frame;
             for (NSAppearanceName appearance in @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
                 window.appearance = [NSAppearance appearanceNamed:appearance];
@@ -96,6 +126,7 @@ int main(void) {
                 assertState(view, NO);
                 assert(keepwork_startup_update((__bridge void *)window, true));
                 assertState(view, YES);
+                assertOverlay(window, container, webview, view);
                 assert(NSEqualRects(window.frame, originalFrame));
             }
             assert(keepwork_startup_update((__bridge void *)window, false));
@@ -112,7 +143,7 @@ int main(void) {
                 location:NSZeroPoint modifierFlags:0 timestamp:0
                 windowNumber:window.windowNumber context:nil characters:@"\e"
                 charactersIgnoringModifiers:@"\e" isARepeat:NO keyCode:53];
-            [view keyDown:escape];
+            [view interpretKeyEvents:@[escape]];
             assert(actions.hides == 2);
 
             assert(keepwork_startup_update((__bridge void *)window, true));
@@ -129,12 +160,42 @@ int main(void) {
             [view.retryButton performClick:nil];
             assert(actions.retries == 2 && actions.hides == 3);
             assert(!window.visible);
+
+            // Resizing the app during startup must keep the entire WebView
+            // covered without replacing the window or its document container.
+            [window setContentSize:NSMakeSize(960, 640)];
+            [container layoutSubtreeIfNeeded];
+            assertOverlay(window, container, webview, view);
+            assertState(view, YES);
+            assert(window.movableByWindowBackground == originalDragging);
+
+            assert(keepwork_startup_remove((__bridge void *)window));
+            assert(!keepwork_startup_is_installed((__bridge void *)window));
+            assert(container.subviews.count == 1 && container.subviews.firstObject == webview);
+            assert(window.contentView == container && webview.window == window);
+            assert(window.firstResponder == webview);
+            assert(!window.visible);
         }
-        window.contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 176)];
+        // AppKit may retain a detached view until its current autorelease pool
+        // drains; verify all callback releases after leaving that pool below.
+        assert(actions.releases <= 1);
         assert(!keepwork_startup_update((__bridge void *)window, true));
+        assert(keepwork_startup_remove((__bridge void *)window));
+        // A later reload reattaches to the exact same document, with fresh
+        // callbacks that release independently when readiness removes it.
+        @autoreleasepool {
+            assert(keepwork_startup_install((__bridge void *)window, &actions, action, releaseContext));
+            KeepworkStartupView *view = KeepworkStartupFindView(window);
+            assertOverlay(window, container, webview, view);
+            [view.retryButton performClick:nil];
+            assert(actions.retries == 3);
+            assert(keepwork_startup_remove((__bridge void *)window));
+            assert(window.firstResponder == webview);
+        }
+        assert(actions.releases <= 2);
         [window close];
     }
-    assert(actions.releases == 1);
+    assert(actions.releases == 2);
     puts("native startup AppKit controls passed");
     return 0;
 }

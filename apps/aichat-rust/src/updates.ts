@@ -56,7 +56,7 @@ function describeComponentStatus(item: UpdateComponentStatus): string {
   } else if (item.state === "ready") {
     parts.push("已下载，可以更新");
   } else if (item.state === "up-to-date") {
-    parts.push("已是最新版本");
+    parts.push("当前无需更新");
   } else if (item.state === "error") {
     parts.push("检查或下载失败");
   } else {

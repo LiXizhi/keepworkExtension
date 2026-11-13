@@ -12,6 +12,8 @@
 
 并行开发时，顶层 `sourceHash` 标识本报告所验证的产品源码、共享模块、编译配置与相关测试输入；每个 `checks[].sourceHash` 必须与该快照一致才能复用通过结果。`run` 在命令前后比较指纹，执行期间源码变化则不得记录该快照通过；后续修改需要用新的证据目录重新执行受影响检查。相同Git commit或版本号不能证明未提交工作树相同，不能把不同源码指纹的旧日志合并成一次全绿。
 
+桌面源码指纹及源码快照归档精确排除 `.gitignore` 标为生成产物的 `apps/aichat-rust/releases/`；历史.app/DMG的字节、数量或大小不属于源码输入，不应使同源码产生不同指纹。不将任意同名 `releases` 目录一并排除，真实源码、清单、编译配置与测试输入继续参与验证。最终安装包不因此失去校验：仍在 `artifact` 独立记录并验证实际文件大小与SHA-256。此前包含历史产物的报告/快照保留原始字节、指纹和状态；调整指纹范围后使用新的证据目录重新验证，不改写旧report、不把既有失败或pending重新标为通过。
+
 `checks[].evidenceSha256` 以证据相对路径为键保存各日志/产物的SHA-256，`verify` 同时核对文件存在与实际摘要；自动聚合的gate继承子项指纹和摘要。旧人工回执缺少这些新增字段时保留格式兼容，但不能据此证明与新源码一致；发布级 `--require-complete` 还要求完整源码指纹、所有必要检查完成、最终artifact/runtime身份以及 `sourceDirty: false`。源码/夹具报告可诚实保留dirty与pending，不通过修改状态或删除待验项来获得发布结论。`--metadata-only` 只检查元数据，不验证本地证据字节，不能代替默认verify。
 
 证据入口为仓库根目录的 `scripts/rust-validation-evidence.cjs`。`run` 直接使用参数数组执行命令、保存原始日志与独立check记录并传播退出码；不使用shell拼接。ID采用固定gate或其子项前缀。`collect` 合并记录，缺少的发布gate自动补pending；可显式传最终 `--artifact`，默认不检查共享服务。`verify` 校验格式、证据存在及状态；加 `--require-complete` 才要求没有未完成项。

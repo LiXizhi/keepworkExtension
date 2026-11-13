@@ -57,6 +57,8 @@ test('publishes discoverable manifests at every existing native desktop target p
     const bytes = fs.readFileSync(feed.filePath);
     assert.equal(feed.size, bytes.length);
     assert.equal(feed.sha256, digest(bytes));
+    assert.equal(feed.mimeType, 'application/json');
+    assert.equal(feed.cacheControl, 'public, max-age=60, must-revalidate');
     const manifest = readManifest(feed);
     const installer = entries.find(entry => entry.name.endsWith(target.startsWith('darwin-')
       ? 'universal.dmg' : `${target.endsWith('arm64') ? 'arm64' : 'x64'}-setup.exe`));
@@ -91,6 +93,17 @@ test('adds native installer metadata without changing legacy ZIP downloads or un
   assert.equal(installer.format, 'dmg');
   assert.equal(installer.url, entries.find(entry => entry.name.endsWith('.dmg')).url);
   assert.equal(installer.publishedAt, publishedAt);
+});
+
+test('normalizes missing historical feed identity additively without replacing legacy download fields', t => {
+  const { entries } = fixture(t), previous = legacyDownload();
+  for (const key of ['schemaVersion', 'product', 'platform', 'arch']) delete previous[key];
+  const manifest = readManifest(collectUpdateFeeds(entries, version, publishedAt, { 'darwin-arm64': previous })
+    .find(feed => targetOf(feed) === 'darwin-arm64'));
+  for (const [key, value] of Object.entries(previous)) assert.deepEqual(manifest[key], value);
+  assert.equal(manifest.schemaVersion, 1); assert.equal(manifest.product, 'aichat-desktop');
+  assert.equal(manifest.platform, 'macos'); assert.equal(manifest.arch, 'arm64');
+  assert.equal(manifest.installer.version, version);
 });
 
 for (const legacy of [true, false]) {
@@ -215,6 +228,8 @@ function publication(entries, { previousByTarget = {}, failAt } = {}) {
       uploadEntry: async (actualConfig, entry) => {
         const target = targetOf(entry);
         if (target) {
+          assert.equal(entry.mimeType, 'application/json');
+          assert.equal(entry.cacheControl, 'public, max-age=60, must-revalidate');
           assert.notEqual(actualConfig.insertOnly, true, 'latest-client.json must remain mutable');
           feedUploads.push({ target, manifest: readManifest(entry) });
           events.push(`upload-feed:${target}`);

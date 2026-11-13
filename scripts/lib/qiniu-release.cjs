@@ -69,21 +69,35 @@ function createQBoxAuthorization(accessKey, secretKey, requestUrl) {
   return `QBox ${accessKey}:${signature}`;
 }
 
-function createMultipartParts(token, remoteKey, fileName) {
+function uploadMetadata(entry) {
+  const mimeType = entry.mimeType === undefined ? 'application/octet-stream' : entry.mimeType;
+  if (typeof mimeType !== 'string' || !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(mimeType)) {
+    throw new Error('Invalid Qiniu object MIME type');
+  }
+  if (entry.cacheControl !== undefined && (typeof entry.cacheControl !== 'string'
+    || !entry.cacheControl.trim() || /[\r\n]/.test(entry.cacheControl))) {
+    throw new Error('Invalid Qiniu object Cache-Control');
+  }
+  return { mimeType, ...(entry.cacheControl === undefined ? {} : { cacheControl: entry.cacheControl }) };
+}
+
+function createMultipartParts(token, remoteKey, fileName, options = {}) {
+  const metadata = uploadMetadata(options);
   const boundary = `----kp-local-helper-${crypto.randomBytes(12).toString('hex')}`;
   const safeFileName = fileName.replace(/["\r\n]/g, '_');
   const header = Buffer.from(
     `--${boundary}\r\nContent-Disposition: form-data; name="token"\r\n\r\n${token}\r\n`
     + `--${boundary}\r\nContent-Disposition: form-data; name="key"\r\n\r\n${remoteKey}\r\n`
+    + (metadata.cacheControl === undefined ? '' : `--${boundary}\r\nContent-Disposition: form-data; name="cacheControl"\r\n\r\n${metadata.cacheControl}\r\n`)
     + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFileName}"\r\n`
-    + 'Content-Type: application/octet-stream\r\n\r\n',
+    + `Content-Type: ${metadata.mimeType}\r\n\r\n`,
   );
   const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
   return { boundary, header, footer };
 }
 
 function streamFormUpload(uploadHost, token, remoteKey, entry) {
-  const { boundary, header, footer } = createMultipartParts(token, remoteKey, entry.name);
+  const { boundary, header, footer } = createMultipartParts(token, remoteKey, entry.name, entry);
   const contentLength = header.length + entry.size + footer.length;
   return new Promise((resolve, reject) => {
     const request = https.request(uploadHost, {
@@ -249,6 +263,7 @@ async function mapConcurrent(values, concurrency, task) {
 }
 
 async function uploadLargeEntry(config, entry, createToken) {
+  const metadata = uploadMetadata(entry);
   const basePath = multipartBasePath(config, entry);
   const initResponse = await requestBufferWithRetry(new URL(basePath, config.uploadHost), {
     method: 'POST',
@@ -267,7 +282,7 @@ async function uploadLargeEntry(config, entry, createToken) {
     const body = Buffer.from(JSON.stringify({
       parts: uploadedParts,
       fname: entry.name,
-      mimeType: 'application/octet-stream',
+      ...metadata,
     }));
     const completeResponse = await requestBuffer(
       new URL(`${basePath}/${encodeURIComponent(uploadId)}`, config.uploadHost),

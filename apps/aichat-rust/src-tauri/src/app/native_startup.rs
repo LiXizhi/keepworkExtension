@@ -1,10 +1,13 @@
-//! A small OS-native launch window. No browser, document, or IPC bridge lives here.
+//! A small OS-native startup overlay rendered INSIDE the main window. No
+//! browser, document, or IPC bridge lives here, and no second OS window is
+//! created. The overlay covers the WebView until the trusted document is ready,
+//! then is removed in place. Creation and updates run on the Tauri main thread.
 //!
-//! Creation and updates run on the Tauri main thread. The window owns its
-//! controls and their callbacks, so hiding/reusing it does not detach actions.
+//! The action handler is registered once by the host and reused whenever the
+//! overlay re-appears (for example a manual reload after the page was ready).
 
-use std::sync::Arc;
-use tauri::{AppHandle, Manager, Theme, Window, WindowBuilder};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Manager, Theme, Window};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Action {
@@ -13,6 +16,8 @@ pub(super) enum Action {
 }
 
 type ActionHandler = Arc<dyn Fn(Action) + Send + Sync>;
+
+static HANDLER: Mutex<Option<ActionHandler>> = Mutex::new(None);
 
 // Match only startup-local shortcuts. Shift+Ctrl+R retains the previous
 // renderer's case-insensitive reload shortcut; Alt/Meta combinations belong to
@@ -29,41 +34,58 @@ fn shortcut_action(key: u32, control: bool, alt: bool, shift: bool, meta: bool) 
     }
 }
 
-pub(super) fn create(
+/// Register the host action handler and attach the overlay to the main window.
+pub(super) fn install(
     app: &AppHandle,
-    theme: Theme,
+    _theme: Theme,
     on_action: impl Fn(Action) + Send + Sync + 'static,
 ) -> Result<(), String> {
-    if app.get_window("startup").is_some() {
-        return Ok(());
-    }
-    let builder = WindowBuilder::new(app, "startup")
-        .title("KeepWork 第二大脑")
-        .inner_size(360.0, 176.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .theme(Some(theme))
-        .center()
-        .visible(false)
-        .focused(false);
-    #[cfg(target_os = "macos")]
-    let builder = builder
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true);
-    let window = builder.build().map_err(|error| error.to_string())?;
-    if let Err(error) = platform::install(&window, Arc::new(on_action)) {
-        let _ = window.destroy();
-        return Err(error);
-    }
-    Ok(())
+    *HANDLER.lock().unwrap() = Some(Arc::new(on_action));
+    attach(app)
 }
 
-pub(super) fn update(app: &AppHandle, failed: bool) -> Result<(), String> {
+fn attach(app: &AppHandle) -> Result<(), String> {
     let window = app
-        .get_window("startup")
-        .ok_or("Native startup window is unavailable")?;
+        .get_window("main")
+        .ok_or("Native startup requires the main window")?;
+    if platform::is_installed(&window) {
+        return Ok(());
+    }
+    let handler = HANDLER
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Native startup handler is unavailable")?;
+    platform::install(&window, handler)
+}
+
+/// Update the overlay, re-attaching it if a new attempt began after readiness.
+pub(super) fn update(app: &AppHandle, failed: bool) -> Result<(), String> {
+    let Some(window) = app.get_window("main") else {
+        return Ok(());
+    };
+    if !platform::is_installed(&window) {
+        attach(app)?;
+    }
     platform::update(&window, failed)
+}
+
+/// Remove the overlay in place once the trusted document is ready.
+pub(super) fn remove(app: &AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_window("main") else {
+        return Ok(());
+    };
+    if !platform::is_installed(&window) {
+        return Ok(());
+    }
+    platform::remove(&window)?;
+    #[cfg(not(target_os = "macos"))]
+    if window.is_focused().unwrap_or(false) {
+        if let Some(webview) = app.get_webview("main") {
+            let _ = webview.set_focus();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -95,6 +117,15 @@ mod platform {
             release: extern "C" fn(*mut c_void),
         ) -> bool;
         fn keepwork_startup_update(window: *mut c_void, failed: bool) -> bool;
+        fn keepwork_startup_remove(window: *mut c_void) -> bool;
+        fn keepwork_startup_is_installed(window: *mut c_void) -> bool;
+    }
+
+    pub(super) fn is_installed(window: &Window) -> bool {
+        window
+            .ns_window()
+            .map(|native| unsafe { keepwork_startup_is_installed(native) })
+            .unwrap_or(false)
     }
 
     pub(super) fn install(window: &Window, handler: ActionHandler) -> Result<(), String> {
@@ -116,13 +147,27 @@ mod platform {
             Err("Cannot update native startup controls".into())
         }
     }
+
+    pub(super) fn remove(window: &Window) -> Result<(), String> {
+        let native = window.ns_window().map_err(|error| error.to_string())?;
+        if unsafe { keepwork_startup_remove(native) } {
+            Ok(())
+        } else {
+            Err("Cannot remove native startup controls".into())
+        }
+    }
 }
 
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows_sys::Win32::Graphics::Gdi::{GetStockObject, DEFAULT_GUI_FONT};
+    use std::sync::Once;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{
+        FillRect, GetStockObject, GetSysColor, GetSysColorBrush, ScreenToClient, SetBkMode,
+        SetTextColor, COLOR_WINDOW, COLOR_WINDOWTEXT, DEFAULT_GUI_FONT, TRANSPARENT,
+    };
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::SystemServices::SS_CENTER;
     use windows_sys::Win32::UI::Controls::{
         InitCommonControlsEx, ICC_PROGRESS_CLASS, INITCOMMONCONTROLSEX, PBM_SETMARQUEE, PBS_MARQUEE,
@@ -138,13 +183,137 @@ mod platform {
     const PROGRESS: i32 = 4103;
     const RETRY: i32 = 4104;
     const HIDE: i32 = 4105;
-    const SUBCLASS: usize = 0x4b575350;
+    const CAP_MIN: i32 = 4106;
+    const CAP_MAX: i32 = 4107;
+    const CAP_CLOSE: i32 = 4108;
+    const PANEL_SUBCLASS: usize = 0x4b575350;
+    const BUTTON_SUBCLASS: usize = 0x4b575351;
+    const PARENT_SUBCLASS: usize = 0x4b575352;
+    const CLASS_NAME: &str = "KeepworkStartupPanel";
 
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(Some(0)).collect()
     }
 
-    unsafe extern "system" fn window_proc(
+    fn panel(hwnd: HWND) -> HWND {
+        unsafe {
+            FindWindowExW(
+                hwnd,
+                std::ptr::null_mut(),
+                wide(CLASS_NAME).as_ptr(),
+                std::ptr::null(),
+            )
+        }
+    }
+
+    fn register_class() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| unsafe {
+            let class_name = wide(CLASS_NAME);
+            let class = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                style: CS_HREDRAW | CS_VREDRAW,
+                lpfnWndProc: Some(DefWindowProcW),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: GetModuleHandleW(std::ptr::null()) as _,
+                hIcon: std::ptr::null_mut(),
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                hbrBackground: GetSysColorBrush(COLOR_WINDOW),
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class_name.as_ptr(),
+                hIconSm: std::ptr::null_mut(),
+            };
+            RegisterClassExW(&class);
+        });
+    }
+
+    // Center the identity group and the failure action row in the full client
+    // area; keep a native caption row aligned to the 34px HTML titlebar so the
+    // window can be moved, minimized, maximized and closed before chat loads.
+    fn layout_controls(hwnd: HWND) {
+        unsafe {
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            GetClientRect(hwnd, &mut rect);
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            let scale = GetWindowLongPtrW(hwnd, GWLP_USERDATA).max(1000) as f64 / 1000.0;
+            let px = |value: i32| (value as f64 * scale).round() as i32;
+            let move_to = |id: i32, x: i32, y: i32, w: i32, h: i32| {
+                let control = GetDlgItem(hwnd, id);
+                if !control.is_null() {
+                    MoveWindow(control, x, y, px(w), px(h), 1);
+                }
+            };
+            move_to(CAP_CLOSE, width - px(46), px(3), 42, 28);
+            move_to(CAP_MAX, width - px(90), px(3), 42, 28);
+            move_to(CAP_MIN, width - px(134), px(3), 42, 28);
+            let center_y = height / 2;
+            move_to(TITLE, (width - px(320)) / 2, center_y - px(46), 320, 26);
+            move_to(SUMMARY, (width - px(360)) / 2, center_y - px(12), 360, 32);
+            move_to(PROGRESS, (width - px(120)) / 2, center_y + px(30), 120, 5);
+            let row_left = (width - px(180)) / 2;
+            move_to(HIDE, row_left, center_y + px(56), 84, 30);
+            move_to(RETRY, row_left + px(96), center_y + px(56), 84, 30);
+        }
+    }
+
+    unsafe extern "system" fn parent_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        let result = DefSubclassProc(hwnd, message, wparam, lparam);
+        if message == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(parent_proc), PARENT_SUBCLASS);
+        } else if message == WM_SIZE || message == WM_DPICHANGED {
+            let child = panel(hwnd);
+            if !child.is_null() {
+                if message == WM_DPICHANGED {
+                    SetWindowLongPtrW(
+                        child,
+                        GWLP_USERDATA,
+                        ((wparam & 0xffff) * 1000 / 96) as isize,
+                    );
+                }
+                let mut rect: RECT = std::mem::zeroed();
+                GetClientRect(hwnd, &mut rect);
+                SetWindowPos(
+                    child,
+                    HWND_TOP,
+                    0,
+                    0,
+                    rect.right,
+                    rect.bottom,
+                    SWP_NOACTIVATE,
+                );
+            }
+        } else if message == WM_NCHITTEST {
+            let child = panel(hwnd);
+            if !child.is_null() {
+                let mut point = POINT {
+                    x: (lparam as i32 & 0xffff) as i16 as i32,
+                    y: ((lparam as i32) >> 16) as i16 as i32,
+                };
+                ScreenToClient(hwnd, &mut point);
+                let scale = GetWindowLongPtrW(child, GWLP_USERDATA).max(1000) as f64 / 1000.0;
+                if point.y >= 0 && point.y < (34.0 * scale) as i32 {
+                    return HTCAPTION as LRESULT;
+                }
+            }
+        }
+        result
+    }
+
+    unsafe extern "system" fn button_proc(
         hwnd: HWND,
         message: u32,
         wparam: WPARAM,
@@ -153,7 +322,37 @@ mod platform {
         data: usize,
     ) -> LRESULT {
         if message == WM_NCDESTROY {
-            RemoveWindowSubclass(hwnd, Some(window_proc), SUBCLASS);
+            RemoveWindowSubclass(hwnd, Some(button_proc), BUTTON_SUBCLASS);
+            drop(Box::from_raw(data as *mut ActionHandler));
+            return DefSubclassProc(hwnd, message, wparam, lparam);
+        }
+        if message == WM_KEYDOWN {
+            let action = shortcut_action(
+                wparam as u32,
+                GetKeyState(VK_CONTROL as i32) < 0,
+                GetKeyState(VK_MENU as i32) < 0,
+                GetKeyState(VK_SHIFT as i32) < 0,
+                GetKeyState(VK_LWIN as i32) < 0 || GetKeyState(VK_RWIN as i32) < 0,
+            );
+            if let Some(action) = action {
+                let callback = (&*(data as *const ActionHandler)).clone();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(action)));
+                return 0;
+            }
+        }
+        DefSubclassProc(hwnd, message, wparam, lparam)
+    }
+
+    unsafe extern "system" fn panel_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        data: usize,
+    ) -> LRESULT {
+        if message == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(panel_proc), PANEL_SUBCLASS);
             drop(Box::from_raw(data as *mut ActionHandler));
             return DefSubclassProc(hwnd, message, wparam, lparam);
         }
@@ -166,29 +365,104 @@ mod platform {
                 GetKeyState(VK_LWIN as i32) < 0 || GetKeyState(VK_RWIN as i32) < 0,
             )
         } else if message == WM_COMMAND && (wparam >> 16) == BN_CLICKED as usize {
-            let command = (wparam & 0xffff) as i32;
-            match command {
+            match (wparam & 0xffff) as i32 {
                 RETRY => Some(Action::Retry),
-                HIDE => Some(Action::Hide),
+                HIDE | CAP_CLOSE => Some(Action::Hide),
+                CAP_MIN => {
+                    ShowWindow(GetParent(hwnd), SW_MINIMIZE);
+                    None
+                }
+                CAP_MAX => {
+                    let parent = GetParent(hwnd);
+                    let mut placement = WINDOWPLACEMENT {
+                        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                        ..std::mem::zeroed()
+                    };
+                    if GetWindowPlacement(parent, &mut placement) != 0 {
+                        let command = if placement.showCmd == SW_SHOWMAXIMIZED as u32 {
+                            SW_RESTORE
+                        } else {
+                            SW_MAXIMIZE
+                        };
+                        ShowWindow(parent, command);
+                    }
+                    None
+                }
                 _ => None,
             }
         } else {
             None
         };
         if let Some(action) = action {
-            // Clone before calling out: the action may synchronously hide or
-            // destroy this native window and release its own handler.
+            // Clone before calling out: the action may synchronously destroy
+            // this panel and release its own handler.
             let callback = (&*(data as *const ActionHandler)).clone();
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(action)));
             return 0;
         }
-        DefSubclassProc(hwnd, message, wparam, lparam)
+        match message {
+            WM_SIZE => {
+                layout_controls(hwnd);
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
+            WM_ERASEBKGND => {
+                let mut rect = RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                };
+                GetClientRect(hwnd, &mut rect);
+                FillRect(wparam as _, &rect, GetSysColorBrush(COLOR_WINDOW));
+                1
+            }
+            WM_CTLCOLORSTATIC => {
+                SetTextColor(wparam as _, GetSysColor(COLOR_WINDOWTEXT));
+                SetBkMode(wparam as _, TRANSPARENT as i32);
+                GetSysColorBrush(COLOR_WINDOW) as LRESULT
+            }
+            WM_NCHITTEST => {
+                // Drag by the caption strip; the rest stays client so buttons
+                // and the future HTML titlebar keep their own hit testing.
+                let result = DefSubclassProc(hwnd, message, wparam, lparam);
+                let y = ((lparam as i32) >> 16) as i16;
+                let mut rect = RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                };
+                GetClientRect(hwnd, &mut rect);
+                let mut point = POINT {
+                    x: ((lparam as i32) & 0xffff) as i16 as i32,
+                    y: y as i32,
+                };
+                ScreenToClient(hwnd, &mut point);
+                let scale = GetWindowLongPtrW(hwnd, GWLP_USERDATA).max(1000) as f64 / 1000.0;
+                if point.y >= 0 && point.y < (34.0 * scale) as i32 && result == HTCLIENT as LRESULT
+                {
+                    // Let the top-level window handle caption dragging.
+                    HTTRANSPARENT as LRESULT
+                } else {
+                    result
+                }
+            }
+            _ => DefSubclassProc(hwnd, message, wparam, lparam),
+        }
+    }
+
+    pub(super) fn is_installed(window: &Window) -> bool {
+        window
+            .hwnd()
+            .map(|hwnd| !panel(hwnd.0 as HWND).is_null())
+            .unwrap_or(false)
     }
 
     pub(super) fn install(window: &Window, handler: ActionHandler) -> Result<(), String> {
         let hwnd = window.hwnd().map_err(|error| error.to_string())?.0 as HWND;
         let scale = window.scale_factor().map_err(|error| error.to_string())?;
         let px = |value: i32| (value as f64 * scale).round() as i32;
+        register_class();
         unsafe {
             let common = INITCOMMONCONTROLSEX {
                 dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -197,6 +471,37 @@ mod platform {
             if InitCommonControlsEx(&common) == 0 {
                 return Err("Cannot initialize native startup progress control".into());
             }
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            GetClientRect(hwnd, &mut rect);
+            let panel_hwnd = CreateWindowExW(
+                0,
+                wide(CLASS_NAME).as_ptr(),
+                std::ptr::null(),
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                0,
+                0,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                hwnd,
+                std::ptr::null_mut(),
+                GetModuleHandleW(std::ptr::null()),
+                std::ptr::null(),
+            );
+            if panel_hwnd.is_null() {
+                return Err("Cannot create native startup panel".into());
+            }
+            SetWindowLongPtrW(panel_hwnd, GWLP_USERDATA, (scale * 1000.0).round() as isize);
+            if SetWindowSubclass(hwnd, Some(parent_proc), PARENT_SUBCLASS, 0) == 0 {
+                DestroyWindow(panel_hwnd);
+                return Err("Cannot resize native startup panel".into());
+            }
+            // Keep the panel above the WebView2 child HWND.
+            SetWindowPos(panel_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             let child = |class: &str, text: &str, style: u32, id: i32, rect: [i32; 4]| {
                 let control = CreateWindowExW(
                     0,
@@ -207,7 +512,7 @@ mod platform {
                     px(rect[1]),
                     px(rect[2]),
                     px(rect[3]),
-                    hwnd,
+                    panel_hwnd,
                     id as _,
                     std::ptr::null_mut(),
                     std::ptr::null(),
@@ -227,64 +532,115 @@ mod platform {
                 "KeepWork 第二大脑",
                 SS_CENTER as u32,
                 TITLE,
-                [24, 30, 312, 26],
+                [0, 0, 320, 26],
             );
             let summary = child(
                 "STATIC",
                 "正在准备工作台…",
                 SS_CENTER as u32,
                 SUMMARY,
-                [24, 64, 312, 32],
+                [0, 0, 360, 32],
             );
             let progress = child(
                 "msctls_progress32",
                 "",
                 PBS_MARQUEE,
                 PROGRESS,
-                [120, 108, 120, 5],
+                [0, 0, 120, 5],
             );
             let retry = child(
                 "BUTTON",
                 "重试",
                 WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
                 RETRY,
-                [248, 126, 84, 30],
+                [0, 0, 84, 30],
             );
             let hide = child(
                 "BUTTON",
                 "稍后",
                 WS_TABSTOP | BS_PUSHBUTTON as u32,
                 HIDE,
-                [156, 126, 84, 30],
+                [0, 0, 84, 30],
             );
-            if [title, summary, progress, retry, hide]
-                .iter()
-                .any(|control| control.is_null())
+            let cap_min = child(
+                "BUTTON",
+                "—",
+                WS_TABSTOP | BS_PUSHBUTTON as u32,
+                CAP_MIN,
+                [0, 0, 42, 28],
+            );
+            let cap_max = child(
+                "BUTTON",
+                "□",
+                WS_TABSTOP | BS_PUSHBUTTON as u32,
+                CAP_MAX,
+                [0, 0, 42, 28],
+            );
+            let cap_close = child(
+                "BUTTON",
+                "✕",
+                WS_TABSTOP | BS_PUSHBUTTON as u32,
+                CAP_CLOSE,
+                [0, 0, 42, 28],
+            );
+            if [
+                title, summary, progress, retry, hide, cap_min, cap_max, cap_close,
+            ]
+            .iter()
+            .any(|control| control.is_null())
             {
+                RemoveWindowSubclass(hwnd, Some(parent_proc), PARENT_SUBCLASS);
+                DestroyWindow(panel_hwnd);
                 return Err("Cannot create native startup controls".into());
             }
             ShowWindow(retry, SW_HIDE);
             ShowWindow(hide, SW_HIDE);
             SendMessageW(progress, PBM_SETMARQUEE, 1, 30);
-            // A focused BUTTON receives its own key messages. Keep the same
-            // local shortcuts on each focusable startup control, with separate
-            // ownership released by that exact HWND's WM_NCDESTROY.
-            for target in [hwnd, retry, hide] {
+            let panel_callback = Box::into_raw(Box::new(handler.clone()));
+            if SetWindowSubclass(
+                panel_hwnd,
+                Some(panel_proc),
+                PANEL_SUBCLASS,
+                panel_callback as usize,
+            ) == 0
+            {
+                drop(Box::from_raw(panel_callback));
+                RemoveWindowSubclass(hwnd, Some(parent_proc), PARENT_SUBCLASS);
+                DestroyWindow(panel_hwnd);
+                return Err("Cannot connect native startup panel".into());
+            }
+            // A focused BUTTON receives its own key messages; keep the same
+            // local shortcuts on each focusable control, released by its HWND.
+            for target in [retry, hide, cap_min, cap_max, cap_close] {
                 let callback = Box::into_raw(Box::new(handler.clone()));
-                if SetWindowSubclass(target, Some(window_proc), SUBCLASS, callback as usize) == 0 {
+                if SetWindowSubclass(
+                    target,
+                    Some(button_proc),
+                    BUTTON_SUBCLASS,
+                    callback as usize,
+                ) == 0
+                {
                     drop(Box::from_raw(callback));
+                    RemoveWindowSubclass(hwnd, Some(parent_proc), PARENT_SUBCLASS);
+                    DestroyWindow(panel_hwnd);
                     return Err("Cannot connect native startup controls".into());
                 }
             }
+            layout_controls(panel_hwnd);
+            SetFocus(panel_hwnd);
         }
         Ok(())
     }
 
     pub(super) fn update(window: &Window, failed: bool) -> Result<(), String> {
         let hwnd = window.hwnd().map_err(|error| error.to_string())?.0 as HWND;
+        let panel_hwnd = panel(hwnd);
+        if panel_hwnd.is_null() {
+            return Err("Native startup panel is unavailable".into());
+        }
         unsafe {
             SetWindowTextW(
-                GetDlgItem(hwnd, TITLE),
+                GetDlgItem(panel_hwnd, TITLE),
                 wide(if failed {
                     "暂时无法打开工作台"
                 } else {
@@ -293,7 +649,7 @@ mod platform {
                 .as_ptr(),
             );
             SetWindowTextW(
-                GetDlgItem(hwnd, SUMMARY),
+                GetDlgItem(panel_hwnd, SUMMARY),
                 wide(if failed {
                     "请检查网络或本地服务后重试。"
                 } else {
@@ -301,14 +657,29 @@ mod platform {
                 })
                 .as_ptr(),
             );
-            let progress = GetDlgItem(hwnd, PROGRESS);
+            let progress = GetDlgItem(panel_hwnd, PROGRESS);
             SendMessageW(progress, PBM_SETMARQUEE, (!failed) as WPARAM, 30);
             ShowWindow(progress, if failed { SW_HIDE } else { SW_SHOW });
             for id in [RETRY, HIDE] {
-                ShowWindow(GetDlgItem(hwnd, id), if failed { SW_SHOW } else { SW_HIDE });
+                ShowWindow(
+                    GetDlgItem(panel_hwnd, id),
+                    if failed { SW_SHOW } else { SW_HIDE },
+                );
             }
             if failed && window.is_focused().unwrap_or(false) {
-                SetFocus(GetDlgItem(hwnd, RETRY));
+                SetFocus(GetDlgItem(panel_hwnd, RETRY));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove(window: &Window) -> Result<(), String> {
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?.0 as HWND;
+        let panel_hwnd = panel(hwnd);
+        if !panel_hwnd.is_null() {
+            unsafe {
+                RemoveWindowSubclass(hwnd, Some(parent_proc), PARENT_SUBCLASS);
+                DestroyWindow(panel_hwnd);
             }
         }
         Ok(())
@@ -320,10 +691,94 @@ mod platform {
     use super::*;
     use gtk::prelude::*;
 
+    fn find(widget: gtk::Widget, name: &str) -> Option<gtk::Widget> {
+        if widget.widget_name() == name {
+            return Some(widget);
+        }
+        let container = widget.downcast::<gtk::Container>().ok()?;
+        container
+            .children()
+            .into_iter()
+            .find_map(|child| find(child, name))
+    }
+
+    pub(super) fn is_installed(window: &Window) -> bool {
+        window
+            .gtk_window()
+            .map(|native| find(native.upcast::<gtk::Widget>(), "keepwork-startup").is_some())
+            .unwrap_or(false)
+    }
+
     pub(super) fn install(window: &Window, handler: ActionHandler) -> Result<(), String> {
         let native = window.gtk_window().map_err(|error| error.to_string())?;
+        // Keep the WebView mapped while it loads; the native layer blocks
+        // painting and input without suspending the document's ready callback.
+        let host = match native.child() {
+            Some(child) if child.widget_name() == "keepwork-startup-host" => child
+                .downcast::<gtk::Overlay>()
+                .map_err(|_| "Unsupported native startup host")?,
+            Some(child) => {
+                let host = gtk::Overlay::new();
+                host.set_widget_name("keepwork-startup-host");
+                native.remove(&child);
+                host.add(&child);
+                native.add(&host);
+                host.show();
+                host
+            }
+            None => return Err("Missing native document container".into()),
+        };
+        let panel = gtk::EventBox::new();
+        panel.set_widget_name("keepwork-startup");
+        panel.set_can_focus(true);
+        panel.style_context().add_class("background");
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let caption = gtk::EventBox::new();
+        let caption_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        caption_row.set_size_request(-1, 34);
+        let title = gtk::Label::new(Some("KeepWork 第二大脑"));
+        title.set_margin_start(12);
+        caption_row.pack_start(&title, false, false, 0);
+        let minimize = gtk::Button::with_label("—");
+        let maximize = gtk::Button::with_label("□");
+        let close = gtk::Button::with_label("×");
+        let weak_window = native.downgrade();
+        minimize.connect_clicked(move |_| {
+            if let Some(window) = weak_window.upgrade() {
+                window.iconify();
+            }
+        });
+        let weak_window = native.downgrade();
+        maximize.connect_clicked(move |_| {
+            if let Some(window) = weak_window.upgrade() {
+                if window.is_maximized() {
+                    window.unmaximize();
+                } else {
+                    window.maximize();
+                }
+            }
+        });
+        let on_close = handler.clone();
+        close.connect_clicked(move |_| on_close(Action::Hide));
+        caption_row.pack_end(&close, false, false, 0);
+        caption_row.pack_end(&maximize, false, false, 0);
+        caption_row.pack_end(&minimize, false, false, 0);
+        caption.add(&caption_row);
+        let weak_window = native.downgrade();
+        caption.connect_button_press_event(move |_, event| {
+            if event.button() == 1 {
+                if let Some(window) = weak_window.upgrade() {
+                    let (x, y) = event.root();
+                    window.begin_move_drag(1, x as i32, y as i32, event.time());
+                }
+                gtk::glib::Propagation::Stop
+            } else {
+                gtk::glib::Propagation::Proceed
+            }
+        });
+        body.pack_start(&caption, false, false, 0);
         let on_key = handler.clone();
-        native.connect_key_press_event(move |_, event| {
+        panel.connect_key_press_event(move |_, event| {
             let key = match event.keyval() {
                 gtk::gdk::keys::constants::Escape => 27,
                 gtk::gdk::keys::constants::R | gtk::gdk::keys::constants::r => 82,
@@ -349,7 +804,6 @@ mod platform {
             }
         });
         let layout = gtk::Box::new(gtk::Orientation::Vertical, 20);
-        layout.set_widget_name("keepwork-startup");
         layout.set_halign(gtk::Align::Center);
         layout.set_valign(gtk::Align::Center);
         layout.set_margin_start(28);
@@ -395,30 +849,14 @@ mod platform {
         identity.pack_start(&text, true, true, 0);
         layout.pack_start(&identity, false, false, 0);
         layout.pack_start(&buttons, false, false, 0);
-        // Tauri's native GTK window has no WebView child. Keep its existing
-        // container if present, since the runtime owns the window hierarchy.
-        if let Some(child) = native.child() {
-            let container = child
-                .downcast::<gtk::Container>()
-                .map_err(|_| "Unsupported native startup container")?;
-            container.add(&layout);
-        } else {
-            native.add(&layout);
-        }
-        layout.show_all();
+        body.pack_start(&layout, true, true, 0);
+        panel.add(&body);
+        host.add_overlay(&panel);
+        host.set_overlay_pass_through(&panel, false);
+        panel.show_all();
         buttons.hide();
+        panel.grab_focus();
         Ok(())
-    }
-
-    fn find(widget: gtk::Widget, name: &str) -> Option<gtk::Widget> {
-        if widget.widget_name() == name {
-            return Some(widget);
-        }
-        let container = widget.downcast::<gtk::Container>().ok()?;
-        container
-            .children()
-            .into_iter()
-            .find_map(|child| find(child, name))
     }
 
     pub(super) fn update(window: &Window, failed: bool) -> Result<(), String> {
@@ -450,15 +888,34 @@ mod platform {
         }
         Ok(())
     }
+
+    pub(super) fn remove(window: &Window) -> Result<(), String> {
+        let root = window
+            .gtk_window()
+            .map_err(|error| error.to_string())?
+            .upcast::<gtk::Widget>();
+        if let Some(panel) = find(root, "keepwork-startup") {
+            // The shortcut signal belongs to this widget, not the main window;
+            // destroying it releases the handler before the page takes focus.
+            unsafe { panel.destroy() };
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod platform {
     use super::*;
+    pub(super) fn is_installed(_: &Window) -> bool {
+        false
+    }
     pub(super) fn install(_: &Window, _: ActionHandler) -> Result<(), String> {
         Err("Native startup controls are unavailable on this platform".into())
     }
     pub(super) fn update(_: &Window, _: bool) -> Result<(), String> {
+        Err("Native startup controls are unavailable on this platform".into())
+    }
+    pub(super) fn remove(_: &Window) -> Result<(), String> {
         Err("Native startup controls are unavailable on this platform".into())
     }
 }

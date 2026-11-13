@@ -33,10 +33,38 @@ function eventTarget() {
   };
 }
 
-function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUrl, readyState = "loading", subframe = false, root = null, invoke, onVerifiedEntry } = {}) {
+function pageNode(values = {}) {
+  const node = Object.assign(values, eventTarget());
+  const attributes = new Map(Object.entries(values.attributes || {}));
+  node.childElementCount ??= 0;
+  node.textContent ??= "";
+  node.dataset ??= {};
+  node.style ??= { display: "block", visibility: "visible" };
+  node.queries ??= new Map();
+  node.getAttribute = name => {
+    if (name === "data-workbench-ready" && Object.hasOwn(node.dataset, "workbenchReady")) return node.dataset.workbenchReady;
+    return attributes.has(name) ? attributes.get(name) : null;
+  };
+  node.setAttribute = (name, value) => attributes.set(name, String(value));
+  node.removeAttribute = name => attributes.delete(name);
+  node.querySelectorAll = selector => node.queries.get(selector) || [];
+  node.querySelector = selector => node.querySelectorAll(selector)[0] || null;
+  node.closest = () => node.hidden || node.hiddenAncestor || attributes.has("hidden") || attributes.get("aria-hidden") === "true" ? node : null;
+  node.getClientRects = () => node.hasLayout === false ? [] : [{ width: 640, height: 480 }];
+  node.layoutReads = 0;
+  node.getBoundingClientRect = () => { node.layoutReads++; return { width: 640, height: 480 }; };
+  return node;
+}
+
+function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUrl, readyState = "loading", subframe = false, root = null, invoke, onVerifiedEntry,
+  marker, progress = false, styles = [], dialogs = [], elements = {}, fonts = Object.assign(eventTarget(), { status: "loaded" }),
+} = {}) {
   const calls = [];
   const observers = [];
-  const window = Object.assign(eventTarget(), { location: new URL(url) });
+  const window = Object.assign(eventTarget(), {
+    location: new URL(url), getComputedStyle: node => node.style,
+    matchMedia: media => ({ matches: media !== "print" }),
+  });
   window.top = subframe ? {} : window;
   window.__TAURI_INTERNALS__ = {
     invoke(command, args) {
@@ -44,7 +72,16 @@ function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUr
       return invoke ? invoke(command, args) : Promise.resolve(command === "desktop_page_connection_attempt" ? 7 : true);
     },
   };
-  const document = Object.assign(eventTarget(), { readyState, getElementById: id => id === "app" ? root : null });
+  const byId = new Map(Object.entries(elements));
+  if (root) byId.set("app", pageNode(root));
+  if (progress) byId.set("startup-progress", pageNode());
+  const documentElement = pageNode();
+  if (marker !== undefined) documentElement.dataset.workbenchReady = marker;
+  const document = Object.assign(eventTarget(), {
+    readyState, documentElement, fonts,
+    getElementById: id => byId.get(id) || null,
+    querySelectorAll: selector => selector === 'link[rel~="stylesheet"]' ? styles : dialogs,
+  });
   class MutationObserver {
     constructor(callback) { this.callback = callback; this.connected = false; observers.push(this); }
     observe(target, options) { this.target = target; this.options = options; this.connected = true; }
@@ -56,7 +93,8 @@ function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUr
   vm.runInNewContext(`${source}\ninstallPageConnection(${JSON.stringify(privateToken)}, ${JSON.stringify(recoveryUrl)}${onVerifiedEntry ? ", onVerifiedEntry" : ""});`, {
     window, document, MutationObserver, onVerifiedEntry,
   });
-  return { window, document, calls, observers, mutate() { observers.forEach(observer => observer.fire()); } };
+  return { window, document, calls, observers, elements: byId, styles, dialogs, fonts,
+    mutate() { observers.forEach(observer => observer.fire()); } };
 }
 
 test("document readiness is injected into older chat pages without adding recovery listeners", async () => {
@@ -89,7 +127,7 @@ test("already loaded documents report readiness and a rejected report stays boun
   await settle();
   assert.equal(page.calls.length, 2);
   assert.equal(page.calls[1].command, "desktop_main_document_ready");
-  assert.equal(page.document.listeners.has("DOMContentLoaded"), false);
+  assert.equal((page.document.listeners.get("DOMContentLoaded") || []).length, 0);
 });
 
 test("DOMContentLoaded waits for the captured attempt ticket instead of using a later generation", async () => {
@@ -185,7 +223,7 @@ test("known AIChat documents with an empty app wait for rendering instead of acc
     await settle();
     assert.equal(page.calls.length, 1, url);
     assert.equal(page.observers.length, 1);
-    assert.equal(page.observers[0].target, root);
+    assert.equal(page.observers[0].target, page.document.documentElement, "observe the marker and progress element outside #app too");
     assert.equal(page.observers[0].options.childList, true);
     assert.equal(page.observers[0].options.characterData, true);
     page.mutate();
@@ -206,12 +244,12 @@ test("known AIChat documents with an empty app wait for rendering instead of acc
   }
 });
 
-test("rendered child elements or nonempty text accept the known app without waiting for further network resources", async () => {
+test("older rendered layouts or nonempty error UI remain usable without a new readiness marker", async () => {
   for (const root of [{ childElementCount: 1, textContent: "" }, { childElementCount: 0, textContent: "登录提示" }]) {
     const page = injectedPage({ root, readyState: "interactive" });
     await settle();
     assert.equal(page.calls.length, 2);
-    assert.equal(page.observers.length, 0);
+    assert.equal(page.observers[0].connected, false);
   }
   const root = { childElementCount: 0, textContent: "" };
   const loading = injectedPage({ root });
@@ -240,8 +278,153 @@ test("legacy documents with no app root and unknown custom layouts retain DOM re
     const page = injectedPage({ url, root, readyState: "complete" });
     await settle();
     assert.equal(page.calls.length, 2, url);
-    assert.equal(page.observers.length, 0, url);
+    assert.equal(page.observers[0].connected, false, url);
   }
+});
+
+test("an existing loading shell waits for the workbench marker and removal of startup progress", async () => {
+  const root = { childElementCount: 1, textContent: "Loading workspace…" };
+  const page = injectedPage({ root, marker: "false", progress: true, readyState: "complete" });
+  await settle();
+  assert.equal(page.calls.length, 1, "the first child in #app is not a completed first screen");
+  page.document.documentElement.dataset.workbenchReady = "true";
+  page.mutate();
+  await settle();
+  assert.equal(page.calls.length, 1, "the boot progress element must disappear too");
+  root.textContent = "Workspace actions";
+  page.elements.delete("startup-progress");
+  page.mutate();
+  await settle();
+  assert.equal(page.calls.length, 2);
+  assert.equal(page.calls[1].command, "desktop_main_document_ready");
+  assert.equal(page.observers[0].connected, false);
+  assert.ok(page.document.documentElement.layoutReads > 0, "prepare layout before revealing the hidden window");
+  assert.ok(page.observers[0].options.attributeFilter.includes("data-workbench-ready"));
+});
+
+test("older pages reject a busy root, loading-only placeholder, and an empty chat shell", async () => {
+  const placeholders = ':scope > [role="progressbar"], :scope > [aria-busy="true"], :scope > .loading, :scope > .spinner';
+  for (const busyRoot of [true, false]) {
+    const root = { childElementCount: 1, textContent: "Loading…", queries: new Map() };
+    if (busyRoot) root.attributes = { "aria-busy": "true" };
+    else root.queries.set(placeholders, [pageNode()]);
+    const page = injectedPage({ root, readyState: "complete" });
+    await settle();
+    assert.equal(page.calls.length, 1);
+    root.removeAttribute("aria-busy");
+    root.queries.delete(placeholders);
+    const chat = pageNode();
+    root.queries.set(".app-shell", [pageNode()]);
+    root.queries.set(".scenario-pane.active", [pageNode({ id: "paneChat" })]);
+    page.elements.set("chatMessages", chat);
+    page.mutate();
+    await settle();
+    assert.equal(page.calls.length, 1, "a mounted shell with no initial chat content stays hidden");
+    chat.textContent = "Start a new conversation";
+    page.mutate();
+    await settle();
+    assert.equal(page.calls.length, 2, "a completed legacy first screen remains compatible without a marker");
+  }
+});
+
+test("current first-screen stylesheet and fonts finish before readiness and their listeners are released", async () => {
+  const stylesheet = pageNode({ sheet: null });
+  const fonts = Object.assign(eventTarget(), { status: "loading" });
+  const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", styles: [stylesheet], fonts, readyState: "complete" });
+  await settle();
+  assert.equal(page.calls.length, 1);
+  stylesheet.sheet = {};
+  stylesheet.fire("load");
+  await settle();
+  assert.equal(page.calls.length, 1, "a ready document still waits for its current fonts");
+  fonts.status = "loaded";
+  fonts.fire("loadingdone");
+  await settle();
+  assert.equal(page.calls.length, 2);
+  for (const event of ["load", "error"]) assert.equal(stylesheet.listeners.get(event).length, 0);
+  for (const event of ["loadingdone", "loadingerror"]) assert.equal(fonts.listeners.get(event).length, 0);
+  assert.equal(page.observers[0].connected, false);
+  page.mutate();
+  stylesheet.fire("load");
+  fonts.fire("loadingdone");
+  await settle();
+  assert.equal(page.calls.length, 2, "readiness is one-shot and does not keep watching an opened chat");
+});
+
+test("failed critical CSS stays unready for native timeout recovery instead of showing an unstyled workspace", async () => {
+  const stylesheet = pageNode({ sheet: null });
+  const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", styles: [stylesheet], readyState: "complete" });
+  stylesheet.fire("error");
+  page.mutate();
+  await settle();
+  assert.equal(stylesheet.sheet, null, "a browser keeps failed stylesheet.sheet null");
+  assert.equal(page.calls.length, 1, "native owns the bounded 20-second failure/recovery path");
+  assert.equal(page.observers[0].connected, true);
+  page.window.fire("pagehide");
+  assert.equal(page.observers[0].connected, false);
+  assert.equal(stylesheet.listeners.get("error").length, 0);
+});
+
+test("disabled, nonmatching and already-loaded styles do not block older documents", async () => {
+  const styles = [pageNode({ sheet: null, disabled: true }), pageNode({ sheet: null, media: "print" }), pageNode({ sheet: {} })];
+  const page = injectedPage({ styles, fonts: null, readyState: "complete" });
+  await settle();
+  assert.equal(page.calls.length, 2);
+  assert.ok(styles.every(link => link.listeners.size === 0));
+});
+
+test("usable login and modal prompts can finish a boot that is waiting for user interaction", async () => {
+  for (const kind of ["login", "modal"]) {
+    const prompt = pageNode({ queries: new Map() });
+    prompt.queries.set(kind === "login" ? 'button:not([disabled])' : 'button:not([disabled]), input:not([disabled]), a[href]', [pageNode()]);
+    const page = injectedPage({ root: { childElementCount: 1 }, marker: "false", progress: true, readyState: "complete",
+      ...(kind === "login" ? { elements: { loginPromptBar: prompt } } : { dialogs: [prompt] }),
+    });
+    await settle();
+    assert.equal(page.calls.length, 2, `${kind} must be visible so the user can complete initialization`);
+  }
+});
+
+test("hidden or noninteractive prompts cannot reveal an incomplete workbench", async () => {
+  for (const hidden of [{ hidden: true }, { hiddenAncestor: true }, { style: { display: "none" } }, { style: { visibility: "hidden" } }, { hasLayout: false }, { noControl: true }]) {
+    const modal = pageNode({ ...hidden, queries: new Map() });
+    if (!hidden.noControl) modal.queries.set('button:not([disabled]), input:not([disabled]), a[href]', [pageNode()]);
+    const page = injectedPage({ root: { childElementCount: 1 }, marker: "false", progress: true, dialogs: [modal], readyState: "complete" });
+    await settle();
+    assert.equal(page.calls.length, 1, JSON.stringify(hidden));
+    page.window.fire("pagehide");
+  }
+});
+
+test("pagehide or a changed URL invalidates a delayed readiness ticket", async () => {
+  for (const invalidate of [page => page.window.fire("pagehide"), page => { page.window.location = new URL("https://keepwork.com/chat?different-document=1"); }]) {
+    let resolveAttempt;
+    const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", readyState: "complete",
+      invoke: command => command === "desktop_page_connection_attempt" ? new Promise(resolve => { resolveAttempt = resolve; }) : Promise.resolve(true),
+    });
+    invalidate(page);
+    resolveAttempt(7);
+    page.mutate();
+    await settle();
+    assert.equal(page.calls.length, 1, "an old document must not reveal itself after navigation");
+  }
+});
+
+test("a stylesheet added while the native ticket is pending is rechecked before revealing the page", async () => {
+  let resolveAttempt;
+  const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", readyState: "complete",
+    invoke: command => command === "desktop_page_connection_attempt" ? new Promise(resolve => { resolveAttempt = resolve; }) : Promise.resolve(true),
+  });
+  const stylesheet = pageNode({ sheet: null });
+  page.styles.push(stylesheet);
+  resolveAttempt(17);
+  await settle();
+  assert.equal(page.calls.length, 1);
+  stylesheet.sheet = {};
+  stylesheet.fire("load");
+  await settle();
+  assert.equal(page.calls.length, 2);
+  assert.equal(page.calls[1].args.generation, 17, "the captured attempt remains unchanged");
 });
 
 test("tool frames and login subframes never receive recovery controls or publish readiness", async () => {

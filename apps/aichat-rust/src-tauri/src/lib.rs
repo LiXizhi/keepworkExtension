@@ -25,6 +25,9 @@ pub mod theme;
 pub mod tray_channels;
 pub mod updates;
 
+#[cfg(test)]
+mod clipboard_acl_tests;
+
 mod app;
 
 pub use app::{

@@ -400,35 +400,6 @@ pub fn run() {
             let _ = setup_native_menu_and_tray(&app_handle, &core_for_setup);
             core_for_setup.remote_voice.start_automatic();
 
-            let app_for_startup = app_handle.clone();
-            let core_for_startup = Arc::clone(&core_for_setup);
-            native_startup::create(&app_handle, core_for_setup.theme.current().native(), move |action| {
-                match action {
-                    native_startup::Action::Retry => main_window::reload_main_window(&app_for_startup, &core_for_startup),
-                    native_startup::Action::Hide => {
-                        hide_main_window(&app_for_startup, &core_for_startup);
-                        if core_for_startup.settings().pet_visible {
-                            ensure_pet_window(&app_for_startup, &core_for_startup, true);
-                        }
-                    }
-                }
-            })?;
-            let app_for_startup_close = app_handle.clone();
-            let core_for_startup_close = Arc::clone(&core_for_setup);
-            if let Some(startup) = app_handle.get_window("startup") {
-                startup.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        if !core_for_startup_close.quitting.load(Ordering::Relaxed) {
-                            api.prevent_close();
-                            hide_main_window(&app_for_startup_close, &core_for_startup_close);
-                            if core_for_startup_close.settings().pet_visible {
-                                ensure_pet_window(&app_for_startup_close, &core_for_startup_close, true);
-                            }
-                        }
-                    }
-                });
-            }
-
             // Configure main window navigation guard, close-to-tray, and initialization script
             let entry_target = core_for_setup
                 .entry_url
@@ -553,6 +524,28 @@ pub fn run() {
             #[cfg(windows)]
             signal_launcher_webview_ready();
 
+            // The main window is the only startup surface: attach the native
+            // overlay inside it before the first runtime attempt, then reveal
+            // the window with the overlay covering the still-loading document.
+            let app_for_startup = app_handle.clone();
+            let core_for_startup = Arc::clone(&core_for_setup);
+            native_startup::install(
+                &app_handle,
+                core_for_setup.theme.current().native(),
+                move |action| match action {
+                    native_startup::Action::Retry => {
+                        main_window::reload_main_window(&app_for_startup, &core_for_startup)
+                    }
+                    native_startup::Action::Hide => {
+                        hide_main_window(&app_for_startup, &core_for_startup);
+                        if core_for_startup.settings().pet_visible {
+                            ensure_pet_window(&app_for_startup, &core_for_startup, true);
+                        }
+                    }
+                },
+            )?;
+            sync_window_presentation(&app_handle, false);
+
             if let Some(error) = initial_local_source_error.take() {
                 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
                 app_handle.dialog()
@@ -585,7 +578,7 @@ pub fn run() {
             let app_bg = app_handle.clone();
             let core_bg = Arc::clone(&core_for_setup);
             tauri::async_runtime::spawn(async move {
-                // The native startup window can paint while MCP initializes.
+                // The in-window native loading layer can paint while MCP initializes.
                 // Keep the daemon's first attempt before chat's first /health
                 // probe; an unavailable optional runtime still permits chat.
                 let _ = core_bg.mcp_supervisor.ensure_started(true).await;

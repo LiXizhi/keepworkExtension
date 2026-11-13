@@ -1,5 +1,38 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-13：初始化与工作台共用主窗口（0.2.101）
+
+启动改为在既有 `main` 窗口内显示原生加载层，就绪后原位移除；不创建独立 `startup` 窗口，也不替换主窗口或 WebView。初始化、失败提示和重试保持窗口位置与尺寸；关闭、稍后、后台启动及迟到就绪继续遵循原有隐藏意图。保留可信主文档回执、20 秒超时、自动重试上限与旧网页兼容规则，无需同时更新 AIChat 网页或 MCP。
+
+macOS 加载层绘制不透明且随主题变化的背景，移除后将键盘焦点交回实际 WKWebView；Win32 加载层随父窗口缩放和 DPI 变化更新，保留窗口操作并修复原生类名字节的生命周期；GTK 使用同窗覆盖层，快捷键随加载控件销毁，不在就绪后继续拦截。README 已统一为单窗口描述。
+
+实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建通过；Rust **232 通过 / 2 忽略 / 0 失败**；Node **431 通过 / 5 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-single-window-check-final.log`。
+- `pnpm --prefix apps/aichat-rust smoke`：5 套核心冒烟通过；真实 Tauri / AppKit / WKWebView 启动冒烟 **15 阶段通过**，包括同一主窗口及 WebView 身份、不透明覆盖、就绪文档焦点、后台隐藏、关闭 / Esc 后迟到就绪、真实 20 秒失败及原生重试。使用隔离配置档、非持久 WebView 与随机私有 Loopback，不连接共享 8089。日志 `/private/tmp/keepwork-single-window-smoke.log`。
+- `node --test apps/aichat-rust/tests/native-startup.test.cjs`：**4/4 通过**，包括真实离屏 AppKit / WKWebView、亮暗布局、不透明像素、窗口缩放、焦点恢复及加载层回调释放。
+- Windows `x86_64-pc-windows-msvc` 隔离 API 类型检查通过、零警告：使用真实 `windows-sys` 与最小 Tauri host stub，日志 `/private/tmp/keepwork-startup-wincheck.jV38Wu/check.log`。此检查不代表完整 Windows 构建或实机交互通过。Linux 仅静态复核。
+
+最初沙箱内完整检查因本地监听被禁止而失败；保留日志 `/private/tmp/keepwork-single-window-check.log`。允许测试创建临时本地服务后重新执行通过，没有修改监听策略或跳过失败测试。四处桌面产品版本同步为 **0.2.101**，`git diff --check` 通过。本轮未发布安装包或重启用户现有桌面进程；已安装包冷启动、真实用户焦点切换以及 Windows / Linux 窗口交互仍需单独验收。
+
+## 2026-11-13：原生剪贴板 ACL 与验证源码范围（本轮验收范围）
+
+本轮目标为桌面 `0.2.100` / Rust MCP `0.2.51`，按三角色流程处理原生剪贴板JS授权、共用证据脚本的生成目录误收及音频取消夹具的时序竞态。本段记录最小合同及回归范围，不预填最终完整检查或冒烟通过数，也不重写下方历史失败。
+
+Rust旧默认capability向main、pet、updates及配置的remote来源授予原生插件 `read-text`、`write-text`、`write-image`。这些插件命令直接操作原生剪贴板，不经过 `MediaGrants`；`withGlobalTauri:false` 也不等于阻止内部invoke。Electron参考没有向网页开放原生读取API。本轮撤销这三项未使用的JS allow，保留现有window/URL范围、Bridge v1方法及宿主插件注册，不扩大IPC或权限范围。
+
+验收要求：
+
+- 使用真实Tauri ACL resolver核对main/pet/updates以及既有本地/远程来源的插件读写请求被拒绝，并通过fake clipboard backend spy断言拒绝发生在实际后端访问之前；测试不读取、覆盖或清空用户真实系统剪贴板。
+- 旧/新网页均不能经插件命令绕过权限；普通网页 `navigator.clipboard`、操作系统允许的手动复制/粘贴，以及遥控器原生系统输入继续遵循各自已有规则。撤销未使用插件授权不代表已实现完整WebView媒体/剪贴板持久授权，也不能用单测代替真人复制验收。
+- 共用证据脚本只精确排除 `apps/aichat-rust/releases/` 生成目录；其中历史.app/DMG的增删改不改变相同源码的sourceHash。真实源码、配置、测试及其它属于源码的同名目录仍受指纹保护，最终安装包继续单独核对artifact大小与SHA-256。
+
+后续完整桌面检查实际暴露 `pet-audio-capture` 取消用例失败：旧夹具设置20ms的resume超时，却在Stop之前经过5次真实 `setImmediate`，不能保证Stop先于deadline。受控旧顺序驱动在先处理timeout时复现同一错误，属于合法超时先发生后被误断言为应无错误。测试改为每个夹具独立VM、手动timer和resume-entered屏障，分别验证Stop先发生时无错误、timeout先发生时一次错误，以及late resolve/reject、重复Stop、旧deadline不影响replacement。生产音频源码、resume超时与硬件输入策略未修改，不通过增加等待、放宽期限或忽略测试掩盖竞态。修前源码、旧顺序驱动及修后定向日志存入新证据根的 `regressions/`；最终完整检查仍待单独记录。
+
+MCP首次完整wire曾报告Claude累计输出上限用例在原5秒窗口仍running。恢复环境后，保持原25×100k输入、原期限和生产代码：新的idle observer观测约514ms进入failed、子进程退出、重复request未重放；原单用例约658ms结束，并覆盖其它session继续可用。这些是新身份与新回执下的独立诊断，未证明原完整失败属于生产缺陷或确定由负载导致，也不取代原失败。没有修改MCP源码、累计上限、原fixture或单用例期限；最终完整wire计划在大编译结束后使用 `--test-concurrency=1` 新执行，保留用例内部的并发断言。
+
+本轮新证据根为 `.tmp/rust-clipboard-recovery-20261113/`。原 `.test-runtime/rust-agents-clipboard-20261113/` 等目录在并行工作期间被未知来源清理，部分raw日志与原报告已无法取得；不再声称旧报告仍完整保存，也不对首次失败的未采信息补造归因。已从仍可取得的 `/private/tmp` 日志恢复桌面失败等证据，并在新根的 `regressions/`、`mcp-diagnostic/` 及incident记录中区分恢复件、缺失件和新诊断receipt；指纹红绿证据也按实际可恢复内容记录。新完整检查与冒烟需生成新源码指纹和独立回执，不将丢失、失败或pending结果重新标为通过。真实账号、Windows原生交互、系统权限提示与最终安装升级仍独立待验，本段不作共享8089已变更或已发布声明。
+
 ## 2026-11-13：Bridge 桌面安装语义与构建身份回归（本轮验收范围）
 
 本轮按产品、程序员与测试 Agent 流程处理两个已定位问题，目标版本为桌面 `0.2.98` / Rust MCP `0.2.49`；本段记录合同与待执行验收，不预填最终全量通过数。旧失败、既有版本与真实原生检查记录继续保留，不将早前通过结果移作本轮结果。

@@ -56,6 +56,7 @@ impl RuntimeSupervisor {
             .map_err(|error| error.to_string())?;
         let response = client
             .get(&self.config.feed_url)
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .send()
             .await
             .map_err(|error| format!("更新清单暂不可用：{error}"))?;
@@ -111,6 +112,7 @@ impl RuntimeSupervisor {
             let mut record = Self::load_active_record(&self.config.store_dir);
             record.latest_version = Some(remote.version.clone());
             record.latest_built_at = Some(remote.built_at.clone());
+            record.latest_source = Some(self.config.update_source());
             self.save_active_record(&record)?;
             if let Ok(mut status) = self.status.lock() {
                 status.latest_version = remote.version.clone();
