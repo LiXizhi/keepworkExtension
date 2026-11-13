@@ -27,6 +27,11 @@ on:
         description: Promote the stable CDN feed after release approval (default is review only)
         type: boolean
         default: false
+      acceptance:
+        description: required needs a complete acceptance report; deferred publishes with CI evidence and records the gates that need a real machine or account
+        type: choice
+        options: [required, deferred]
+        default: required
       package_path:
         description: Package directory inside the artifact
         type: string
@@ -97,10 +102,26 @@ jobs:
           TARGET: ${{ inputs.target }}
           VERSION: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
+          ACCEPTANCE: ${{ inputs.acceptance }}
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
         run: >-
           node apps/mcp-rust/scripts/publish-runtime.cjs
           --release-dir "accepted-runtime/$PACKAGE_PATH" --target "$TARGET"
           --version "$VERSION" --commit "$RELEASE_COMMIT"
-          --report "accepted-runtime/$REPORT_PATH" --publish true
+          --report "accepted-runtime/$REPORT_PATH" --acceptance "$ACCEPTANCE" --publish true
+      - name: Record the acceptance basis of this publication
+        run: |
+          if [ "${{ inputs.acceptance }}" = "deferred" ]; then
+            {
+              echo "### Acceptance deferred"
+              echo ""
+              echo "Published from CI evidence only. These gates need a real machine, account or interactive desktop and were not executed:"
+              echo ""
+              echo "- \`package-integrity\`, \`runtime-live-identity\`, \`runtime-update-rollback\`, \`compatibility-matrix\`, \`cli-live\`, \`messaging-live\`"
+              echo ""
+              echo "The publisher still verified the archive identity (version/commit/target/sourceHash) and the immutable bytes."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Published with a complete acceptance report." >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -141,6 +141,31 @@ test('missing, dirty, incomplete or wrong-archive evidence prevents even the fir
   await assert.rejects(publishRelease(release, {}, {}), /complete release acceptance/);
 });
 
+test('deferred acceptance publishes CI evidence and records every skipped gate', async t => {
+  const { release, report, reportFile, save } = fixture(t);
+  const executed = ['source-checks', 'fixture-contracts'];
+  for (const check of report.checks) if (!executed.includes(check.id)) {
+    check.status = 'pending'; check.evidence = []; delete check.evidenceSha256; delete check.requirements;
+    check.reason = 'Not executed for this report; source and fixture checks do not establish this acceptance result.';
+  }
+  report.overallStatus = 'pending'; save();
+  const strict = publication(release);
+  await assert.rejects(publishRelease(release, {}, { ...strict.dependencies, reportFile }), /incomplete/);
+  assert.deepEqual(strict.events, []);
+  const run = publication(release);
+  const result = await publishRelease(release, {}, { ...run.dependencies, reportFile, acceptance: 'deferred' });
+  assert.deepEqual(result.deferredGates.slice().sort(), ['cli-live', 'compatibility-matrix', 'messaging-live',
+    'package-integrity', 'runtime-live-identity', 'runtime-update-rollback'].sort());
+  assert.ok(run.events.includes('upload-feed'));
+
+  const downgraded = report.checks.find(check => check.id === 'source-checks');
+  downgraded.status = 'pending'; downgraded.reason = 'fixture pending gate';
+  report.overallStatus = 'pending'; save();
+  const blocked = publication(release);
+  await assert.rejects(publishRelease(release, {}, { ...blocked.dependencies, reportFile, acceptance: 'deferred' }), /cannot skip: source-checks/);
+  assert.deepEqual(blocked.events, []);
+});
+
 test('downgrades, same-version conflicts, unavailability and immutable-byte conflicts make no writes', async t => {
   const { release, reportFile } = fixture(t);
   for (const options of [{ previous: { ...release.metadata, version: '9.0.0' } },
