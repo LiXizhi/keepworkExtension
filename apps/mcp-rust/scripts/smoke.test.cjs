@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { runSmoke } = require('./smoke.cjs');
+const { runSmoke, samePath } = require('./smoke.cjs');
 
 const identity = { product: 'keepwork-mcp-runtime', engine: 'rust', version: '9.9.9-fixture', commit: 'f'.repeat(40) };
 
@@ -18,11 +18,12 @@ function fixture(t, mode = 'normal') {
     const args = process.argv.slice(2);
     const port = Number(args[args.indexOf('--port') + 1]);
     const root = args[args.indexOf('--root') + 1];
+    const nativeRoot = fs.realpathSync.native(root);
     const mode = process.env.KP_SMOKE_FIXTURE_MODE;
     const auth = process.env.KEEPWORK_MCP_REQUIRE_AUTH === '1';
     const token = 'isolated-smoke-token-' + process.pid;
     const record = row => fs.appendFileSync(process.env.KP_SMOKE_FIXTURE_JOURNAL, JSON.stringify(row) + '\\n');
-    record({kind:'start',pid:process.pid,profile:process.env.HOME,override:!!process.env.KEEPWORK_MCP_RUNTIME_VERSION});
+    record({kind:'start',pid:process.pid,profile:process.env.HOME,root,nativeRoot,override:!!process.env.KEEPWORK_MCP_RUNTIME_VERSION});
     process.on('exit', () => record({kind:'exit',pid:process.pid,profilePresent:fs.existsSync(process.env.HOME)}));
     process.on('SIGTERM', () => setTimeout(() => process.exit(0), 30));
     if (mode === 'early-exit') process.exit(3);
@@ -35,7 +36,7 @@ function fixture(t, mode = 'normal') {
         if (mode === 'hang-body') { res.writeHead(200,{'content-type':'application/json'}); res.write('{"ok":'); return; }
         if (mode === 'large-body') { res.end('x'.repeat(2*1024*1024)); return; }
         res.setHeader('content-type','application/json');
-        return res.end(JSON.stringify({ok:true,name:'keepwork-mcp',runtimeProduct:mode==='wrong-product'?'unrelated':'keepwork-mcp-runtime',runtimeEngine:mode==='wrong-engine'?'node':'rust',hostKind:'standalone',workspaceRoot:mode==='wrong-profile'?path.dirname(root):root,pid:mode==='replace-before-stop' && posts>=3 ? process.pid+1000 : process.pid,runtimeVersion:mode==='wrong-version'?'wrong':'9.9.9-fixture',runtimeCommit:mode==='wrong-commit'?'e'.repeat(40):'${identity.commit}',requireAuth:auth}));
+        return res.end(JSON.stringify({ok:true,name:'keepwork-mcp',runtimeProduct:mode==='wrong-product'?'unrelated':'keepwork-mcp-runtime',runtimeEngine:mode==='wrong-engine'?'node':'rust',hostKind:'standalone',workspaceRoot:mode==='wrong-profile'?path.dirname(nativeRoot):nativeRoot,pid:mode==='replace-before-stop' && posts>=3 ? process.pid+1000 : process.pid,runtimeVersion:mode==='wrong-version'?'wrong':'9.9.9-fixture',runtimeCommit:mode==='wrong-commit'?'e'.repeat(40):'${identity.commit}',requireAuth:auth}));
       }
       if (auth && req.headers.authorization !== 'Bearer ' + token) { res.writeHead(401); return res.end('{}'); }
       if (req.url === '/admin/stop') {
@@ -64,6 +65,8 @@ function fixture(t, mode = 'normal') {
 
 function assertReaped(f) {
   const rows = f.rows();
+  assert.equal(rows.find(row => row.kind === 'start').root, rows.find(row => row.kind === 'start').nativeRoot,
+    'the smoke must pin the same native root reported by a real Rust daemon');
   const start = rows.find(row => row.kind === 'start');
   assert.ok(start, 'our fixture process started');
   const exit = rows.find(row => row.kind === 'exit');
@@ -118,7 +121,9 @@ test('an occupied port is never stopped, even when it advertises the expected Ru
 
 for (const mode of ['replace-before-stop', 'wrong-version', 'wrong-commit', 'wrong-engine', 'wrong-product', 'wrong-profile']) test('ownership and build identity are revalidated: ' + mode, async t => {
   const f = fixture(t, mode);
-  await assert.rejects(runSmoke(f.options), /ownership or identity mismatch/);
+  const field = { 'replace-before-stop': 'pid', 'wrong-version': 'runtimeVersion', 'wrong-commit': 'runtimeCommit',
+    'wrong-engine': 'runtimeEngine', 'wrong-product': 'runtimeProduct', 'wrong-profile': 'workspaceRoot' }[mode];
+  await assert.rejects(runSmoke(f.options), new RegExp(`ownership or identity mismatch \\(${field}\\)`));
   assert.equal(f.rows().filter(row => row.kind === 'request' && row.url === '/admin/stop').length, 0);
   assertReaped(f);
 });
@@ -138,4 +143,11 @@ test('spawn failures are handled without unhandled errors or retained profiles',
   assert.ok(failure);
   assert.match(failure.message, /EACCES|EPERM|ENOENT|spawn/);
   assert.equal(fs.existsSync(failure.profile), false);
+});
+
+test('Windows drive and UNC prefixes preserve exact workspace identity', () => {
+  assert.equal(samePath(String.raw`\\?\C:\Users\Alice\Workspace`, String.raw`c:\users\alice\workspace`, 'win32'), true);
+  assert.equal(samePath(String.raw`\\?\UNC\server\share\Workspace`, String.raw`\\server\share\workspace`, 'win32'), true);
+  assert.equal(samePath(String.raw`\\?\UNC\server\other\Workspace`, String.raw`\\server\share\workspace`, 'win32'), false);
+  assert.equal(samePath(String.raw`C:\Users\Alice\Workspace-sibling`, String.raw`C:\Users\Alice\Workspace`, 'win32'), false);
 });

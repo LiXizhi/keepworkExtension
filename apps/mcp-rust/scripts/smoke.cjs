@@ -51,10 +51,13 @@ async function within(promise, timeoutMs) {
   finally { clearTimeout(timer); }
 }
 
-function samePath(left, right) {
+function samePath(left, right, platform = process.platform) {
   if (typeof left !== 'string') return false;
-  const normalize = value => path.resolve(value).replace(/^\\\\\?\\/, '');
-  return process.platform === 'win32' ? normalize(left).toLowerCase() === normalize(right).toLowerCase() : normalize(left) === normalize(right);
+  const paths = platform === 'win32' ? path.win32 : path;
+  const normalize = value => paths.resolve(value)
+    .replace(/^\\\\\?\\UNC\\/i, '\\\\')
+    .replace(/^\\\\\?\\(?=[a-z]:\\)/i, '');
+  return platform === 'win32' ? normalize(left).toLowerCase() === normalize(right).toLowerCase() : normalize(left) === normalize(right);
 }
 
 async function runSmoke({ binary = defaultBinary, args = [], expectedBuildInfo, env = {}, port: requestedPort, startupTimeoutMs = 5000, requestTimeoutMs = 2000, shutdownTimeoutMs = 5000 } = {}) {
@@ -67,7 +70,9 @@ async function runSmoke({ binary = defaultBinary, args = [], expectedBuildInfo, 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-rust-smoke-'));
   const workspace = path.join(home, 'workspace');
   fs.mkdirSync(workspace);
-  const actualWorkspace = fs.realpathSync(workspace);
+  // Rust canonicalize expands Windows short names (e.g. RUNNER~1), unlike
+  // Node's JS realpath. Pin the native identity once before starting the child.
+  const actualWorkspace = fs.realpathSync.native(workspace);
   const childEnv = { ...process.env, ...env, HOME: home, USERPROFILE: home, KEEPWORK_MCP_HOST_KIND: 'standalone' };
   // Observe the compiled identity, not enclosing desktop metadata overrides.
   for (const key of ['KEEPWORK_MCP_RUNTIME_VERSION', 'KEEPWORK_MCP_RUNTIME_COMMIT', 'KEEPWORK_MCP_RUNTIME_BUILT_AT', 'KEEPWORK_MCP_HOST_VERSION']) delete childEnv[key];
@@ -92,8 +97,15 @@ async function runSmoke({ binary = defaultBinary, args = [], expectedBuildInfo, 
     assertChild();
     const health = (await fetchJson(base + '/health', {}, timeoutMs ?? requestTimeoutMs)).json;
     assertChild();
-    if (health?.pid !== child.pid || health?.name !== 'keepwork-mcp' || health?.runtimeEngine !== 'rust' || health?.runtimeProduct !== 'keepwork-mcp-runtime' || health?.hostKind !== 'standalone' || !samePath(health?.workspaceRoot, actualWorkspace) || health?.runtimeVersion !== expected.version || health?.runtimeCommit !== expected.commit) {
-      const error = Error('Smoke endpoint ownership or identity mismatch; no shutdown request was sent');
+    const checks = {
+      pid: health?.pid === child.pid, name: health?.name === 'keepwork-mcp',
+      runtimeEngine: health?.runtimeEngine === 'rust', runtimeProduct: health?.runtimeProduct === 'keepwork-mcp-runtime',
+      hostKind: health?.hostKind === 'standalone', workspaceRoot: samePath(health?.workspaceRoot, actualWorkspace),
+      runtimeVersion: health?.runtimeVersion === expected.version, runtimeCommit: health?.runtimeCommit === expected.commit,
+    };
+    const mismatches = Object.keys(checks).filter(field => !checks[field]);
+    if (mismatches.length) {
+      const error = Error(`Smoke endpoint ownership or identity mismatch (${mismatches.join(', ')}); no shutdown request was sent`);
       error.code = 'SMOKE_OWNERSHIP_MISMATCH';
       throw error;
     }
@@ -171,7 +183,7 @@ async function runSmoke({ binary = defaultBinary, args = [], expectedBuildInfo, 
   return result;
 }
 
-module.exports = { runSmoke, fetchJson, freePort };
+module.exports = { runSmoke, fetchJson, freePort, samePath };
 if (require.main === module) {
   if (process.argv.length > 3) { process.stderr.write('Usage: smoke.cjs [path-to-binary]\n'); process.exitCode = 1; }
   else runSmoke({ binary: process.argv[2] || defaultBinary }).then(result => {
