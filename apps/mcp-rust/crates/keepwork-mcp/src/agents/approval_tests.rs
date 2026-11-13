@@ -22,6 +22,8 @@ async fn attach(
     child: &Arc<Harness>,
     root: &Path,
 ) -> tokio::task::JoinHandle<()> {
+    // The fixture cache key must match checked_roots(), including on Windows.
+    assert_eq!(root, canonical_root(&root.to_string_lossy()).unwrap());
     manager
         .harnesses
         .lock()
@@ -64,14 +66,17 @@ async fn log(child: &Harness) -> Vec<Value> {
 async fn codex_selection_reaches_native_creation_turn_resume_and_explicit_reset() {
     let directory = std::env::temp_dir().join(format!("kp-approval-session-{}", id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let root = directory.canonicalize().unwrap();
+    let request_root = directory.canonicalize().unwrap();
+    let root = canonical_root(&directory.to_string_lossy()).unwrap();
     let registry = root.join("sessions.json");
     let owner = "a".repeat(64);
     let manager = AgentManager::open(registry.clone(), 0);
     let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
     let consumer = attach(&manager, &child, &root).await;
-    let session = manager.create(&owner, &json!({"conversationId":"approval-chat","backend":"codex","roots":[root],"mode":"craft","approvalMode":"on-request"})).await.unwrap();
+    // Exercise Windows verbatim-path input while registering the normalized key.
+    let session = manager.create(&owner, &json!({"conversationId":"approval-chat","backend":"codex","roots":[request_root],"mode":"craft","approvalMode":"on-request"})).await.unwrap();
     let session_id = session["id"].as_str().unwrap().to_string();
+    assert_eq!(session["roots"], json!([root]));
     assert_eq!(session["approvalMode"], "on-request");
     let calls = log(&child).await;
     assert_eq!(calls[0]["params"]["sandbox"], "workspace-write");
@@ -169,7 +174,7 @@ async fn codex_selection_reaches_native_creation_turn_resume_and_explicit_reset(
 async fn explicit_policies_validate_before_dispatch_and_cannot_replace_an_active_turn() {
     let directory = std::env::temp_dir().join(format!("kp-approval-validation-{}", id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let root = directory.canonicalize().unwrap();
+    let root = canonical_root(&directory.to_string_lossy()).unwrap();
     let manager = AgentManager::open(root.join("sessions.json"), 0);
     let owner = "a".repeat(64);
     let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
@@ -245,7 +250,7 @@ async fn explicit_policies_validate_before_dispatch_and_cannot_replace_an_active
 async fn native_craft_requests_wait_for_the_user_and_readonly_denies_permissions() {
     let directory = std::env::temp_dir().join(format!("kp-approval-events-{}", id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let root = directory.canonicalize().unwrap();
+    let root = canonical_root(&directory.to_string_lossy()).unwrap();
     let manager = AgentManager::open(root.join("sessions.json"), 0);
     let owner = "a".repeat(64);
     let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
@@ -345,7 +350,7 @@ async fn native_craft_requests_wait_for_the_user_and_readonly_denies_permissions
 async fn dedicated_approval_routes_require_semantics_and_support_image_limits() {
     let directory = std::env::temp_dir().join(format!("kp-approval-routes-{}", id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let root = directory.canonicalize().unwrap();
+    let root = canonical_root(&directory.to_string_lossy()).unwrap();
     let manager = AgentManager::open(root.join("sessions.json"), 0);
     let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
     let consumer = attach(&manager, &child, &root).await;
