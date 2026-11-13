@@ -22,7 +22,7 @@ description: 发布 KeepWork AIChat Rust 桌面端与 MCP Rust 运行时到 GitH
 
 ```bash
 git fetch origin --tags
-git tag -l 'aichat-rust-v*' | sort -V | tail -3
+git tag -l 'v*' 'aichat-rust-v*' | sort -V | tail -5
 for t in darwin-universal win32-x64 win32-arm64; do
   curl -fsSL "https://cdn.keepwork.com/keepwork/aichat-rust/$t/latest-client.json" |
     node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).version))'
@@ -49,14 +49,14 @@ mcp-rust（两处）：
 
 ## 2. 桌面发布
 
-**触发条件很关键**：`aichat-rust-windows-release.yml` 的 `publish` 作业只在 `refs/tags/aichat-rust-v*` 上执行。
+**触发条件很关键**：`aichat-rust-windows-release.yml` 的 `publish` 作业只在 tag 上执行（2026-11-13 起新发布统一用标准 `v<major>.<minor>.<patch>`，历史 `aichat-rust-v*` 仅用于重跑已有 Release）。
 在分支上 dispatch 只会构建、不会上传 CDN、不会建 Release。
 
 ```bash
 git push origin HEAD:<release-branch>
-git tag -a aichat-rust-v<ver> -m "KeepWork 第二大脑 <ver>（Windows / macOS）"
-git push origin aichat-rust-v<ver>
-gh workflow run aichat-rust-windows-release.yml --ref aichat-rust-v<ver>
+git tag -a v<ver> -m "KeepWork 第二大脑 <ver>（Windows / macOS）"
+git push origin v<ver>
+gh workflow run aichat-rust-windows-release.yml --ref v<ver>
 ```
 
 发布作业自动完成：上传三个安装包到 CDN、提升三个 `latest-client.json`、创建 GitHub Release、
@@ -100,7 +100,7 @@ deferred 是显式选择，不要为了方便改成默认值。要发布「已�
 
 ```bash
 # 桌面
-gh release view aichat-rust-v<ver> --json body --jq .body | head -12
+gh release view v<ver> --json body --jq .body | head -12
 for t in darwin-universal win32-x64 win32-arm64; do
   curl -fsSL "https://cdn.keepwork.com/keepwork/aichat-rust/$t/latest-client.json"
 done
