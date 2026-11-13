@@ -1,3 +1,5 @@
+<!-- Preserve the Common Controls v6 dependency from Tauri 2's default manifest.
+     Linked into every MSVC target, including library unit-test harnesses. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
     <dependentAssembly>

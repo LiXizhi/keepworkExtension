@@ -104,6 +104,41 @@ test('a matching identity delayed beyond one second reuses the existing server',
   assert.equal(server.listening, true, 'closing a reused handle must preserve its owner');
 });
 
+test('Windows defaults reuse a same-checkout identity response slower than the old one-second budget', {
+  skip: process.platform !== 'win32',
+  timeout: 15000,
+}, async t => {
+  const projectRoot = project(t), timers = new Set();
+  let requests = 0, creations = 0;
+  const server = http.createServer((req, res) => {
+    if (req.url !== IDENTITY_PATH) { res.writeHead(404); res.end(); return; }
+    requests++;
+    // Reproduce a valid but cold/loaded Windows response, not a foreign service
+    // or invalid identity. This must fail with the previous 1000 ms default.
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ protocol: IDENTITY_PROTOCOL, projectRoot }));
+    }, 1500);
+    timers.add(timer);
+    res.once('close', () => { clearTimeout(timer); timers.delete(timer); });
+  });
+  const port = await listen(server);
+  t.after(async () => { for (const timer of timers) clearTimeout(timer); await close(server); });
+  const reused = await ensureDevServer({
+    projectRoot, port,
+    createServer: async () => { creations++; assert.fail('An existing verified server must be reused, never recreated'); },
+  });
+  assert.equal(reused.reused, true);
+  assert.equal(reused.url, `http://127.0.0.1:${port}`);
+  assert.equal(creations, 0);
+  await reused.close();
+  assert.equal(server.listening, true, 'closing a reused handle cannot stop its owner');
+  assert.equal((await probeDevServer({ projectRoot, port })).state, 'same', 'the direct probe must use the Windows default budget too');
+  assert.equal(requests, 2);
+  assert.equal(creations, 0);
+});
+
 test('two concurrent real Vite starts converge on one owner after both observe a free port', async t => {
   const projectRoot = project(t), port = await unusedPort();
   const { createServer } = await import('vite');

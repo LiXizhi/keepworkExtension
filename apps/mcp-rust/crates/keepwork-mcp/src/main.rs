@@ -20,7 +20,7 @@ fn main() {
         return;
     }
     if args.build_info {
-        println!("{}", keepwork_mcp::identity::BUILD_INFO);
+        println!("{}", keepwork_mcp::identity::build_info_document());
         return;
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()

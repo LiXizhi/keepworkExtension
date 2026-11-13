@@ -27,6 +27,7 @@ commands.allow = [
   "desktop_install_update",
   "desktop_run_menu_command",
   "desktop_open_menu",
+  "desktop_set_menu_language",
   "desktop_titlebar_action",
   "desktop_sync_theme",
   "desktop_pet_action",

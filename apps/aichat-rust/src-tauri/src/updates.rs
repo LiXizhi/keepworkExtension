@@ -5,18 +5,20 @@ use crate::runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(not(target_os = "windows"))]
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(not(target_os = "windows"))]
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
 mod install_tests;
+#[cfg(target_os = "macos")]
+mod macos_install;
+#[cfg(any(windows, test))]
+mod windows_install;
 
 pub const DEFAULT_DESKTOP_FEED_BASE: &str = "https://cdn.keepwork.com/keepwork/aichat-rust";
 
@@ -107,7 +109,7 @@ pub fn default_desktop_feed_url() -> String {
     let custom = std::env::var("AICHAT_UPDATE_FEED_URL").ok();
     let compatibility_launcher = cfg!(windows)
         && std::env::current_exe()
-            .map(|exe| exe.with_file_name("Keepwork.exe").is_file())
+            .map(|exe| has_compatibility_launcher(&exe))
             .unwrap_or(false);
     desktop_feed_url_for(
         current_runtime_platform(),
@@ -115,6 +117,15 @@ pub fn default_desktop_feed_url() -> String {
         compatibility_launcher,
         custom.as_deref(),
     )
+}
+
+fn has_compatibility_launcher(executable: &Path) -> bool {
+    // Standard native releases are themselves named Keepwork.exe. Only the
+    // legacy inner executable plus a separate outer launcher selects CEF.
+    executable
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("aichat-rust.exe"))
+        && executable.with_file_name("Keepwork.exe").is_file()
 }
 
 fn desktop_feed_url_for(
@@ -187,6 +198,12 @@ impl UpdateManager {
             "idle"
         };
 
+        let install_error = Self::cached_install_error(&meta, &downloads_dir, &desktop_version);
+        let initial_state = if !ready && !install_error.is_empty() {
+            "error"
+        } else {
+            initial_state
+        };
         Self {
             desktop_version,
             metadata_file,
@@ -198,11 +215,47 @@ impl UpdateManager {
                 state: initial_state.to_string(),
                 progress: if ready { Some(100) } else { None },
                 stale: false,
-                error: String::new(),
+                error: install_error,
                 meta,
             })),
             desktop_install_busy: AtomicBool::new(false),
         }
+    }
+
+    fn cached_install_error(
+        meta: &PersistedDesktopUpdateMeta,
+        downloads: &Path,
+        current_version: &str,
+    ) -> String {
+        // A newer executable can start after only part of an NSIS install was
+        // written. Equal versions alone do not prove the whole install finished.
+        if meta.latest_version.is_empty() || is_version_newer(current_version, &meta.latest_version)
+        {
+            return String::new();
+        }
+        let error = fs::read_to_string(downloads.join("desktop-install-error.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .filter(|receipt| receipt["version"].as_str() == Some(meta.latest_version.as_str()))
+            .and_then(|receipt| receipt["error"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let error = macos_install::read_failure(downloads, &meta.latest_version).unwrap_or(error);
+        #[cfg(any(windows, test))]
+        let error = if Path::new(&meta.downloaded_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        {
+            let package = Path::new(&meta.downloaded_path);
+            if windows_install::installation_succeeded(package) {
+                String::new()
+            } else {
+                windows_install::read_failure(package).unwrap_or(error)
+            }
+        } else {
+            error
+        };
+        error
     }
 
     fn load_meta(path: &Path) -> PersistedDesktopUpdateMeta {
@@ -367,6 +420,9 @@ impl UpdateManager {
 
         let resp = client
             .get(&self.feed_url)
+            // CDN edges may reuse cached feeds despite no-cache. Keep the
+            // nonce request-only so persisted channel identity stays stable.
+            .query(&[("kp_update_check", uuid::Uuid::new_v4().to_string())])
             .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .timeout(Duration::from_secs(30))
             .send()
@@ -431,11 +487,24 @@ impl UpdateManager {
         if !is_version_newer(&version, &self.desktop_version) {
             if let Ok(mut ds) = self.desktop_state.lock() {
                 ds.checking = false;
-                ds.state = "up-to-date".to_string();
+                let install_error = Self::cached_install_error(
+                    &ds.meta,
+                    &self.downloads_dir,
+                    &self.desktop_version,
+                );
+                ds.state = if install_error.is_empty() {
+                    "up-to-date"
+                } else {
+                    "error"
+                }
+                .into();
                 ds.progress = None;
                 ds.stale = false;
-                ds.error.clear();
-                ds.meta.latest_version = version;
+                ds.error = install_error;
+                // Preserve the incomplete installation's receipt association.
+                if ds.error.is_empty() {
+                    ds.meta.latest_version = version;
+                }
                 ds.meta.published_at = published_at;
                 ds.meta.checked_at = checked_at;
                 self.save_meta(&ds.meta);
@@ -603,7 +672,11 @@ impl UpdateManager {
             return Ok(DesktopInstallOutcome::Cancelled);
         }
         let package = self.prepare_desktop_install_expected(Some(&candidate))?;
-        launch(&package)?;
+        if let Err(error) = launch(&package) {
+            self.record_install_failure(&error);
+            return Err(error);
+        }
+        let _ = fs::remove_file(self.downloads_dir.join("desktop-install-error.json"));
         // Once the installer was actually started, another desktop IPC call
         // cannot launch it again while the host is completing its exit.
         permit.launched = true;
@@ -639,16 +712,42 @@ impl UpdateManager {
             return Err("ZIP 更新包需要兼容 Launcher，请重新检查原生桌面更新".to_string());
         }
         let bytes = fs::read(&path).map_err(|e| format!("读取桌面更新包失败：{e}"))?;
-        if !ds.meta.sha256.is_empty() && sha256_hex(&bytes) != ds.meta.sha256 {
+        if !is_valid_hex(&ds.meta.sha256, 64)
+            || (ds.meta.size > 0 && bytes.len() as u64 != ds.meta.size)
+            || sha256_hex(&bytes) != ds.meta.sha256
+        {
             return Err("桌面更新包完整性校验失败，请重新下载".to_string());
         }
         Ok(path)
     }
 
+    pub fn record_install_failure(&self, error: &str) {
+        if let Ok(mut state) = self.desktop_state.lock() {
+            state.error = error.to_string();
+            let _ = atomic_json_write(
+                &self.downloads_dir.join("desktop-install-error.json"),
+                &serde_json::json!({"version": state.meta.latest_version, "error": error}),
+            );
+        }
+    }
+
+    /// Apply on an explicit full quit, without reopening a deliberately closed app.
+    pub fn install_on_exit(&self) -> Result<DesktopInstallOutcome, String> {
+        self.install_desktop_with_confirmation(
+            || true,
+            |package| self.launch_desktop_installer_with_restart(package, false),
+        )
+    }
+
     pub fn launch_desktop_installer(&self, package_path: &Path) -> Result<(), String> {
-        // Execute only what this app downloaded: the metadata on disk can be
-        // edited, and a path outside the download directory would turn the
-        // updater into a "run arbitrary file" primitive.
+        self.launch_desktop_installer_with_restart(package_path, true)
+    }
+
+    fn launch_desktop_installer_with_restart(
+        &self,
+        package_path: &Path,
+        relaunch: bool,
+    ) -> Result<(), String> {
         let package = package_path
             .canonicalize()
             .map_err(|e| format!("更新包路径无效：{e}"))?;
@@ -657,63 +756,42 @@ impl UpdateManager {
             .canonicalize()
             .map_err(|e| format!("更新下载目录无效：{e}"))?;
         if !crate::files::inside(&downloads, &package) {
-            return Err("更新包不在下载目录内，已拒绝执行".to_string());
+            return Err("更新包不在下载目录内，已拒绝执行".into());
         }
-        let ext = package
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        #[cfg(not(target_os = "windows"))]
-        if let Some(launcher) = &self.launcher_exe {
-            if launcher.is_file() {
-                return spawn_installer(
-                    launcher,
-                    &[OsStr::new("--apply-update"), package.as_os_str()],
-                );
-            }
+        // Revalidate at the actual launch boundary too; callers cannot substitute
+        // a different file within downloads after the confirmation gate.
+        let expected = self
+            .prepare_desktop_install()?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        if package != expected {
+            return Err("更新包与已验证的候选不一致".into());
         }
-
+        let profile = dunce::canonicalize(self.metadata_file.parent().ok_or("用户配置目录无效")?)
+            .map_err(|e| format!("无法保留更新后的用户配置目录：{e}"))?;
+        if !profile.is_dir() {
+            return Err("用户配置目录无效".into());
+        }
+        let version = self
+            .desktop_state
+            .lock()
+            .map_err(|_| "Lock poisoned")?
+            .meta
+            .latest_version
+            .clone();
         #[cfg(target_os = "macos")]
         {
-            if ext == "dmg" || ext == "pkg" {
-                return spawn_installer(Path::new("open"), &[package.as_os_str()]);
-            }
-            return Err(format!("不支持的更新包类型：{ext}"));
+            return macos_install::launch(&package, &version, relaunch, &profile);
         }
-
-        #[cfg(target_os = "windows")]
+        #[cfg(windows)]
         {
-            if ext == "exe" {
-                // Open the visible installer through the Windows shell, allowing
-                // normal elevation/association handling. Never pass silent flags.
-                use std::os::windows::ffi::OsStrExt;
-                let file: Vec<u16> = package.as_os_str().encode_wide().chain(Some(0)).collect();
-                let verb: Vec<u16> = "open\0".encode_utf16().collect();
-                let result = unsafe {
-                    windows_sys::Win32::UI::Shell::ShellExecuteW(
-                        std::ptr::null_mut(),
-                        verb.as_ptr(),
-                        file.as_ptr(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-                    )
-                } as isize;
-                return if result > 32 {
-                    Ok(())
-                } else {
-                    Err(format!("启动安装器失败（Windows {result}）"))
-                };
-            }
-            return Err(format!("不支持的更新包类型：{ext}"));
+            let _ = version;
+            return windows_install::launch(&package, relaunch, &profile);
         }
-
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
-            let _ = ext;
-            Err("当前平台不支持自动安装更新".to_string())
+            let _ = (version, relaunch, profile);
+            Err("当前平台不支持自动安装更新".into())
         }
     }
 }
@@ -741,19 +819,6 @@ fn unsupported_zip(package: &Path, launcher: Option<&Path>) -> bool {
     true
 }
 
-/// Start an interactive platform installer without inheriting terminal handles.
-#[cfg(not(target_os = "windows"))]
-fn spawn_installer(program: &Path, args: &[&OsStr]) -> Result<(), String> {
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn()
-        .map(|_| ())
-        .map_err(|e| format!("启动更新器失败：{e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +826,35 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use uuid::Uuid;
+
+    #[test]
+    fn standard_windows_binary_does_not_mistake_itself_for_a_compatibility_launcher() {
+        let root = std::env::temp_dir().join(format!("aichat-feed-launcher-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let standard = root.join("Keepwork.exe");
+        fs::write(&standard, b"standard desktop fixture").unwrap();
+        assert!(!has_compatibility_launcher(&standard));
+        for arch in ["x64", "arm64"] {
+            assert_eq!(
+                desktop_feed_url_for("win32", arch, has_compatibility_launcher(&standard), None),
+                format!("{DEFAULT_DESKTOP_FEED_BASE}/win32-{arch}/latest-client.json")
+            );
+        }
+        let legacy = root.join("aichat-rust.exe");
+        fs::write(&legacy, b"legacy inner desktop fixture").unwrap();
+        assert!(has_compatibility_launcher(&legacy));
+        assert!(
+            desktop_feed_url_for("win32", "x64", has_compatibility_launcher(&legacy), None)
+                .contains("/aichat-cef/")
+        );
+        fs::remove_file(&standard).unwrap();
+        assert!(!has_compatibility_launcher(&legacy));
+        assert_eq!(
+            desktop_feed_url_for("win32", "x64", has_compatibility_launcher(&legacy), None),
+            format!("{DEFAULT_DESKTOP_FEED_BASE}/win32-x64/latest-client.json")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn desktop_feeds_use_three_rust_targets_and_preserve_explicit_channels() {
@@ -851,6 +945,17 @@ mod tests {
         }
     }
 
+    // Cache-busting queries are request-only, so fixtures route on the path.
+    fn request_path(request: &str) -> &str {
+        request
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .split('?')
+            .next()
+            .unwrap_or_default()
+    }
+
     fn update_server(
         make_manifest: impl FnOnce(&str) -> Value,
         payload: Vec<u8>,
@@ -875,10 +980,10 @@ mod tests {
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap();
                 let request = String::from_utf8_lossy(&buf[..n]);
-                let bytes = if request.starts_with("GET /latest-client.json ") {
+                let bytes = if request_path(&request) == "/latest-client.json" {
                     manifest.as_bytes()
                 } else {
-                    assert!(request.starts_with("GET /installer.dmg "), "{request}");
+                    assert_eq!(request_path(&request), "/installer.dmg", "{request}");
                     payload.as_slice()
                 };
                 let header = format!(
@@ -892,6 +997,75 @@ mod tests {
             assert_eq!(count, expected_requests);
         });
         (format!("{base}/latest-client.json"), server)
+    }
+
+    #[tokio::test]
+    async fn incomplete_same_version_install_remains_visible_after_rechecking() {
+        for outcome in ["failed", "installing"] {
+            let root = std::env::temp_dir().join(format!("partial-install-{}", Uuid::new_v4()));
+            let downloads = root.join("downloads");
+            fs::create_dir_all(&downloads).unwrap();
+            let package = downloads.join("0.3.0-installer.exe");
+            fs::write(&package, b"fixture installer").unwrap();
+            let receipt = downloads.join("0.3.0-installer.exe.result.json");
+            atomic_json_write(&receipt, &serde_json::json!({"state":outcome})).unwrap();
+            let (feed, server) =
+                update_server(|_| serde_json::json!({"version":"0.3.0"}), vec![], 2);
+            let meta = PersistedDesktopUpdateMeta {
+                feed_url: feed.clone(),
+                latest_version: "0.3.0".into(),
+                downloaded_path: package.to_string_lossy().into(),
+                sha256: sha256_hex(b"fixture installer"),
+                ..Default::default()
+            };
+            let metadata = root.join("meta.json");
+            atomic_json_write(&metadata, &meta).unwrap();
+            let manager = UpdateManager::new(
+                "0.3.0".into(),
+                metadata.clone(),
+                downloads.clone(),
+                feed.clone(),
+                None,
+            );
+            let runtime = RuntimeStatusSnapshot::initial("mcp", 0);
+            for check in [false, true] {
+                if check {
+                    manager.check_desktop_update().await;
+                }
+                let status = manager.snapshot(&runtime).desktop;
+                assert_eq!(status.state, "error");
+                assert!(status.error.contains(package.to_str().unwrap()));
+                assert!(
+                    !status.can_apply,
+                    "must not launch a concurrent repair automatically"
+                );
+            }
+            for (current, source) in [
+                ("0.4.0", feed.clone()),
+                ("0.3.0", "https://other.example/feed".into()),
+            ] {
+                let other = UpdateManager::new(
+                    current.into(),
+                    metadata.clone(),
+                    downloads.clone(),
+                    source,
+                    None,
+                );
+                assert!(other.snapshot(&runtime).desktop.error.is_empty());
+            }
+            atomic_json_write(
+                &downloads.join("desktop-install-error.json"),
+                &serde_json::json!({"version":"0.3.0", "error":"previous launch failed"}),
+            )
+            .unwrap();
+            atomic_json_write(&receipt, &serde_json::json!({"state":"installed"})).unwrap();
+            manager.check_desktop_update().await;
+            assert_eq!(manager.snapshot(&runtime).desktop.state, "up-to-date");
+            assert!(manager.snapshot(&runtime).desktop.error.is_empty());
+            assert!(package.is_file());
+            server.join().unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1041,8 +1215,9 @@ mod tests {
                     let mut buf = [0u8; 2048];
                     let n = stream.read(&mut buf).unwrap();
                     let request = String::from_utf8_lossy(&buf[..n]);
-                    assert!(
-                        request.starts_with("GET /latest-client.json "),
+                    assert_eq!(
+                        request_path(&request),
+                        "/latest-client.json",
                         "an older or equal ZIP must never be downloaded: {request}"
                     );
                     let (status, bytes) = if count == 0 {

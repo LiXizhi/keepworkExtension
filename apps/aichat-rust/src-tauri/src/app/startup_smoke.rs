@@ -238,6 +238,7 @@ fn core(profile: &Path, fixture: &Fixture) -> Result<Arc<AppCore>, String> {
         zoom: Mutex::new(1.0),
         signed_in: AtomicBool::new(false),
         quitting: AtomicBool::new(false),
+        replacing_instance: AtomicBool::new(false),
         channels: Mutex::new(crate::tray_channels::channel_states(&Value::Null)),
         lock: Mutex::new(None),
         page_connection: Mutex::new(PageConnection::default()),

@@ -2,13 +2,34 @@ name: AIChat Rust release packages
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/aichat-rust/**"
+      - "apps/mcp-rust/**"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "package*.json"
+      - "docs/acceptance/rust-release-evidence.schema.json"
+      - ".github/workflows/*rust*.yml"
+  push:
+    branches: [master, main]
+    paths:
+      - "apps/aichat-rust/**"
+      - "apps/mcp-rust/**"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "package*.json"
+      - "docs/acceptance/rust-release-evidence.schema.json"
+      - ".github/workflows/*rust*.yml"
 
 permissions:
   contents: read
 
 concurrency:
   group: aichat-rust-release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate:
@@ -16,6 +37,7 @@ jobs:
 
   build:
     needs: validate
+    if: github.event_name != 'pull_request'
     name: Windows Rust (${{ matrix.arch }})
     runs-on: windows-latest
     strategy:
@@ -124,7 +146,7 @@ jobs:
           $extract = Join-Path $env:RUNNER_TEMP 'keepwork-payload'
           & 'C:\Program Files\7-Zip\7z.exe' x $installer "-o$extract" -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $application = @(Get-ChildItem $extract -Filter aichat-rust.exe -Recurse)
+          $application = @(Get-ChildItem $extract -File -Recurse | Where-Object { $_.Name -in @('Keepwork.exe', 'aichat-rust.exe') })
           if ($application.Count -ne 1) { throw 'Expected one desktop executable' }
           $productVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($application[0].FullName).ProductVersion
           if ($productVersion -ne $version) { throw "Desktop version mismatch: $productVersion" }
@@ -138,7 +160,7 @@ jobs:
         run: |
           $extract = Join-Path $env:RUNNER_TEMP 'keepwork-payload'
           $version = (Get-Content apps/aichat-rust/package.json | ConvertFrom-Json).version
-          $files = @(Get-ChildItem $extract -Recurse -Include aichat-rust.exe, keepwork-mcp.exe, keepwork-installer-helper.exe, uninstall.exe)
+          $files = @(Get-ChildItem $extract -Recurse -Include Keepwork.exe, aichat-rust.exe, keepwork-mcp.exe, keepwork-installer-helper.exe, uninstall.exe)
           $files += Get-Item "apps/aichat-rust/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/Keepwork_${version}_${{ matrix.arch }}-setup.exe"
           foreach ($file in $files) {
             $signature = Get-AuthenticodeSignature $file.FullName
@@ -159,6 +181,12 @@ jobs:
           if ($runtime.Count -ne 1) { throw 'Expected one daemon executable' }
           node apps/mcp-rust/scripts/smoke.cjs $runtime[0].FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke test x64 automatic overwrite in an isolated installation
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/aichat-rust/package.json | ConvertFrom-Json).version
+          ./apps/aichat-rust/scripts/windows-self-update-smoke.ps1 -Installer "apps/aichat-rust/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/Keepwork_${version}_${{ matrix.arch }}-setup.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: aichat-rust-windows-${{ matrix.arch }}-rust
@@ -167,6 +195,7 @@ jobs:
 
   build-macos:
     needs: validate
+    if: github.event_name != 'pull_request'
     name: macOS Rust (universal)
     runs-on: macos-latest
     env:
@@ -199,11 +228,15 @@ jobs:
         run: node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
       - name: Build macOS universal app and DMG
         working-directory: apps/aichat-rust
+        env:
+          # Seal the bundle for updater integrity checks; not Developer ID notarization.
+          APPLE_SIGNING_IDENTITY: '-'
         run: pnpm tauri build --ci --target universal-apple-darwin --bundles app,dmg
       - name: Verify the universal binary and its bundled runtime
         working-directory: apps/aichat-rust
         run: |
           APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/Keepwork.app"
+          codesign --verify --deep --strict "$APP"
           ARCHS=$(lipo -archs "$APP/Contents/MacOS/Keepwork")
           echo "Detected architectures: $ARCHS"
           echo "$ARCHS" | grep -q "x86_64"
@@ -228,7 +261,7 @@ jobs:
   publish:
     name: Publish release assets
     needs: [build, build-macos]
-    if: startsWith(github.ref, 'refs/tags/aichat-rust-v')
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/aichat-rust-v')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     concurrency:
@@ -241,17 +274,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Resolve release version
+        id: release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node apps/aichat-rust/scripts/publish-release.cjs --version-from-tag "$TAG")"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Check release publication contracts
-        run: node --test apps/aichat-rust/tests/release-publication.test.cjs apps/aichat-rust/tests/automatic-update-publication.test.cjs
+        run: node --test apps/aichat-rust/tests/release-tags.test.cjs apps/aichat-rust/tests/release-publication.test.cjs apps/aichat-rust/tests/automatic-update-publication.test.cjs
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Collect assets and checksums
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          version="${GITHUB_REF_NAME#aichat-rust-v}"
+          version="${{ steps.release.outputs.version }}"
           ls -l dist
-          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --dry-run
+          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --tag "$TAG" --dry-run
           (cd dist && shasum -a 256 *.exe *.dmg) > "SHA256SUMS-${version}.txt"
           cat "SHA256SUMS-${version}.txt"
       - name: Ensure the GitHub release exists
@@ -260,8 +302,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          version="${TAG#aichat-rust-v}"
+          version="${{ steps.release.outputs.version }}"
           if ! gh release view "$TAG" > /dev/null 2>&1; then
+            if [[ "$TAG" == aichat-rust-v* ]]; then
+              echo '::error::Historical tags may only rerun an existing GitHub release.'
+              exit 1
+            fi
             gh release create "$TAG" --verify-tag --draft \
               --title "KeepWork 第二大脑 ${version}（Windows / macOS）" --generate-notes
           fi
@@ -271,9 +317,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          TAG: ${{ github.ref_name }}
         run: |
-          version="${GITHUB_REF_NAME#aichat-rust-v}"
-          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version"
+          version="${{ steps.release.outputs.version }}"
+          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --tag "$TAG"
       # An existing version must pass CDN byte-for-byte verification before any
       # GitHub attachment is replaced; newly created releases stay draft on error.
       - name: Upload verified assets and publish the GitHub release
@@ -282,6 +329,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          version="${TAG#aichat-rust-v}"
+          version="${{ steps.release.outputs.version }}"
           gh release upload "$TAG" dist/*.exe dist/*.dmg dist/release-manifest-${version}-*.json "SHA256SUMS-${version}.txt" --clobber
           gh release edit "$TAG" --draft=false --latest

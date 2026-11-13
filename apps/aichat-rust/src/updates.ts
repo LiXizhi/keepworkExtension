@@ -54,11 +54,11 @@ function describeComponentStatus(item: UpdateComponentStatus): string {
     const pct = typeof item.progress === "number" ? ` ${Math.round(item.progress)}%` : "";
     parts.push(`正在下载更新${pct}…`);
   } else if (item.state === "ready") {
-    parts.push("已下载，可以更新");
+    parts.push(item.id === "desktop" ? "已下载，完全退出时自动安装" : "已下载，可以更新");
   } else if (item.state === "up-to-date") {
     parts.push("当前无需更新");
   } else if (item.state === "error") {
-    parts.push("检查或下载失败");
+    parts.push("更新未完成");
   } else {
     parts.push("等待检查");
   }
@@ -132,8 +132,8 @@ function render(snapshot: UpdatesSnapshot): void {
     renderCard(snapshot.mcp, "更新 MCP", "构建日期", () => {
       void api.mcp().then(render);
     }),
-    renderCard(snapshot.desktop, "更新桌面应用", "发布日期", () => {
-      void api.desktop().then(render);
+    renderCard(snapshot.desktop, "重启并更新", "发布日期", () => {
+      void api.desktop().then(render).catch((error: unknown) => window.alert(String(error)));
     })
   );
 }

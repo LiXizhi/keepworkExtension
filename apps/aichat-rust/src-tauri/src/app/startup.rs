@@ -335,6 +335,7 @@ pub fn run() {
         zoom: Mutex::new(1.0),
         signed_in: AtomicBool::new(true),
         quitting: AtomicBool::new(false),
+        replacing_instance: AtomicBool::new(false),
         channels: Mutex::new(channel_states(&Value::Null)),
         lock: Mutex::new(None),
         page_connection: Mutex::new(page_connection),
@@ -377,6 +378,7 @@ pub fn run() {
                 move |action| {
                     match action {
                         InstanceAction::Replace => {
+                            core_for_lock.replacing_instance.store(true, Ordering::Relaxed);
                             core_for_lock.quitting.store(true, Ordering::Relaxed);
                             app_for_lock.exit(0);
                         }
@@ -616,7 +618,7 @@ pub fn run() {
                                 .notification()
                                 .builder()
                                 .title("Keepwork 桌面应用更新已就绪")
-                                .body("新版本已下载并校验完成，请在「检查更新」窗口确认后安装。")
+                                .body("新版本已下载并校验完成，完全退出时将自动安装，也可在「检查更新」中重启并更新。")
                                 .show();
                             notified_desktop_version = snap.desktop.latest_version;
                         }
@@ -694,6 +696,8 @@ pub fn run() {
         .map(|app| {
             let voice = Arc::clone(&core.remote_voice);
             let core_for_events = Arc::clone(&core);
+            let automatic_exit_started = Arc::new(AtomicBool::new(false));
+            let automatic_exit_finished = Arc::new(AtomicBool::new(false));
             app.run(move |app, event| {
                 #[cfg(target_os = "macos")]
                 if let tauri::RunEvent::Opened { urls } = &event {
@@ -703,6 +707,31 @@ pub fn run() {
                 }
                 #[cfg(not(target_os = "macos"))]
                 let _ = (&app, &core_for_events);
+                // Keep DMG staging and signature checks off the event thread.
+                // Hiding the main window never requests process exit.
+                if let tauri::RunEvent::ExitRequested { code: Some(0), api, .. } = &event {
+                    if core_for_events.quitting.load(Ordering::Relaxed)
+                        && !core_for_events.replacing_instance.load(Ordering::Relaxed)
+                        && !automatic_exit_finished.load(Ordering::Acquire)
+                    {
+                        api.prevent_exit();
+                        if automatic_exit_started.swap(true, Ordering::AcqRel) {
+                            return;
+                        }
+                        let finished = Arc::clone(&automatic_exit_finished);
+                        let core = Arc::clone(&core_for_events);
+                        let app = app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if let Err(error) = core.updates.install_on_exit() {
+                                core.updates.record_install_failure(&error);
+                                eprintln!("自动更新未启动，保留下载包供下次重试：{error}");
+                            }
+                            finished.store(true, Ordering::Release);
+                            app.exit(0);
+                        });
+                        return;
+                    }
+                }
                 if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
                     voice.shutdown();
                 }

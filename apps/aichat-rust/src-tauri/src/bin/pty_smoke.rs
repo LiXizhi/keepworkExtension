@@ -37,6 +37,7 @@ fn main() {
     } else {
         "printf 'AICHAT_RUST_PTY_%s\\n' SMOKE_PASS\n"
     };
+    assert!(!command.contains("AICHAT_RUST_PTY_SMOKE_PASS"));
     manager
         .handle(
             "desktop:main",
@@ -67,7 +68,12 @@ fn main() {
                 &json!({ "id": session_id, "cursor": cursor }),
             )
             .unwrap();
-        cursor = chunk["cursor"].as_u64().unwrap() as usize;
+        let next_cursor = chunk["cursor"].as_u64().unwrap() as usize;
+        assert!(
+            next_cursor >= cursor,
+            "Output cursor must not move backwards"
+        );
+        cursor = next_cursor;
         output_acc.push_str(chunk["output"].as_str().unwrap_or(""));
         if output_acc.contains("AICHAT_RUST_PTY_SMOKE_PASS")
             || chunk["closed"] == true

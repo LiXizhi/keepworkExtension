@@ -183,7 +183,7 @@ test("self-update and automatic update flows are preserved for both MCP and Desk
   assert.ok(updatesHtml.includes("检查更新"));
   assert.ok(updatesHtml.includes("分别更新本地 MCP 服务和桌面应用。"));
   assert.ok(updatesTs.includes("更新 MCP"));
-  assert.ok(updatesTs.includes("更新桌面应用"));
+  assert.ok(updatesTs.includes("重启并更新"));
 });
 
 test("floating pet window preserves click stability, screenshot permission bubble, and exit prompt", () => {

@@ -745,7 +745,12 @@ mod tests {
                     &json!({ "id": id, "cursor": cursor }),
                 )
                 .unwrap();
-            cursor = out["cursor"].as_u64().unwrap() as usize;
+            let next_cursor = out["cursor"].as_u64().unwrap() as usize;
+            assert!(
+                next_cursor >= cursor,
+                "Output cursor must not move backwards"
+            );
+            cursor = next_cursor;
             combined.push_str(out["output"].as_str().unwrap_or(""));
             if combined.contains("KEEPWORK_PTY_OK")
                 || out["closed"] == true
@@ -784,6 +789,7 @@ mod tests {
             "cursor output must not repeat prior command results"
         );
 
+        // Explicit close and the scope cleanup protect both success and panic paths.
         manager
             .handle("desktop:main", &files, "close", &json!({ "id": id }))
             .unwrap();

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const BUILD_SCRIPT: &str = include_str!("../build.rs");
+const BUILD_TIMESTAMP: &str = include_str!("../src/build_timestamp.rs");
 const WORKSPACE_LOCK: &str = include_str!("../../../Cargo.lock");
 
 struct Fixture {
@@ -95,6 +96,7 @@ impl Fixture {
             .expect("the main crate has already downloaded its locked sha2 dependency");
         fs::write(crate_dir.join("Cargo.toml"), format!("[package]\nname = \"build-provenance-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\nbuild = false\n[[bin]]\nname = \"build-script-under-test\"\npath = \"build.rs\"\n[dependencies]\nsha2 = \"={sha2_version}\"\n")).unwrap();
         fs::write(crate_dir.join("build.rs"), BUILD_SCRIPT).unwrap();
+        fs::write(crate_dir.join("src/build_timestamp.rs"), BUILD_TIMESTAMP).unwrap();
         fs::write(
             crate_dir.join("src/lib.rs"),
             "pub const MARKER: &str = \"initial identical bytes\";\n",
@@ -137,6 +139,7 @@ impl Fixture {
             "crates/keepwork-mcp/Cargo.toml",
             "crates/keepwork-mcp/build.rs",
             "crates/keepwork-mcp/src/lib.rs",
+            "crates/keepwork-mcp/src/build_timestamp.rs",
         ] {
             fs::copy(source.join(relative), destination.join(relative)).unwrap();
         }

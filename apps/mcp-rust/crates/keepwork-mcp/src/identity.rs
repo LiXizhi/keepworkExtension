@@ -32,6 +32,29 @@ fn env_non_empty(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn compiled_built_at(document: &str) -> Option<String> {
+    let info: Value = serde_json::from_str(document).ok()?;
+    let seconds = i64::try_from(info.get("builtAtUnix")?.as_u64()?).ok()?;
+    if seconds > 253_402_300_799 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+/// `--build-info` must report the same record packaging reads from the binary.
+/// The embedded document stores only `builtAtUnix`; derive the display form here
+/// so executed and statically embedded records stay identical.
+pub fn build_info_document() -> String {
+    let Ok(mut info) = serde_json::from_str::<Value>(BUILD_INFO) else {
+        return BUILD_INFO.to_string();
+    };
+    if let (Some(object), Some(built_at)) = (info.as_object_mut(), compiled_built_at(BUILD_INFO)) {
+        object.insert("builtAt".to_string(), Value::String(built_at));
+    }
+    info.to_string()
+}
+
 impl Identity {
     pub fn from_env(host_kind: Option<String>, host_version: Option<String>) -> Self {
         Self {
@@ -41,7 +64,8 @@ impl Identity {
                 .or_else(|| Some(env!("CARGO_PKG_VERSION").to_string())),
             runtime_commit: env_non_empty("KEEPWORK_MCP_RUNTIME_COMMIT")
                 .or_else(|| BUILD_COMMIT.map(str::to_string)),
-            runtime_built_at: env_non_empty("KEEPWORK_MCP_RUNTIME_BUILT_AT"),
+            runtime_built_at: env_non_empty("KEEPWORK_MCP_RUNTIME_BUILT_AT")
+                .or_else(|| compiled_built_at(BUILD_INFO)),
         }
     }
 
@@ -117,5 +141,23 @@ mod tests {
         assert_eq!(fields["hostKind"], "standalone");
         assert!(fields.contains_key("runtimeVersion"));
         assert!(fields.get("hostVersion").is_none());
+    }
+
+    #[test]
+    fn compiled_time_is_stable_and_missing_legacy_time_remains_unknown() {
+        assert_eq!(
+            compiled_built_at(r#"{"builtAtUnix":1700000000}"#).as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
+        for document in [
+            "{}",
+            r#"{"builtAtUnix":null}"#,
+            r#"{"builtAtUnix":-1}"#,
+            r#"{"builtAtUnix":253402300800}"#,
+        ] {
+            assert!(compiled_built_at(document).is_none());
+        }
+        let compiled = compiled_built_at(BUILD_INFO).expect("new binaries embed build time");
+        assert_eq!(compiled_built_at(BUILD_INFO).unwrap(), compiled);
     }
 }

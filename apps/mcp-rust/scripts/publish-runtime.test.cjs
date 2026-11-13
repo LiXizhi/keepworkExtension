@@ -11,12 +11,12 @@ const evidence = require('../../../scripts/rust-validation-evidence.cjs');
 const { readRuntimeArchive } = require('../../../scripts/lib/runtime-archive.cjs');
 const digest = data => crypto.createHash('sha256').update(data).digest('hex');
 
-function fixture(t) {
+function fixture(t, buildTime = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-rust-publication-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const info = { marker: 'keepwork-mcp-build-v1', product: 'keepwork-mcp-runtime', engine: 'rust', version: '0.2.51',
     commit: 'a'.repeat(40), sourceHash: 'b'.repeat(64), target: 'aarch64-apple-darwin',
-    capabilities: { agentSessionApi: 'v1', agentInventoryApi: 'v1', agentContextApi: 'v1', agentModeApi: 'v1' }, endMarker: 'keepwork-mcp-build-end' };
+    capabilities: { agentSessionApi: 'v1', agentInventoryApi: 'v1', agentContextApi: 'v1', agentModeApi: 'v1' }, ...buildTime, endMarker: 'keepwork-mcp-build-end' };
   const binary = path.join(directory, 'binary');
   fs.writeFileSync(binary, Buffer.from('nonexecutable fixture\0' + JSON.stringify(info)));
   const output = path.join(directory, 'package');
@@ -87,6 +87,16 @@ test('final package discovery validates target, archive bytes, runtime metadata 
   assert.throws(() => collectRelease(output, options), /size\/SHA-256/);
 });
 
+test('publication requires a new binary timestamp to match both runtime and feed', t => {
+  const { release, output, options } = fixture(t, { builtAtUnix: 1700000000, builtAtSource: 'source-date-epoch' });
+  assert.equal(release.metadata.builtAt, '2023-11-14T22:13:20Z');
+  const manifest = path.join(output, 'macos-arm64.json');
+  for (const changes of [{ builtAt: '2026-11-13T00:00:00Z' }, { builtAtSource: 'file-mtime' }, { builtAt: undefined }]) {
+    fs.writeFileSync(manifest, JSON.stringify({ ...release.metadata, ...changes }));
+    assert.throws(() => collectRelease(output, options), /build.*(?:timestamp|provenance)|builtAt/i);
+  }
+});
+
 test('archive inspection rejects traversal, symlinks, truncation and expanded-size abuse without extraction', t => {
   const { release } = fixture(t), original = fs.readFileSync(release.archive.filePath);
   assert.ok(readRuntimeArchive(original).get('runtime.json'));
@@ -129,6 +139,31 @@ test('missing, dirty, incomplete or wrong-archive evidence prevents even the fir
     assert.deepEqual(run.events, []);
   }
   await assert.rejects(publishRelease(release, {}, {}), /complete release acceptance/);
+});
+
+test('deferred acceptance publishes CI evidence and records every skipped gate', async t => {
+  const { release, report, reportFile, save } = fixture(t);
+  const executed = ['source-checks', 'fixture-contracts'];
+  for (const check of report.checks) if (!executed.includes(check.id)) {
+    check.status = 'pending'; check.evidence = []; delete check.evidenceSha256; delete check.requirements;
+    check.reason = 'Not executed for this report; source and fixture checks do not establish this acceptance result.';
+  }
+  report.overallStatus = 'pending'; save();
+  const strict = publication(release);
+  await assert.rejects(publishRelease(release, {}, { ...strict.dependencies, reportFile }), /incomplete/);
+  assert.deepEqual(strict.events, []);
+  const run = publication(release);
+  const result = await publishRelease(release, {}, { ...run.dependencies, reportFile, acceptance: 'deferred' });
+  assert.deepEqual(result.deferredGates.slice().sort(), ['cli-live', 'compatibility-matrix', 'messaging-live',
+    'package-integrity', 'runtime-live-identity', 'runtime-update-rollback'].sort());
+  assert.ok(run.events.includes('upload-feed'));
+
+  const downgraded = report.checks.find(check => check.id === 'source-checks');
+  downgraded.status = 'pending'; downgraded.reason = 'fixture pending gate';
+  report.overallStatus = 'pending'; save();
+  const blocked = publication(release);
+  await assert.rejects(publishRelease(release, {}, { ...blocked.dependencies, reportFile, acceptance: 'deferred' }), /cannot skip: source-checks/);
+  assert.deepEqual(blocked.events, []);
 });
 
 test('downgrades, same-version conflicts, unavailability and immutable-byte conflicts make no writes', async t => {

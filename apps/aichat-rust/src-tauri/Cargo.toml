@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.110"
+version = "0.2.114"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"

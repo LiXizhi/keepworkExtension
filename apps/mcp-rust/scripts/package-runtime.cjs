@@ -19,6 +19,7 @@ function packageRuntime({ binary, target, output, baseUrl = 'https://cdn.keepwor
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('Artifact base requires a credential-free HTTPS URL');
   const [platform, arch] = targets[target];
   const info = identity.validateBinary(binary, { triple: target }, expected);
+  const buildTime = info.builtAt === undefined ? {} : { builtAt: info.builtAt, builtAtSource: info.builtAtSource };
   if (!/^[a-f0-9]{40}$/.test(info.commit) || !/^[a-f0-9]{64}$/.test(info.sourceHash)) throw new Error('Missing compiled provenance');
   output = path.resolve(output);
   const temporary = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'kp-rust-package-'));
@@ -29,7 +30,7 @@ function packageRuntime({ binary, target, output, baseUrl = 'https://cdn.keepwor
     fs.copyFileSync(binary, path.join(temporary, entry));
     fs.chmodSync(path.join(temporary, entry), 0o755);
     fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(temporary, 'LICENSE'));
-    const runtime = { schemaVersion: 2, product: info.product, engine: 'rust', version: info.version,
+    const runtime = { schemaVersion: 2, product: info.product, engine: 'rust', version: info.version, ...buildTime,
       commit: info.commit, sourceHash: info.sourceHash, platform, arch, entry, args: ['--port', '8089'], env: {},
       health: { url: 'http://127.0.0.1:8089/health', match: { name: 'keepwork-mcp' } } };
     fs.writeFileSync(path.join(temporary, 'runtime.json'), JSON.stringify(runtime, null, 2) + '\n');
@@ -43,7 +44,7 @@ function packageRuntime({ binary, target, output, baseUrl = 'https://cdn.keepwor
       { env: { ...process.env, KP_RUST_ARCHIVE_SOURCE: temporary, KP_RUST_ARCHIVE_OUTPUT: archive }, stdio: 'pipe' });
     } else execFileSync('zip', ['-q', '-r', archive, '.'], { cwd: temporary, stdio: 'pipe' });
     const bytes = fs.readFileSync(archive);
-    const manifest = { schemaVersion: 2, product: info.product, engine: 'rust', version: info.version,
+    const manifest = { schemaVersion: 2, product: info.product, engine: 'rust', version: info.version, ...buildTime,
       commit: info.commit, platform, arch, sourceHash: info.sourceHash,
       url: `${baseUrl.replace(/\/$/, '')}/${info.version}/${fileName}`, fileName,
       size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };

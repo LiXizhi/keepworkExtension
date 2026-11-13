@@ -40,19 +40,49 @@ function collectRelease(directory, { target, version, commit }) {
   try {
     const binary = path.join(temporary, 'binary');
     fs.writeFileSync(binary, members.get(binaryName));
-    validateBinary(binary, { triple: TRIPLES[target] }, metadata);
+    const info = validateBinary(binary, { triple: TRIPLES[target] }, metadata);
+    if (info.builtAt !== undefined) {
+      for (const key of ['builtAt', 'builtAtSource']) {
+        if (runtime[key] !== info[key] || metadata[key] !== info[key]) {
+          throw Error('Rust compiled build timestamp mismatch: ' + key);
+        }
+      }
+    }
   } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
   return { metadata, archive, target, feedUrl: `${BASE}/${target}.json` };
 }
 
-async function verifyAcceptance(reportFile, release) {
-  if (!reportFile) throw Error('Publishing requires a complete release acceptance report');
-  const report = await require('../../../scripts/rust-validation-evidence.cjs').verify(reportFile, { requireComplete: true });
+// These gates need a real account, network or interacting desktop and can never run
+// inside CI. An explicitly requested deferred publication still demands a clean source
+// snapshot and verified archive identity, and records every skipped gate in the receipt.
+const DEFERRED_GATES = ['package-integrity', 'runtime-live-identity', 'runtime-update-rollback',
+  'compatibility-matrix', 'cli-live', 'messaging-live'];
+
+async function verifyAcceptance(reportFile, release, { acceptance = 'required' } = {}) {
+  if (!reportFile) throw Error('Publishing requires a release acceptance report (complete release acceptance unless deferred is explicit)');
+  if (!['required', 'deferred'].includes(acceptance)) throw Error('Unknown acceptance mode: ' + acceptance);
+  const evidence = require('../../../scripts/rust-validation-evidence.cjs');
+  const report = acceptance === 'required'
+    ? await evidence.verify(reportFile, { requireComplete: true })
+    : await evidence.verify(reportFile);
   if (report.product !== 'mcp-rust' || report.version !== release.metadata.version || report.commit !== release.metadata.commit
     || report.platform !== release.metadata.platform || report.arch !== release.metadata.arch
-    || report.artifact?.sha256 !== release.archive.sha256 || report.artifact?.size !== release.archive.size
-    || report.runtime?.engine !== 'rust' || report.runtime.version !== release.metadata.version || report.runtime.commit !== release.metadata.commit) {
+    || report.artifact?.sha256 !== release.archive.sha256 || report.artifact?.size !== release.archive.size) {
     throw Error('Release acceptance does not match the final Rust archive/target/runtime');
+  }
+  // collectRelease already proved the archive's compiled identity. A report that never
+  // recorded the runtime block cannot contradict it; one that did must agree exactly.
+  const runtimeMatches = report.runtime === null
+    ? true
+    : report.runtime.engine === 'rust' && report.runtime.version === release.metadata.version
+      && report.runtime.commit === release.metadata.commit;
+  if (!runtimeMatches) throw Error('Release acceptance does not match the final Rust archive/target/runtime');
+  if (acceptance === 'deferred') {
+    if (report.sourceDirty !== false) throw Error('Deferred publication requires a clean source snapshot');
+    const pending = report.checks.filter(check => check.status !== 'passed').map(check => check.id);
+    const unexpected = pending.filter(id => !DEFERRED_GATES.includes(id));
+    if (unexpected.length) throw Error('Deferred publication cannot skip: ' + unexpected.join(', '));
+    return { ...report, deferredGates: pending };
   }
   return report;
 }
@@ -63,9 +93,9 @@ function compareVersions(left, right) {
   return 0;
 }
 
-async function publishRelease(release, config, { reportFile, fetchImpl = fetch, transport = qiniu, now = () => new Date().toISOString() } = {}) {
+async function publishRelease(release, config, { reportFile, acceptance = 'required', fetchImpl = fetch, transport = qiniu, now = () => new Date().toISOString() } = {}) {
   // No network writes (or reads) precede the existing final-package release gate.
-  await verifyAcceptance(reportFile, release);
+  const acceptanceReport = await verifyAcceptance(reportFile, release, { acceptance });
   const request = url => fetchImpl(`${url}?kp_release_preflight=${Date.now()}`, {
     headers: { 'Accept-Encoding': 'identity', 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(60_000), redirect: 'error',
   });
@@ -108,20 +138,23 @@ async function publishRelease(release, config, { reportFile, fetchImpl = fetch, 
     await transport.uploadEntry({ ...config, insertOnly: false }, feed);
     await transport.refreshUrls(config, [feed.url]);
     await transport.verifyEntriesWithRetry([feed], 20, 30_000, false);
-    return { manifest, feed: { ...feed, filePath: undefined } };
+    return { manifest, feed: { ...feed, filePath: undefined }, deferredGates: acceptanceReport.deferredGates || [] };
   } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 }
 
 async function main() {
   const args = qiniu.readArgs(process.argv.slice(2));
-  for (const key of Object.keys(args)) if (!['dryRun', 'publish', 'release-dir', 'target', 'version', 'commit', 'report'].includes(key)) throw Error('Unknown argument: ' + key);
+  for (const key of Object.keys(args)) if (!['dryRun', 'publish', 'release-dir', 'target', 'version', 'commit', 'report', 'acceptance'].includes(key)) throw Error('Unknown argument: ' + key);
   if (args.publish !== undefined && args.publish !== 'true') throw Error('Use --publish true only after release approval');
+  const acceptance = args.acceptance || 'required';
+  if (!['required', 'deferred'].includes(acceptance)) throw Error('Use --acceptance required or --acceptance deferred');
   const release = collectRelease(path.resolve(qiniu.required(args['release-dir'], 'release-dir')), args);
-  console.log(JSON.stringify({ ...release, publication: args.publish === 'true' && !args.dryRun ? 'requested' : 'dry-run; no upload or feed promotion' }, null, 2));
+  console.log(JSON.stringify({ ...release, acceptance, publication: args.publish === 'true' && !args.dryRun ? 'requested' : 'dry-run; no upload or feed promotion' }, null, 2));
   if (args.publish !== 'true' || args.dryRun) return;
   const config = { accessKey: qiniu.required(process.env.KP_QINIU_ACCESS_KEY, 'KP_QINIU_ACCESS_KEY'),
     secretKey: qiniu.required(process.env.KP_QINIU_SECRET_KEY, 'KP_QINIU_SECRET_KEY'), bucket: 'haqi', uploadHost: 'https://up-z2.qiniup.com' };
-  const result = await publishRelease(release, config, { reportFile: args.report });
+  const result = await publishRelease(release, config, { reportFile: args.report, acceptance });
+  if (result.deferredGates.length) console.log('Deferred gates (not executed for this publication): ' + result.deferredGates.join(', '));
   writeCdnSummary({ title: 'Rust MCP — CDN 归档与独立更新清单已验证', version: release.metadata.version, entries: [release.archive, result.feed] });
 }
 

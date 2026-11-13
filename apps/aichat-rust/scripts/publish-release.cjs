@@ -6,7 +6,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const qiniu = require('../../../scripts/lib/qiniu-release.cjs');
 const { writeCdnSummary } = require('../../../scripts/lib/cdn-summary.cjs');
-const { validateDesktopManifest } = require('../../../scripts/lib/update-manifest.cjs');
+const { validateDesktopManifest, validateDesktopVersionStatus } = require('../../../scripts/lib/update-manifest.cjs');
 
 const START = '<!-- keepwork-cdn-downloads:start -->';
 const END = '<!-- keepwork-cdn-downloads:end -->';
@@ -18,6 +18,19 @@ const INSTALLERS = [
 const UPDATE_TARGETS = ['win32-x64', 'win32-arm64', 'darwin-universal'];
 const updateKey = target => `keepwork/aichat-rust/${target}/latest-client.json`;
 const cdnUrl = key => `https://cdn.keepwork.com/${key}`;
+
+function releaseVersionFromTag(tag) {
+  const match = typeof tag === 'string' && /^(?:aichat-rust-)?v([0-9]+\.[0-9]+\.[0-9]+)$/.exec(tag);
+  if (!match || match[0] !== tag) throw new Error('Release tag must be vX.Y.Z or historical aichat-rust-vX.Y.Z');
+  return qiniu.normalizeVersion(match[1]);
+}
+
+function resolveReleaseTag(version, refName) {
+  const normalized = qiniu.normalizeVersion(version);
+  const tag = refName === undefined ? `v${normalized}` : refName;
+  if (releaseVersionFromTag(tag) !== normalized) throw new Error('Release tag does not match installer version');
+  return tag;
+}
 
 function collectReleaseFiles(directory, version) {
   qiniu.normalizeVersion(version);
@@ -57,14 +70,22 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
       || (previous.product && previous.product !== 'aichat-desktop'))) {
       throw new Error(`Invalid existing desktop update feed: ${target}`);
     }
-    if (previous) validateDesktopManifest(previous, { target, legacy: true });
+    const versionStatus = previous && (previous.kind === 'version-status'
+      || previous.releaseStatus === 'version-only' || previous.installable === false);
+    if (previous) {
+      if (versionStatus) validateDesktopVersionStatus(previous, { target });
+      else validateDesktopManifest(previous, { target, legacy: true });
+    }
+    // A status record describes a source version, not this new package. Do not
+    // carry its commit, timestamp, description or non-installable markers forward.
+    const inherited = versionStatus ? {} : previous;
     const legacyZip = previous?.format === 'zip' || /\.zip(?:[?#]|$)/i.test(previous?.url || '');
-    const oldInstaller = previous?.installer || (legacyZip ? undefined : previous);
+    const oldInstaller = previous?.installer || (legacyZip || versionStatus ? undefined : previous);
     const oldVersion = oldInstaller?.version || previous?.version;
-    if (oldInstaller && oldVersion) {
+    if ((oldInstaller || versionStatus) && oldVersion) {
       const comparison = compareVersions(oldVersion, version);
       if (comparison > 0) throw new Error(`Refusing desktop update downgrade: ${target}`);
-      if (comparison === 0 && (oldInstaller.url !== pkg.url || oldInstaller.size !== pkg.size
+      if (comparison === 0 && oldInstaller && (oldInstaller.url !== pkg.url || oldInstaller.size !== pkg.size
         || oldInstaller.sha256?.toLowerCase() !== pkg.sha256)) {
         throw new Error(`Same desktop version has a different installer: ${target}`);
       }
@@ -78,9 +99,9 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
     // clients use the additive installer, including its independent version.
     const manifest = legacyZip ? {
       schemaVersion: 1, product: 'aichat-desktop', platform: windows ? 'windows' : 'macos', arch: target.split('-')[1],
-      ...previous, installer,
+      ...inherited, installer,
     } : {
-      ...previous, schemaVersion: 1, product: 'aichat-desktop',
+      ...inherited, schemaVersion: 1, product: 'aichat-desktop',
       platform: windows ? 'windows' : 'macos', arch: target.split('-')[1],
       ...installer, installer,
     };
@@ -190,9 +211,20 @@ function githubRelease(tag, repository) {
 async function main() {
   const args = qiniu.readArgs(process.argv.slice(2));
   for (const key of Object.keys(args)) {
-    if (!['dryRun', 'release-dir', 'version'].includes(key)) throw new Error(`Unknown argument: ${key}`);
+    if (!['dryRun', 'release-dir', 'version', 'tag', 'version-from-tag'].includes(key)) throw new Error(`Unknown argument: ${key}`);
+  }
+  if (Object.hasOwn(args, 'version-from-tag')) {
+    if (args.dryRun || Object.keys(args).some(key => !['dryRun', 'version-from-tag'].includes(key))) {
+      throw new Error('--version-from-tag must be used alone');
+    }
+    console.log(releaseVersionFromTag(args['version-from-tag']));
+    return;
   }
   const version = qiniu.normalizeVersion(args.version);
+  if (args.tag !== undefined && process.env.GITHUB_REF_NAME !== undefined && args.tag !== process.env.GITHUB_REF_NAME) {
+    throw new Error('Release tag does not match GITHUB_REF_NAME');
+  }
+  const tag = resolveReleaseTag(version, args.tag ?? process.env.GITHUB_REF_NAME);
   const directory = path.resolve(qiniu.required(args['release-dir'], 'release-dir'));
   const entries = collectReleaseFiles(directory, version);
   if (args.dryRun) {
@@ -200,8 +232,6 @@ async function main() {
     console.log(collectUpdateFeeds(entries, version, new Date().toISOString()).map(feed => feed.url).join('\n'));
     return;
   }
-  const tag = `aichat-rust-v${version}`;
-  if (process.env.GITHUB_REF_NAME && process.env.GITHUB_REF_NAME !== tag) throw new Error('Release tag does not match installer version');
   const repository = qiniu.required(process.env.GH_REPO || process.env.GITHUB_REPOSITORY, 'GH_REPO');
   const config = {
     accessKey: qiniu.required(process.env.KP_QINIU_ACCESS_KEY, 'KP_QINIU_ACCESS_KEY'),
@@ -213,4 +243,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { collectReleaseFiles, collectUpdateFeeds, updateReleaseBody, publishRelease };
+module.exports = { releaseVersionFromTag, resolveReleaseTag, collectReleaseFiles, collectUpdateFeeds, updateReleaseBody, publishRelease };

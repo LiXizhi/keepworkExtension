@@ -230,6 +230,13 @@ Commands: `keepwork.openMcpWorkspace`, `keepwork.changeMcpWorkspace`, `keepwork.
 
 ## Common workflows
 
+### Rust desktop release tags (`apps/aichat-rust`)
+
+- Standing user requirement (2026-11-13): new AIChat Rust desktop releases use standard `v<major>.<minor>.<patch>` Git tags, for example `v0.2.112`, matching the desktop version in all four manifests. Do not create new `aichat-rust-v*` tags.
+- Record the release procedure in [apps/aichat-rust/README.md](apps/aichat-rust/README.md#github-release-与-cdn-下载地址). Keep `.github/workflows/aichat-rust-windows-release.yml` as the single desktop workflow: it validates PRs and `main` pushes through `rust-desktop-validation.yml` and builds installers there, but publication still requires manual dispatch on the release tag. Changing this naming convention does not authorize a push or publication and must not add automatic publication triggers.
+- Preserve historical `aichat-rust-v*` tags, Releases and download URLs. Keep explicit legacy-tag support for rerunning an existing historical release; do not rename, move, delete or recreate historical tags or Releases to change their display order. A standard tag improves version recognition but does not guarantee GitHub's ordering of all historical releases; the `Latest` marker is separate from list order.
+- This convention applies only to `apps/aichat-rust`. Other products retain their independent versions and tag conventions (including the extension's `keepwork-v*` tags).
+
 ### NodeRuntime CDN release
 
 - `apps/mcp-runtime` owns standalone runtime staging, archive packaging and release metadata. See [its README](apps/mcp-runtime/README.md).

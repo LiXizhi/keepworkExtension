@@ -131,9 +131,10 @@ test('platform registration uses a strict URL-only helper and keeps other instal
   assert.match(plist, /<key>CFBundleURLSchemes<\/key>\s*<array><string>keepwork-secondbrain<\/string><\/array>/);
   const hooks = fs.readFileSync(path.join(app, 'src-tauri/windows/installer-hooks.nsh'), 'utf8');
   assert.match(hooks, /!macro NSIS_HOOK_POSTINSTALL/);
-  assert.match(hooks, /WriteRegStr HKCU "Software\\Classes\\keepwork-secondbrain\\shell\\open\\command" "" '\$"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe\$" --launch-url \$"%1\$"'/);
+  assert.match(hooks, /WriteRegStr HKCU "Software\\Classes\\keepwork-secondbrain\\shell\\open\\command" "" '"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" --launch-url "%1"'/);
   const uninstall = hooks.slice(hooks.indexOf('!macro NSIS_HOOK_POSTUNINSTALL'));
-  assert.ok(uninstall.indexOf('${If} $0 ==') < uninstall.indexOf('DeleteRegKey'));
+  assert.match(uninstall, /\$\{If\} \$0 S== '"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" --launch-url "%1"'/);
+  assert.ok(uninstall.indexOf('${If} $0 S==') < uninstall.indexOf('DeleteRegKey'));
   const main = fs.readFileSync(path.join(app, 'src-tauri/src/main.rs'), 'utf8');
   assert.ok(main.indexOf('"--launch-url"') < main.indexOf('"--stop-mcp"'));
   assert.match(main, /protocol_launch_action\(std::env::args_os\(\)\.skip\(2\)\)/);
@@ -168,7 +169,7 @@ Section "Uninstall"
  !insertmacro NSIS_HOOK_POSTUNINSTALL
 SectionEnd
 `);
-  const result = spawnSync(compiler, ['/INPUTCHARSET', 'UTF8', script], {
+  const result = spawnSync(compiler, ['/WX', '/INPUTCHARSET', 'UTF8', script], {
     encoding: 'utf8', windowsHide: true, timeout: 50000,
   });
   assert.ifError(result.error);

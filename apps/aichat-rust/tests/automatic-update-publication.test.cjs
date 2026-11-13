@@ -335,3 +335,57 @@ for (const failAt of ['verify-installers', 'verify-feeds']) {
     if (failAt === 'verify-installers') assert.equal(run.feedUploads.length, 0);
   });
 }
+
+function versionStatus(target, recordVersion = '1.2.2') {
+  return {
+    schemaVersion: 1, kind: 'version-status', product: 'aichat-desktop', channel: 'stable',
+    platform: target.startsWith('darwin-') ? 'macos' : 'windows', arch: target.split('-')[1],
+    version: recordVersion, commit: 'b'.repeat(40), publishedAt: '2026-11-12T08:00:00.000Z',
+    releaseStatus: 'version-only', installable: false, description: 'Installer publication is pending.',
+  };
+}
+
+for (const oldVersion of ['1.2.2', version]) {
+  test(`promotes version-status ${oldVersion} to the first real package without stale status metadata`, async t => {
+    const { entries } = fixture(t);
+    const previousByTarget = Object.fromEntries(targets.map(target => [target, versionStatus(target, oldVersion)]));
+    const original = structuredClone(previousByTarget);
+    const run = publication(entries, { previousByTarget });
+    await publishRelease(entries, run.config, { ...run.dependencies, publishedAt });
+    assert.deepEqual(previousByTarget, original);
+    for (const { target, manifest } of run.feedUploads) {
+      assert.equal(manifest.version, version);
+      assert.equal(manifest.publishedAt, publishedAt, 'package publication is distinct from source version announcement');
+      assert.equal(manifest.installer.publishedAt, publishedAt);
+      for (const marker of ['kind', 'releaseStatus', 'installable', 'commit', 'description']) {
+        assert.equal(Object.hasOwn(manifest, marker), false, `discard stale ${marker}`);
+      }
+      assert.ok(entries.some(entry => entry.url === manifest.url && entry.sha256 === manifest.sha256 && entry.size === manifest.size));
+      assert.ok(run.events.indexOf('verify-installers') < run.events.indexOf(`upload-feed:${target}`));
+    }
+  });
+}
+
+test('version-status cannot bypass downgrade protection or genuine package validation', async t => {
+  const { entries } = fixture(t);
+  const run = publication(entries, { previousByTarget: { 'darwin-universal': versionStatus('darwin-universal', '9.0.0') } });
+  await assert.rejects(publishRelease(entries, run.config, run.dependencies), /downgrade/);
+  assert.ok(run.events.every(event => event.startsWith('read-')));
+  const invalidEntries = entries.map(entry => entry.name.endsWith('.dmg') ? { ...entry, sha256: '' } : entry);
+  assert.throws(() => collectUpdateFeeds(invalidEntries, version, publishedAt,
+    { 'darwin-universal': versionStatus('darwin-universal') }), /SHA-256/);
+});
+
+test('ambiguous or malformed version-status records abort before remote mutations', async t => {
+  const { entries } = fixture(t);
+  const changes = [{ installable: true }, { kind: 'other' }, { releaseStatus: 'released' },
+    { product: 'another-product' }, { schemaVersion: 2 }, { channel: 'preview' },
+    { arch: 'arm64' }, { commit: 'not-a-commit' }, { publishedAt: 'invalid' },
+    { installer: null }, { url: 'https://cdn.keepwork.com/phantom.dmg' }, { size: 1 },
+    { sha256: 'a'.repeat(64) }, { format: 'dmg' }, { fileName: 'phantom.dmg' }];
+  for (const change of changes) {
+    const run = publication(entries, { previousByTarget: { 'darwin-universal': { ...versionStatus('darwin-universal'), ...change } } });
+    await assert.rejects(publishRelease(entries, run.config, run.dependencies), JSON.stringify(change));
+    assert.ok(run.events.every(event => event.startsWith('read-')), JSON.stringify(change));
+  }
+});

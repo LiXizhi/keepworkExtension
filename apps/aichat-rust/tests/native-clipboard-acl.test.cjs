@@ -46,3 +46,18 @@ test('clipboard removal preserves default window, origin and unrelated command b
     'notification:default',
   ]);
 });
+
+test('registered desktop bridge commands have matching explicit IPC permissions', () => {
+  const app = path.resolve(__dirname, '..');
+  const startup = fs.readFileSync(path.join(app, 'src-tauri/src/app/startup.rs'), 'utf8');
+  const handler = startup.match(/\.invoke_handler\(tauri::generate_handler!\[([\s\S]*?)\]\)/);
+  assert.ok(handler, 'desktop commands must have an explicit Tauri handler');
+  const registered = [...handler[1].matchAll(/(?:[A-Za-z_]\w*::)+([A-Za-z_]\w*)/g)]
+    .map(match => match[1]);
+  const permissions = fs.readFileSync(path.join(app, 'src-tauri/permissions/desktop-commands.toml'), 'utf8');
+  const allowed = [...permissions.matchAll(/commands\.allow\s*=\s*\[([\s\S]*?)\]/g)]
+    .flatMap(match => [...match[1].matchAll(/"([^"]+)"/g)].map(command => command[1]));
+  assert.ok(registered.includes('desktop_set_menu_language'), 'native menu language updates stay registered');
+  assert.deepEqual([...registered].sort(), [...allowed].sort(),
+    'every registered bridge command needs an explicit permission, with no stale permissions');
+});

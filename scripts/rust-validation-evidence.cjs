@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const Ajv = require('ajv/dist/2020');
+const { readRuntimeArchive } = require('./lib/runtime-archive.cjs');
 
 const repoRoot = path.resolve(__dirname, '..');
 const defaultOutput = path.join(repoRoot, '.test-runtime', 'rust-validation');
@@ -203,6 +204,19 @@ function pendingGate(id) {
   return { id, level: (gateLevels[id] || ['packaged'])[0], status: 'pending', evidence: [], reason: 'Not executed for this report; source and fixture checks do not establish this acceptance result.', ...(requirements.length ? { requirements } : {}) };
 }
 
+// A packaged Rust runtime archive answers its own identity; record it so publication
+// can compare the report against the exact bytes it is about to promote.
+function runtimeIdentity(artifact) {
+  if (!artifact?.path || !/\.zip$/i.test(artifact.path)) return null;
+  let runtime;
+  try {
+    runtime = JSON.parse(readRuntimeArchive(fs.readFileSync(artifact.path)).get('runtime.json')?.toString() || 'null');
+  } catch { return null; }
+  if (!runtime || runtime.engine !== 'rust' || !runtime.version) return null;
+  return { engine: runtime.engine, version: runtime.version, commit: runtime.commit || null,
+    owner: 'desktop', capabilities: runtime.capabilities || {}, source: 'build-info' };
+}
+
 async function collect({ output, product, artifact }) {
   if (!gates[product]) throw Error('Unknown Rust product: ' + product);
   const directory = path.join(output, 'checks');
@@ -231,7 +245,7 @@ async function collect({ output, product, artifact }) {
   }
   const report = {
     schemaVersion: 1, recordedAt: new Date().toISOString(), ...context,
-    artifact: installer, runtime: null, web: null, checks, overallStatus: overallStatus(checks),
+    artifact: installer, runtime: runtimeIdentity(installer), web: null, checks, overallStatus: overallStatus(checks),
   };
   validateReport(report, { directory: output });
   fs.mkdirSync(output, { recursive: true });

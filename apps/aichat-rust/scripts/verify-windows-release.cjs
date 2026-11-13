@@ -47,7 +47,7 @@ function verify({ directory, arch, commit, binary, installer }) {
   assert.deepEqual(manifest.env, {}, 'Unexpected runtime environment');
   assert.deepEqual(manifest.health, { url: 'http://127.0.0.1:8089/health', match: { name: 'keepwork-mcp' }, timeoutMs: 10000 }, 'Unexpected runtime health configuration');
   const runtime = path.join(path.dirname(manifests[0]), 'bin/keepwork-mcp.exe');
-  const applications = files.filter((file) => path.basename(file) === 'aichat-rust.exe');
+  const applications = files.filter((file) => ['keepwork.exe', 'aichat-rust.exe'].includes(path.basename(file).toLowerCase()));
   assert.equal(applications.length, 1, 'Expected exactly one desktop executable');
   assert.equal(peMachine(applications[0]), machines[arch], 'Desktop architecture mismatch');
   assert.equal(peMachine(runtime), machines[arch], 'Runtime architecture mismatch');

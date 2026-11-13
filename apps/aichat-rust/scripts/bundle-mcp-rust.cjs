@@ -112,6 +112,7 @@ function writeRuntime(arch, source, info, outputRoot = resourcesRoot) {
     version: info.version,
     commit: info.commit,
     sourceHash: info.sourceHash,
+    ...(info.builtAt ? { builtAt: info.builtAt, builtAtSource: info.builtAtSource } : {}),
     platform: arch.platform,
     arch: arch.arch,
     entry: `bin/${binName(arch.platform)}`,
