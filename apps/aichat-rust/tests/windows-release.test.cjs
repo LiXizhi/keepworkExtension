@@ -4,9 +4,25 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { peMachine, verify } = require('../scripts/verify-windows-release.cjs');
 
 const appRoot = path.resolve(__dirname, '..');
+
+test('packaged self-update smoke has valid PowerShell syntax', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', String.raw`
+    $parseTokens = $null; $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($env:KEEPWORK_SMOKE_PARSE_FILE, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+    if ($parseErrors.Count) { $parseErrors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+  `], {
+    env: { ...process.env, KEEPWORK_SMOKE_PARSE_FILE: path.join(appRoot, 'scripts/windows-self-update-smoke.ps1') },
+    encoding: 'utf8', windowsHide: true, timeout: 15000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
 const desktopVersion = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).version;
 const runtimeVersion = /^version\s*=\s*"([^"]+)"/m.exec(fs.readFileSync(path.join(appRoot, '../mcp-rust/crates/keepwork-mcp/Cargo.toml'), 'utf8'))[1];
 const machines = { x64: 0x8664, arm64: 0xaa64 };

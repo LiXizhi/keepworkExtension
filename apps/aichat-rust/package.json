@@ -1,6 +1,6 @@
 {
   "name": "keepwork-aichat-rust",
-  "version": "0.2.110",
+  "version": "0.2.111",
   "private": true,
   "description": "Rust + Tauri 2 native desktop application for KeepWork 第二大脑 (AIChat Desktop)",
   "type": "module",

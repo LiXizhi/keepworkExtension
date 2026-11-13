@@ -8,6 +8,11 @@ $Installer = (Resolve-Path -LiteralPath $Installer).Path
 if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork') {
   throw 'Packaged updater smoke requires a clean disposable Windows runner'
 }
+$protocolKey = 'HKCU:\Software\Classes\keepwork-secondbrain'
+$protocolCommandKey = 'HKEY_CURRENT_USER\Software\Classes\keepwork-secondbrain\shell\open\command'
+if (Test-Path -LiteralPath $protocolKey) {
+  throw 'Packaged updater smoke requires an unclaimed protocol on its disposable runner'
+}
 foreach ($port in @(8089, 18089)) {
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
   try { $listener.Start() } finally { $listener.Stop() }
@@ -17,7 +22,22 @@ $install = Join-Path $root 'Keepwork 中文 custom directory'
 $external = Join-Path $root 'other-install'
 $profile = Join-Path $root 'private profile 中文'
 $owned = [Collections.Generic.List[Diagnostics.Process]]::new()
+$uninstalled = $false
+$fixtureProtocolCommand = $null
 New-Item -ItemType Directory -Path $install, $external, $profile | Out-Null
+function Get-ProtocolCommand {
+  return [Microsoft.Win32.Registry]::GetValue($protocolCommandKey, '', $null)
+}
+function Assert-ProtocolCommand([string]$executableName) {
+  # Use NSIS's recorded installation spelling, including short-name expansion.
+  $location = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork').InstallLocation
+  if (-not $location) { throw 'Installer did not record its installation directory' }
+  $expected = '"' + (Join-Path $location $executableName) + '" --launch-url "%1"'
+  if (-not [string]::Equals((Get-ProtocolCommand), $expected, [StringComparison]::Ordinal)) {
+    throw 'Installed URL protocol command was not quoted exactly'
+  }
+  return $expected
+}
 function Start-Owned([string]$file, [string]$arguments) {
   $info = [Diagnostics.ProcessStartInfo]::new($file)
   $info.Arguments = $arguments
@@ -58,9 +78,14 @@ function Retain-Relaunched([string]$executable, [DateTime]$since) {
 }
 try {
   Wait-Code (Start-Owned $Installer "/S /D=$install") 0
+  # The installer can expand RUNNER~1 in its persisted path. Use that spelling
+  # for executable identity and exact uninstall ownership checks from now on.
+  $install = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork').InstallLocation
+  if (-not $install) { throw 'Installer did not record its installation directory' }
   $apps = @(Get-ChildItem -LiteralPath $install -File | Where-Object { $_.Name -in @('Keepwork.exe', 'aichat-rust.exe') })
   if ($apps.Count -ne 1) { throw 'Installed application identity is ambiguous' }
   $application = $apps[0].FullName
+  $protocolCommand = Assert-ProtocolCommand $apps[0].Name
   $expectedHash = (Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash
   $helper = Join-Path $root 'fixture-installer-helper.exe'
   Copy-Item -LiteralPath $application -Destination $helper
@@ -71,7 +96,7 @@ try {
   Copy-Item -LiteralPath (Get-Command node).Source -Destination $application -Force
   $externalExe = Join-Path $external $apps[0].Name
   Copy-Item -LiteralPath (Get-Command node).Source -Destination $externalExe
-  $other = Start-Owned $externalExe '-e "setTimeout(() => {}, 120000)"'
+  $other = Start-Owned $externalExe '-e "setTimeout(() => {}, 300000)"'
   # A reopened historical executable must block before MCP cleanup or writes.
   $alternateName = if ($apps[0].Name -ieq 'Keepwork.exe') { 'aichat-rust.exe' } else { 'Keepwork.exe' }
   $alternateExe = Join-Path $install $alternateName
@@ -133,7 +158,32 @@ try {
   if ($other.HasExited) { throw 'Restart affected another installation' }
   $restarted.Kill(); $restarted.WaitForExit()
   Wait-Code (Start-Owned $helper "--stop-mcp `"$install`"") 0
-  Write-Output (@{ result='passed'; cases=@('silent-custom-install', 'both-native-names-block-before-mcp-cleanup', 'parent-identity-rejection', 'no-force-desktop-check', 'parent-exit-before-replacement', 'silent-overwrite', 'custom-directory-preserved', 'user-data-preserved', 'external-install-untouched', 'manual-repair-clears-failure-receipt', 'real-nsis-relaunch', 'isolated-relaunch-profile'); elapsedMs=$watch.ElapsedMilliseconds; relaunchTested=$true; applicationHealthTested=$false } | ConvertTo-Json -Compress)
+  $protocolCommand = Assert-ProtocolCommand $apps[0].Name
+  $uninstall = Join-Path $install 'uninstall.exe'
+  foreach ($foreignCommand in @(
+    ('"{0}" --launch-url "%1"' -f $externalExe)
+    ($protocolCommand + ' --foreign-owner')
+    ($protocolCommand.Replace('--launch-url', '--LAUNCH-URL'))
+  )) {
+    [Microsoft.Win32.Registry]::SetValue($protocolCommandKey, '', $foreignCommand, [Microsoft.Win32.RegistryValueKind]::String)
+    $fixtureProtocolCommand = $foreignCommand
+    Wait-Code (Start-Owned $uninstall "/S _?=$install") 0
+    if (-not [string]::Equals((Get-ProtocolCommand), $foreignCommand, [StringComparison]::Ordinal)) {
+      throw 'Uninstall modified a URL protocol command owned by another installation or handler'
+    }
+    if ($other.HasExited) { throw 'Uninstall stopped another installation' }
+    Remove-Item -LiteralPath $protocolKey -Recurse -Force
+    $fixtureProtocolCommand = $null
+    Wait-Code (Start-Owned $Installer "/S /D=$install") 0
+    $install = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork').InstallLocation
+    if (-not $install) { throw 'Reinstalled application did not record its directory' }
+    $uninstall = Join-Path $install 'uninstall.exe'
+    $protocolCommand = Assert-ProtocolCommand $apps[0].Name
+  }
+  Wait-Code (Start-Owned $uninstall "/S _?=$install") 0
+  $uninstalled = $true
+  if (Test-Path -LiteralPath $protocolKey) { throw 'Uninstall retained its own URL protocol registration' }
+  Write-Output (@{ result='passed'; cases=@('silent-custom-install', 'quoted-protocol-command', 'both-native-names-block-before-mcp-cleanup', 'parent-identity-rejection', 'no-force-desktop-check', 'parent-exit-before-replacement', 'silent-overwrite', 'custom-directory-preserved', 'user-data-preserved', 'external-install-untouched', 'manual-repair-clears-failure-receipt', 'real-nsis-relaunch', 'isolated-relaunch-profile', 'foreign-protocol-owner-preserved', 'own-protocol-registration-removed'); elapsedMs=$watch.ElapsedMilliseconds; relaunchTested=$true; applicationHealthTested=$false } | ConvertTo-Json -Compress)
 } finally {
   # Kill only processes created and retained by this fixture, never by name/PID lookup.
   foreach ($process in $owned) { if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() } }
@@ -141,9 +191,12 @@ try {
     Wait-Code (Start-Owned $helper "--stop-mcp `"$install`"") 0
   }
   $uninstall = Join-Path $install 'uninstall.exe'
-  if (Test-Path -LiteralPath $uninstall) {
+  if (-not $uninstalled -and (Test-Path -LiteralPath $uninstall)) {
     $cleanup = Start-Owned $uninstall "/S _?=$install"
     Wait-Code $cleanup 0
+  }
+  if ($fixtureProtocolCommand -and [string]::Equals((Get-ProtocolCommand), $fixtureProtocolCommand, [StringComparison]::Ordinal)) {
+    Remove-Item -LiteralPath $protocolKey -Recurse -Force
   }
   Remove-Item -LiteralPath $root -Recurse -Force
 }

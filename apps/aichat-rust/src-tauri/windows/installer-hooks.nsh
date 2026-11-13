@@ -122,7 +122,7 @@ FunctionEnd
   ; The Rust parser accepts two exact actions and never invokes a shell.
   WriteRegStr HKCU "Software\Classes\keepwork-secondbrain" "" "URL:Keepwork Second Brain"
   WriteRegStr HKCU "Software\Classes\keepwork-secondbrain" "URL Protocol" ""
-  WriteRegStr HKCU "Software\Classes\keepwork-secondbrain\shell\open\command" "" '$"$INSTDIR\${MAINBINARYNAME}.exe$" --launch-url $"%1$"'
+  WriteRegStr HKCU "Software\Classes\keepwork-secondbrain\shell\open\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" --launch-url "%1"'
   !insertmacro KEEPWORK_RECORD_UPDATE_RESULT "installed"
 !macroend
 
@@ -130,7 +130,7 @@ FunctionEnd
   ; Another edition/installation may now own this shared URL scheme.
   Push $0
   ReadRegStr $0 HKCU "Software\Classes\keepwork-secondbrain\shell\open\command" ""
-  ${If} $0 == '$"$INSTDIR\${MAINBINARYNAME}.exe$" --launch-url $"%1$"'
+  ${If} $0 S== '"$INSTDIR\${MAINBINARYNAME}.exe" --launch-url "%1"'
     DeleteRegKey HKCU "Software\Classes\keepwork-secondbrain"
   ${EndIf}
   Pop $0
