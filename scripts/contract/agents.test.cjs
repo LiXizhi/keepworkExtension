@@ -251,6 +251,12 @@ test('cloudPrimary requires an actual boolean and an explicitly registered conte
   const relative = path.relative(fs.realpathSync(home), fs.realpathSync(cloud.roots[0]));
   assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative),
     'cloud contexts use a confined temporary native cwd rather than a fake local project root');
+  const creations = logRows().filter(row => row.method === 'session/new').length;
+  const reconnected = await create(conversationId, { roots: [], contextVersion: 1, cloudPrimary: true });
+  assert.equal(reconnected.id, cloud.id);
+  assert.equal(reconnected.threadId, cloud.threadId);
+  assert.equal(logRows().filter(row => row.method === 'session/new').length, creations,
+    'reconnecting a cloud workspace must reuse its native session');
   const sent = await turn(cloud, 'cloud-context-1', 'answer through cloud context', { contextVersion: 1, model: '', effort: '' });
   assert.equal(sent.status, 200, JSON.stringify(sent.json));
   await waitSession(cloud, (snapshot) => snapshot.status === 'completed');
@@ -941,14 +947,36 @@ test('malformed or duplicate persisted records stay read-only and preserve their
 test('Rust and Node can take turns hosting one profile without losing ACP history or replaying requests', async (t) => {
   if (!h.hasNodeReference()) return t.skip('Node reference has not been built; cross-engine live fixture not available');
   const createdByRust = await create('rust-to-node-history');
+  const expectedRoot = process.platform === 'win32' ? fs.realpathSync(root).toLowerCase() : fs.realpathSync(root);
+  assert.deepEqual(createdByRust.roots, [expectedRoot], 'persisted roots must use the published Node identity format');
   assert.equal((await turn(createdByRust, 'rust-history-1', 'answer from Rust host')).status, 200);
   const rustDone = await waitSession(createdByRust, (view) => view.status === 'completed');
   assert.equal(answerText(rustDone), '中文 fixture answer');
+  await stop();
+  // Simulate a registry written by the older Rust server, before Windows
+  // identities were lowercased. Reopening it must preserve history and allow
+  // an explicit new request while retaining duplicate-request receipts.
+  const registry = path.join(home, '.keepwork-mcp', 'agent-sessions-v1.json');
+  const rows = JSON.parse(fs.readFileSync(registry, 'utf8'));
+  const legacy = rows.find(row => row.id === createdByRust.id);
+  legacy.roots = [fs.realpathSync(root)];
+  legacy.worktrees = [...legacy.roots];
+  fs.writeFileSync(registry, JSON.stringify(rows));
+  await start();
+  const recovered = await request(`/sessions/${createdByRust.id}`);
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.json));
+  assert.deepEqual(recovered.json.roots, [expectedRoot]);
+  assert.equal(recovered.json.threadId, createdByRust.threadId);
+  assert.equal(answerText(recovered.json), '中文 fixture answer');
+  assert.equal((await turn(createdByRust, 'rust-history-2', 'continue legacy Rust history')).status, 200);
+  const continued = await waitSession(createdByRust, view => view.status === 'completed');
+  const rustHistory = '中文 fixture answer'.repeat(2);
+  assert.equal(answerText(continued), rustHistory);
   const firstCount = prompts().length;
   await stop(); await start('node');
   const onNode = await request(`/sessions/${createdByRust.id}`);
   assert.equal(onNode.status, 200, JSON.stringify(onNode.json));
-  assert.equal(answerText(onNode.json), '中文 fixture answer');
+  assert.equal(answerText(onNode.json), rustHistory);
   assert.equal(prompts().length, firstCount, 'downgrading to Node must only read, never replay a request');
   const duplicate = await turn(createdByRust, 'rust-history-1', 'must not replay after switch');
   assert.equal(duplicate.status, 200, JSON.stringify(duplicate.json));
@@ -961,8 +989,11 @@ test('Rust and Node can take turns hosting one profile without losing ACP histor
   for (const session of [createdByRust, createdByNode]) {
     const onRust = await request(`/sessions/${session.id}`);
     assert.equal(onRust.status, 200, JSON.stringify(onRust.json));
-    assert.equal(answerText(onRust.json), '中文 fixture answer');
+    assert.equal(answerText(onRust.json), session.id === createdByRust.id ? rustHistory : '中文 fixture answer');
     assert.equal(onRust.json.threadId, session.threadId);
   }
   assert.equal(prompts().length, secondCount, 'returning to Rust must not dispatch historical prompts');
+  const duplicateOnRust = await turn(createdByNode, 'node-history-1', 'must not replay after returning to Rust');
+  assert.equal(duplicateOnRust.status, 200, JSON.stringify(duplicateOnRust.json));
+  assert.equal(prompts().length, secondCount);
 });

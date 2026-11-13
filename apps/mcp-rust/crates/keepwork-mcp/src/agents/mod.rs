@@ -14,6 +14,7 @@ mod history;
 mod images;
 mod item_stream;
 mod native;
+mod path_identity;
 #[cfg(test)]
 mod persistence_tests;
 mod sessions;
@@ -142,17 +143,7 @@ fn canonical_root(value: &str) -> Result<PathBuf, String> {
     }
     let canonical =
         std::fs::canonicalize(path).map_err(|_| "Existing absolute local folder required")?;
-    #[cfg(windows)]
-    {
-        let raw = canonical.to_string_lossy();
-        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
-            return Ok(PathBuf::from(format!(r"\\{rest}")));
-        }
-        if let Some(rest) = raw.strip_prefix(r"\\?\") {
-            return Ok(PathBuf::from(rest));
-        }
-    }
-    Ok(canonical)
+    Ok(path_identity::normalize(canonical))
 }
 fn checked_roots(data: &Value) -> Result<Vec<String>, String> {
     let roots = data["roots"]
@@ -351,6 +342,9 @@ impl AgentManager {
                     receipt["state"] = json!("unknown");
                 }
             }
+            // Old Rust registries used case-preserved Windows paths. Convert
+            // only their spelling; load() still verifies the live real path.
+            path_identity::normalize_record(&mut data);
             let (events, _) =
                 watch::channel(json!({"cursor":data["cursor"],"session":snapshot(&data)}));
             let native = data["nativeMetadata"].clone();

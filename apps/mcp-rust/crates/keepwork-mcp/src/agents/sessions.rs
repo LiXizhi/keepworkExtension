@@ -452,6 +452,7 @@ impl AgentManager {
                         .join("agent-workspaces")
                         .join(owner)
                         .join(conversation);
+                    let temporary = path_identity::normalize(temporary);
                     if s.data["roots"][0].as_str() != Some(temporary.to_string_lossy().as_ref()) {
                         return Err(
                             "Existing session primary workspace differs; start a new conversation"
@@ -482,6 +483,7 @@ impl AgentManager {
                         .join("agent-workspaces")
                         .join(owner)
                         .join(conversation);
+                    let temporary = path_identity::normalize(temporary);
                     let stored = s.data["roots"].as_array().unwrap();
                     let stored = if stored
                         .first()
@@ -1550,9 +1552,10 @@ fn workspace_prompt(text: &str, data: &Value) -> Result<String, String> {
         };
         let real =
             std::fs::canonicalize(candidate).map_err(|_| "Referenced local file is unavailable")?;
+        let identity = path_identity::normalize(real.clone());
         if !roots
             .iter()
-            .any(|root| real.starts_with(root.as_str().unwrap_or("")))
+            .any(|root| identity.starts_with(root.as_str().unwrap_or("")))
         {
             return Err("File reference is outside the session workspace roots".into());
         }
@@ -1569,4 +1572,70 @@ fn workspace_prompt(text: &str, data: &Value) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join("\n")
     ))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_file_references_accept_real_files_and_reject_sibling_and_link_escapes() {
+        let directory = std::env::temp_dir().join(format!("kp-reference-paths-{}", id()));
+        let folder = directory.join("MixedCaseWorkspace");
+        let outside = directory.join("MixedCaseWorkspace-sibling");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(folder.join("Notes.txt"), b"inside").unwrap();
+        std::fs::write(outside.join("Notes.txt"), b"outside").unwrap();
+        let root = canonical_root(folder.to_str().unwrap()).unwrap();
+        let data = json!({"roots":[root],"rootNames":["work"]});
+        let prompt = workspace_prompt("read [#ref //work/Notes.txt]", &data).unwrap();
+        assert!(prompt.contains("Notes.txt"));
+        let escaped = format!("read [#ref {}]", outside.join("Notes.txt").display());
+        assert!(workspace_prompt(&escaped, &data)
+            .unwrap_err()
+            .contains("outside"));
+
+        let link = folder.join("outside-link");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(
+            workspace_prompt("read [#ref //work/outside-link/Notes.txt]", &data)
+                .unwrap_err()
+                .contains("outside")
+        );
+        // Replacing the previously canonical root with a link must still fail
+        // the live identity check used by load(), even for old Rust records.
+        #[cfg(windows)]
+        std::fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir_all(&folder).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&folder)
+            .arg(&outside)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &folder).unwrap();
+        assert_ne!(canonical_root(root.to_str().unwrap()).unwrap(), root);
+        #[cfg(windows)]
+        std::fs::remove_dir(&folder).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&folder).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
