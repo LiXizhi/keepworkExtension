@@ -10,27 +10,10 @@ impl Drop for ScratchDirectory {
     }
 }
 
-#[tokio::test]
-async fn request_diagnostics_keep_connection_causes_without_custom_feed_secrets() {
+fn assert_sanitized_network_cause(error: reqwest::Error) {
     use std::error::Error;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let url = format!(
-        "http://private-user:private-password@127.0.0.1:{port}/latest-client.json?token=private-query#private-fragment"
-    );
-    let error = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap()
-        .get(&url)
-        .send()
-        .await
-        .unwrap_err();
-    assert!(error.is_connect());
-    let mut cause = error.source().expect("connect failures expose a source");
+    let mut cause = error.source().expect("network failures expose a source");
     while let Some(next) = cause.source() {
         cause = next;
     }
@@ -46,6 +29,67 @@ async fn request_diagnostics_keep_connection_causes_without_custom_feed_secrets(
     ] {
         assert!(!diagnostic.contains(secret), "{diagnostic}");
     }
+}
+
+#[tokio::test]
+async fn request_diagnostics_keep_connection_causes_without_custom_feed_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let url = format!(
+        "http://private-user:private-password@127.0.0.1:{port}/latest-client.json?token=private-query#private-fragment"
+    );
+    let error = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap()
+        .get(&url)
+        .send()
+        .await
+        .unwrap_err();
+    // Windows can reach the request deadline before the OS reports that the
+    // closed port refused the connection. Both must preserve the real cause.
+    assert!(error.is_connect() || error.is_timeout(), "{error:?}");
+    assert_sanitized_network_cause(error);
+}
+
+#[tokio::test]
+async fn connected_request_timeout_keeps_its_cause_without_custom_feed_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!(
+        "http://private-user:private-password@127.0.0.1:{port}/latest-client.json?token=private-query#private-fragment"
+    );
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let request = tokio::spawn(async move { client.get(url).send().await });
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("timeout fixture must accept the connection")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut buf = [0; 1024];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0 && headers.len() + read <= 16 * 1024);
+            headers.extend_from_slice(&buf[..read]);
+        }
+    })
+    .await
+    .expect("timeout fixture must read the complete request");
+    // The TCP connection and HTTP request are complete. Hold the socket open
+    // without responding, then advance virtual time instead of waiting a minute.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    let error = request.await.unwrap().unwrap_err();
+    assert!(error.is_timeout(), "{error:?}");
+    assert_sanitized_network_cause(error);
+    drop(socket);
 }
 
 #[tokio::test]
