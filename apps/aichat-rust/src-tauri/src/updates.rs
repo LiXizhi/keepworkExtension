@@ -107,7 +107,7 @@ pub fn default_desktop_feed_url() -> String {
     let custom = std::env::var("AICHAT_UPDATE_FEED_URL").ok();
     let compatibility_launcher = cfg!(windows)
         && std::env::current_exe()
-            .map(|exe| exe.with_file_name("Keepwork.exe").is_file())
+            .map(|exe| has_compatibility_launcher(&exe))
             .unwrap_or(false);
     desktop_feed_url_for(
         current_runtime_platform(),
@@ -115,6 +115,15 @@ pub fn default_desktop_feed_url() -> String {
         compatibility_launcher,
         custom.as_deref(),
     )
+}
+
+fn has_compatibility_launcher(executable: &Path) -> bool {
+    // Standard native releases are themselves named Keepwork.exe. Only the
+    // legacy inner executable plus a separate outer launcher selects CEF.
+    executable
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("aichat-rust.exe"))
+        && executable.with_file_name("Keepwork.exe").is_file()
 }
 
 fn desktop_feed_url_for(
@@ -761,6 +770,33 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use uuid::Uuid;
+
+    #[test]
+    fn standard_windows_binary_does_not_mistake_itself_for_a_compatibility_launcher() {
+        let root = std::env::temp_dir().join(format!("aichat-feed-launcher-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let standard = root.join("Keepwork.exe");
+        fs::write(&standard, b"standard desktop fixture").unwrap();
+        assert!(!has_compatibility_launcher(&standard));
+        for arch in ["x64", "arm64"] {
+            assert_eq!(
+                desktop_feed_url_for("win32", arch, has_compatibility_launcher(&standard), None),
+                format!("{DEFAULT_DESKTOP_FEED_BASE}/win32-{arch}/latest-client.json")
+            );
+        }
+        let legacy = root.join("aichat-rust.exe");
+        fs::write(&legacy, b"legacy inner desktop fixture").unwrap();
+        assert!(has_compatibility_launcher(&legacy));
+        assert!(desktop_feed_url_for("win32", "x64", has_compatibility_launcher(&legacy), None)
+            .contains("/aichat-cef/"));
+        fs::remove_file(&standard).unwrap();
+        assert!(!has_compatibility_launcher(&legacy));
+        assert_eq!(
+            desktop_feed_url_for("win32", "x64", has_compatibility_launcher(&legacy), None),
+            format!("{DEFAULT_DESKTOP_FEED_BASE}/win32-x64/latest-client.json")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn desktop_feeds_use_three_rust_targets_and_preserve_explicit_channels() {

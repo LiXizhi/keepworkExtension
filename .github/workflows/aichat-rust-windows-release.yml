@@ -124,7 +124,7 @@ jobs:
           $extract = Join-Path $env:RUNNER_TEMP 'keepwork-payload'
           & 'C:\Program Files\7-Zip\7z.exe' x $installer "-o$extract" -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $application = @(Get-ChildItem $extract -Filter aichat-rust.exe -Recurse)
+          $application = @(Get-ChildItem $extract -File -Recurse | Where-Object { $_.Name -in @('Keepwork.exe', 'aichat-rust.exe') })
           if ($application.Count -ne 1) { throw 'Expected one desktop executable' }
           $productVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($application[0].FullName).ProductVersion
           if ($productVersion -ne $version) { throw "Desktop version mismatch: $productVersion" }
@@ -138,7 +138,7 @@ jobs:
         run: |
           $extract = Join-Path $env:RUNNER_TEMP 'keepwork-payload'
           $version = (Get-Content apps/aichat-rust/package.json | ConvertFrom-Json).version
-          $files = @(Get-ChildItem $extract -Recurse -Include aichat-rust.exe, keepwork-mcp.exe, keepwork-installer-helper.exe, uninstall.exe)
+          $files = @(Get-ChildItem $extract -Recurse -Include Keepwork.exe, aichat-rust.exe, keepwork-mcp.exe, keepwork-installer-helper.exe, uninstall.exe)
           $files += Get-Item "apps/aichat-rust/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/Keepwork_${version}_${{ matrix.arch }}-setup.exe"
           foreach ($file in $files) {
             $signature = Get-AuthenticodeSignature $file.FullName
