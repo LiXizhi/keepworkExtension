@@ -28,10 +28,18 @@ New-Item -ItemType Directory -Path $install, $external, $profile | Out-Null
 function Get-ProtocolCommand {
   return [Microsoft.Win32.Registry]::GetValue($protocolCommandKey, '', $null)
 }
+function Get-RecordedInstallLocation {
+  $location = [string](Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork').InstallLocation
+  # Tauri records InstallLocation with one pair of surrounding quotes.
+  if ($location.Length -ge 2 -and $location[0] -eq '"' -and $location[-1] -eq '"') {
+    $location = $location.Substring(1, $location.Length - 2)
+  }
+  if (-not $location) { throw 'Installer did not record its installation directory' }
+  return $location
+}
 function Assert-ProtocolCommand([string]$executableName) {
   # Use NSIS's recorded installation spelling, including short-name expansion.
-  $location = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork').InstallLocation
-  if (-not $location) { throw 'Installer did not record its installation directory' }
+  $location = Get-RecordedInstallLocation
   $expected = '"' + (Join-Path $location $executableName) + '" --launch-url "%1"'
   if (-not [string]::Equals((Get-ProtocolCommand), $expected, [StringComparison]::Ordinal)) {
     throw 'Installed URL protocol command was not quoted exactly'
@@ -80,8 +88,7 @@ try {
   Wait-Code (Start-Owned $Installer "/S /D=$install") 0
   # The installer can expand RUNNER~1 in its persisted path. Use that spelling
   # for executable identity and exact uninstall ownership checks from now on.
-  $install = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork').InstallLocation
-  if (-not $install) { throw 'Installer did not record its installation directory' }
+  $install = Get-RecordedInstallLocation
   $apps = @(Get-ChildItem -LiteralPath $install -File | Where-Object { $_.Name -in @('Keepwork.exe', 'aichat-rust.exe') })
   if ($apps.Count -ne 1) { throw 'Installed application identity is ambiguous' }
   $application = $apps[0].FullName
@@ -175,8 +182,7 @@ try {
     Remove-Item -LiteralPath $protocolKey -Recurse -Force
     $fixtureProtocolCommand = $null
     Wait-Code (Start-Owned $Installer "/S /D=$install") 0
-    $install = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Keepwork').InstallLocation
-    if (-not $install) { throw 'Reinstalled application did not record its directory' }
+    $install = Get-RecordedInstallLocation
     $uninstall = Join-Path $install 'uninstall.exe'
     $protocolCommand = Assert-ProtocolCommand $apps[0].Name
   }
