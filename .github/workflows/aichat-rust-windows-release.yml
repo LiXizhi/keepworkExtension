@@ -238,7 +238,7 @@ jobs:
   publish:
     name: Publish release assets
     needs: [build, build-macos]
-    if: startsWith(github.ref, 'refs/tags/aichat-rust-v')
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/aichat-rust-v')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     concurrency:
@@ -251,17 +251,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Resolve release version
+        id: release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node apps/aichat-rust/scripts/publish-release.cjs --version-from-tag "$TAG")"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Check release publication contracts
-        run: node --test apps/aichat-rust/tests/release-publication.test.cjs apps/aichat-rust/tests/automatic-update-publication.test.cjs
+        run: node --test apps/aichat-rust/tests/release-tags.test.cjs apps/aichat-rust/tests/release-publication.test.cjs apps/aichat-rust/tests/automatic-update-publication.test.cjs
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Collect assets and checksums
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          version="${GITHUB_REF_NAME#aichat-rust-v}"
+          version="${{ steps.release.outputs.version }}"
           ls -l dist
-          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --dry-run
+          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --tag "$TAG" --dry-run
           (cd dist && shasum -a 256 *.exe *.dmg) > "SHA256SUMS-${version}.txt"
           cat "SHA256SUMS-${version}.txt"
       - name: Ensure the GitHub release exists
@@ -270,8 +279,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          version="${TAG#aichat-rust-v}"
+          version="${{ steps.release.outputs.version }}"
           if ! gh release view "$TAG" > /dev/null 2>&1; then
+            if [[ "$TAG" == aichat-rust-v* ]]; then
+              echo '::error::Historical tags may only rerun an existing GitHub release.'
+              exit 1
+            fi
             gh release create "$TAG" --verify-tag --draft \
               --title "KeepWork 第二大脑 ${version}（Windows / macOS）" --generate-notes
           fi
@@ -281,9 +294,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          TAG: ${{ github.ref_name }}
         run: |
-          version="${GITHUB_REF_NAME#aichat-rust-v}"
-          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version"
+          version="${{ steps.release.outputs.version }}"
+          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --tag "$TAG"
       # An existing version must pass CDN byte-for-byte verification before any
       # GitHub attachment is replaced; newly created releases stay draft on error.
       - name: Upload verified assets and publish the GitHub release
@@ -292,6 +306,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          version="${TAG#aichat-rust-v}"
+          version="${{ steps.release.outputs.version }}"
           gh release upload "$TAG" dist/*.exe dist/*.dmg dist/release-manifest-${version}-*.json "SHA256SUMS-${version}.txt" --clobber
           gh release edit "$TAG" --draft=false --latest
