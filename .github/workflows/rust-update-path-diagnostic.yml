@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/auto-update-release-20261113]
-    paths: [.github/workflows/rust-update-path-diagnostic.yml]
+    paths: [.github/workflows/rust-update-path-diagnostic.yml, apps/mcp-rust/scripts/smoke.cjs]
 permissions:
   contents: read
 jobs:

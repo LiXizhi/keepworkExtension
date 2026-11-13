@@ -67,7 +67,9 @@ async function runSmoke({ binary = defaultBinary, args = [], expectedBuildInfo, 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-rust-smoke-'));
   const workspace = path.join(home, 'workspace');
   fs.mkdirSync(workspace);
-  const actualWorkspace = fs.realpathSync(workspace);
+  // Match Rust canonicalize on Windows too: the JS realpath implementation
+  // can retain an 8.3 name such as RUNNER~1 while the native API expands it.
+  const actualWorkspace = fs.realpathSync.native(workspace);
   const childEnv = { ...process.env, ...env, HOME: home, USERPROFILE: home, KEEPWORK_MCP_HOST_KIND: 'standalone' };
   // Observe the compiled identity, not enclosing desktop metadata overrides.
   for (const key of ['KEEPWORK_MCP_RUNTIME_VERSION', 'KEEPWORK_MCP_RUNTIME_COMMIT', 'KEEPWORK_MCP_RUNTIME_BUILT_AT', 'KEEPWORK_MCP_HOST_VERSION']) delete childEnv[key];

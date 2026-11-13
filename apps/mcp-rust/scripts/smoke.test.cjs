@@ -94,6 +94,15 @@ for (const requireAuth of ['0', '1']) test('owned smoke validates every POST and
   assertReaped(f);
 });
 
+test('smoke uses the native canonical workspace, including Windows short-name temp roots', async t => {
+  const f = fixture(t);
+  const canonicalTemp = fs.realpathSync.native(os.tmpdir());
+  const result = await runSmoke(f.options);
+  const root = result.health.workspaceRoot;
+  assert.equal(path.dirname(path.dirname(root)).toLowerCase(), canonicalTemp.toLowerCase());
+  assertReaped(f);
+});
+
 test('an occupied port is never stopped, even when it advertises the expected Rust identity', async t => {
   const f = fixture(t);
   let stopped = 0;
