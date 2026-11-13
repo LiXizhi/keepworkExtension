@@ -132,6 +132,55 @@ test('source fingerprints include new sources and lockfiles while ignoring build
   assert.equal(evidence.sourceFingerprint('mcp-rust', root), mcp, 'unrelated desktop code is outside MCP inputs');
 });
 
+test('historical desktop app bundles and disk images never change either product source fingerprint', t => {
+  const root = fixture(t);
+  const source = path.join(root, 'apps/aichat-rust/src/main.ts');
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, 'export const value = 1');
+  const fingerprints = () => Object.fromEntries(['aichat-rust', 'mcp-rust'].map(product => [product, evidence.sourceFingerprint(product, root)]));
+  const baseline = fingerprints();
+  const observed = [];
+  for (const relative of [
+    'apps/aichat-rust/releases/0.2.1/Keepwork.app/Contents/MacOS/Keepwork',
+    'apps/aichat-rust/releases/0.2.2/Keepwork 0.2.2.dmg',
+  ]) {
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'tiny historical package fixture');
+    observed.push({ operation: 'add ' + relative, ...fingerprints() });
+    fs.appendFileSync(file, ' changed');
+    observed.push({ operation: 'modify ' + relative, ...fingerprints() });
+    fs.rmSync(file);
+    observed.push({ operation: 'delete ' + relative, ...fingerprints() });
+  }
+  assert.deepEqual(observed, observed.map(({ operation }) => ({ operation, ...baseline })));
+});
+
+test('real desktop inputs and releases-named source modules remain fingerprinted', t => {
+  const root = fixture(t);
+  for (const relative of [
+    'apps/aichat-rust/src/main.ts',
+    'apps/aichat-rust/package.json',
+    'apps/aichat-rust/src-tauri/Cargo.toml',
+    'apps/aichat-rust/src-tauri/Cargo.lock',
+    'apps/aichat-rust/src-tauri/tauri.conf.json',
+    'apps/aichat-rust/tests/input.test.cjs',
+    'apps/aichat-rust/src/releases/index.ts',
+    'apps/aichat-rust/src-tauri/src/releases/mod.rs',
+  ]) {
+    const before = evidence.sourceFingerprint('aichat-rust', root);
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'first source fixture');
+    const added = evidence.sourceFingerprint('aichat-rust', root);
+    assert.notEqual(added, before, 'new input must be fingerprinted: ' + relative);
+    fs.appendFileSync(file, ' changed');
+    assert.notEqual(evidence.sourceFingerprint('aichat-rust', root), added, 'modified input must be fingerprinted: ' + relative);
+    fs.rmSync(file);
+    assert.equal(evidence.sourceFingerprint('aichat-rust', root), before, 'deleting only this input must restore its prior fingerprint: ' + relative);
+  }
+});
+
 test('a source change during a successful command becomes a failed receipt and cannot mix with later checks', async t => {
   const output = fixture(t);
   const first = 'a'.repeat(64), next = 'b'.repeat(64);

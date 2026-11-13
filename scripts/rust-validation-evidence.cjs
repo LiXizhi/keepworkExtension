@@ -42,9 +42,12 @@ function sourceFingerprint(product, root = repoRoot) {
   const inputs = ['package.json', 'package-lock.json', 'tsconfig.json', 'LICENSE', '.github/workflows', 'src', 'scripts', 'skills', 'apps/mcp-runtime', 'apps/mcp-rust', 'apps/pet-companion', 'docs/acceptance/rust-release-evidence.schema.json'];
   if (product === 'aichat-rust') inputs.push('apps/aichat-rust');
   const generated = new Set(['node_modules', 'target', 'dist', 'gen', 'resources', 'staging', 'runtime-staging', 'release', 'reports']);
+  // Historical desktop packages are generated outputs, independent of the
+  // source snapshot. Keep source modules named "releases" in other locations.
+  const desktopReleases = path.join(root, 'apps', 'aichat-rust', 'releases');
   const files = [];
   const walk = file => {
-    if (!fs.existsSync(file)) return;
+    if (file === desktopReleases || !fs.existsSync(file)) return;
     const info = fs.lstatSync(file);
     if (info.isSymbolicLink()) {
       files.push([path.relative(root, file), Buffer.from('symlink:' + fs.readlinkSync(file))]);
