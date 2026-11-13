@@ -12,6 +12,7 @@ use crate::runtime::{
 };
 use crate::security::ENTRY;
 use crate::terminal::TerminalSessionManager;
+use crate::theme::{DesktopTheme, ThemePreference};
 use crate::tray_channels::ChannelStatus;
 use crate::updates::{UpdateManager, UpdatesSnapshot};
 use crate::APP_VERSION;
@@ -25,6 +26,7 @@ use std::sync::{Arc, Mutex};
 #[serde(rename_all = "camelCase")]
 pub struct DesktopStatus {
     pub version: String,
+    pub theme: DesktopTheme,
     pub platform: String,
     pub arch: String,
     pub entry_url: String,
@@ -38,6 +40,7 @@ pub struct DesktopStatus {
 pub struct AppCore {
     pub profile_dir: PathBuf,
     pub settings_path: PathBuf,
+    pub theme: ThemePreference,
     pub mcp_home: PathBuf,
     pub files: NativeFiles,
     pub terminals: TerminalSessionManager,
@@ -97,6 +100,7 @@ impl AppCore {
             .unwrap_or_else(|_| ENTRY.to_string());
         DesktopStatus {
             version: APP_VERSION.to_string(),
+            theme: self.theme.current(),
             platform: current_runtime_platform().to_string(),
             arch: current_runtime_arch().to_string(),
             entry_url: entry_url.clone(),

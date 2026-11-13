@@ -169,4 +169,143 @@ for (const implementation of ["typescript", "rust-init-script"]) {
     assert.equal(bar.host, null);
     assert.deepEqual(bar.calls, []);
   });
+
+  const themeCalls = bar => bar.calls.filter(call => call.command === "desktop_sync_theme");
+  const legacyPalette = (element, document) => ({
+    colorScheme: "normal",
+    properties: { "--bg-sidebar": document.body.classList.contains("light") ? "#f2f3f7" : "#2b2b2b" },
+  });
+
+  test(`${implementation}: legacy AIChat without body.light uses dark chrome even without color-scheme metadata`, () => {
+    const bar = renderer(implementation, "windows", false, false, { computedStyle: legacyPalette });
+    const theme = bar.initialCalls.find(call => call.command === "desktop_sync_theme");
+    assert.equal(theme.args.dark, true);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#18181f");
+    assert.equal(bar.host.style.getPropertyValue("--chrome-text"), "#d4d4dc");
+    assert.equal(bar.host.style.getPropertyValue("--chrome-menu-bg"), "#202028");
+  });
+
+  test(`${implementation}: document-only theme events follow AIChat light-class removal and restoration`, () => {
+    const bar = renderer(implementation, "darwin", false, false, {
+      bodyClass: "light", computedStyle: legacyPalette,
+    });
+    assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.dark, false);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#f2f3f7");
+    bar.document.body.classList.remove("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false, detail: { theme: "dark" } });
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true]);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#18181f");
+    bar.document.body.classList.add("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false, detail: { theme: "light" } });
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true, false]);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-text"), "#1a1a2e");
+  });
+
+  test(`${implementation}: explicit class and data-theme remain authoritative over native or CSS preference`, () => {
+    for (const [className, scheme, dark] of [["dark", "light", true], ["light", "dark", false]]) {
+      const bar = renderer(implementation, "linux", false, false, {
+        bodyClass: className, computedStyle: { colorScheme: scheme }, systemDark: !dark,
+      });
+      assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.dark, dark);
+    }
+    const bar = renderer(implementation, "linux");
+    bar.document.documentElement.setAttribute("data-theme", "dark");
+    bar.mutation(bar.document.documentElement, "data-theme");
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true]);
+    bar.document.documentElement.setAttribute("data-theme", "light");
+    bar.mutation(bar.document.documentElement, "data-theme");
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true, false]);
+  });
+
+  test(`${implementation}: asynchronous stylesheet loading refreshes dark chrome before a page event`, () => {
+    const palette = { colorScheme: "normal", properties: {} };
+    const bar = renderer(implementation, "windows", false, false, { computedStyle: palette });
+    assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.dark, false);
+    palette.properties["--bg-sidebar"] = "#2b2b2b";
+    const sheet = bar.child(bar.document.head, "link");
+    sheet.setAttribute("rel", "stylesheet");
+    bar.fire(sheet, "load", { bubbles: false });
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true]);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#18181f");
+  });
+
+  test(`${implementation}: absent CSS theme defaults to unconfirmed light without following OS changes`, () => {
+    const bar = renderer(implementation, "darwin", false, false, {
+      computedStyle: { colorScheme: "normal" }, systemDark: true,
+    });
+    const initial = bar.initialCalls.find(call => call.command === "desktop_sync_theme");
+    assert.equal(initial.args.dark, false);
+    assert.equal(initial.args.confirmed, false, "a provisional theme cannot overwrite the native preference");
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#f2f3f7");
+    bar.setSystemDark(false);
+    bar.setSystemDark(true);
+    assert.deepEqual(themeCalls(bar), []);
+    bar.document.body.classList.add("dark");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+    assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[true, true]]);
+  });
+
+  test(`${implementation}: startup chrome waits for the native theme snapshot without reporting an OS guess`, () => {
+    for (const mode of [{ shell: true }, { startupMarker: true }]) {
+      const bar = renderer(implementation, "darwin", false, false, {
+        ...mode, systemDark: true, computedStyle: { colorScheme: "dark" },
+      });
+      assert.equal(bar.host.style.visibility, "hidden");
+      assert.equal(bar.initialCalls.some(call => call.command === "desktop_sync_theme"), false);
+      bar.fire(bar.window, "load");
+      bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+      bar.setSystemDark(false);
+      assert.deepEqual(themeCalls(bar), []);
+      assert.equal(bar.document.documentElement.dataset.theme, undefined);
+      bar.document.documentElement.dataset.theme = "light";
+      bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+      assert.equal(bar.host.style.visibility, "visible");
+      assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#f2f3f7");
+      assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[false, true]]);
+    }
+  });
+
+  test(`${implementation}: saved startup theme overrides the opposite system appearance and remains stable`, () => {
+    for (const [theme, systemDark, background] of [["light", true, "#f2f3f7"], ["dark", false, "#18181f"]]) {
+      const bar = renderer(implementation, "windows", false, false, {
+        shell: true, htmlTheme: theme, systemDark,
+        computedStyle: { colorScheme: systemDark ? "dark" : "light" },
+      });
+      assert.equal(bar.host.style.visibility, "visible");
+      const initial = bar.initialCalls.find(call => call.command === "desktop_sync_theme");
+      assert.equal(initial.args.dark, theme === "dark");
+      assert.equal(initial.args.confirmed, true);
+      assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), background);
+      bar.setSystemDark(!systemDark);
+      bar.setSystemDark(systemDark);
+      bar.fire(bar.window, "resize");
+      assert.equal(bar.document.documentElement.dataset.theme, theme, "chrome never rewrites the native startup preference");
+      assert.deepEqual(themeCalls(bar), []);
+    }
+  });
+
+  test(`${implementation}: actual chat theme changes remain confirmed and independent of the OS`, () => {
+    const bar = renderer(implementation, "windows", false, false, {
+      bodyClass: "light", systemDark: true, computedStyle: legacyPalette,
+    });
+    assert.equal(bar.document.documentElement.dataset.theme, undefined, "startup preferences cannot be injected into a real chat document");
+    assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.confirmed, true);
+    bar.document.body.classList.remove("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+    bar.setSystemDark(false);
+    assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[true, true]]);
+    bar.document.body.classList.add("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+    assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[true, true], [false, true]]);
+  });
+
+  test(`${implementation}: repeated theme, skin and experience signals avoid duplicate native theme updates`, () => {
+    const bar = renderer(implementation, "linux", false, false, { computedStyle: legacyPalette });
+    for (const type of ["aichat:theme-changed", "aichat:skin-changed", "aichat:experience-changed"]) {
+      bar.fire(bar.document, type, { bubbles: false });
+      bar.fire(bar.window, type);
+    }
+    bar.fire(bar.window, "resize");
+    assert.deepEqual(themeCalls(bar), []);
+  });
 }

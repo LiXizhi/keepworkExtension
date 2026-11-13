@@ -20,6 +20,7 @@ pub mod runtime;
 pub mod remote_voice;
 pub mod security;
 pub mod terminal;
+pub mod theme;
 pub mod tray_channels;
 pub mod updates;
 

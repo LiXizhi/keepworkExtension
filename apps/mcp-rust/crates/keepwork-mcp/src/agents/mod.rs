@@ -1,6 +1,9 @@
 //! Native CLI sessions. The browser receives normalized snapshots, never a raw
 //! RPC tunnel or a choice of executable. Credentials and tool grants stay in RAM.
 mod antigravity;
+mod approval;
+#[cfg(test)]
+mod approval_tests;
 mod body;
 mod claude;
 pub mod context;
@@ -102,6 +105,15 @@ fn valid_record(data: &Value) -> bool {
         && data
             .get("backend")
             .is_none_or(|v| v.as_str().is_some_and(valid_id))
+        && data.get("approvalMode").is_none_or(|value| {
+            value.is_null()
+                || approval::selected(
+                    Some(value),
+                    data["backend"].as_str().unwrap_or("codex"),
+                    None,
+                )
+                .is_ok()
+        })
         && data.get("items").is_none_or(Value::is_array)
         && data.get("submissions").is_none_or(|v| {
             v.as_object().is_some_and(|m| {
@@ -627,7 +639,15 @@ async fn handle_request(
             .await;
     }
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
-    let image_turn = matches!(parts.as_slice(), ["agents", "sessions", _, "image-turns"]);
+    let image_turn = matches!(
+        parts.as_slice(),
+        [
+            "agents",
+            "sessions",
+            _,
+            "image-turns" | "approval-image-turns"
+        ]
+    );
     let input = if ["POST", "PATCH"].contains(&method) {
         if !headers
             .get(header::CONTENT_TYPE)
@@ -664,10 +684,26 @@ async fn handle_request(
         }
         ("GET", ["agents", "sessions"]) => manager.list(&owner, query),
         ("POST", ["agents", "sessions"]) => manager.create(&owner, &input).await,
+        ("POST", ["agents", "approval-sessions"]) => {
+            if input.get("approvalMode").is_none() {
+                Err("approvalMode required".into())
+            } else {
+                manager.create(&owner, &input).await
+            }
+        }
         ("GET", ["agents", "sessions", session_id]) => manager.read_owned(session_id, &owner).await,
         ("PATCH", ["agents", "sessions", session_id]) => manager.update(session_id, &owner, &input),
         ("POST", ["agents", "sessions", session_id, "turns"]) => {
             manager.turn(session_id, &owner, &input).await
+        }
+        ("POST", ["agents", "sessions", session_id, "approval-turns" | "approval-image-turns"]) => {
+            if input.get("approvalMode").is_none() {
+                Err("approvalMode required".into())
+            } else if image_turn && !input["images"].is_array() {
+                Err("Missing images".into())
+            } else {
+                manager.turn(session_id, &owner, &input).await
+            }
         }
         ("POST", ["agents", "sessions", session_id, "image-turns"]) => {
             if !input["images"].is_array() {

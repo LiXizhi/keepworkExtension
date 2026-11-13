@@ -1,6 +1,6 @@
 // Injected by the host before page scripts. The private token stays in this
 // top-frame closure; only the exact local connection page receives recovery UI.
-export function installPageConnection(token, shellUrl) {
+export function installPageConnection(token, shellUrl, onVerifiedEntry) {
   if (window !== window.top) return;
   const invoke = (command, args = {}) => window.__TAURI_INTERNALS__.invoke(command, { ...args, token });
   if (window.location.href === shellUrl) {
@@ -20,6 +20,21 @@ export function installPageConnection(token, shellUrl) {
   const attempt = invoke("desktop_page_connection_attempt", { url });
   // Attach rejection handling immediately, even while DOM parsing is pending.
   const ticket = attempt.catch(() => null);
+  // A menu can change the configured origin without rebuilding this WebView's
+  // init script. Only the host-verified current entry may receive the one-shot
+  // appearance fallback; ordinary pages and failed tickets remain untouched.
+  if (typeof onVerifiedEntry === "function") {
+    let live = true;
+    const stopAppearance = () => { live = false; };
+    window.addEventListener("pagehide", stopAppearance, { once: true });
+    void ticket.then(generation => {
+      window.removeEventListener("pagehide", stopAppearance);
+      if (!live || window.location.href !== url || !Number.isSafeInteger(generation) || generation < 0) return;
+      const root = document.getElementById("app");
+      if (root && (root.childElementCount > 0 || !!root.textContent.trim())) return;
+      onVerifiedEntry(url);
+    }).catch(() => { window.removeEventListener("pagehide", stopAppearance); });
+  }
   const reportReady = () => {
     void ticket.then(generation => {
       if (generation === null) return;

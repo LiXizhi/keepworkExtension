@@ -8,7 +8,7 @@ use super::platform::open_in_system_browser;
 use super::state::{resolve_profile_dir, AppCore};
 use super::updates_window::broadcast_update_status;
 use super::{commands, main_window, pet_audio_host, pet_host, updates_window};
-use crate::bridge::build_main_window_init_script;
+use crate::bridge::build_main_window_init_script_for_entry;
 use crate::deployment::{resolve_local_aichat_source_dir, startup_deployment};
 use crate::desktop_identity::{default_mcp_home, remember_desktop_client};
 use crate::desktop_lock::DesktopLock;
@@ -24,6 +24,7 @@ use crate::runtime::{
 };
 use crate::security::{allowed_in_app_popup, allowed_navigation, ENTRY};
 use crate::terminal::TerminalSessionManager;
+use crate::theme::ThemePreference;
 use crate::tray_channels::{channel_states, describe, fetch_tray_channels};
 use crate::updates::{default_desktop_feed_url, UpdateManager};
 use crate::APP_VERSION;
@@ -283,6 +284,7 @@ pub fn run() {
     let core = Arc::new(AppCore {
         profile_dir: profile_dir.clone(),
         settings_path,
+        theme: ThemePreference::new(profile_dir.join("desktop-theme.json")),
         mcp_home,
         files: NativeFiles::new(grants_path),
         terminals: TerminalSessionManager::new(terminal_workspaces_dir),
@@ -309,7 +311,9 @@ pub fn run() {
     let icon_b64 = base64::engine::general_purpose::STANDARD
         .encode(include_bytes!("../../icons/keepwork.png"));
     let icon_data_url = format!("data:image/png;base64,{icon_b64}");
-    let init_script = build_main_window_init_script(current_runtime_platform(), &icon_data_url);
+    let init_script = build_main_window_init_script_for_entry(
+        current_runtime_platform(), &icon_data_url, &core.entry_url.lock().unwrap(),
+    );
 
     let core_for_setup = Arc::clone(&core);
     #[cfg(windows)]
@@ -388,7 +392,8 @@ pub fn run() {
                 let mut connection = core_for_setup.page_connection.lock().unwrap();
                 connection.shell_url = Some(shell_url.clone());
                 let script = include_str!("../../../src/pageConnection.js").replacen("export function", "function", 1);
-                format!("{script}\ninstallPageConnection({}, {});", json!(connection.token), json!(shell_url.as_str()))
+                let appearance = include_str!("../../../src/pageTheme.js").replacen("export function", "function", 1);
+                format!("(() => {{\n{appearance}\n{script}\ninstallPageConnection({}, {}, installPageTheme);\n}})();", json!(connection.token), json!(shell_url.as_str()))
             };
             let mut main_builder = WebviewWindowBuilder::new(
                 app,
@@ -401,6 +406,8 @@ pub fn run() {
             .inner_size(1360.0, 900.0)
             .min_inner_size(640.0, 480.0)
             .resizable(true)
+            .theme(Some(core_for_setup.theme.current().native()))
+            .background_color(core_for_setup.theme.current().background())
             .visible(!background_launch)
             // The pet keeps calls on this document while the main window is
             // hidden. WebKit's default inactive scheduling can suspend speech

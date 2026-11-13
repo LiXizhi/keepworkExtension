@@ -297,6 +297,37 @@ Installation and updates remain user-controlled. Protocol sources:
 [Claude permissions](https://code.claude.com/docs/en/agent-sdk/permissions).
 Offline mode coverage: `node --test scripts/agent-modes.test.cjs`.
 
+Codex additionally supports optional independent approval. Health advertises
+`agentApprovalApi: "codex-v1"` and its targeted backend status includes
+`approvalModes: ["default", "on-request", "untrusted", "never", "read-only"]`.
+Session creation and turns accept `approvalMode`; other backends and unknown
+values fail explicitly. Omitted creation retains legacy mode behavior. Omitted
+turns retain the saved session policy; `default` deliberately resets it. Resume
+uses the saved policy. A running turn never changes policy or replays on a menu
+change. Existing clients and sessions with no explicit policy retain their prior
+behavior.
+
+In Craft, `on-request` and `untrusted` select workspace-write with the native
+approval policy, the session roots as writable roots, and restricted network
+access. `never` selects full access, while `read-only` selects read-only/never.
+Codex classifies commands itself: on-request does not promise a prompt for every
+edit or workspace command. Every explicit selection in Ask/Plan uses read-only/never;
+write, permission-escalation and unclassified approval requests are denied,
+including writes through the bound AIChat tool bridge. Explicit policies bypass
+legacy Craft and programmatic auto-approval. Actual questions and required user
+decisions remain interactive. Managed native policy errors never trigger a
+silent policy downgrade or replay. Client selections remain local to the account
+and conversation and must be negotiated again against the current peer before
+submission; absent capability leaves ordinary/default conversations available.
+Explicit client selections use `/agents/approval-sessions` and
+`/agents/sessions/:id/approval-turns` (or `approval-image-turns`). These require
+`approvalMode` and use the same ownership, authentication, context, image limits
+and receipt validation as the original endpoints. This also protects a peer
+downgrade after the health check: an older handler rejects the route, never
+silently ignores the policy. Unsupported routes are definite rejections with no
+legacy fallback or automatic retry. Original routes still accept the optional
+field for compatible integrations.
+
 Transient provider retry errors clear when item output resumes; pending requests
 keep their waiting state even during retry. Raw command results and exit codes
 remain available to the UI for inspection.

@@ -110,6 +110,9 @@ impl AgentManager {
             let spec = definition(backend).unwrap();
             let launch = discover(backend);
             let mut value = json!({"name":spec.name,"protocol":spec.protocol.as_str(),"protocolSupported":spec.protocol.supported(),"installUrl":spec.install_url,"available":launch.is_ok(),"authenticated":null,"authState":"unknown","probe":"executable","models":[]});
+            if backend == "codex" {
+                value["approvalModes"] = json!(approval::MODES);
+            }
             match launch {
                 Ok(launch) => value["cli"] = launch.info(),
                 Err(error) => {
@@ -412,6 +415,7 @@ impl AgentManager {
             return Err("Invalid workspace names".into());
         }
         let selected_mode = mode(input.get("mode"), "craft")?;
+        let selected_approval = approval::selected(input.get("approvalMode"), backend, None)?;
         if !spec.protocol.supported() {
             return Err(
                 "UNSUPPORTED_FEATURE: This native CLI protocol is not yet available in Rust MCP"
@@ -554,6 +558,8 @@ impl AgentManager {
             .collect::<Vec<_>>();
         let harness = self.harness(backend, Path::new(&roots[0])).await?;
         self.context.set_mode(owner, conversation, &selected_mode);
+        self.context
+            .set_approval_mode(owner, conversation, selected_approval.as_deref());
         let (server, context_marker) = if contextual {
             let (descriptor, marker) =
                 self.context
@@ -565,9 +571,15 @@ impl AgentManager {
         let mut parameters =
             json!({"cwd":roots[0],"mcpServers":server.clone().into_iter().collect::<Vec<_>>()});
         if spec.protocol == Protocol::Codex {
-            parameters = json!({"cwd":roots[0],"sandbox":if selected_mode=="craft"{"danger-full-access"}else{"read-only"},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
+            let access =
+                approval::access(&selected_mode, selected_approval.as_deref(), &json!(roots));
+            parameters =
+                json!({"cwd":roots[0],"sandbox":access.sandbox,"approvalPolicy":access.policy});
+            if access.sandbox == "workspace-write" {
+                parameters["config"] = json!({"sandbox_workspace_write":{"writable_roots":roots,"network_access":false}});
+            }
             if let Some(server) = server {
-                parameters["config"] = codex_server(&server);
+                parameters["config"]["mcp_servers"] = codex_server(&server)["mcp_servers"].clone();
                 parameters["developerInstructions"]=json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
             }
         } else if matches!(spec.protocol, Protocol::Claude | Protocol::Antigravity) {
@@ -613,7 +625,10 @@ impl AgentManager {
             return Err("AIChat page changed while creating the native tool bridge; reconnect before sending".into());
         }
         let session_id = id();
-        let data = json!({"id":session_id,"owner":owner,"backend":backend,"conversationId":conversation,"threadId":thread,"title":spec.name,"roots":roots,"worktrees":roots,"rootNames":root_names,"model":input["model"],"archived":false,"removed":false,"status":"idle","mode":selected_mode,"cursor":0,"items":[],"pending":[],"submissions":{},"updatedAt":now(),"aichatContext":contextual,"nativeMetadata":native});
+        let mut data = json!({"id":session_id,"owner":owner,"backend":backend,"conversationId":conversation,"threadId":thread,"title":spec.name,"roots":roots,"worktrees":roots,"rootNames":root_names,"model":input["model"],"archived":false,"removed":false,"status":"idle","mode":selected_mode,"cursor":0,"items":[],"pending":[],"submissions":{},"updatedAt":now(),"aichatContext":contextual,"nativeMetadata":native});
+        if let Some(approval) = selected_approval {
+            data["approvalMode"] = json!(approval);
+        }
         let (events, _) = watch::channel(json!({"cursor":0,"session":snapshot(&data)}));
         {
             let mut sessions = self.sessions.lock().unwrap();
@@ -850,9 +865,17 @@ impl AgentManager {
                 }
                 params
             } else {
-                let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"sandbox":if data["mode"]=="craft"{"danger-full-access"}else{"read-only"},"approvalPolicy":if data["mode"]=="ask"{"on-request"}else{"never"}});
+                let access = approval::access(
+                    data["mode"].as_str().unwrap_or("craft"),
+                    data["approvalMode"].as_str(),
+                    &data["roots"],
+                );
+                let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"sandbox":access.sandbox,"approvalPolicy":access.policy});
+                if access.sandbox == "workspace-write" {
+                    params["config"] = json!({"sandbox_workspace_write":{"writable_roots":data["roots"],"network_access":false}});
+                }
                 if let Some(server) = server {
-                    params["config"] = codex_server(&server);
+                    params["config"]["mcp_servers"] = codex_server(&server)["mcp_servers"].clone();
                 }
                 params
             };
@@ -959,6 +982,11 @@ impl AgentManager {
         let requested_model = optional_text(input, "model", 1024)?;
         let requested_effort = optional_text(input, "effort", 256)?;
         let selected_mode = mode(input.get("mode"), data["mode"].as_str().unwrap_or("craft"))?;
+        let selected_approval = approval::selected(
+            input.get("approvalMode"),
+            data["backend"].as_str().unwrap_or("codex"),
+            data.get("approvalMode"),
+        )?;
         let mut native_text = if data["aichatContext"] == true {
             let (instructions, revision) = self
                 .context
@@ -992,6 +1020,11 @@ impl AgentManager {
             }
             s.data["status"] = json!("starting");
             s.data["mode"] = json!(selected_mode);
+            if let Some(approval) = &selected_approval {
+                s.data["approvalMode"] = json!(approval);
+            } else {
+                s.data.as_object_mut().unwrap().remove("approvalMode");
+            }
             s.data["error"] = json!("");
             s.data["turnId"] = Value::Null;
             s.data["submissions"][&request_id] = json!({"state":"starting"});
@@ -1010,6 +1043,11 @@ impl AgentManager {
             owner,
             data["conversationId"].as_str().unwrap(),
             &selected_mode,
+        );
+        self.context.set_approval_mode(
+            owner,
+            data["conversationId"].as_str().unwrap(),
+            selected_approval.as_deref(),
         );
         // Concurrent requests can only observe this persisted claim, never dispatch it again.
         let configured: Result<Arc<Harness>, String> = async {
@@ -1046,6 +1084,7 @@ impl AgentManager {
                 data["conversationId"].as_str().unwrap(),
                 &selected_mode,
             );
+            self.context.set_approval_mode(owner, data["conversationId"].as_str().unwrap(), selected_approval.as_deref());
             Ok(harness)
         }
         .await;
@@ -1133,7 +1172,9 @@ impl AgentManager {
                 }
             });
         } else {
-            let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":native_content,"sandboxPolicy":{"type":if selected_mode=="craft"{"dangerFullAccess"}else{"readOnly"}},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
+            let access =
+                approval::access(&selected_mode, selected_approval.as_deref(), &data["roots"]);
+            let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":native_content,"sandboxPolicy":access.sandbox_policy,"approvalPolicy":access.policy});
             if matches!(harness.protocol(), Protocol::Claude | Protocol::Antigravity) {
                 params.as_object_mut().unwrap().remove("sandboxPolicy");
                 params.as_object_mut().unwrap().remove("approvalPolicy");

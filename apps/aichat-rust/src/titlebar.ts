@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { mountDesktopMenus } from "./menuChrome.js";
+import { mountDesktopTheme } from "./chromeTheme.js";
 
 const TITLEBAR_CSS = `
 :host{
@@ -321,94 +322,5 @@ export function mountDesktopTitlebar(options: {
   window.addEventListener("DOMContentLoaded", mountDom, { once: true });
 
 
-  const canvas = document.createElement("canvas");
-  canvas.width = 1;
-  canvas.height = 1;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const toHex = (raw: string, fallback: string): string => {
-    if (!ctx || !raw) return fallback;
-    ctx.clearRect(0, 0, 1, 1);
-    ctx.fillStyle = fallback;
-    ctx.fillStyle = raw;
-    ctx.fillRect(0, 0, 1, 1);
-    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-    return `#${[r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
-  };
-
-  let lastThemeKey = "";
-  const syncTheme = (): void => {
-    if (!document.body) return;
-    const cs = getComputedStyle(document.body);
-    const dark =
-      document.body.classList.contains("dark") ||
-      document.documentElement.classList.contains("dark") ||
-      cs.colorScheme === "dark";
-    const bgRaw =
-      cs.getPropertyValue("--experience-rail-bg").trim() ||
-      cs.getPropertyValue("--bg-sidebar").trim() ||
-      (dark ? "#18181f" : "#f2f3f7");
-    const textRaw =
-      cs.getPropertyValue("--text-primary").trim() || (dark ? "#d4d4dc" : "#1a1a2e");
-    const hoverRaw =
-      cs.getPropertyValue("--bg-pill-hover").trim() || (dark ? "#282834" : "#e2e6ef");
-    const addressRaw =
-      cs.getPropertyValue("--text-secondary").trim() || (dark ? "#9a9aa8" : "#4a4a5a");
-    const pillRaw =
-      cs.getPropertyValue("--bg-pill").trim() || (dark ? "#242430" : "#e2e6ef");
-
-    const bgHex = toHex(bgRaw, dark ? "#18181f" : "#f2f3f7");
-    const textHex = toHex(textRaw, dark ? "#d4d4dc" : "#1a1a2e");
-    host.style.setProperty("--chrome-menu-bg", cs.getPropertyValue("--bg-card").trim() || (dark ? "#202028" : "#ffffff"));
-    host.style.setProperty("--chrome-bg", bgHex);
-    host.style.setProperty("--chrome-text", textHex);
-    host.style.setProperty("--chrome-hover", hoverRaw);
-    host.style.setProperty("--chrome-address", addressRaw);
-    host.style.setProperty("--chrome-pill", pillRaw);
-
-    const simple =
-      document.body.dataset.experience === "simple" && window.innerWidth > 768;
-    const railWidth = cs.getPropertyValue("--experience-rail-width").trim() || "56px";
-    host.style.setProperty(
-      "--chrome-surface-start",
-      simple ? `calc(${railWidth} + 14px)` : "0px"
-    );
-
-    const key = `${dark ? "dark" : "light"}:${bgHex}:${textHex}`;
-    if (key !== lastThemeKey) {
-      lastThemeKey = key;
-      void invoke("desktop_sync_theme", {
-        dark,
-        color: bgHex,
-        symbolColor: textHex,
-      });
-    }
-  };
-
-  const mountThemeObserver = (): void => {
-    syncTheme();
-    const observer = new MutationObserver(syncTheme);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class", "style", "data-theme"],
-    });
-    if (document.body) {
-      observer.observe(document.body, {
-        attributes: true,
-        attributeFilter: ["class", "style", "data-experience", "data-skin"],
-      });
-    }
-    for (const evt of [
-      "aichat:theme-changed",
-      "aichat:skin-changed",
-      "aichat:experience-changed",
-      "resize",
-    ]) {
-      window.addEventListener(evt, syncTheme);
-    }
-  };
-  if (document.readyState === "loading") {
-    window.addEventListener("DOMContentLoaded", mountThemeObserver, { once: true });
-  } else {
-    mountThemeObserver();
-  }
+  mountDesktopTheme({ host, invoke });
 }

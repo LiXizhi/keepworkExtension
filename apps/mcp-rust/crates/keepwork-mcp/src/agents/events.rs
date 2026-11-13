@@ -341,19 +341,7 @@ impl AgentManager {
         let read_only = params["readOnly"] == true
             || ["read", "search", "fetch"]
                 .contains(&params["toolCall"]["kind"].as_str().unwrap_or(""));
-        let automatic = if data["mode"] == "plan" && normalized != "item/tool/requestUserInput" {
-            Some(if read_only && !requires_decision {
-                "accept"
-            } else {
-                "decline"
-            })
-        } else if requires_decision {
-            None
-        } else if data["mode"] == "craft" {
-            Some("accept")
-        } else {
-            None
-        };
+        let automatic = approval::decision(&data, normalized, params, requires_decision, read_only);
         let native = json!({"method":method,"params":params,"acp":acp});
         if let Some(decision) = automatic {
             let result = permission_result(&native, &json!({"decision":decision}));
@@ -434,7 +422,8 @@ impl AgentManager {
                 return;
             }
         }
-        let automatic_offered = !requires_decision
+        let automatic_offered = data["approvalMode"].is_null()
+            && !requires_decision
             && visible["availableDecisions"]
                 .as_array()
                 .is_none_or(|options| options.iter().any(|option| option == "accept"));

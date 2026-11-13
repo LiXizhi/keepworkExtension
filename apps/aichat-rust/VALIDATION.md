@@ -1,5 +1,49 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-13：聊天页面等待 SDK 时的真实首屏（0.2.81）
+
+用户截图的黑色画布来自已进入 `localhost:3001` 的 AIChat 文档：`startup-progress` 已出现，但 `initTheme` 仍在等待包初始化、Tailwind、SDK 和工作台模块，因此基础 CSS 的默认深色先绘制。前两轮仅覆盖本地连接页及已应用主题的页面，遗漏了此阶段。
+
+AIChat 源码现在在样式表之前只读解析 URL、手动偏好或本地 07:00–19:00 调度，以临时根标记提供首帧颜色；body 初始化后立即接管并移除标记，运行时首次选色采用相同规则。桌面同时对已配置、受信任 AIChat 顶层入口注入一次性预主题，兼容旧网页；菜单切换入口时复用现有有效页面票据，在文档仍有效、URL 未变化且工作台未接管时补齐，不新增 IPC 或放宽 URL 校验。根标记、临时样式和观察器及时撤销，后续用户/宿主切换与皮肤正常接管。bootstrap 入口只含 origin/path，不暴露 query、fragment 或凭据。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **168 通过 / 1 实连默认忽略**，Node **373 通过 / 4 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-real-startup-check.log`。桌面专项 **127/127** 是完整检查的子集，涵盖预主题、作用范围、单次执行、有效/拒绝/迟到票据及入口隐私。
+- AIChat 真实 HTML/CSS 浏览器启动回归 **28/28**：挂起真实包模块或 SDK 请求，在只有原始进度条、空工作台时采样实际背景和标题栏颜色。覆盖新网页独立运行、新桌面注入新网页、新桌面注入旧缓存页面，手动亮暗、自动时段边界、URL/query/hash 优先及不可读存储。日志 `/private/tmp/keepwork-real-startup-final.log`，截图 `AIChat/.test-runtime/screenshots/startup-theme-rust-manual-{light,dark}.png`；亮暗截图已视觉复核。
+- 保存的真实修复前 HTML/CSS 在 `web startup manual-light` 场景确定失败，日志 `/private/tmp/keepwork-real-startup-before/result.log`；这是工作树源码对照，不是历史版本实连。现有工作台主题调度浏览器回归最终 **2/2**，日志 `/private/tmp/keepwork-real-startup-schedule-tap.log`；首次报告异常失败已保留说明，不计为通过。
+- Web 主题源码行为测试 **17/17**，包组成/契约/资源检查 **32/32**；库存检查通过（91 个源包、3 个配置）。JavaScript 语法、JSON 与两仓差异检查通过。未运行 AIChat 的 Vite、构建、部署或发布命令。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，日志 `/private/tmp/keepwork-real-startup-native-build.log`，本地开发程序已重新编译。
+
+本轮使用隔离 SDK/网络夹具，没有真实账号或模型请求；不把 Chrome 注入脚本验证等同原生 macOS/Windows 整窗实测。修改源于 `apps/official/apps/tools/AIChat` 与本仓桌面，各自独立生效，无需更新 MCP。四处桌面版本同步 **0.2.81**。
+
+## 2026-11-13：亮色启动主题记忆（0.2.80）
+
+修正上一轮启动页按系统外观取色的规则：现在启动和连接恢复使用本配置档最近一次受信任聊天页的亮暗模式，无有效记录时默认亮色；系统深色不再覆盖应用亮色。主题独立保存至 `desktop-theme.json`，不修改旧 `settings.json` 或网页 origin 的偏好。原生窗口显示前设置主题与不透明背景；本地页面在当前状态快照返回前保持透明且不绘制正文/标题栏，随后统一应用 `status.theme`，避免恢复时使用过期启动缓存。
+
+宿主按已验证主窗口 URL 区分 shell，启动/恢复页的主题报告不改写记忆；无 CSS 主题信号的 `confirmed:false` 报告同样不覆盖，旧调用省略该字段保持有效。状态字段 `theme` 为可选新增字段，旧宿主缺失或返回未知值时本地页默认亮色。主题写盘失败仍保留本进程最新外观，不阻断聊天或恢复。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **167 通过 / 1 实连默认忽略**，Node **337 通过 / 4 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-light-startup-check.log`。
+- 标题栏、连接页和菜单专项 **91/91**；`cargo test --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins theme::tests` **6/6**。覆盖快照等待时不报告系统猜测、保存主题压过系统、无记录默认亮色、聊天主题接管、同进程恢复/下次启动、配置档隔离、旧设置不变及写入失败后保留内存主题。
+- Chrome 隔离页面 **8 个启动组合**通过：TypeScript / Rust 注入两条路径分别验证保存亮色+系统深色、保存暗色+系统亮色、无记录+系统深色、未知字段+系统深色；检查快照前透明且正文/标题栏隐藏、首个可见背景/标题栏颜色、系统变化不覆盖，以及失败恢复读取最新快照。脚本 `/private/tmp/keepwork-startup-preference-smoke.cjs`，日志 `/private/tmp/keepwork-startup-preference-smoke.log`；亮色对照截图 `/private/tmp/keepwork-preference-rust-init-script-light-os-dark.png`。两套真实脚本的页面深浅切换、body CSS 变量、混合色与延迟皮肤另已回归通过，日志 `/private/tmp/keepwork-startup-page-colors-smoke.log`。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，本地开发程序已重新编译，日志 `/private/tmp/keepwork-light-startup-build.log`；`git diff --check` 通过。
+
+上述浏览器测试使用隔离状态夹具，Rust 持久化测试使用临时配置档；未访问真实账号、迁移网页设置或发布安装包。原生 macOS / Windows 整窗首帧尚未实机验收。四处版本同步 **0.2.80**，本轮规则取代下方 0.2.79 的“跟随系统”约定。
+
+## 2026-11-13：启动画面与深色顶部栏（0.2.79）
+
+正常启动显示居中品牌、加载提示和轻量进度动画，跟随系统深浅色并支持减少动态效果；连接失败后才显示恢复按钮，诊断默认折叠。保留同一 WebView、20 秒超时、5/15/30 秒退避重试和旧宿主手动重载。标题栏的 TypeScript 与 Rust 注入路径共用 `src/chromeTheme.js`，监听 document 非冒泡主题事件、原有 window 事件、样式表加载与主题属性变化，并在页面 CSS 上下文解析变量和混合颜色。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **161 通过 / 1 实连默认忽略**，Node **329 通过 / 4 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-startup-theme-check.log`。初次沙盒运行因禁止回环监听失败，允许隔离 HTTP/WebSocket 夹具监听后完整重跑通过。
+- `node --test --test-reporter=dot apps/aichat-rust/tests/titlebar.test.cjs apps/aichat-rust/tests/page-connection.test.cjs apps/aichat-rust/tests/menuChrome.test.cjs`：**83/83**。覆盖两套标题栏、默认深色无 `.dark`、`body.light` 切换、非冒泡事件、延迟样式、系统偏好、重复同步去重，以及正常启动隐藏恢复入口、失败/重试状态、旧宿主、超时退避和防并发。
+- Chrome 无头隔离页面验证两套实际脚本的可见颜色：深浅切换、body 局部 CSS 变量、`color-mix()` 和延迟皮肤加载均通过。加载构建后的入口验证明暗启动居中、640×480 无横向溢出、减少动态效果、失败后显示恢复操作、折叠详情及点击重试均通过。临时验证脚本 `/private/tmp/keepwork-chrome-browser-smoke.cjs`，日志 `/private/tmp/keepwork-chrome-browser-smoke.log`，截图 `/private/tmp/keepwork-startup-{light,dark}.png` 和 `/private/tmp/keepwork-recovery-{light,dark}.png`。未加载真实账号或连接线上聊天/MCP。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，日志 `/private/tmp/keepwork-startup-theme-build.log`。四处产品版本同步 **0.2.79**，`git diff --check` 通过。
+
+浏览器夹具不等同 macOS WKWebView / Windows WebView2 原生窗口实测；本轮未发布安装包，已编译本地开发程序，需重启客户端生效。
+
 ## 2026-11-12：已配对遥控器默认自动开启（0.2.76）
 
 按照用户最新要求，`autoStart` 默认为 true；有效旧配置省略字段时同样开启，未知旧字段继续忽略，损坏配置则关闭自动开启、保留原文件并显示错误。启动及后台定时检测只使用系统已配对/已连接证据，唯一匹配才启动现有 BLE 会话；无设备时不主动扫描、不拦截 F5、不弹窗或抢焦点。多设备歧义、指定 ID 不匹配、配对证据不足及权限问题均给出明确状态，不任意选设备或反复弹出授权。

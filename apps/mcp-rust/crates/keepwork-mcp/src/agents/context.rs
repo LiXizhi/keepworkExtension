@@ -38,6 +38,7 @@ struct Binding {
     stream: Option<(String, StreamSender)>,
     pending: HashMap<String, Pending>,
     mode: String,
+    approval_mode: Option<String>,
     spaces: Vec<Value>,
     primary: String,
     username: String,
@@ -186,6 +187,7 @@ impl ContextManager {
                 stream: None,
                 pending: HashMap::new(),
                 mode: "craft".into(),
+                approval_mode: None,
                 spaces: vec![],
                 primary: String::new(),
                 username: String::new(),
@@ -358,6 +360,17 @@ impl ContextManager {
         }
     }
 
+    pub fn set_approval_mode(&self, owner: &str, conversation: &str, approval: Option<&str>) {
+        if let Some(binding) = self
+            .bindings
+            .lock()
+            .unwrap()
+            .get_mut(&(owner.into(), conversation.into()))
+        {
+            binding.approval_mode = approval.map(str::to_string);
+        }
+    }
+
     pub fn snapshot(&self, owner: &str, conversation: &str) -> Value {
         let bindings = self.bindings.lock().unwrap();
         let Some(binding) = bindings.get(&(owner.into(), conversation.into())) else {
@@ -367,7 +380,11 @@ impl ContextManager {
         let mut capabilities: Vec<Value> = binding
             .tools
             .iter()
-            .filter(|tool| binding.mode != "plan" || readable_tool(text(tool, "name")))
+            .filter(|tool| {
+                (binding.mode != "plan"
+                    && !super::approval::read_only(&binding.mode, binding.approval_mode.as_deref()))
+                    || readable_tool(text(tool, "name"))
+            })
             .map(|tool| json!({"name":tool["name"],"execution":"web","online":online}))
             .collect();
         if !binding.spaces.is_empty() {
@@ -478,7 +495,12 @@ impl ContextManager {
             .iter()
             .filter(|tool| {
                 text(tool, "name") != "workspace_file"
-                    && (binding.mode != "plan" || readable_tool(text(tool, "name")))
+                    && ((binding.mode != "plan"
+                        && !super::approval::read_only(
+                            &binding.mode,
+                            binding.approval_mode.as_deref(),
+                        ))
+                        || readable_tool(text(tool, "name")))
             })
             .cloned()
             .map(|mut tool| {
@@ -536,6 +558,11 @@ impl ContextManager {
             }
             if binding.mode == "plan" && !readable_tool(name) {
                 return tool_error("Tool is unavailable in Plan mode");
+            }
+            if super::approval::read_only(&binding.mode, binding.approval_mode.as_deref())
+                && !readable_tool(name)
+            {
+                return tool_error("Tool is unavailable with read-only Codex approvals");
             }
             let Some(definition) = binding.tools.iter().find(|tool| text(tool, "name") == name)
             else {
@@ -949,6 +976,9 @@ impl ContextManager {
         }
         let operation = text(args, "operation");
         let mutation = matches!(operation, "write" | "replace" | "delete" | "rename");
+        if super::approval::read_only(&binding.mode, binding.approval_mode.as_deref()) && mutation {
+            return Err("Workspace mutation is unavailable with read-only Codex approvals".into());
+        }
         if binding.mode != "craft" && mutation {
             return Err("Background workspace mutation requires Craft mode; use the original online page for an approved edit".into());
         }
@@ -1640,6 +1670,76 @@ mod tests {
             .invoke("owner", "conversation", "read_file", &json!({}))
             .await;
         assert!(text(&offline["content"][0], "text").contains("web_offline"));
+    }
+
+    #[test]
+    fn explicit_readonly_approvals_block_background_writes_and_unknown_web_tools() {
+        let directory =
+            std::env::temp_dir().join(format!("kp-context-approval-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let root = directory.canonicalize().unwrap();
+        std::fs::write(root.join("file.txt"), "original").unwrap();
+        let manager = ContextManager::new();
+        manager
+            .register("owner", "conversation", &registration())
+            .unwrap();
+        manager.credentials("owner", "conversation", &json!({"username":"tester","primaryId":"local","spaces":[{"id":"local","type":"local","root":root,"aliases":["local"]}]})).unwrap();
+        for (mode, approval) in [
+            ("craft", "read-only"),
+            ("ask", "never"),
+            ("plan", "untrusted"),
+        ] {
+            manager.set_mode("owner", "conversation", mode);
+            manager.set_approval_mode("owner", "conversation", Some(approval));
+            let tools = manager.tools("owner", "conversation").unwrap();
+            assert!(!tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "delete_file" || tool["name"] == "fixture_echo"));
+            let read = manager
+                .local_file(
+                    "owner",
+                    "conversation",
+                    &json!({"operation":"read","path":"file.txt"}),
+                )
+                .unwrap();
+            assert_eq!(read["content"], "original");
+            let error = manager.local_file("owner", "conversation", &json!({"operation":"write","path":"file.txt","content":"not allowed","expectedContent":"original"})).unwrap_err();
+            assert!(error.contains("read-only Codex approvals"));
+            assert_eq!(
+                std::fs::read_to_string(root.join("file.txt")).unwrap(),
+                "original"
+            );
+        }
+        // Removing the explicit choice restores the ordinary Craft contract.
+        manager.set_mode("owner", "conversation", "craft");
+        manager.set_approval_mode("owner", "conversation", None);
+        manager.local_file("owner", "conversation", &json!({"operation":"write","path":"file.txt","content":"approved","expectedContent":"original"})).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).unwrap(),
+            "approved"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_readonly_approvals_reject_frontend_write_before_dispatch() {
+        let manager = ContextManager::new();
+        manager
+            .register("owner", "conversation", &registration())
+            .unwrap();
+        manager.set_approval_mode("owner", "conversation", Some("read-only"));
+        let denied = manager
+            .invoke("owner", "conversation", "delete_file", &json!({}))
+            .await;
+        assert_eq!(denied["isError"], true);
+        assert!(text(&denied["content"][0], "text").contains("read-only Codex approvals"));
+        assert!(
+            manager.bindings.lock().unwrap()[&("owner".into(), "conversation".into())]
+                .pending
+                .is_empty()
+        );
     }
 
     #[test]

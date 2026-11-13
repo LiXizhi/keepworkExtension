@@ -13,6 +13,8 @@ const titlebarJs = ts.transpileModule(titlebarSource, {
 const bridgeSource = fs.readFileSync(path.join(appRoot, "src-tauri/src/bridge.rs"), "utf8");
 const rawBridge = bridgeSource.match(/r#"([\s\S]*?)"#/)[1];
 const menuSource = fs.readFileSync(path.join(appRoot, "src/menuChrome.js"), "utf8").replace("export function", "function");
+const themeSource = fs.readFileSync(path.join(appRoot, "src/chromeTheme.js"), "utf8").replace("export function", "function");
+const pageThemeSource = fs.readFileSync(path.join(appRoot, "src/pageTheme.js"), "utf8").replace("export function", "function");
 
 // Model composed event bubbling across a CLOSED shadow root: listeners inside
 // see the real target; host/document/window listeners see only the host. A
@@ -35,14 +37,20 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
       this.tagName = tag.toUpperCase();
       this.children = [];
       this.attributes = new Map();
-      this.dataset = new Proxy({}, {
+      this.dataValues = {};
+      this.dataset = new Proxy(this.dataValues, {
         set: (target, key, value) => {
           target[key] = value;
           this.setAttribute("data-" + key.replace(/[A-Z]/g, letter => "-" + letter.toLowerCase()), value);
           return true;
         },
       });
-      this.style = { setProperty() {} };
+      const properties = new Map();
+      this.style = {
+        setProperty(name, value) { properties.set(name, String(value)); },
+        getPropertyValue(name) { return properties.get(name) || ""; },
+        removeProperty(name) { const value = properties.get(name) || ""; properties.delete(name); return value; },
+      };
       this.className = "";
       this.classList = {
         contains: name => this.className.split(/\s+/).includes(name),
@@ -82,8 +90,14 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
       if (options.mode !== "closed") this.shadowRoot = shadow;
       return shadow;
     }
-    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    setAttribute(name, value) {
+      this.attributes.set(name, String(value));
+      if (name.startsWith("data-")) {
+        this.dataValues[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = String(value);
+      }
+    }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); }
     hasAttribute(name) { return this.attributes.has(name); }
     matches(selector) {
       return selector.split(",").some(part => {
@@ -111,6 +125,13 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
   document.documentElement.parentNode = document;
   document.head = document.documentElement.appendChild(new Element("head"));
   document.body = document.documentElement.appendChild(new Element("body"));
+  document.body.className = config.bodyClass || "";
+  document.documentElement.className = config.htmlClass || "";
+  if (config.htmlTheme !== undefined) document.documentElement.dataset.theme = config.htmlTheme;
+  if (config.startupMarker) {
+    const startup = document.body.appendChild(new Element("main"));
+    startup.id = "startup";
+  }
   document.activeElement = document.body;
   document.getSelection = () => null;
   document.createElement = tag => new Element(tag);
@@ -119,9 +140,17 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
   const window = new Target();
   document.parentNode = window;
   window.top = subframe ? {} : window;
+  if (config.shell) window.__AICHAT_PAGE_CONNECTION__ = {};
   window.location = { host: "localhost:57175", pathname: "/", href: "http://localhost:57175/", origin: "http://localhost:57175" };
   window.innerWidth = 1280;
   window.innerHeight = 900;
+  const media = new Target();
+  media.matches = !!config.systemDark;
+  media.media = "(prefers-color-scheme: dark)";
+  media.addListener = callback => media.addEventListener("change", callback);
+  media.removeListener = callback => media.removeEventListener("change", callback);
+  window.matchMedia = () => media;
+  const observers = [];
   const calls = [];
   const messages = [];
   let maximized = false;
@@ -142,20 +171,32 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
   window.__TAURI_INTERNALS__ = { invoke };
   window.postMessage = message => messages.push(message);
   const context = {
-    window, document, Element, HTMLElement: Element,
-    exports: {}, require: () => ({ invoke, mountDesktopMenus: context.mountDesktopMenus }),
-    MutationObserver: class { observe() {} },
+    window, document, Element, HTMLElement: Element, URL, URLSearchParams,
+    exports: {}, require: () => ({ invoke, mountDesktopMenus: context.mountDesktopMenus, mountDesktopTheme: context.mountDesktopTheme }),
+    MutationObserver: class {
+      constructor(callback) { this.callback = callback; this.targets = []; observers.push(this); }
+      observe(target, options) { this.targets.push({ target, options }); }
+      disconnect() { this.targets = []; }
+    },
     setTimeout, clearTimeout, requestAnimationFrame: callback => callback(),
-    getComputedStyle: () => ({ colorScheme: "light", getPropertyValue: () => "" }),
+    getComputedStyle: element => {
+      const supplied = typeof config.computedStyle === "function"
+        ? config.computedStyle(element, document) : config.computedStyle || {};
+      return { colorScheme: "light", color: "", backgroundColor: "", ...supplied,
+        getPropertyValue: name => supplied.getPropertyValue?.(name) || supplied.properties?.[name] || "" };
+    },
+    matchMedia: window.matchMedia,
   };
   const bootstrap = { platform, iconDataUrl: "", menus: config.menus || [{ id: "file", label: "文件" }, { id: "edit", label: "编辑" }, { id: "view", label: "视图" }, { id: "help", label: "帮助" }], hostCommands: [], pageCommands: [] };
   if (implementation === "typescript") {
     vm.runInNewContext(menuSource, context);
+    vm.runInNewContext(themeSource, context);
     vm.runInNewContext(titlebarJs, context);
     context.exports.mountDesktopTitlebar(bootstrap);
   } else {
     const javascript = rawBridge.replaceAll("{{", "{").replaceAll("}}", "}")
-      .replace("{bootstrap}", JSON.stringify(bootstrap)).replace("{menu_chrome}", menuSource);
+      .replace("{bootstrap}", JSON.stringify(bootstrap)).replace("{menu_chrome}", menuSource)
+      .replace("{chrome_theme}", themeSource).replace("{page_theme}", pageThemeSource);
     vm.runInNewContext(javascript, context);
   }
   const initialCalls = [...calls];
@@ -186,12 +227,20 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
       }
     }
     for (const node of [...eventPath].reverse()) { visit(node, true); if (stopped) return event; }
-    for (const node of eventPath) { visit(node, false); if (stopped) break; }
+    for (const node of event.bubbles === false ? eventPath.slice(0, 1) : eventPath) { visit(node, false); if (stopped) break; }
     return event;
   }
   const host = document.getElementById("keepwork-desktop-titlebar");
   return {
     host, window, document, calls, initialCalls, messages, fire,
+    setSystemDark(dark) { media.matches = dark; fire(media, "change", { matches: dark }); },
+    mutation(target, attributeName = "class") {
+      for (const observer of observers) {
+        if (observer.targets.some(row => row.target === target || row.options.subtree && row.target.contains?.(target))) {
+          observer.callback([{ target, type: "attributes", attributeName }]);
+        }
+      }
+    },
     element: selector => host.testShadow.querySelectorAll(selector)[0],
     elements: selector => host.testShadow.querySelectorAll(selector),
     child(parent, tag) { return parent.appendChild(new Element(tag)); },

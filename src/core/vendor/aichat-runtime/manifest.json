@@ -7,8 +7,8 @@
       "output": "90e88f0f46e49385abf925082b11c8bddba157c40c53d7206efad40f1b029cd6"
     },
     "completion.mjs": {
-      "source": "8b6295feb94adbdb1c63987896032dae1927ae83c693f376b9dac700ac0d82e1",
-      "output": "5f76f5eda979e92ee319b84d40fcbfef7263881efc3bf9e98b5efd472124c6fd"
+      "source": "8ba0d66f6ad4a7ec0bfdf021b9893599252f2c51c875bee17e229011892c00b3",
+      "output": "f537c6deb27cb17718abdf708a4cd10d2522c23a79b2b44f06b2aa756ca9dfc8"
     },
     "context.mjs": {
       "source": "d053875cb9316780e76ad483c57e694b5bdc567391839f3102a10244fde57f6d",
@@ -27,8 +27,8 @@
       "output": "2b42e01fda2bcc9aba8c7fba5cf7bbf50f4b55bde3c9cef68fd8cc2df9b4bf1d"
     },
     "package_registry.mjs": {
-      "source": "15bfb6eff54eae0200ba55c4102f6b5e45e8afd0c2e52d1364a2227ff91aabd6",
-      "output": "56351f381518b25c17534be3c99859a805816064b1340b765f908f62cbbb9595"
+      "source": "63c8717de9cad20341a19ba30be7d69d1e7fb9f994d01f9678e46797974c381f",
+      "output": "11b40e4823f1a3aab4813b9ecfdef8f7ba108ce75304a417d793cd5b0e82a1cf"
     },
     "package_schema.mjs": {
       "source": "ef27f0d8504d494c2084ad9d46d6427105c2034c4a35125f8c41816a9c57c291",
@@ -65,10 +65,14 @@
     "skills.mjs": {
       "source": "81609a4343770eef88ac6cdaf5294ed6b9b7f9cdcea10873599a25efe58a3c8d",
       "output": "28386ec30681641cc4024fff98140679a8716a85fc94e750227d63a25ae047f3"
+    },
+    "text_tool_calls.mjs": {
+      "source": "a2819145e8bfbc2570fd1897a30cedc1fa35cff40cce2b6fa4d6521729942b63",
+      "output": "d9b7203aa313224105ca9243dd062d8b0da43b67523dc6945ebf3a58cc8716a2"
     }
   },
   "sourceRevision": {
-    "commit": "bb0e3b1409a41df2104ff50d3d421626fad15841",
+    "commit": "833fc4bed688ac22ae5359ac002bb38d3d1621ea",
     "dirty": false
   }
 }

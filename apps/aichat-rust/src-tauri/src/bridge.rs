@@ -7,22 +7,50 @@ use serde_json::json;
 ///   centered title, address pill, SVG refresh button, and CSS theme variable observer.
 /// - Installs the frozen `window.aichatDesktop` v1 bridge with all capabilities and methods.
 pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> String {
+    build_main_window_init_script_for_entry(platform, icon_data_url, crate::security::ENTRY)
+}
+
+pub fn build_main_window_init_script_for_entry(
+    platform: &str,
+    icon_data_url: &str,
+    entry_url: &str,
+) -> String {
+    // Only origin/path is needed for early appearance. Do not expose an entry's
+    // query, fragment or credentials through the public bootstrap object.
+    let entry = url::Url::parse(entry_url)
+        .ok()
+        .filter(|url| !crate::security::has_credentials(url))
+        .map(|mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|| crate::security::ENTRY.to_string());
     let bootstrap = json!({
         "platform": platform,
         "iconDataUrl": icon_data_url,
         "menus": top_menu_bar_labels(),
         "hostCommands": HOST_COMMANDS,
         "pageCommands": PAGE_COMMANDS,
+        "entryUrl": entry,
     });
 
     let menu_chrome =
         include_str!("../../src/menuChrome.js").replacen("export function", "function", 1);
+
+    let chrome_theme =
+        include_str!("../../src/chromeTheme.js").replacen("export function", "function", 1);
+    let page_theme =
+        include_str!("../../src/pageTheme.js").replacen("export function", "function", 1);
 
     format!(
         r#"(() => {{
   if (window !== window.top) return;
   const bootstrap = {bootstrap};
   {menu_chrome}
+  {chrome_theme}
+  {page_theme}
+  installPageTheme(bootstrap.entryUrl);
   window.__AICHAT_DESKTOP_BOOTSTRAP__ = bootstrap;
 
   // Native desktop chrome should not be text-selectable. Inputs, the composer
@@ -390,89 +418,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     }}
 
 
-    const canvas = document.createElement("canvas");
-    canvas.width = 1;
-    canvas.height = 1;
-    const ctx = canvas.getContext("2d", {{ willReadFrequently: true }});
-    const toHex = (raw, fallback) => {{
-      if (!ctx || !raw) return fallback;
-      ctx.clearRect(0, 0, 1, 1);
-      ctx.fillStyle = fallback;
-      ctx.fillStyle = raw;
-      ctx.fillRect(0, 0, 1, 1);
-      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-      return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
-    }};
-
-    let lastThemeKey = "";
-    const syncTheme = () => {{
-      if (!document.body) return;
-      const cs = getComputedStyle(document.body);
-      const dark =
-        document.body.classList.contains("dark") ||
-        document.documentElement.classList.contains("dark") ||
-        cs.colorScheme === "dark";
-      const bgRaw =
-        cs.getPropertyValue("--experience-rail-bg").trim() ||
-        cs.getPropertyValue("--bg-sidebar").trim() ||
-        (dark ? '#18181f' : '#f2f3f7');
-      const textRaw =
-        cs.getPropertyValue("--text-primary").trim() || (dark ? '#d4d4dc' : '#1a1a2e');
-      const hoverRaw =
-        cs.getPropertyValue("--bg-pill-hover").trim() || (dark ? '#282834' : '#e2e6ef');
-      const addressRaw =
-        cs.getPropertyValue("--text-secondary").trim() || (dark ? '#9a9aa8' : '#4a4a5a');
-      const pillRaw =
-        cs.getPropertyValue("--bg-pill").trim() || (dark ? '#242430' : '#e2e6ef');
-
-      const bgHex = toHex(bgRaw, dark ? '#18181f' : '#f2f3f7');
-      const textHex = toHex(textRaw, dark ? '#d4d4dc' : '#1a1a2e');
-      host.style.setProperty("--chrome-menu-bg", cs.getPropertyValue("--bg-card").trim() || (dark ? '#202028' : '#ffffff'));
-      host.style.setProperty("--chrome-bg", bgHex);
-      host.style.setProperty("--chrome-text", textHex);
-      host.style.setProperty("--chrome-hover", hoverRaw);
-      host.style.setProperty("--chrome-address", addressRaw);
-      host.style.setProperty("--chrome-pill", pillRaw);
-
-      const simple =
-        document.body.dataset.experience === "simple" && window.innerWidth > 768;
-      const railWidth = cs.getPropertyValue("--experience-rail-width").trim() || "56px";
-      host.style.setProperty(
-        "--chrome-surface-start",
-        simple ? `calc(${{railWidth}} + 14px)` : "0px"
-      );
-
-      const key = `${{dark ? "dark" : "light"}}:${{bgHex}}:${{textHex}}`;
-      if (key !== lastThemeKey) {{
-        lastThemeKey = key;
-        void invoke("desktop_sync_theme", {{
-          dark,
-          color: bgHex,
-          symbolColor: textHex,
-        }});
-      }}
-    }};
-
-    syncTheme();
-    const observer = new MutationObserver(syncTheme);
-    observer.observe(document.documentElement, {{
-      attributes: true,
-      attributeFilter: ["class", "style", "data-theme"],
-    }});
-    if (document.body) {{
-      observer.observe(document.body, {{
-        attributes: true,
-        attributeFilter: ["class", "style", "data-experience", "data-skin"],
-      }});
-    }}
-    for (const evt of [
-      "aichat:theme-changed",
-      "aichat:skin-changed",
-      "aichat:experience-changed",
-      "resize",
-    ]) {{
-      window.addEventListener(evt, syncTheme);
-    }}
+    mountDesktopTheme({{ host, invoke }});
   }};
 
   if (document.readyState === "loading") {{
@@ -487,6 +433,25 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_appearance_receives_only_the_configured_entry_origin_and_path() {
+        let script = build_main_window_init_script_for_entry(
+            "darwin",
+            "",
+            "http://localhost:3001/AIChat.html?token=private-entry-secret#private-entry-fragment",
+        );
+        assert!(script.contains("\"entryUrl\":\"http://localhost:3001/AIChat.html\""));
+        assert!(!script.contains("private-entry-secret"));
+        assert!(!script.contains("private-entry-fragment"));
+        let credentialed = build_main_window_init_script_for_entry(
+            "darwin",
+            "",
+            "https://user:private-password@example.com/chat",
+        );
+        assert!(!credentialed.contains("private-password"));
+        assert!(credentialed.contains("\"entryUrl\":\"https://keepwork.com/chat\""));
+    }
 
     #[test]
     fn generates_frozen_main_frame_init_script_with_titlebar_and_v1_bridge() {

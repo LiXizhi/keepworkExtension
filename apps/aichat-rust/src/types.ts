@@ -83,6 +83,7 @@ export interface UpdatesSnapshot {
 }
 
 export interface DesktopStatus {
+  readonly theme?: "light" | "dark";
   version: string;
   platform: string;
   arch: string;

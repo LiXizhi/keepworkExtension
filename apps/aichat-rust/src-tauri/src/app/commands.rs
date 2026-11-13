@@ -14,6 +14,7 @@ use crate::menu::{
     MenuContextState,
 };
 use crate::security::ENTRY;
+use crate::theme::DesktopTheme;
 use crate::APP_VERSION;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -313,12 +314,19 @@ pub(super) fn desktop_sync_theme(
     dark: bool,
     _color: Option<String>,
     _symbol_color: Option<String>,
+    confirmed: Option<bool>,
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state)?;
-    let _ = window.set_theme(Some(if dark {
-        tauri::Theme::Dark
+    let url = window.url().map_err(|error| error.to_string())?;
+    let shell = state.page_connection.lock().unwrap().is_shell(&url);
+    let theme = if shell || confirmed == Some(false) {
+        state.theme.current()
     } else {
-        tauri::Theme::Light
-    }));
+        let theme = DesktopTheme::from_dark(dark);
+        let _ = state.theme.remember(theme);
+        theme
+    };
+    let _ = window.set_theme(Some(theme.native()));
+    let _ = window.set_background_color(Some(theme.background()));
     Ok(true)
 }

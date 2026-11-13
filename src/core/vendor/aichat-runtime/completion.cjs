@@ -5,6 +5,7 @@ exports.abortable = abortable;
 exports.parseArguments = parseArguments;
 exports.responseText = responseText;
 exports.runCompletion = runCompletion;
+const text_tool_calls_cjs_1 = require("./text_tool_calls.cjs");
 /** One model/tool loop. Transports perform exactly one inference request. */
 function throwIfAborted(signal) {
     if (signal?.aborted) {
@@ -77,8 +78,23 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
         const rawCalls = response?.choices?.[0]?.message?.tool_calls || response?.tool_calls;
         for (const call of rawCalls || [])
             announced.set(call.id || `index:${call.index ?? announced.size}`, call);
-        const calls = [...announced.values()].map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
-        const content = responseText(response);
+        let calls = [...announced.values()].map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
+        let content = responseText(response);
+        // Native calls are authoritative. Text recovery runs only after the
+        // transport completes; partial/cancelled requests never reach execution.
+        const reason = response?.choices?.[0]?.finish_reason ?? response?.finish_reason ?? response?.stop_reason;
+        const incomplete = response?.truncated || response?.error
+            || ['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'error', 'cancelled', 'aborted'].includes(reason)
+            || ['incomplete', 'failed', 'cancelled'].includes(response?.status);
+        const recovered = !calls.length && !incomplete
+            ? (0, text_tool_calls_cjs_1.recoverTextToolCalls)(content, finalSummary ? [] : options.tools, iteration) : null;
+        if (recovered) {
+            calls = recovered.calls;
+            content = recovered.content;
+            options.onMessage?.(content, { result: content, tool_calls: calls, replaceContent: true });
+            for (const call of calls)
+                options.onToolCallChunk?.(call);
+        }
         await emit({ type: 'message', content, iteration, message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) } });
         if (!calls.length)
             return response;
@@ -94,6 +110,8 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
             try {
                 if (!(options.tools || []).some(t => t.function?.name === name))
                     throw Error(`Unavailable tool: ${name}`);
+                if (recovered?.errors.has(call.id))
+                    throw Error(recovered.errors.get(call.id));
                 const args = parseArguments(call.function?.arguments);
                 const signature = JSON.stringify([name, args]);
                 const prior = receipts.get(call.id);
