@@ -108,11 +108,15 @@ try {
   $receipt = Get-Content -LiteralPath "$Installer.result.json" -Raw | ConvertFrom-Json
   if ($receipt.state -ne 'installed') { throw 'Installer did not persist its successful result' }
   Wait-Code (Start-Owned $helper "--check-desktop-stopped `"$application`"") 0
+  # Manual repair omits KEEPWORK_PARENT but must replace a prior failure receipt.
+  [IO.File]::WriteAllText("$Installer.result.json", '{"state":"failed","code":"fixture-previous-failure"}', [Text.Encoding]::ASCII)
   # Exercise the real NSIS restart flag and the actual packaged desktop binary.
   $restartSince = [DateTime]::UtcNow
   # GetOptions('/ARGS') preserves the inner quotes because the returned value
   # begins with '--', not a quote. RunAsUser then parses this as one argv.
   Wait-Code (Start-Owned $Installer "/S /UPDATE /R /ARGS --user-data-dir=`"$profile`" /D=$install") 0
+  $repairedReceipt = Get-Content -LiteralPath "$Installer.result.json" -Raw | ConvertFrom-Json
+  if ($repairedReceipt.state -ne 'installed') { throw 'Manual repair left a stale installer failure receipt' }
   $restarted = Retain-Relaunched $application $restartSince
   if ($restarted.WaitForExit(2000)) { throw 'The relaunched desktop exited immediately' }
   $recordPath = Join-Path $profile 'desktop-instance.json'
@@ -129,7 +133,7 @@ try {
   if ($other.HasExited) { throw 'Restart affected another installation' }
   $restarted.Kill(); $restarted.WaitForExit()
   Wait-Code (Start-Owned $helper "--stop-mcp `"$install`"") 0
-  Write-Output (@{ result='passed'; cases=@('silent-custom-install', 'both-native-names-block-before-mcp-cleanup', 'parent-identity-rejection', 'no-force-desktop-check', 'parent-exit-before-replacement', 'silent-overwrite', 'custom-directory-preserved', 'user-data-preserved', 'external-install-untouched', 'real-nsis-relaunch', 'isolated-relaunch-profile'); elapsedMs=$watch.ElapsedMilliseconds; relaunchTested=$true; applicationHealthTested=$false } | ConvertTo-Json -Compress)
+  Write-Output (@{ result='passed'; cases=@('silent-custom-install', 'both-native-names-block-before-mcp-cleanup', 'parent-identity-rejection', 'no-force-desktop-check', 'parent-exit-before-replacement', 'silent-overwrite', 'custom-directory-preserved', 'user-data-preserved', 'external-install-untouched', 'manual-repair-clears-failure-receipt', 'real-nsis-relaunch', 'isolated-relaunch-profile'); elapsedMs=$watch.ElapsedMilliseconds; relaunchTested=$true; applicationHealthTested=$false } | ConvertTo-Json -Compress)
 } finally {
   # Kill only processes created and retained by this fixture, never by name/PID lookup.
   foreach ($process in $owned) { if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() } }

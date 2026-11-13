@@ -244,7 +244,12 @@ impl UpdateManager {
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
         {
-            windows_install::read_failure(Path::new(&meta.downloaded_path)).unwrap_or(error)
+            let package = Path::new(&meta.downloaded_path);
+            if windows_install::installation_succeeded(package) {
+                String::new()
+            } else {
+                windows_install::read_failure(package).unwrap_or(error)
+            }
         } else {
             error
         };
@@ -1032,6 +1037,11 @@ mod tests {
                 );
                 assert!(other.snapshot(&runtime).desktop.error.is_empty());
             }
+            atomic_json_write(
+                &downloads.join("desktop-install-error.json"),
+                &serde_json::json!({"version":"0.3.0", "error":"previous launch failed"}),
+            )
+            .unwrap();
             atomic_json_write(&receipt, &serde_json::json!({"state":"installed"})).unwrap();
             manager.check_desktop_update().await;
             assert_eq!(manager.snapshot(&runtime).desktop.state, "up-to-date");

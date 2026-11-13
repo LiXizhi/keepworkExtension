@@ -69,13 +69,21 @@ pub(super) fn parameters(
     ))
 }
 
-pub(super) fn read_failure(package: &Path) -> Option<String> {
+fn receipt_state(package: &Path) -> Option<String> {
     let receipt = package.with_file_name(format!("{}.result.json", package.file_name()?.to_str()?));
     if std::fs::metadata(&receipt).ok()?.len() > 65536 {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(receipt).ok()?).ok()?;
-    match value["state"].as_str()? {
+    value["state"].as_str().map(str::to_owned)
+}
+
+pub(super) fn installation_succeeded(package: &Path) -> bool {
+    receipt_state(package).as_deref() == Some("installed")
+}
+
+pub(super) fn read_failure(package: &Path) -> Option<String> {
+    match receipt_state(package)?.as_str() {
         "failed" => Some(format!(
             "上次自动覆盖安装失败；原下载包已保留，请重新运行安装包修复：{}",
             package.display()

@@ -4,7 +4,18 @@
   Push $0
   Push $1
   ${GetOptions} $CMDLINE "/KEEPWORK_PARENT=" $0
-  ${IfNot} ${Errors}
+  ${If} ${Errors}
+    ; A downloaded package can be retried manually without the parent flag.
+    ; Complete its existing receipt, including a previous handoff failure.
+    StrCpy $0 0
+    IfFileExists "$EXEPATH.result.json" 0 +2
+      StrCpy $0 1
+    IfFileExists "$EXEDIR\desktop-install-error.json" 0 +2
+      StrCpy $0 1
+  ${Else}
+    StrCpy $0 1
+  ${EndIf}
+  ${If} $0 == 1
     ClearErrors
     FileOpen $1 "$EXEPATH.result.json" w
     ${IfNot} ${Errors}
