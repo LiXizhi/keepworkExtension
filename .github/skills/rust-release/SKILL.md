@@ -78,10 +78,34 @@ MCP 证据验证依赖仓库根目录的 Node 依赖；尚未安装时先执行 
 每次 `--output` 使用全新目录，下载回执记录构建身份和本地文件校验值，不混入其他 run 的同名文件。
 
 本地上传从环境读取 `KP_QINIU_ACCESS_KEY`、`KP_QINIU_SECRET_KEY`，不得把密钥写进参数、日志或仓库。
-GitHub 仓库 secrets 不会自动出现在本机；缺少本机凭据时说明缺项，不尝试导出仓库 secrets。
+环境中缺项时先按下节加载本机 `ai-skill-accesskey/qiniu.yaml`，不要直接判定缺少凭据。
+GitHub 仓库 secrets 不会自动出现在本机，不尝试导出仓库 secrets。
 七牛发布器自身清除代理设置后直连七牛，沿用既有的不可变归档、SHA-256 和 feed 提升顺序。
 默认仅预检；只有 `--publish true` 执行写入。保留下载目录与报告；发布日志和新增回执存到下载目录外，
 不要向 artifacts 根目录添加文件，否则重试时下载回执的文件清单校验会失败。
+
+### 本机七牛凭据：ai-skill-accesskey
+
+本机七牛凭据保存在独立的 `ai-skill-accesskey` 仓库。以下位置均相对于本仓库根目录：
+
+- 首选：`../ai-skill-accesskey/qiniu.yaml`。
+- 备用：`../keepworksdk/.github/skills/upload-deploy-cdn-files/ai-skill-accesskey/qiniu.yaml`。
+
+已有可用配置时直接在已授权的发布流程中加载，不再让用户重复提供密钥位置。
+配置定位说明和对外回执使用相对路径，不写入个人绝对路径或用户名。
+
+1. 当次用户明确指定的配置优先；未指定且两个环境变量已齐全时，直接使用环境变量。
+   否则按上述顺序检查相对路径。
+   不自动选择其他项目或账户的配置；明确指定的文件无效时报告该问题。
+2. 使用安全 YAML 解析器（如 Python `yaml.safe_load`）读取选定文件；支持字段位于根对象或 `qiniu` 对象下。
+   从同一文件成对映射 `accessKey` → `KP_QINIU_ACCESS_KEY`、`secretKey` → `KP_QINIU_SECRET_KEY`，
+   不把不完整环境变量与另一份配置拼成一对。核对 `bucketName` 为 `haqi`、`publicDomain` 为 `https://cdn.keepwork.com`。
+3. `scripts/publish-local.cjs` 仍只读取环境变量，不会自动发现 YAML。
+   用加载包装器在内存中解析配置后调用其 `publishLocal`，或通过子进程的 `env` 注入这两个变量再执行原发布命令。
+   密钥只进入发布进程环境，不写入 `.env`、临时文件、下载目录或回执；不 `cat` 配置、不用 shell `source` 或命令替换传递密钥。
+   若解析器通过子进程返回数据，捕获到内存并处理，禁止把其原始输出或含配置行的解析异常写入日志。
+4. 保持原有代理隔离：所有 `gh` 子进程通过 `githubEnvironment` 剔除七牛变量后使用本机代理；七牛请求直连。
+   选定配置无效或默认查找均无可用配置时，才说明缺失或无效的路径并请求配置位置，不要求用户在聊天中粘贴密钥。
 
 ## 2. 桌面打包与发布
 
