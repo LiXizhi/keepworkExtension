@@ -89,7 +89,13 @@ async fn health_reports_identity_and_only_served_capabilities() {
     assert!(value.get("workspaceRoot").is_some());
     // P1 advertises the local surface it serves and nothing further.
     assert_eq!(value["fsApi"], "workspace");
-    assert_eq!(value["terminalApi"], "pty-session-v1");
+    if keepwork_mcp::terminal::supported() {
+        assert_eq!(value["terminalApi"], "pty-session-v1");
+    } else {
+        assert!(value.get("terminalApi").is_none());
+        assert_eq!(value["runtimeVariant"], "win7-win8");
+        assert_eq!(value["minWindows"], serde_json::json!([6, 1, 7601]));
+    }
     assert_eq!(value["personasApi"], "personas-v1");
     assert_eq!(value["agentSessionApi"], "v1");
     assert_eq!(value["messagingApi"], "messaging-v1");

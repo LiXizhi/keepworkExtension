@@ -527,3 +527,9 @@ real account, clean-machine and published-feed checks remain separate pending ga
 
 
 DingTalk manual image attachments use the additive conversation `replyImage` contract and `POST /agents/personas/:id/reply-image`. One PNG/JPEG/GIF/WebP up to 5 MiB is validated, staged privately under the binding root, sent through current-user DWS file transport, and cleaned after the attempt. Images arrive as downloadable attachments. Text replies keep their legacy request shape; Feishu and older services keep text usable without advertising this optional capability. The persistent request ledger prevents replay of unknown sends. See [manual image attachments](../../docs/message-autoreply.md#manual-image-attachments).
+
+## Windows 7 / 8 compatibility edition (preview)
+
+A separate `variant: "win7-win8"` build targets Windows 7 SP1 x64, Windows 8 x64 and Windows 8.1 x64 from the same Rust sources. The technical target `x86_64-win7-windows-msvc` names the minimum OS; it does not certify all three systems. This edition retains basic files, folder browsing, search and noninteractive `run_terminal`, omits `terminalApi`, and returns bounded unsupported errors for PTY routes. Loopback, Origin/authentication, path and daemon ownership rules remain in force.
+
+Build/package instructions and the independent `mcp-win7-win8-rs` channel are documented in the [Win7/Win8 release flow](../../.github/skills/rust-release/references/windows7.md); the [Windows compatibility contract](../aichat-rust/docs/windows-cef.md) defines the shared client/server scope. The ordinary modern MCP release does not include this edition. Native MCP smoke and client/CEF/update acceptance must be recorded separately for each legacy OS; a modern Windows build is not native legacy acceptance. No compatibility release was published as part of this development task.

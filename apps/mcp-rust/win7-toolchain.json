@@ -1,0 +1,27 @@
+{
+  "toolchain": "nightly-2026-11-01",
+  "target": "x86_64-win7-windows-msvc",
+  "minWindows": [
+    6,
+    1,
+    7601
+  ],
+  "variant": "win7-win8",
+  "supportedWindows": [
+    [
+      6,
+      1,
+      7601
+    ],
+    [
+      6,
+      2,
+      9200
+    ],
+    [
+      6,
+      3,
+      9600
+    ]
+  ]
+}

@@ -1,8 +1,11 @@
 #include "native.hpp"
 #include "common/archive.hpp"
 #include "release-key.hpp"
+#ifndef KEEPWORK_WIN7_EDITION
 #include <wrl.h>
 #include <WebView2.h>
+#endif
+#include "common/win7_policy.hpp"
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <shlobj.h>
@@ -18,8 +21,10 @@
 
 namespace keepwork {
 namespace fs = std::filesystem;
+#ifndef KEEPWORK_WIN7_EDITION
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
+#endif
 namespace {
 void check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 void nt(NTSTATUS status) { check(status >= 0, "Windows cryptography operation failed"); }
@@ -63,7 +68,11 @@ struct Internet {
   ~Internet() { WinHttpCloseHandle(handle); }
 };
 void fetch(const std::string& url, std::uint64_t limit, const std::function<void(const char*, DWORD)>& consume, const Progress& progress) {
-  check(url.rfind(cdn_base, 0) == 0 && url.find_first_of("?#\\") == std::string::npos, "Unexpected download origin");
+  bool allowed = url.rfind(cdn_base, 0) == 0;
+#ifdef KEEPWORK_WIN7_EDITION
+  allowed = allowed || url.rfind(win7_mcp_base, 0) == 0 || url.rfind(win7_client_base, 0) == 0;
+#endif
+  check(allowed && url.find_first_of("?#\\") == std::string::npos, "Unexpected download origin");
   auto address = wide(url);
   URL_COMPONENTS parts{}; parts.dwStructSize = sizeof(parts); parts.dwHostNameLength = parts.dwUrlPathLength = DWORD(-1);
   check(WinHttpCrackUrl(address.c_str(), 0, 0, &parts) && parts.nScheme == INTERNET_SCHEME_HTTPS && parts.nPort == 443, "Invalid HTTPS download URL");
@@ -137,6 +146,10 @@ const char* architecture() {
 #endif
 }
 bool probe_webview(const fs::path& probe_profile, const Progress& progress) {
+#ifdef KEEPWORK_WIN7_EDITION
+  (void)probe_profile; (void)progress;
+  return false;
+#else
   progress(L"正在检查 WebView2…", 0, 0);
   plain_path(probe_profile); fs::create_directories(probe_profile);
   auto path = executable_dir() / L"WebView2Loader.dll";
@@ -173,6 +186,7 @@ bool probe_webview(const fs::path& probe_profile, const Progress& progress) {
     }
   } catch (...) { state->cancelled = true; DestroyWindow(window); throw; }
   state->cancelled = true; DestroyWindow(window); return state->ok;
+#endif
 }
 std::string sha256_file(const fs::path& path) {
   plain_path(path); std::ifstream file(path, std::ios::binary); check(bool(file), "Cannot hash runtime file");

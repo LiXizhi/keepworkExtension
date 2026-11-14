@@ -1,15 +1,16 @@
 ---
 name: rust-release
-description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；支持双产品和仅 MCP 发布。GitHub 构建后经本机代理下载产物，再由本机上传七牛、提升 feed 并核验下载地址；用于打包新版本、补发和发布排查。
+description: 打包或发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；支持现代版双产品、仅 MCP，以及显式选择的 Win7/Win8 专版流程。用于版本打包、发布与排查。
 ---
 
 # Rust 双产品发布
 
-用户说“按 rust-release 发新版本”或“打包新的版本”时，默认完成桌面端和 MCP Rust 服务器两条发布链。
-除非用户明确限定“只发桌面”或“只发 MCP”，不能省略 `Rust MCP daemon` 构建 Action 和独立 MCP CDN 发布。
+用户说“按 rust-release 发新版本”或“打包新的版本”且未指定 Win7/Win8 时，默认完成现代桌面端和 MCP Rust 服务器两条发布链。
+现代版模式中，除非用户明确限定“只发桌面”或“只发 MCP”，不能省略 `Rust MCP daemon` 构建 Action 和独立 MCP CDN 发布。
 GitHub Actions 负责构建和保存 artifacts；**此设备经 `http://127.0.0.1:7890` 下载，再由此设备直连七牛上传**。
 不再调用远端上传七牛的 Action，也不在代理不可用时回退到 GitHub 上传。
 用户只要求修改 Skill、流程、总结或解释时，完成相应改动，不触发实际构建、发布或推送。
+Win7/Win8 专版是独立流程，只在用户明确选择 Win7、Win8 或 Win8.1 兼容版时执行；普通双产品发布和 `mcp-server` 均不附带 Win7/Win8 构建或发布。
 
 ## 调用命令与参数
 
@@ -20,6 +21,12 @@ GitHub Actions 负责构建和保存 artifacts；**此设备经 `http://127.0.0.
 | `/rust-release` 或 `/rust-release all` | 发布桌面端和 MCP Rust 服务器 |
 | `/rust-release mcp-server` | **仅发布 MCP Rust 服务器**，从其清单与线上 MCP feed 确定下一个版本 |
 | `/rust-release mcp-server X.Y.Z` | 仅发布 MCP Rust 服务器，使用明确指定的 MCP 版本 |
+| `/rust-release win7-win8` | 仅准备 Win7/Win8 x64 专版，按用户要求构建、打包或发布；先读取 [Win7/Win8 流程](references/windows7.md)，不执行下文的现代版双产品步骤 |
+| `/rust-release win7` | `win7-win8` 的兼容别名，仍使用当前 Win7/Win8 专版身份和渠道，不生成旧 Win7 单系统渠道 |
+
+`win7-win8` 模式覆盖 Windows 7 SP1 x64、Windows 8 x64、Windows 8.1 x64；能力边界、独立产物/更新地址、构建步骤及逐系统虚拟机验收见该参考文件，按需读取。
+用户只授权实现、流程修改或本地打包时，不触发远端 workflow、推送、CDN 写入或公开 Release；
+现有现代版发布授权不把一次 Win7/Win8 开发请求变成 Win7/Win8 发布请求。缺少任一目标系统的实测回执时，分别报告该系统未验证，不以一台机器的通过覆盖全部系统。
 
 `mcp-server` 模式的执行顺序：
 

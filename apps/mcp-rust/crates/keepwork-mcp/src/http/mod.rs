@@ -122,10 +122,12 @@ impl AppState {
             "folderBrowserApi".into(),
             serde_json::json!(crate::folders::FOLDER_BROWSER_API),
         );
-        caps.insert(
-            "terminalApi".into(),
-            serde_json::json!(crate::terminal::TERMINAL_API),
-        );
+        if crate::terminal::supported() {
+            caps.insert(
+                "terminalApi".into(),
+                serde_json::json!(crate::terminal::TERMINAL_API),
+            );
+        }
         caps.insert("fsDirApi".into(), serde_json::json!("mkdir-v1"));
         caps.insert("aichatPresenceApi".into(), serde_json::json!("post-sse-v1"));
         caps.insert("personasApi".into(), serde_json::json!("personas-v1"));

@@ -56,7 +56,49 @@ pub fn home_dir() -> Option<PathBuf> {
             return Some(dir);
         }
     }
-    dirs::home_dir()
+    os_home_dir()
+}
+
+/// Native profile lookup. New windows-sys bindings used by dirs 6 import
+/// CoTaskMemFree from combase.dll, which does not exist on Windows 7.
+/// SHGetFolderPathW provides the same profile-folder lookup on the legacy target.
+pub(crate) fn os_home_dir() -> Option<PathBuf> {
+    #[cfg(not(target_vendor = "win7"))]
+    {
+        dirs::home_dir()
+    }
+    #[cfg(target_vendor = "win7")]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        #[link(name = "shell32")]
+        extern "system" {
+            fn SHGetFolderPathW(
+                hwnd: *mut std::ffi::c_void,
+                csidl: i32,
+                token: *mut std::ffi::c_void,
+                flags: u32,
+                path: *mut u16,
+            ) -> i32;
+        }
+        let mut path = [0u16; 260];
+        let result = unsafe {
+            SHGetFolderPathW(
+                std::ptr::null_mut(),
+                0x0028, // CSIDL_PROFILE; do not create or change a profile.
+                std::ptr::null_mut(),
+                0,
+                path.as_mut_ptr(),
+            )
+        };
+        if result < 0 {
+            return None;
+        }
+        let length = path.iter().position(|unit| *unit == 0)?;
+        if length == 0 {
+            return None;
+        }
+        Some(std::ffi::OsString::from_wide(&path[..length]).into())
+    }
 }
 
 fn non_empty_env_path(key: &str) -> Option<PathBuf> {

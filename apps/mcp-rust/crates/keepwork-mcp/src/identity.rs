@@ -73,6 +73,10 @@ impl Identity {
     /// order the Node daemon emits them.
     pub fn fields(&self) -> Map<String, Value> {
         let mut map = Map::new();
+        if cfg!(any(target_vendor = "win7", feature = "win7-compat")) {
+            map.insert("runtimeVariant".into(), json!("win7-win8"));
+            map.insert("minWindows".into(), json!([6, 1, 7601]));
+        }
         if let Some(value) = &self.runtime_version {
             map.insert("runtimeVersion".into(), json!(value));
         }

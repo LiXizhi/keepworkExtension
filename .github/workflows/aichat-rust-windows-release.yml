@@ -2,6 +2,23 @@ name: AIChat Rust release packages
 
 on:
   workflow_dispatch:
+    inputs:
+      edition:
+        description: Desktop edition to build (publication remains a separate local action)
+        type: choice
+        required: true
+        default: modern
+        options:
+          - modern
+          - win7-win8
+      legacy-signing:
+        description: Win7/Win8 manifest signing trust root
+        type: choice
+        required: true
+        default: preview
+        options:
+          - preview
+          - production
   pull_request:
     paths:
       - "apps/aichat-rust/**"
@@ -23,11 +40,21 @@ concurrency:
 
 jobs:
   validate:
+    if: github.event_name == 'pull_request' || inputs.edition != 'win7-win8'
     uses: ./.github/workflows/rust-desktop-validation.yml
+
+  build-win7-win8:
+    name: Windows 7/8 x64 compatibility edition
+    if: github.event_name == 'workflow_dispatch' && inputs.edition == 'win7-win8'
+    uses: ./.github/workflows/aichat-rust-win7.yml
+    with:
+      signing: ${{ inputs['legacy-signing'] || 'preview' }}
+    secrets:
+      WIN7_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WIN7_RELEASE_PRIVATE_KEY_PEM }}
 
   build:
     needs: validate
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && inputs.edition != 'win7-win8'
     name: Windows Rust (${{ matrix.arch }})
     runs-on: windows-latest
     strategy:
@@ -185,7 +212,7 @@ jobs:
 
   build-macos:
     needs: validate
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && inputs.edition != 'win7-win8'
     name: macOS Rust (universal)
     runs-on: macos-latest
     env:
@@ -251,7 +278,7 @@ jobs:
   prepare-release:
     name: Prepare assets for the local publisher
     needs: [build, build-macos]
-    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/aichat-rust-v')
+    if: inputs.edition != 'win7-win8' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/aichat-rust-v'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

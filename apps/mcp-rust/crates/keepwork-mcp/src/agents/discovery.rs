@@ -261,7 +261,7 @@ fn node_script(path: &Path) -> bool {
 }
 
 pub fn search_dirs() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = crate::config::os_home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let inherited = std::env::var_os("PATH")
         .or_else(|| std::env::var_os("Path"))
         .unwrap_or_default();
@@ -521,7 +521,9 @@ pub fn discover(backend: &str) -> Result<CliLaunch, String> {
     if let Some(configured) = std::env::var_os(&variable).filter(|value| !value.is_empty()) {
         let configured = configured.to_string_lossy();
         let expanded = if let Some(relative) = configured.strip_prefix("~/") {
-            dirs::home_dir().unwrap_or_default().join(relative)
+            crate::config::os_home_dir()
+                .unwrap_or_default()
+                .join(relative)
         } else {
             PathBuf::from(configured.as_ref())
         };
@@ -614,7 +616,7 @@ pub fn discover(backend: &str) -> Result<CliLaunch, String> {
             }
         }
     }
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = crate::config::os_home_dir().unwrap_or_default();
     let app_roots = if cfg!(windows) {
         ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
             .iter()

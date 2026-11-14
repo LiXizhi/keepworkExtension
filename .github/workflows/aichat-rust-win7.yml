@@ -1,0 +1,174 @@
+name: Build Windows 7/8 compatibility edition (reusable, no publication)
+
+# Keep the desktop release workflow as the only operator-facing entry point.
+on:
+  workflow_call:
+    inputs:
+      signing:
+        description: preview uses an ephemeral key; production requires the pinned release key secret
+        type: string
+        required: false
+        default: preview
+    secrets:
+      WIN7_RELEASE_PRIVATE_KEY_PEM:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Win7 SP1 / Win8 / Win8.1 x64 package
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      LEGACY_SIGNING_MODE: ${{ inputs.signing }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install the pinned Rust toolchain and Win7 standard-library sources
+        id: toolchain
+        run: |
+          $configuration = Get-Content apps/mcp-rust/win7-toolchain.json -Raw | ConvertFrom-Json
+          if ($configuration.toolchain -notmatch '^nightly-\d{4}-\d{2}-\d{2}$' -or
+              $configuration.target -ne 'x86_64-win7-windows-msvc' -or $configuration.variant -ne 'win7-win8') {
+            throw 'Expected a pinned Win7/Win8 build configuration'
+          }
+          "channel=$($configuration.toolchain)" | Out-File $env:GITHUB_OUTPUT -Append
+          rustup toolchain install $configuration.toolchain --profile minimal --component rust-src --no-self-update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-win7-win8-${{ steps.toolchain.outputs.channel }}
+          workspaces: apps/mcp-rust -> target
+      - name: Locate the NSIS compiler
+        run: |
+          $compiler = 'C:\Program Files (x86)\NSIS\makensis.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            choco install nsis --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'NSIS makensis.exe was not installed' }
+          "MAKENSIS=$compiler" | Out-File $env:GITHUB_ENV -Append
+      - name: Prepare the isolated signing key outside all artifact directories
+        env:
+          WIN7_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.WIN7_RELEASE_PRIVATE_KEY_PEM }}
+        run: |
+          if ($env:LEGACY_SIGNING_MODE -notin @('preview', 'production')) {
+            throw 'signing must be preview or production'
+          }
+          $keyDirectory = Join-Path $env:RUNNER_TEMP ('keepwork-legacy-key-' + [Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $keyDirectory | Out-Null
+          "WIN7_SIGNING_KEY_DIR=$keyDirectory" | Out-File $env:GITHUB_ENV -Append
+          $env:WIN7_SIGNING_KEY_DIR = $keyDirectory
+          @'
+          const crypto = require('node:crypto'), fs = require('node:fs'), path = require('node:path');
+          const directory = process.env.WIN7_SIGNING_KEY_DIR;
+          let key;
+          if (process.env.LEGACY_SIGNING_MODE === 'production') {
+            if (!process.env.WIN7_RELEASE_PRIVATE_KEY_PEM) throw Error('Production build requires WIN7_RELEASE_PRIVATE_KEY_PEM; preview fallback is forbidden');
+            try { key = crypto.createPrivateKey(process.env.WIN7_RELEASE_PRIVATE_KEY_PEM); }
+            catch { throw Error('WIN7_RELEASE_PRIVATE_KEY_PEM is not a usable RSA-2048 private key'); }
+          } else key = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+          if (key.asymmetricKeyType !== 'rsa' || key.asymmetricKeyDetails.modulusLength !== 2048) throw Error('Use an RSA-2048 release key');
+          fs.writeFileSync(path.join(directory, 'private.pem'), key.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx' });
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify the legacy HTTP contract on the modern build host
+        run: |
+          $configuration = Get-Content apps/mcp-rust/win7-toolchain.json -Raw | ConvertFrom-Json
+          cargo "+$($configuration.toolchain)" test --locked --manifest-path apps/mcp-rust/Cargo.toml --features win7-compat --test contract --test win7_compat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and package the Windows 7 baseline Rust MCP
+        run: |
+          node apps/mcp-rust/scripts/build-win7.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/mcp-rust/scripts/package-win7-runtime.cjs --binary apps/mcp-rust/target/x86_64-win7-windows-msvc/release/keepwork-mcp.exe --out win7-mcp-package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Download and build the sandboxed CEF 109 host
+        run: |
+          python apps/aichat-rust/scripts/fetch-cef-sdk.py --channel legacy --arch x64 --output win7-cef-sdk
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sdk = (Get-Content win7-cef-sdk/cef-root.txt -Raw).Trim()
+          cmake -S apps/aichat-rust/windows/cef-host -B win7-cef-build -A x64 "-DCEF_ROOT=$sdk" -DPROJECT_ARCH=x86_64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build win7-cef-build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir win7-cef-build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python apps/aichat-rust/scripts/prepare-win7-cef.py --payload win7-cef-build/payload/Release --cache win7-d3dcompiler-cache
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/lib/windows7-pe.cjs win7-cef-build/payload/Release --output win7-cef-static-pe.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/aichat-rust/scripts/cef-release.cjs package win7-cef-build/payload/Release win7-cef-release "$env:WIN7_SIGNING_KEY_DIR/private.pem"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the standalone launcher and installer with offline CEF bootstrap
+        run: |
+          node apps/aichat-rust/scripts/build-win7.cjs --mcp win7-mcp-package --out win7-build --key "$env:WIN7_SIGNING_KEY_DIR/private.pem" --cef win7-cef-release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item win7-cef-sdk/cef-sdk-lock.json win7-build/release/cef-sdk-lock.json
+          Copy-Item win7-cef-static-pe.json win7-build/release/cef-static-pe-report.json
+      - name: Validate package, CEF and native cross-language manifest contracts
+        run: |
+          $env:KEEPWORK_WIN7_POLICY_TEST_BIN = (Resolve-Path win7-build/bootstrap-build/Release/keepwork_win7_policy_test.exe).Path
+          $env:KEEPWORK_WIN7_SDK81_D3D_DLL = (Resolve-Path win7-cef-build/payload/Release/d3dcompiler_47.dll).Path
+          $sdk = (Get-Content win7-cef-sdk/cef-root.txt -Raw).Trim()
+          $env:KEEPWORK_WIN7_MODERN_D3D_DLL = Join-Path $sdk 'Release/d3dcompiler_47.dll'
+          $env:KEEPWORK_CEF_VERIFY_EXE = (Resolve-Path win7-build/bootstrap-build/Release/keepwork_native_verify.exe).Path
+          $env:KEEPWORK_CEF_TEST_PRIVATE_KEY = Join-Path $env:WIN7_SIGNING_KEY_DIR 'private.pem'
+          node --test scripts/win7-pe.test.cjs scripts/win7-runtime-contract.test.cjs scripts/win7-publication.test.cjs scripts/rust-local-release.test.cjs scripts/rust-validation-workflows.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/package-win7-runtime.test.cjs apps/aichat-rust/tests/win7-package.test.cjs apps/aichat-rust/tests/win7-cef.test.cjs apps/aichat-rust/tests/cef-sdk.test.cjs apps/aichat-rust/tests/cef-package.test.cjs apps/aichat-rust/tests/cef-installer.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run the owned native MCP smoke on this modern Windows runner
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/aichat-rust/scripts/win7-native-smoke.ps1 -RuntimeDirectory win7-build/release/installer-payload/resources/win7-mcp -OutputDirectory win7-build/release/native-mcp-modern-runner
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content win7-build/release/native-mcp-modern-runner/report.json -Raw | ConvertFrom-Json
+          if (-not $report.passed -or $report.nativeLegacyVerified -or $report.nativeWin7Verified) {
+            throw 'Modern-runner smoke cannot certify native Win7/Win8 acceptance'
+          }
+      - name: Record the artifact trust and verification scope
+        run: |
+          $record = @{
+            schemaVersion = 1
+            variant = 'win7-win8'
+            signing = $env:LEGACY_SIGNING_MODE
+            productionTrustRoot = ($env:LEGACY_SIGNING_MODE -eq 'production')
+            commit = $env:GITHUB_SHA
+            runId = $env:GITHUB_RUN_ID
+            buildHost = 'windows-latest'
+            nativeWin7Verified = $false
+            nativeWin8Verified = $false
+            nativeWin81Verified = $false
+            cefUiVerified = $false
+          }
+          $record | ConvertTo-Json -Depth 6 | Set-Content win7-build/release/build-scope.json -Encoding utf8
+          $notice = 'Built on modern Windows. Win7 SP1, Win8 and Win8.1 x64 need separate native VM acceptance. No CDN publication was performed.'
+          if ($env:LEGACY_SIGNING_MODE -eq 'preview') {
+            $notice = 'PREVIEW ONLY: ephemeral signing key. Never promote these manifests to production. ' + $notice
+          }
+          Set-Content win7-build/release/BUILD-SCOPE.txt $notice -Encoding utf8
+      - name: Remove the signing private key
+        if: always()
+        run: |
+          if ($env:WIN7_SIGNING_KEY_DIR -and (Test-Path -LiteralPath $env:WIN7_SIGNING_KEY_DIR)) {
+            Remove-Item -LiteralPath $env:WIN7_SIGNING_KEY_DIR -Recurse -Force
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aichat-rust-win7-win8-x64
+          path: win7-build/release/
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 0

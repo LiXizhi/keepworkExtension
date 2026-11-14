@@ -1,5 +1,8 @@
 #include "native.hpp"
 #include "common/archive.hpp"
+#ifdef KEEPWORK_WIN7_EDITION
+#include "win7_native.hpp"
+#endif
 #include <commctrl.h>
 #include <shellapi.h>
 #include <nlohmann/json.hpp>
@@ -36,7 +39,11 @@ void atomic_write(const fs::path& file, const std::string& value) {
   if (!MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     throw std::runtime_error("Cannot activate downloaded CEF package");
 }
-struct Options { bool force_cef = false, update = false, background = false; };
+struct Options { bool force_cef = false, update = false, background = false;
+#ifdef KEEPWORK_WIN7_EDITION
+  bool update_mcp = false, update_client = false;
+#endif
+};
 Options options() {
   int count = 0; auto args = CommandLineToArgvW(GetCommandLineW(), &count);
   if (!args) throw std::runtime_error("Cannot read launch arguments");
@@ -47,6 +54,10 @@ Options options() {
     if (arg == L"--cef") result.force_cef = true;
     else if (arg == L"--update-cef") { result.force_cef = true; result.update = true; }
     else if (arg == L"--background") result.background = true;
+#ifdef KEEPWORK_WIN7_EDITION
+    else if (arg == L"--update-mcp") result.update_mcp = true;
+    else if (arg == L"--update-client") result.update_client = true;
+#endif
     else throw std::runtime_error("Unknown launcher option. Supported: --cef, --update-cef, --background");
   }
   return result;
@@ -60,6 +71,15 @@ void run(const Options& opts, const Progress& progress) {
   Handle lock(CreateFileW((cache / L"launcher.lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
   if (lock.value == INVALID_HANDLE_VALUE) throw std::runtime_error("Another Keepwork launcher is running; retry when it finishes");
   auto channel = select_channel(os, false);
+#ifdef KEEPWORK_WIN7_EDITION
+  if (opts.update_client) { update_win7_client(progress); return; }
+  // This edition only accepts packages whose minimum is Win7 SP1. It also
+  // runs on newer Windows for validation without selecting modern CEF/Tauri.
+  channel = "legacy";
+  os = {6, 1, 7601};
+  try { start_win7_mcp(opts.update_mcp, progress); }
+  catch (const std::exception& error) { win7_startup_warning(error.what()); }
+#endif
   if (channel == "modern" && !opts.force_cef && probe_webview(cache / L"webview-probe", progress)) {
     progress(L"正在打开 Keepwork…", 0, 0);
     if (launch_desktop(executable_dir() / L"aichat-rust.exe", opts.background, progress)) return;
@@ -88,7 +108,15 @@ void run(const Options& opts, const Progress& progress) {
       start(m, root / L"versions" / m.sha256); return;
     }
   }
-  auto envelope = fetch_manifest(std::string(cdn_base) + channel + "/windows-" + architecture() + "/stable.json", progress);
+  std::string envelope;
+#ifdef KEEPWORK_WIN7_EDITION
+  const auto bundled_archive = executable_dir() / L"resources" / L"cef-bundled.zip";
+  const auto bundled_manifest = executable_dir() / L"resources" / L"cef-bundled.signed.json";
+  const bool bundled = !opts.update && fs::exists(bundled_archive) && fs::exists(bundled_manifest);
+  if (bundled) envelope = read_file(bundled_manifest);
+  else
+#endif
+    envelope = fetch_manifest(std::string(cdn_base) + channel + "/windows-" + architecture() + "/stable.json", progress);
   auto manifest = validate_manifest(verify_envelope(envelope), channel, architecture(), os);
   auto directory = root / L"versions" / manifest.sha256;
   auto archive = root / (manifest.sha256 + ".zip.part");
@@ -101,7 +129,14 @@ void run(const Options& opts, const Progress& progress) {
       if (!valid) throw std::runtime_error("Cached CEF files are damaged; close Keepwork and remove the damaged version before retrying");
     }
     if (!valid) {
-      download(std::string(cdn_base) + "objects/" + manifest.sha256 + ".zip", archive, manifest.size, progress);
+#ifdef KEEPWORK_WIN7_EDITION
+      if (bundled) {
+        plain_path(bundled_archive);
+        if (fs::file_size(bundled_archive) != manifest.size) throw std::runtime_error("Bundled CEF size differs from its signed manifest");
+        fs::copy_file(bundled_archive, archive, fs::copy_options::overwrite_existing);
+      } else
+#endif
+        download(std::string(cdn_base) + "objects/" + manifest.sha256 + ".zip", archive, manifest.size, progress);
       if (sha256_file(archive) != manifest.sha256) throw std::runtime_error("CEF download SHA-256 mismatch");
       plain_path(staging);
       if (fs::exists(staging)) throw std::runtime_error("An interrupted CEF staging directory exists; close Keepwork and remove it before retrying");

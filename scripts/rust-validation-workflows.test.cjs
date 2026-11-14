@@ -11,8 +11,19 @@ const jobBody = (source, job) => {
   const start = source.search(new RegExp(`^  ${job}:$`, 'm'));
   assert.ok(start >= 0, `workflow must define the ${job} job`);
   const remainder = source.slice(start);
-  const next = remainder.slice(1).search(/^  [a-z][a-z-]*:$/m);
+  const next = remainder.slice(1).search(/^  [a-z][a-z0-9-]*:$/m);
   return next < 0 ? remainder : remainder.slice(0, next + 1);
+};
+const jobSelected = (source, job, context) => {
+  const expression = jobBody(source, job).match(/^    if: (.+)$/m)?.[1];
+  assert.ok(expression, `the ${job} job must have an explicit event/edition gate`);
+  // Evaluate the workflow's actual gate for the contexts below. Restrict this
+  // tiny expression subset before execution instead of depending on line order.
+  const operators = expression.replace(/'[^']*'/g, '')
+    .replace(/github\.(?:event_name|ref)|inputs\.edition|startsWith/g, '');
+  assert.match(operators, /^[\s(),!&|=]*$/, 'unsupported workflow gate expression');
+  const evaluate = new Function('github', 'inputs', 'startsWith', `return Boolean(${expression});`);
+  return evaluate(context.github, context.inputs, (value, prefix) => String(value).startsWith(prefix));
 };
 
 test('PRs validate both Rust products without entering installer or publication jobs', () => {
@@ -35,7 +46,7 @@ test('PRs validate both Rust products without entering installer or publication 
   }
   // Tagged builds only prepare downloadable assets; the local publisher owns CDN writes.
   const prepare = jobBody(desktop, 'prepare-release');
-  assert.match(prepare, /^    if: startsWith\(github\.ref, 'refs\/tags\/v'\) \|\| /m);
+  assert.match(prepare, /^    if: .*startsWith\(github\.ref, 'refs\/tags\/v'\)/m);
   assert.match(prepare, /needs: \[build, build-macos\]/);
   assert.match(prepare, /actions\/upload-artifact@v4/);
   assert.match(prepare, /name: aichat-rust-release-packages/);
@@ -59,8 +70,40 @@ test('release and PR builds share real host Windows tests instead of inheriting 
   assert.match(validation, /npm ci --prefix apps\/mcp-runtime/);
   assert.doesNotMatch(validation, /secrets\.|gh release|contents: write/);
   const release = workflow('aichat-rust-windows-release.yml');
-  assert.match(release, /validate:\n    uses: \.\/\.github\/workflows\/rust-desktop-validation\.yml/);
+  assert.match(jobBody(release, 'validate'), /uses: \.\/\.github\/workflows\/rust-desktop-validation\.yml/);
   for (const job of ['build', 'build-macos']) assert.match(release, new RegExp('  ' + job + ':\\n    needs: validate'));
+});
+
+test('edition and event gates keep legacy, modern, and PR build scopes separate even on modern tags', () => {
+  const source = workflow('aichat-rust-windows-release.yml');
+  const jobs = ['validate', 'build-win7-win8', 'build', 'build-macos', 'prepare-release'];
+  const scenarios = [
+    ['ordinary modern branch dispatch', 'workflow_dispatch', 'modern', 'refs/heads/main', ['validate', 'build', 'build-macos']],
+    ['older caller without an edition', 'workflow_dispatch', '', 'refs/heads/main', ['validate', 'build', 'build-macos']],
+    ['modern tagged dispatch', 'workflow_dispatch', 'modern', 'refs/tags/v0.2.126', ['validate', 'build', 'build-macos', 'prepare-release']],
+    ['historical modern tag dispatch', 'workflow_dispatch', 'modern', 'refs/tags/aichat-rust-v0.2.126', ['validate', 'build', 'build-macos', 'prepare-release']],
+    ['legacy branch dispatch', 'workflow_dispatch', 'win7-win8', 'refs/heads/main', ['build-win7-win8']],
+    ['legacy dispatch from a modern release tag', 'workflow_dispatch', 'win7-win8', 'refs/tags/v0.2.126', ['build-win7-win8']],
+    ['ordinary pull request', 'pull_request', '', 'refs/pull/1/merge', ['validate']],
+    ['pull request cannot select legacy secrets', 'pull_request', 'win7-win8', 'refs/pull/1/merge', ['validate']],
+  ];
+  for (const [label, event, edition, ref, expected] of scenarios) {
+    const context = { github: { event_name: event, ref }, inputs: { edition } };
+    assert.deepEqual(jobs.filter(job => jobSelected(source, job, context)), expected, label);
+  }
+});
+
+test('the legacy workflow has only a reusable trigger and is selected through the single desktop entry', () => {
+  const source = workflow('aichat-rust-windows-release.yml');
+  const choices = source.slice(0, source.indexOf('  pull_request:'));
+  assert.match(choices, /edition:[\s\S]*?default: modern[\s\S]*?- modern\n\s+- win7-win8/);
+  assert.match(jobBody(source, 'build-win7-win8'), /uses: \.\/\.github\/workflows\/aichat-rust-win7\.yml/);
+  const reusable = workflow('aichat-rust-win7.yml');
+  const triggers = reusable.slice(0, reusable.indexOf('permissions:'));
+  assert.match(triggers, /^  workflow_call:/m);
+  assert.doesNotMatch(triggers, /^  (?:workflow_dispatch|push|pull_request):/m);
+  assert.match(reusable, /contents: read/);
+  assert.doesNotMatch(reusable, /contents: write|gh release|--publish true|KP_QINIU/);
 });
 
 test('wire contract CI builds and requires Node reference and retains failed command receipts', () => {
@@ -129,12 +172,17 @@ if (!process.env.KEEPWORK_WORKFLOW_EOL_FIXTURE) {
       `);
       for (const eol of ['LF', 'CRLF']) {
         await t.test(eol, () => {
-          const result = spawnSync(process.execPath, ['--require', preload, '--test', __filename], {
+          const environment = { ...process.env, KEEPWORK_WORKFLOW_EOL_FIXTURE: eol };
+          // A test worker exports this flag; inheriting it makes a nested
+          // `node --test` exit successfully without executing its test file.
+          delete environment.NODE_TEST_CONTEXT;
+          const result = spawnSync(process.execPath, ['--require', preload, '--test', '--test-reporter=tap', __filename], {
             encoding: 'utf8', timeout: 30000,
-            env: { ...process.env, KEEPWORK_WORKFLOW_EOL_FIXTURE: eol },
+            env: environment,
           });
           assert.ifError(result.error);
           assert.equal(result.status, 0, result.stdout + result.stderr);
+          assert.match(result.stdout, /^# tests [1-9]\d*$/m, 'the nested checkout must actually execute the contract suite');
         });
       }
     } finally {

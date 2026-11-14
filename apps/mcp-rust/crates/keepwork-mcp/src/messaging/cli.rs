@@ -33,7 +33,7 @@ pub(crate) fn is_directory(dir: &Path) -> bool {
 }
 
 pub(crate) fn version_prefixes() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = crate::config::os_home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let roots: [(PathBuf, &str); 3] = [
         (home.join(".nvm/versions/node"), ""),
         (home.join(".local/share/fnm/node-versions"), "installation"),
@@ -56,7 +56,7 @@ pub(crate) fn version_prefixes() -> Vec<PathBuf> {
 }
 
 pub(crate) fn cli_search_dirs() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = crate::config::os_home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let mut dirs = vec![
         home.join(".local/bin"),
         home.join(".npm-global/bin"),
@@ -148,7 +148,7 @@ pub(crate) fn shell_child_path() -> String {
 }
 
 pub(crate) fn global_module_dirs() -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = crate::config::os_home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let mut dirs = vec![
         home.join(".npm-global/lib"),
         PathBuf::from("/usr/local/lib"),

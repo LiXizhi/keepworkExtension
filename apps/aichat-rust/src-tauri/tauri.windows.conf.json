@@ -9,6 +9,7 @@
     "targets": ["nsis"],
     "windows": {
       "nsis": {
+        "template": "windows/installer.nsi",
         "installerHooks": "windows/installer-hooks.nsh",
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"],

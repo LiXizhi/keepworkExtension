@@ -98,37 +98,44 @@ try {
   Copy-Item -LiteralPath $application -Destination $helper
   $data = Join-Path $install 'user-data-marker.txt'
   Set-Content -LiteralPath $data -Value 'must survive update' -NoNewline
-  # Two owned node processes have the same image basename. Only the target
-  # install is allowed to block updating; the other installation stays alive.
+  # Owned node processes use the installed image basenames. Stop only this
+  # installation; the same name in another installation must stay alive.
   Copy-Item -LiteralPath (Get-Command node).Source -Destination $application -Force
   $externalExe = Join-Path $external $apps[0].Name
   Copy-Item -LiteralPath (Get-Command node).Source -Destination $externalExe
   $other = Start-Owned $externalExe '-e "setTimeout(() => {}, 300000)"'
-  # A reopened historical executable must block before MCP cleanup or writes.
+  # A manual update must stop both desktop names, then the bundled MCP.
   $alternateName = if ($apps[0].Name -ieq 'Keepwork.exe') { 'aichat-rust.exe' } else { 'Keepwork.exe' }
   $alternateExe = Join-Path $install $alternateName
   Copy-Item -LiteralPath (Get-Command node).Source -Destination $alternateExe
+  $manualDesktop = Start-Owned $application '-e "setTimeout(() => {}, 120000)"'
   $reopened = Start-Owned $alternateExe '-e "setTimeout(() => {}, 120000)"'
   $fixtureMcpExe = Join-Path $install 'resources\mcp-runtime\keepworkmcp.exe'
   if (Test-Path -LiteralPath $fixtureMcpExe) { throw 'Fixture MCP path unexpectedly exists in the package' }
   Copy-Item -LiteralPath (Get-Command node).Source -Destination $fixtureMcpExe
   $fixtureMcp = Start-Owned $fixtureMcpExe '-e "setTimeout(() => {}, 120000)"'
-  $beforeRejectedUpdate = (Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash
-  Wait-Code (Start-Owned $Installer "/S /UPDATE /D=$install") 2
-  if ($reopened.HasExited -or $fixtureMcp.HasExited -or $other.HasExited) {
-    throw 'A rejected update stopped the reopened desktop or a service'
+  Wait-Code (Start-Owned $Installer "/S /UPDATE /D=$install") 0
+  foreach ($stopped in @($manualDesktop, $reopened, $fixtureMcp)) {
+    if (-not $stopped.WaitForExit(10000)) { throw 'Manual update left an installed desktop or MCP running' }
   }
-  if ((Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash -ne $beforeRejectedUpdate) {
-    throw 'A rejected update changed application bytes'
+  if ($other.HasExited) { throw 'Manual update stopped another installation' }
+  if ((Get-FileHash -LiteralPath $application -Algorithm SHA256).Hash -ne $expectedHash) {
+    throw 'Manual update did not replace application bytes after stopping it'
   }
-  $reopened.Kill(); $reopened.WaitForExit()
-  $fixtureMcp.Kill(); $fixtureMcp.WaitForExit()
   Remove-Item -LiteralPath $alternateExe, $fixtureMcpExe -Force
+  Copy-Item -LiteralPath (Get-Command node).Source -Destination $application -Force
   $parent = Start-Owned $application '-e "setTimeout(() => {}, 15000)"'
   $stamp = $parent.StartTime.ToUniversalTime().ToFileTimeUtc()
   Wait-Code (Start-Owned $helper "--wait-for-desktop $($parent.Id):$($stamp + 1) `"$application`"") 2
   if ($parent.HasExited -or $other.HasExited) { throw 'Identity rejection terminated a process' }
-  Wait-Code (Start-Owned $helper "--check-desktop-stopped `"$application`"") 2
+  $errorFile = Join-Path $root 'installer-中文错误.txt'
+  Wait-Code (Start-Owned $helper "--check-desktop-stopped `"$application`" --error-file `"$errorFile`"") 2
+  $errorBytes = [IO.File]::ReadAllBytes($errorFile)
+  if ($errorBytes.Length -lt 4 -or $errorBytes[0] -ne 0xff -or $errorBytes[1] -ne 0xfe) {
+    throw 'Packaged helper did not write its failure reason as UTF-16LE with BOM'
+  }
+  $chineseReason = [Text.Encoding]::Unicode.GetString($errorBytes, 2, $errorBytes.Length - 2)
+  if ($chineseReason -notmatch '[\u4e00-\u9fff]') { throw 'Packaged helper failure reason was not Chinese' }
   if ($parent.HasExited) { throw 'Busy check terminated the target app' }
   $watch = [Diagnostics.Stopwatch]::StartNew()
   $updater = Start-Owned $Installer "/S /UPDATE /KEEPWORK_PARENT=$($parent.Id):$stamp /KEEPWORK_EXE=$($apps[0].Name) /D=$install"
@@ -186,10 +193,21 @@ try {
     $uninstall = Join-Path $install 'uninstall.exe'
     $protocolCommand = Assert-ProtocolCommand $apps[0].Name
   }
+  # Uninstall must use the same active-process cleanup, including the old name.
+  Copy-Item -LiteralPath (Get-Command node).Source -Destination $application -Force
+  Copy-Item -LiteralPath (Get-Command node).Source -Destination $alternateExe
+  Copy-Item -LiteralPath (Get-Command node).Source -Destination $fixtureMcpExe
+  $uninstallDesktop = Start-Owned $application '-e "setTimeout(() => {}, 120000)"'
+  $uninstallLegacyDesktop = Start-Owned $alternateExe '-e "setTimeout(() => {}, 120000)"'
+  $uninstallMcp = Start-Owned $fixtureMcpExe '-e "setTimeout(() => {}, 120000)"'
   Wait-Code (Start-Owned $uninstall "/S _?=$install") 0
+  foreach ($stopped in @($uninstallDesktop, $uninstallLegacyDesktop, $uninstallMcp)) {
+    if (-not $stopped.WaitForExit(10000)) { throw 'Uninstall left an installed desktop or MCP running' }
+  }
+  if ($other.HasExited) { throw 'Active-app uninstall stopped another installation' }
   $uninstalled = $true
   if (Test-Path -LiteralPath $protocolKey) { throw 'Uninstall retained its own URL protocol registration' }
-  Write-Output (@{ result='passed'; cases=@('silent-custom-install', 'quoted-protocol-command', 'both-native-names-block-before-mcp-cleanup', 'parent-identity-rejection', 'no-force-desktop-check', 'parent-exit-before-replacement', 'silent-overwrite', 'custom-directory-preserved', 'user-data-preserved', 'external-install-untouched', 'manual-repair-clears-failure-receipt', 'real-nsis-relaunch', 'isolated-relaunch-profile', 'foreign-protocol-owner-preserved', 'own-protocol-registration-removed'); elapsedMs=$watch.ElapsedMilliseconds; relaunchTested=$true; applicationHealthTested=$false } | ConvertTo-Json -Compress)
+  Write-Output (@{ result='passed'; cases=@('silent-custom-install', 'quoted-protocol-command', 'manual-update-stops-both-native-names-and-mcp', 'parent-identity-rejection', 'no-force-desktop-check', 'parent-exit-before-replacement', 'silent-overwrite', 'custom-directory-preserved', 'user-data-preserved', 'external-install-untouched', 'manual-repair-clears-failure-receipt', 'real-nsis-relaunch', 'isolated-relaunch-profile', 'foreign-protocol-owner-preserved', 'uninstall-stops-both-native-names-and-mcp', 'own-protocol-registration-removed'); elapsedMs=$watch.ElapsedMilliseconds; relaunchTested=$true; applicationHealthTested=$false } | ConvertTo-Json -Compress)
 } finally {
   # Kill only processes created and retained by this fixture, never by name/PID lookup.
   foreach ($process in $owned) { if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() } }

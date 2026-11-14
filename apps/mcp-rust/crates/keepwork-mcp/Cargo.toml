@@ -1,6 +1,6 @@
 [package]
 name = "keepwork-mcp"
-version = "0.2.60"
+version = "0.2.61"
 description = "Keepwork local MCP daemon (Rust)"
 edition.workspace = true
 license.workspace = true
@@ -14,17 +14,20 @@ path = "src/main.rs"
 name = "keepwork_mcp"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Also allows the legacy capability contract to be tested on current systems.
+win7-compat = []
+
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
-dirs = "6"
 encoding_rs = "0.8"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gethostname = "0.5"
 percent-encoding = "2"
-portable-pty = "0.8"
 rand = "0.9"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "gzip", "brotli", "deflate"] }
@@ -43,3 +46,7 @@ tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]
 sha2 = "0.10"
+
+[target.'cfg(not(target_vendor = "win7"))'.dependencies]
+dirs = "6"
+portable-pty = "0.8"

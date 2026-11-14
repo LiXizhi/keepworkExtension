@@ -9,8 +9,10 @@ const PROXY = 'http://127.0.0.1:7890';
 const ARTIFACTS = {
   desktop: ['aichat-rust-release-packages'],
   mcp: ['mcp-rust-validation-windows-x64', 'mcp-rust-validation-windows-arm64', 'mcp-rust-validation-macos-universal'],
+  'win7-win8': ['aichat-rust-win7-win8-x64'],
 };
-const WORKFLOWS = { desktop: '.github/workflows/aichat-rust-windows-release.yml', mcp: '.github/workflows/mcp-rust.yml' };
+const WORKFLOWS = { desktop: '.github/workflows/aichat-rust-windows-release.yml', mcp: '.github/workflows/mcp-rust.yml',
+  'win7-win8': '.github/workflows/aichat-rust-windows-release.yml' };
 const RECEIPT = 'download-receipt.json';
 
 function directEnvironment(env = process.env) {
@@ -55,7 +57,7 @@ function inventory(root, relative = '') {
 }
 
 function validateIdentity({ product, commit, repository }) {
-  if (!Object.hasOwn(ARTIFACTS, product)) throw Error('Use --product desktop or mcp');
+  if (!Object.hasOwn(ARTIFACTS, product)) throw Error('Use --product desktop, mcp or win7-win8');
   if (!/^[a-f0-9]{40}$/.test(commit || '')) throw Error('Require a full source commit SHA');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || '')) throw Error('Invalid GitHub repository');
 }
