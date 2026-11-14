@@ -1094,8 +1094,10 @@ impl AgentManager {
                 .clone();
             let _guard = gate.lock().await;
             let harness = self.load(session_id, owner, &request_id).await?;
-            if harness.protocol() == Protocol::Trae {
-                if !images.is_empty() || selected_mode != "craft" || requested_effort.is_some() { return Err("UNSUPPORTED_FEATURE: Trae Agent supports text-only Craft tasks with no reasoning effort selection.".into()); }
+            if harness.protocol() == Protocol::Trae
+                && (!images.is_empty() || selected_mode != "craft" || requested_effort.is_some())
+            {
+                return Err("UNSUPPORTED_FEATURE: Trae Agent supports text-only Craft tasks with no reasoning effort selection.".into());
             }
             if harness.protocol() == Protocol::Antigravity && !images.is_empty() {
                 return Err("UNSUPPORTED_FEATURE: Antigravity supports text input only. Remove the images or switch agents.".into());

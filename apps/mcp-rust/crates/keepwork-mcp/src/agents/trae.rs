@@ -208,12 +208,14 @@ impl Trae {
         }
         let run_id = uuid::Uuid::new_v4().to_string();
         let directory = std::env::temp_dir().join(format!("keepwork-trae-{run_id}"));
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
             builder.mode(0o700);
-        }
+            builder
+        };
         builder
             .create(&directory)
             .map_err(|_| rejected("Trae Agent temporary workspace unavailable"))?;
