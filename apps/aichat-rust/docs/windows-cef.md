@@ -4,7 +4,7 @@ Windows 兼容启动方案用于处理 WebView2 不可用的机器，包括 Wind
 
 这是一条单独的兼容构建路径。现有 Windows Tauri 安装包及 macOS / Linux 路径继续使用原来的 WebView。历史通用兼容安装包不内置 CEF；首次进入该 CEF 路径需要联网下载完整宿主包，之后使用经过验证的本地缓存。独立 Win7/Win8 专版默认构建内置已签名 CEF109 归档的完整包，也保留按需下载的薄包，区别见下节。
 
-**验证状态：兼容预览，尚未完成 Win7/Win8/Win8.1 虚拟机或实机验收。** `0.2.44` 引入的是通用 CEF 预览；本轮增加独立 Win7/Win8 专版的实现和打包路径。源码/fixture 检查、现代 Windows 上的编译、每个旧系统上的实际运行和 CDN 发布必须分别记录，不能相互替代。本文中的构建入口和地址均不表示已构建、已上传或已在线可用；本轮开发不执行推送或发布。
+**验证状态：兼容预览，尚未完成 Win7/Win8/Win8.1 虚拟机或实机验收。** `0.2.44` 引入的是通用 CEF 预览；后续增加独立 Win7/Win8 专版的实现和打包路径。源码/fixture 检查、现代 Windows 上的编译、每个旧系统上的实际运行和 CDN 发布必须分别记录，不能相互替代。用户已于 2026-11-14 授权跳过三系统实测直接发布 CDN；每次发布记录绑定产物的豁免，保持 `nativeLegacyVerified: false`。地址是否在线以当次发布回执为准，具体流程见 rust-release Skill。
 
 ## Win7/Win8 x64 专版契约
 
@@ -15,7 +15,7 @@ Windows 兼容启动方案用于处理 WebView2 不可用的机器，包括 Wind
 | 完整包，预览工作流默认 | `build-win7.cjs` / `package-win7.cjs` 传 `--cef <已签名 CEF release-dir>`，内置匹配信任根的 CEF109 归档，安装体积较大 | 无已验证 active 缓存时先校验并解包内置归档，不要求 CEF CDN 已发布 |
 | 薄包，可选 | 不传 `--cef`，仅安装 Launcher 和兼容版 MCP | 无可用缓存时从 legacy 签名 feed 下载完整宿主包，需要网络和可用 CDN |
 
-两种形式均对 CEF 清单验签并检查归档大小、SHA-256 和路径安全；已有已验证缓存继续按缓存策略使用，`--update-cef` 仍从独立签名 feed 检查更新。内置 CEF 不表示允许混用任意 DLL，也不代表云聊天可离线使用。预览可在没有已发布 CDN 的条件下验证内核启动，但安装、CEF 渲染与真实账号登录仍须逐系统实测。
+两种形式均对 CEF 清单验签并检查归档大小、SHA-256 和路径安全；已有已验证缓存继续按缓存策略使用，`--update-cef` 仍从独立签名 feed 检查更新。内置 CEF 不表示允许混用任意 DLL，也不代表云聊天可离线使用。预览可在没有已发布 CDN 的条件下验证内核启动；安装、CEF 渲染与真实账号登录仍未经过逐系统实测，按 Skill 授权发布不代表这些能力已验证通过。
 
 启动器尝试启动或附着本机 Rust MCP；MCP 缺失、启动失败或端口已被其他进程占用，均不能阻止云聊天窗口打开。CEF 不注入 `window.aichatDesktop`。网页通过现有 loopback HTTP/MCP 协议发现本地服务，依能力使用基础文件、目录、搜索、`grep_files` 和 `run_terminal`；兼容宿主不代替网页的用户确认，也不放宽路径、Origin 或认证检查。
 
@@ -39,7 +39,7 @@ MCP 继续只监听 `127.0.0.1:8089`，遵守单 daemon 和进程归属保护。
 
 客户端更新验签并下载安装器，由用户完成升级，不宣称安装器具备原子回滚。CEF 更新失败保留已验证缓存，不自动切回并重新启动旧内核；三条更新均不提供定时热更新。关闭 CEF 窗口不结束已有 daemon。
 
-专版构建和打包使用独立入口：`apps/mcp-rust/scripts/build-win7.cjs`、`package-win7-runtime.cjs`，以及 `apps/aichat-rust/scripts/build-win7.cjs`、`package-win7.cjs`。技术路径中的 `win7` 和 Rust 目标 `x86_64-win7-windows-msvc` 表示最低系统兼容目标，对外产品标识统一为 `win7-win8`，不是单系统发行承诺。详细操作按 [rust-release 的 Win7/Win8 参考流程](../../../.github/skills/rust-release/references/windows7.md) 执行；默认 `all` 包含专版，`modern` 和 `mcp-server` 明确排除专版。远端构建沿用唯一桌面主工作流 `aichat-rust-windows-release.yml`：默认 `edition=all` 同时构建现代版与专版，仅专版时选择 `edition=win7-win8`。正式发布另须显式选择 `legacy-signing=production` 并通过三个旧系统的验收，不能以预览签名或现代 MCP 的 deferred 模式替代。`aichat-rust-win7.yml` 仅作为主工作流调用的可复用实现，不能用现代 Windows runner 通过替代各目标系统实测。
+专版构建和打包使用独立入口：`apps/mcp-rust/scripts/build-win7.cjs`、`package-win7-runtime.cjs`，以及 `apps/aichat-rust/scripts/build-win7.cjs`、`package-win7.cjs`。技术路径中的 `win7` 和 Rust 目标 `x86_64-win7-windows-msvc` 表示最低系统兼容目标，对外产品标识统一为 `win7-win8`，不是单系统发行承诺。详细操作按 [rust-release 的 Win7/Win8 参考流程](../../../.github/skills/rust-release/references/windows7.md) 执行；默认 `all` 包含专版，`modern` 和 `mcp-server` 明确排除专版。远端构建沿用唯一桌面主工作流 `aichat-rust-windows-release.yml`：默认 `edition=all` 同时构建现代版与专版，仅专版时选择 `edition=win7-win8`。正式发布须显式选择 `legacy-signing=production`，并提供真实三系统验收或用户授权的当次 `--native-acceptance-waiver`；不能以预览签名或现代 MCP 的 deferred 模式替代。`aichat-rust-win7.yml` 仅作为主工作流调用的可复用实现，不能用现代 Windows runner 通过替代各目标系统实测。
 
 验收报告的 `nativeLegacyVerified` 仅表示当前记录中的真实旧系统已通过对应测试，必须同时保留 OS 版本和测试范围。Win7 SP1（6.1.7601）、Win8（6.2.9200）、Win8.1（6.3.9600）的 native MCP 和完整安装/CEF/更新结果分别记录；任一系统的一次通过不能代表另外两个系统已验证。
 
@@ -84,7 +84,7 @@ Windows 7 使用 **CEF 109**，它是最后兼容该系统的官方分支，已�
 
 Win7/Win8 构建还必须锁定旧系统可用的 `D3DCompiler_47.dll`：本轮实际 CEF109 SDK 所附 DLL 来自更新的系统版本，不能只因 CEF 主版本为 109 就接受所有附带依赖。legacy payload 通过 `prepare-win7-cef.py` 从微软官方 Windows 8.1 SDK redist 准备匹配 DLL，校验固定 CAB 与 DLL 的 SHA-256 后替换，来源与摘要锁随构建证据保留。DirectX 官方作者的[平台支持与 app-local 分发说明](https://walbourn.github.io/hlsl-fxc-and-d3dcompile/)说明该 SDK 的编译器 DLL 支持 Win7/Win8.x，并可随 Win32 桌面程序在应用目录分发；不从构建机系统目录或任意 DLL 下载站取替代文件。
 
-该精确微软 redist 的原始 PE `OSVersion` 为 6.3、subsystem 版本为 6.0。静态审计只对来源锁中固定 SHA-256 对应的这个文件允许该 `OSVersion` 元数据例外，不修改 DLL 的 PE 头，也不按文件名、所有微软 DLL 或所有 legacy 依赖泛化放宽。架构、原有 subsystem 阈值、导入 API、清单签名和归档校验继续执行。此例外依据特定厂商兼容声明及可重复来源，不表示 CEF/GPU 已在三个旧系统运行通过；Win7 SP1、Win8、Win8.1 的真实 VM 验收门禁保持不变。
+该精确微软 redist 的原始 PE `OSVersion` 为 6.3、subsystem 版本为 6.0。静态审计只对来源锁中固定 SHA-256 对应的这个文件允许该 `OSVersion` 元数据例外，不修改 DLL 的 PE 头，也不按文件名、所有微软 DLL 或所有 legacy 依赖泛化放宽。架构、原有 subsystem 阈值、导入 API、清单签名和归档校验继续执行。此例外依据特定厂商兼容声明及可重复来源，不表示 CEF/GPU 已在三个旧系统运行通过；三系统的未实测状态必须保留，发布实测豁免按 rust-release Skill 记录。
 
 外层启动器必须自身兼容 Windows 7。当前应用使用的 Tauri 2.12 已停止官方 Windows 7 支持，单纯在它的 `main` 中增加 OS 判断不能消除 Windows 加载器的失败。详见 [Tauri 2.12 公告](https://v2.tauri.app/blog/tauri-2.12/)。仓库原有 Electron 下载启动器使用 Go 1.25，也不能直接作为 Windows 7 入口；[Go 1.21 起要求 Windows 10](https://go.dev/doc/go1.21)。
 
@@ -100,7 +100,7 @@ Win7/Win8 正式发行使用仓库固定的 [`keys/win7-release-public.pem`](../
 
 包先下载并解压到暂存目录。解包必须限制条目数量和总大小，拒绝绝对路径、路径穿越以及可写出暂存目录的成员。宿主完成本地空白页渲染并发出原生就绪信号后，才将候选缓存置为当前版本；中断下载、校验失败、解包失败或启动失败不能覆盖已验证的可用缓存。
 
-新的 CEF CDN 命名空间需要单独发布，不应覆盖现有桌面更新和 MCP feed。仓库代码或测试 fixture 中存在 URL 并不代表该 URL 已有可下载产物。**本次未执行任何 CDN 上传或对外发布。** 首次发布必须先构建实际 Windows 包、完成验收、配置匹配的签名公钥，再发布清单与包。
+新的 CEF CDN 命名空间需要单独发布，不应覆盖现有桌面更新和 MCP feed。仓库代码或测试 fixture 中存在 URL 并不代表该 URL 已有可下载产物。首次发布必须先构建实际 Windows 包、配置匹配的签名公钥，并完成验收或记录用户授权的实测豁免，再发布清单与包。
 
 启动器约定的 CDN 根路径是 `https://cdn.keepwork.com/keepwork/aichat-cef/v1/`：
 
@@ -218,9 +218,9 @@ node scripts/build-windows-compat.cjs --payload C:/build/modern-desktop-payload 
 
 该工作流每次生成独立临时 RSA 密钥，私钥不上传 artifact 并在任务结束时删除；它不是正式发布的信任根。预览安装包与包清单只适合隔离验证，不能直接替换正式通道，工作流也不写 CDN。它不是 Win7/Win8 专版工作流；即使构建通过，也不能替代 Win7/Win8/Win8.1 虚拟机中的安装、渲染、登录和下载验证。
 
-## 必须执行的 Windows 验收
+## Windows 实测清单
 
-源码检查、跨平台单元测试和 Windows 编译均不能替代 Windows 7 实机或虚拟机验收。发布前至少记录以下场景的系统版本、架构、CEF 版本、启动结果与日志：
+源码检查、跨平台单元测试和 Windows 编译均不能替代 Windows 7 实机或虚拟机验收。用户要求完整验收时，至少记录以下场景的系统版本、架构、CEF 版本、启动结果与日志；按 Skill 授权跳过实测发布时，保留这些场景未验证的结论：
 
 1. Windows 10 / 11 已安装 WebView2：仍启动现有桌面客户端，文件、终端、宠物及 MCP 行为不受影响。
 2. Windows 10 / 11 无 WebView2：下载现代 CEF 包，完成聊天页加载和登录；普通断网不引发错误的内核切换。

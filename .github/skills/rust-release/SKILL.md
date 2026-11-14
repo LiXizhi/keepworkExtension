@@ -1,12 +1,23 @@
 ---
 name: rust-release
 description: 打包或发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；默认包含现代版和 Win7/Win8 专版，也支持仅现代版、仅 MCP 或仅兼容版。用于版本打包、发布与排查。
+metadata:
+  version: "1.1.0"
 ---
 
 # Rust 全平台发布
 
 用户说“按 rust-release 发新版本”或“打包新的版本”时，默认执行 `all`：完成现代桌面端、现代独立 MCP Rust 服务器和 Win7/Win8 专版三条发布链。
 默认范围包含 Win7/Win8 客户端、专用 MCP 与 CEF 的独立渠道，无需用户再单独点名兼容版。`all` 必须读取并执行 [Win7/Win8 流程](references/windows7.md)。
+一次默认 `all` 发布必须同时交付以下四个桌面安装包；它们共用桌面版本号，分别进入各自的 CDN 更新渠道：
+
+| 安装包 | 文件名 | 平台与架构 |
+| --- | --- | --- |
+| Win7/Win8 兼容版 EXE | `Keepwork_Win7_Win8_<version>_x64-setup.exe` | Win7 SP1、Win8、Win8.1 共用 x64 包 |
+| macOS Universal DMG | `Keepwork_<version>_universal.dmg` | Intel x86_64 + Apple Silicon arm64 |
+| 现代 Windows x64 EXE | `Keepwork_<version>_x64-setup.exe` | x86_64（64 位），不提供 32 位 x86 安装包 |
+| 现代 Windows ARM64 EXE | `Keepwork_<version>_arm64-setup.exe` | ARM64 |
+
 `all` 和 `modern` 模式中，除非用户明确限定“只发桌面”，不能省略 `Rust MCP daemon` 构建 Action 和现代独立 MCP CDN 发布。
 GitHub Actions 负责构建和保存 artifacts；**此设备经 `http://127.0.0.1:7890` 下载，再由此设备直连七牛上传**。
 不再调用远端上传七牛的 Action，也不在代理不可用时回退到 GitHub 上传。
@@ -28,7 +39,17 @@ Win7/Win8 专版保持独立产物、发布器和更新渠道；`modern` 与 `mc
 
 `all` 中的兼容版步骤和 `win7-win8` 模式覆盖 Windows 7 SP1 x64、Windows 8 x64、Windows 8.1 x64；能力边界、独立产物/更新地址、构建步骤及逐系统虚拟机验收见该参考文件。
 用户只授权实现、流程修改或本地打包时，不触发远端 workflow、推送、CDN 写入或公开 Release；
-缺少任一目标系统的实测回执时，分别报告该系统未验证，不以一台机器的通过覆盖全部系统。正式签名或三系统验收缺失时，保留产物与预检计划，报告 `all` 未完成，不跳过兼容版或将其改成现代 MCP 的 `deferred` 验收。
+缺少任一目标系统的实测回执时，分别报告该系统未验证，不以一台机器的通过覆盖全部系统。正式签名缺失时停止发布；三系统实测按下节授权规则处理，不跳过兼容版或将其改成现代 MCP 的 `deferred` 验收。
+
+### 旧系统实测的发布授权
+
+用户授权记录（2026-11-14）：“Win7 SP1、Win8、Win8.1 这三个不用测了，直接发CDN吧，把这个接入SKILL”。
+后续按本 Skill 发布时，默认允许这三个系统的运行、CEF/UI 和安装升级实测未完成，直接继续 CDN 发布，不再反复索要测试机或回执。
+为每次发布生成独立的 `--native-acceptance-waiver FILE`，绑定当次桌面/MCP 版本、完整提交和安装包摘要，引用该授权，具体结构见 [Win7/Win8 流程](references/windows7.md#用户授权跳过旧系统实测)。
+发布器不静默豁免：该参数与真实 `--acceptance FILE` 互斥，无任一参数时仍拒绝实际发布。
+签名、production 信任根、源码/构建身份、下载回执、摘要、PE 和渠道防降级检查全部保留。
+结果和 Release 明确写 `nativeAcceptance: "waived-by-user"`、`nativeLegacyVerified: false`，三个系统均未实测。
+用户当次要求完整实测时，使用真实三系统 `--acceptance`，不使用豁免。
 
 `mcp-server` 模式的执行顺序：
 
@@ -68,7 +89,7 @@ for t in windows-x64 windows-arm64 macos-arm64 macos-x64; do
 done
 ```
 
-`all` 还须核对 [Win7/Win8 流程](references/windows7.md) 列出的三个签名 feed、正式信任根与三系统验收材料；确认可完成专版发布后再开始 CDN 写入。首次发布的 feed 可以不存在，网络或验签失败不能当作首次发布。
+`all` 还须核对 [Win7/Win8 流程](references/windows7.md) 列出的三个签名 feed、正式信任根，以及三系统实测回执或上述用户授权的当次豁免记录；专版预检可发布后开始 CDN 写入。首次发布的 feed 可以不存在，网络或验签失败不能当作首次发布。
 
 按调用范围确定 `desktop_version`、`mcp_version` 和本次发布的完整提交 SHA。
 `mcp-server` 模式只需要 `mcp_version`，不要求提供桌面版本。受影响产品的版本文件必须同步：
@@ -159,7 +180,7 @@ node .github/skills/rust-release/scripts/publish-local.cjs \
 
 `all` 中 `build-win7-win8` 必须成功，`win7_win8_run_id` 与 `desktop_run_id` 为同一次运行，源提交相同；artifact 保持独立，不混入现代版汇总包。
 按 [Win7/Win8 流程](references/windows7.md#发布回滚与结果报告) 下载、预检并实际调用 `publish-win7.cjs --publish true`，发布专版客户端、专用 MCP、CEF 的归档和三个签名 feed。
-正式信任根、production 构建身份及 Win7 SP1/Win8/Win8.1 各自的验收证据继续必需；现代 MCP 的 `--acceptance deferred` 不适用于这一步。
+正式信任根和 production 构建身份继续必需；旧系统实测默认按上述授权生成当次豁免，或按用户当次要求提供真实三系统验收证据。现代 MCP 的 `--acceptance deferred` 不适用于这一步。
 混合构建任一 job 失败时，保留失败证据并修复；不降低下载器对整个 run 成功的要求，也不把现代版可用的产物冒充专版。
 
 ## 3. 必须执行 Rust MCP daemon
@@ -179,7 +200,7 @@ gh run view <mcp_run_id> --json headSha,conclusion,url
 或用户指定的 MCP 源 ref，不依赖桌面 tag。记录返回的完整 `headSha` 为 `mcp_commit`，
 确认等于预期源提交，并检查各平台 job 成功且产物存在。不能复用其他提交或其他版本的同名 artifact。
 
-### MCP 平台必须对应桌面的三个安装包
+### MCP 平台必须对应现代桌面的三个安装包
 
 现代独立 MCP 的发布范围对应 **AIChat Rust release packages** 的三个现代安装包，**不包含 Linux**；Win7/Win8 使用前述专用构建和发布器，不增加或替换下表 target：
 
@@ -279,7 +300,7 @@ wc -c <本地核验文件>
 只更新该目标的 MCP 部分，不为独立 MCP 发布创建新的桌面版本。
 
 `all` 还须以正式信任根验签 Win7/Win8 客户端、MCP、CEF 三个固定 feed，并下载各自实际归档核对版本、身份、大小和 SHA-256。
-把专版安装包、MCP、CEF 的下载地址和签名 feed 链接补入本次桌面 Release，保留现代版下载表；分别记录三个旧系统的验收结果。仅现代渠道核验通过不能报告 `all` 完成。
+把专版安装包、MCP、CEF 的下载地址和签名 feed 链接补入本次桌面 Release，保留现代版下载表；分别记录三个旧系统的验收结果或用户授权跳过、未实测状态。仅现代渠道核验通过不能报告 `all` 完成。
 
 ## 6. 发布完成后合并并推送 main
 
@@ -319,9 +340,9 @@ git push origin main
 默认 `all` 发布只有在以下步骤完成后才算结束：
 
 1. 桌面 Action 生成安装包，此设备经 `127.0.0.1:7890` 下载、本地上传并完成桌面 CDN 发布。
-2. **Rust MCP daemon** 构建成功，覆盖桌面三个安装包对应的四个 MCP target，版本和源提交正确。
+2. **Rust MCP daemon** 构建成功，覆盖现代桌面三个安装包对应的四个 MCP target，版本和源提交正确。
 3. 此设备经同一本机代理下载三个 MCP artifacts，本地发布命令完成四个目标的 ZIP 上传和固定 feed 提升。
-4. Win7/Win8 job 成功，其 artifact 经本机代理下载；正式签名及三系统验收通过，专版客户端、MCP、CEF 的独立归档和三个签名 feed 均由本地发布器上传并核验。
+4. Win7/Win8 job 成功，其 artifact 经本机代理下载；正式签名通过，三系统验收通过或已记录当次用户授权豁免，专版客户端、MCP、CEF 的独立归档和三个签名 feed 均由本地发布器上传并核验。豁免只表示允许发布，不表示旧系统已验收。
 5. 所选渠道 CDN 已核验，GitHub Release 同时包含现代桌面、现代 MCP 及 Win7/Win8 专版下载地址。
 6. 本次新增及修复提交已合并并推送到远端 `main`，主分支包含完整发布代码。
 

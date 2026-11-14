@@ -72,7 +72,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Legacy CEF packaging failed' }
 2. `apps/mcp-rust/scripts/package-win7-runtime.cjs` 生成带 Win7/Win8 标识和最低系统要求的独立归档，记录版本、完整提交、大小及 SHA-256。
 3. `apps/aichat-rust/scripts/build-win7.cjs` 读取已打包的兼容版 MCP，编译原生启动器并调用 `package-win7.cjs`。提供发布方准备的 RSA 私钥，启动器固定对应公钥、Win7/Win8 模式和旧系统入口；不先构建 Tauri。
 4. 内部 `apps/aichat-rust/scripts/package-win7.cjs` 组装独立安装包，并为独立 MCP feed 和客户端更新清单签名。输入包含核对过的启动器、兼容版 MCP、相应资源与许可；完整包通过 `--cef` 加入同信任根签名的 legacy CEF 归档，薄包省略此参数。不能混入现代桌面 EXE、普通 MCP 或任意 `libcef.dll`。
-5. 准备发布计划并核对计划列出的所有源文件、目标身份、摘要和专版渠道。计划生成不是上传；没有独立 MCP 包或缺少任一目标系统的验收回执时，不报告专版全链路已完成。
+5. 准备发布计划并核对计划列出的所有源文件、目标身份、摘要和专版渠道。计划生成不是上传；没有独立 MCP 包时停止。三系统实测默认按主 Skill 的用户授权生成当次豁免，不能宣称已实测。
 
 独立 MCP 归档命令如下，`--out` 必须使用尚不存在的本次输出目录。若设置了 `CARGO_TARGET_DIR`，`--binary` 改为该目录下实际生成的文件：
 
@@ -116,7 +116,7 @@ gh workflow run aichat-rust-windows-release.yml --ref <source-ref> -f edition=al
 
 沿用主 Skill 的本机代理规则读取 GitHub：GitHub 下载走 `http://127.0.0.1:7890`，`gh` 子进程不携带七牛凭据；每次下载到新目录，保存原始 artifacts 和身份校验结果。专版使用 `download-artifacts.cjs --product win7-win8`，记录同样的代理下载回执；不能使用 `--product desktop|mcp` 的现代版匹配规则或改名混入现代 artifacts。
 
-工作流成功只表示其实际步骤成功；下载并核对真实安装包和 MCP 归档后，再进入 VM 验收。不要把传给校验器的 `6.1.7601` 参数写成 Win7 运行环境。
+工作流成功只表示其实际步骤成功；下载并核对真实安装包和 MCP 归档后，按用户要求进入 VM 验收或记录实测豁免。不要把传给校验器的 `6.1.7601` 参数写成 Win7 运行环境。
 
 ## 专版更新验证
 
@@ -173,7 +173,7 @@ CEF109 网页 JS/Web API、系统 TLS/根证书以及原生 DLL 依赖必须在�
 
 ## 发布、回滚与结果报告
 
-仅修改开发或发布流程不执行发布。用户请求默认 `all` 或仅 Win7/Win8 发布时，先确认上述产物、正式信任根和三个目标系统的独立 VM 回执完整，再按专版计划逐项操作：不可变对象先上传并下载核验，最后提升对应专版 feed，保留旧对象及已验证缓存。缺少条件时报告专版及 `all` 未完成，不能静默改为仅现代版。不得调用现代版全平台发布器来发布专版，不得为了通过验收把现代版的 `deferred` 门禁套用为“三个旧系统均已验收”。
+仅修改开发或发布流程不执行发布。用户请求默认 `all` 或仅 Win7/Win8 发布时，先确认上述产物、正式信任根，以及真实三系统验收文件或下节的当次用户授权豁免，再按专版计划逐项操作：不可变对象先上传并下载核验，最后提升对应专版 feed，保留旧对象及已验证缓存。缺少其他发布条件时报告专版及 `all` 未完成，不能静默改为仅现代版。不得调用现代版全平台发布器来发布专版，不得把现代版的 `deferred` 门禁套用为“三个旧系统均已验收”。
 
 从主工作流对应的精确 run 下载专版 artifact `aichat-rust-win7-win8-x64`，然后本地预检。以下命令用于实际发布任务，不能因用户仅要求修改流程就执行：
 
@@ -189,7 +189,7 @@ node .github/skills/rust-release/scripts/publish-win7.cjs \
 
 `publish-win7.cjs` 默认只校验下载回执、身份、签名和字节并生成发布计划，不上传、不提升 feed。它读取的是下载根目录，不是随意拼出的安装包目录。预检可以先没有 `--acceptance`，但结果必须保留未验收状态，不能据计划成功宣布已可正式发布。
 
-实际写入必须使用同一下载根目录和固定源码身份，补齐三系统验收文件，再显式选择发布：
+实际写入必须使用同一下载根目录和固定源码身份。用户要求完整实测时，补齐三系统验收文件，再显式选择发布；默认用户授权豁免路径见下节：
 
 ```bash
 node .github/skills/rust-release/scripts/publish-win7.cjs \
@@ -198,7 +198,7 @@ node .github/skills/rust-release/scripts/publish-win7.cjs \
   --public-key <trusted-public.pem> --acceptance <3OS-acceptance.json> --publish true
 ```
 
-正式发布要求客户端编译身份 `sourceDirty: false`，版本、完整提交、MCP provenance 和下载回执一致；三个旧系统各自具有真实 MCP native report，以及对应 CEF/UI/更新验收。`nativeLegacyVerified` 只是单份 MCP 报告的范围标记，不能替代完整验收文件。缺项时保留预检计划和待验收状态，不伪造报告、不绕过门禁、不自动降成现代版的 deferred 发布。
+正式发布要求客户端编译身份 `sourceDirty: false`，版本、完整提交、MCP provenance 和下载回执一致。真实验收路径要求三个旧系统各自具有 MCP native report 和对应 CEF/UI/更新验收；授权豁免路径保持这些项目未验证。`nativeLegacyVerified` 只是单份 MCP 报告的范围标记，不能替代完整验收文件。不伪造报告、不修改原 CI 证据、不自动降成现代版的 deferred 发布。
 
 发布器另核对产物中的 `build-scope.json`：必须记录 `signing: "production"` 且 `productionTrustRoot: true`；缺失或为 preview 时，即使源码干净、三系统验收齐全也禁止写 CDN。应使用正式信任根重新构建，不能编辑预览范围记录或把临时密钥产物改标为 production。
 
@@ -237,7 +237,39 @@ node .github/skills/rust-release/scripts/publish-win7.cjs \
 
 三个 `osFamily` 必须各出现一次。所有证据路径相对于该验收 JSON 所在目录，必须是真实、非空、未链接且限制在该目录内的文件，不能使用绝对路径或 `..`。每份 MCP 原始报告必须属于相应 OS，`nativeLegacyVerified` 为真且 auth 开/关两组都通过；其实际二进制 SHA-256、版本、commit、sourceHash 必须匹配本次 MCP 包。`installerSha256` 匹配本次已签名客户端清单中的安装包摘要。
 
-`cefUi` 和 `installerUpgrade` 是操作者另行执行并记录的 CEF/UI、安装升级验收，不由 MCP PowerShell smoke 推导。发布器检查结构、身份和证据文件，但不能代替操作者进行 GUI 验证；只有三个系统各自真实通过后才可提供可发布回执。没有验收文件时仍可运行默认预检，返回的 pending / productionReady 状态必须原样报告。
+`cefUi` 和 `installerUpgrade` 是操作者另行执行并记录的 CEF/UI、安装升级验收，不由 MCP PowerShell smoke 推导。发布器检查结构、身份和证据文件，但不能代替操作者进行 GUI 验证；只有三个系统各自真实通过后才可提供真实验收回执。没有验收或豁免文件时仍可运行默认预检，返回的 pending / productionReady 状态必须原样报告。
+
+### 用户授权跳过旧系统实测
+
+按主 Skill 记录的 2026-11-14 用户授权，默认不再将 Win7 SP1、Win8、Win8.1 实测作为 CDN 发布阻塞项。每次创建下载目录以外的独立豁免文件，填写本次已验签产物的真实身份；不能更改原始 smoke 或验收材料来伪造通过：
+
+```json
+{
+  "schemaVersion": 1,
+  "variant": "win7-win8",
+  "version": "<desktop_version>",
+  "mcpVersion": "<mcp_version>",
+  "commit": "<full_source_commit>",
+  "installerSha256": "<installer_sha256>",
+  "osFamilies": ["windows7-sp1", "windows8", "windows8.1"],
+  "authorizedBy": "user",
+  "authorization": "2026-11-14：Win7 SP1、Win8、Win8.1 这三个不用测了，直接发CDN吧，把这个接入SKILL",
+  "nativeLegacyVerified": false
+}
+```
+
+用同一份文件先预检再发布：
+
+```bash
+node .github/skills/rust-release/scripts/publish-win7.cjs \
+  --artifacts .tmp/rust-release/win7-win8-<win7_win8_run_id> \
+  --version <desktop_version> --mcp-version <mcp_version> --commit <full_source_commit> \
+  --public-key <trusted-public.pem> --native-acceptance-waiver <native-waiver.json>
+# 预检通过后，对同一命令追加 --publish true。
+```
+
+`--native-acceptance-waiver` 与 `--acceptance` 互斥。豁免仅移除三系统实测门槛；正式 RSA 签名及信任根、production 身份、干净源码、下载回执、provenance、大小/摘要、PE 审计、防降级、归档先于 feed 的顺序继续强制。
+发布计划、回执及 Release 写明 `nativeAcceptance: "waived-by-user"`、`nativeLegacyVerified: false`，三系统的 MCP 运行、CEF/UI 和安装升级未实测。CDN 全部核验通过后可以报告发布完成，并保留该限制；不再要求用户重复确认。用户当次要求完整实测时改用上节真实验收路径。
 
 `--public-key` 必须是发布方确认的真实受信公钥，不能因预览 artifact 自带 `release-public.pem` 就把它当作生产信任根。预览临时密钥签出的 CEF109 包可供匹配启动器的隔离验收，不能提升现有正式 legacy CEF feed；正式发布时应以匹配既有 CEF 信任根的产物重新核对签名和全部摘要，不能只换公钥文件掩盖不匹配。
 

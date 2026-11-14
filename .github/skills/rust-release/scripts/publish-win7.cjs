@@ -119,8 +119,24 @@ function compareVersions(left, right) {
   for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i];
   return 0;
 }
+function verifyNativeAcceptanceWaiver(file, release) {
+  const waiver = readJson(file);
+  assert.equal(waiver.schemaVersion, 1); assert.equal(waiver.variant, 'win7-win8');
+  assert.equal(waiver.version, release.client.version); assert.equal(waiver.mcpVersion, release.mcp.version);
+  assert.equal(waiver.commit, release.client.commit); assert.equal(waiver.installerSha256, release.client.sha256);
+  assert.equal(waiver.authorizedBy, 'user', 'Native acceptance waiver requires explicit user authorization');
+  assert.ok(typeof waiver.authorization === 'string' && waiver.authorization.trim(), 'Missing user authorization');
+  assert.equal(waiver.nativeLegacyVerified, false, 'Waived tests must remain unverified');
+  const systems = ['windows7-sp1', 'windows8', 'windows8.1'];
+  assert.ok(Array.isArray(waiver.osFamilies), 'Missing waived OS families');
+  assert.deepEqual([...waiver.osFamilies].sort(), [...systems].sort(), 'Waiver must cover three distinct legacy systems');
+  return { mode: 'waived-by-user', nativeLegacyVerified: false, systems,
+    authorization: waiver.authorization, waiverSha256: qiniu.sha256(file) };
+}
 async function publishWin7(options, { transport = qiniu, fetchImpl = fetch } = {}) {
-  const { artifacts, version, mcpVersion, commit, publicKeyFile, acceptanceFile, publish = false } = options;
+  const { artifacts, version, mcpVersion, commit, publicKeyFile, acceptanceFile, nativeAcceptanceWaiverFile, publish = false } = options;
+  assert.ok(!(acceptanceFile && nativeAcceptanceWaiverFile), 'Acceptance and native acceptance waiver are mutually exclusive');
+  assert.equal(typeof publish, 'boolean', 'Publish must be explicitly true or false');
   assert.ok(legacy.stableVersion(version) && legacy.stableVersion(mcpVersion)); assert.match(commit, /^[a-f0-9]{40}$/);
   verifyReceipt(artifacts, { product: 'win7-win8', commit });
   const publicKey = fs.readFileSync(publicKeyFile);
@@ -129,10 +145,13 @@ async function publishWin7(options, { transport = qiniu, fetchImpl = fetch } = {
   if (release.client.sourceDirty !== false) pending.push('clean-release-source');
   if (release.buildScope?.signing !== 'production' || release.buildScope?.productionTrustRoot !== true)
     pending.push('production-signing-key');
-  if (!acceptanceFile) pending.push('three-native-systems-with-cef-and-update-acceptance');
-  const acceptance = acceptanceFile ? verifyAcceptance(acceptanceFile, release) : null;
+  if (!acceptanceFile && !nativeAcceptanceWaiverFile) pending.push('three-native-systems-with-cef-and-update-acceptance');
+  const acceptance = acceptanceFile ? verifyAcceptance(acceptanceFile, release)
+    : nativeAcceptanceWaiverFile ? verifyNativeAcceptanceWaiver(nativeAcceptanceWaiverFile, release) : null;
   const plan = { schemaVersion: 1, variant: 'win7-win8', dryRun: !publish, version, mcpVersion, commit,
     productionReady: pending.length === 0, pending, acceptance,
+    nativeAcceptance: acceptanceFile ? 'verified' : acceptance?.mode || 'pending',
+    nativeLegacyVerified: Boolean(acceptanceFile),
     archives: release.archives, feeds: release.feeds.map(({ metadata, ...value }) => value) };
   if (!publish) return plan;
   assert.equal(pending.length, 0, 'Win7/Win8 publication still lacks required acceptance: ' + pending.join(', '));
@@ -173,9 +192,9 @@ async function publishWin7(options, { transport = qiniu, fetchImpl = fetch } = {
 }
 if (require.main === module) {
   (async () => {
-    const args = readArgs(process.argv.slice(2), ['artifacts', 'version', 'mcp-version', 'commit', 'public-key', 'acceptance', 'publish']);
+    const args = readArgs(process.argv.slice(2), ['artifacts', 'version', 'mcp-version', 'commit', 'public-key', 'acceptance', 'native-acceptance-waiver', 'publish']);
     assert.ok(args.artifacts && args.version && args['mcp-version'] && args.commit && args['public-key'],
-      'Use --artifacts DIRECTORY --version X.Y.Z --mcp-version X.Y.Z --commit FULL_SHA --public-key TRUSTED.pem [--acceptance FILE] [--publish true]');
+      'Use --artifacts DIRECTORY --version X.Y.Z --mcp-version X.Y.Z --commit FULL_SHA --public-key TRUSTED.pem [--acceptance FILE | --native-acceptance-waiver FILE] [--publish true]');
     assert.ok(!args.publish || args.publish === 'true', 'Only --publish true enables publication');
     if (args.publish) {
       const environment = directEnvironment();
@@ -183,8 +202,10 @@ if (require.main === module) {
     }
     const result = await publishWin7({ artifacts: path.resolve(args.artifacts), version: args.version,
       mcpVersion: args['mcp-version'], commit: args.commit, publicKeyFile: path.resolve(args['public-key']),
-      acceptanceFile: args.acceptance && path.resolve(args.acceptance), publish: args.publish === 'true' });
+      acceptanceFile: args.acceptance && path.resolve(args.acceptance),
+      nativeAcceptanceWaiverFile: args['native-acceptance-waiver'] && path.resolve(args['native-acceptance-waiver']),
+      publish: args.publish === 'true' });
     console.log(JSON.stringify(result, null, 2));
   })().catch(error => { console.error(error.message); process.exitCode = 1; });
 }
-module.exports = { collectRelease, verifyAcceptance, publishWin7, compareVersions };
+module.exports = { collectRelease, verifyAcceptance, verifyNativeAcceptanceWaiver, publishWin7, compareVersions };
