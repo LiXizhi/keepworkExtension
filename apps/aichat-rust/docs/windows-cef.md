@@ -88,6 +88,8 @@ Win7/Win8 构建还必须锁定旧系统可用的 `D3DCompiler_47.dll`：本轮�
 
 外层启动器必须自身兼容 Windows 7。当前应用使用的 Tauri 2.12 已停止官方 Windows 7 支持，单纯在它的 `main` 中增加 OS 判断不能消除 Windows 加载器的失败。详见 [Tauri 2.12 公告](https://v2.tauri.app/blog/tauri-2.12/)。仓库原有 Electron 下载启动器使用 Go 1.25，也不能直接作为 Windows 7 入口；[Go 1.21 起要求 Windows 10](https://go.dev/doc/go1.21)。
 
+Win7/Win8 专版的 C++ 构建固定使用 VS 2022 v143 / MSVC 14.44、Windows SDK 10.0.22621.0；CI 使用 `windows-2022`，不随 `windows-latest` 升级到 VS 2026。微软在 [MSVC 14.50 的 STL 变更](https://github.com/microsoft/STL/releases/tag/msvc-build-tools-14.50)中移除了 Win7/Win8/Win8.1 目标支持，并让 `filesystem` 直接调用 Win8 API。仅设置 `_WIN32_WINNT` 不能改变预编译标准库的导入，因此专版配置会拒绝 MSVC 14.50+，并继续对真实 Launcher 和完整 payload 执行既有 PE 审计。现代版工具链保持各自流程。
+
 ## 下载、缓存与发布契约
 
 CEF 分发包需要包含匹配版本的宿主 EXE、CEF 二进制、子进程所需文件、locale 和其他资源，不能只上传 `libcef.dll`。构建时确定 CEF 版本，应用启动时选择经过发布验证的包，不从上游任意获取 DLL 替换。

@@ -1,4 +1,4 @@
-name: Diagnose legacy Microsoft redistributable signature
+name: Verify legacy Windows build prerequisites
 
 on:
   workflow_dispatch:
@@ -7,6 +7,54 @@ permissions:
   contents: read
 
 jobs:
+  launcher:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.22621.0'
+      - name: Build and audit the actual legacy launcher with the pinned toolchain
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs'), crypto = require('node:crypto');
+          const { keyHeader } = require('./apps/aichat-rust/scripts/cef-release.cjs');
+          const key = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+          fs.writeFileSync('diagnostic-key.hpp', keyHeader(key));
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $header = (Resolve-Path diagnostic-key.hpp).Path
+          cmake -S apps/aichat-rust/windows -B launcher-diagnostic -G "Visual Studio 17 2022" -A x64 -T "v143,version=14.44" -DCMAKE_SYSTEM_VERSION=10.0.22621.0 -DCMAKE_EXE_LINKER_FLAGS=/MAP -DKEEPWORK_WIN7_EDITION=ON "-DKEEPWORK_PUBLIC_KEY_HEADER=$header"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $miniz = Get-Content launcher-diagnostic/_deps/miniz-build/miniz.vcxproj -Raw
+          if (-not $miniz.Contains('_WIN32_WINNT=0x0601') -or -not $miniz.Contains('WINVER=0x0601')) {
+            throw 'The legacy baseline must reach the actual miniz compilation'
+          }
+          cmake --build launcher-diagnostic --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir launcher-diagnostic -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/lib/windows7-pe.cjs launcher-diagnostic/Release/Keepwork.exe --output launcher-diagnostic/pe-report.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: legacy-launcher-toolchain-diagnostic
+          path: |
+            launcher-diagnostic/Release/*.exe
+            launcher-diagnostic/Release/*.map
+            launcher-diagnostic/CMakeCache.txt
+            launcher-diagnostic/pe-report.json
+          if-no-files-found: warn
+          retention-days: 30
   signature:
     runs-on: windows-latest
     timeout-minutes: 10

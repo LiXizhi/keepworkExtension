@@ -16,7 +16,9 @@ function buildWin7({ mcpDirectory, output, privateKeyFile, makensis, cefDirector
   fs.mkdirSync(output, { recursive: true });
   const header = path.join(path.resolve(output), 'release-key.hpp'); fs.writeFileSync(header, keyHeader(privateKey));
   const build = path.join(path.resolve(output), 'bootstrap-build');
-  exec('cmake', ['-S', path.join(root, 'windows'), '-B', build, '-A', 'x64',
+  exec('cmake', ['-S', path.join(root, 'windows'), '-B', build,
+    '-G', 'Visual Studio 17 2022', '-A', 'x64', '-T', 'v143,version=14.44',
+    '-DCMAKE_SYSTEM_VERSION=10.0.22621.0',
     '-DKEEPWORK_WIN7_EDITION=ON', '-DKEEPWORK_PUBLIC_KEY_HEADER=' + header], { stdio: 'inherit' });
   exec('cmake', ['--build', build, '--config', 'Release'], { stdio: 'inherit' });
   exec('ctest', ['--test-dir', build, '-C', 'Release', '--output-on-failure'], { stdio: 'inherit' });

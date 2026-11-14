@@ -109,7 +109,7 @@ test('an otherwise valid empty import table is not confused with a truncated PE'
 for (const symbol of [
   'GetSystemTimePreciseAsFileTime', 'WaitOnAddress', 'WakeByAddressAll', 'WakeByAddressSingle',
   'CreatePseudoConsole', 'ResizePseudoConsole', 'ClosePseudoConsole', 'SetThreadDescription',
-  'GetTempPath2W', 'DiscardVirtualMemory',
+  'GetTempPath2W', 'DiscardVirtualMemory', 'CreateFile2', 'CopyFile2',
 ]) test(`Win7 audit rejects the post-Win7 import ${symbol}`, () => {
   assert.throws(() => auditPe(pe({ imports: [{ dll: 'KERNEL32.dll', symbols: [symbol] }] }), { arch: 'x64' }));
 });
@@ -127,6 +127,13 @@ test('Win7 audit checks delay-loaded imports as well as ordinary imports', () =>
   assert.throws(() => auditPe(pe({ delayed: [{ dll: 'KERNEL32.dll', symbols: ['CreatePseudoConsole'] }] }), { arch: 'x64' }));
   assert.doesNotThrow(() => auditPe(pe({ delayed: [{ dll: 'KERNEL32.dll', symbols: ['GetTickCount64'] }] }), { arch: 'x64' }));
 });
+
+for (const symbol of ['CreateFile2', 'CopyFile2']) {
+  test(`Win7 audit rejects the delay-loaded post-Win7 import ${symbol}`, () => {
+    assert.throws(() => auditPe(pe({ delayed: [{ dll: 'KERNEL32.dll', symbols: [symbol] }] }), { arch: 'x64' }),
+      new RegExp(`KERNEL32\\.dll!${symbol}`, 'i'));
+  });
+}
 
 test('Win7 audit records valid ordinal thunks without treating them as out-of-range RVAs', () => {
   const report = auditPe(pe({ imports: [{ dll: 'WS2_32.dll', symbols: [23] }] }), { arch: 'x64' });
