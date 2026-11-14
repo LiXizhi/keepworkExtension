@@ -1,7 +1,6 @@
 //! Native CLI sessions. The browser receives normalized snapshots, never a raw
 //! RPC tunnel or a choice of executable. Credentials and tool grants stay in RAM.
 mod antigravity;
-mod trae;
 mod approval;
 #[cfg(test)]
 mod approval_tests;
@@ -19,6 +18,7 @@ mod path_identity;
 #[cfg(test)]
 mod persistence_tests;
 mod sessions;
+mod trae;
 #[cfg(test)]
 use persistence_tests::PersistenceStats;
 
