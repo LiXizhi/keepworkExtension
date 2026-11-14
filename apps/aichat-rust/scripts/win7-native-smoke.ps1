@@ -321,9 +321,12 @@ try {
   $osInfo = Get-WmiObject -Class Win32_OperatingSystem
   $computer = Get-WmiObject -Class Win32_ComputerSystem
   $osVersion = [Version]([string]$osInfo.Version)
-  $report['system'] = @{ caption = $osInfo.Caption; version = $osInfo.Version; servicePackMajor = $osInfo.ServicePackMajorVersion;
-    architecture = $osInfo.OSArchitecture; productType = $osInfo.ProductType; manufacturer = $computer.Manufacturer; model = $computer.Model;
-    powershell = $PSVersionTable.PSVersion.ToString(); clr = [Environment]::Version.ToString() }
+  # WMI properties carry PowerShell adapters. Give the .NET 3.5 serializer
+  # explicit CLR scalars so it never traverses those adapter/property graphs.
+  $report['system'] = @{ caption = [string]$osInfo.Caption; version = [string]$osInfo.Version; servicePackMajor = [int]$osInfo.ServicePackMajorVersion;
+    architecture = [string]$osInfo.OSArchitecture; productType = [int]$osInfo.ProductType;
+    manufacturer = [string]$computer.Manufacturer; model = [string]$computer.Model;
+    powershell = [string]($PSVersionTable.PSVersion.ToString()); clr = [string]([Environment]::Version.ToString()) }
   $isNativeWin7 = $osInfo.Version.StartsWith('6.1.') -and $osVersion.Build -ge 7601 -and [int]$osInfo.ServicePackMajorVersion -ge 1 -and [int]$osInfo.ProductType -eq 1 -and $osInfo.OSArchitecture -match '^64'
   $osFamily = 'other-windows'
   if ($osInfo.Version.StartsWith('6.1.')) {
@@ -340,8 +343,9 @@ try {
   Assert-Condition ($expected['variant'] -eq 'win7-win8' -and $expected['buildTarget'] -eq 'x86_64-win7-windows-msvc' -and $expected['platform'] -eq 'windows' -and $expected['arch'] -eq 'x64' -and $expected['entry'] -eq 'bin/keepwork-mcp.exe') 'Supply a staged Win7/Win8 x64 MCP runtime'
   $executable = Join-Path $runtime 'bin\keepwork-mcp.exe'
   $binaryInfo = New-Object IO.FileInfo -ArgumentList $executable
-  $report['artifact'] = @{ executable = $executable; sha256 = Get-Sha256 $executable; size = $binaryInfo.Length;
-    version = $expected['version']; commit = $expected['commit']; sourceHash = $expected['sourceHash']; buildTarget = $expected['buildTarget']; runtimeManifestSha256 = Get-Sha256 $manifestPath }
+  $report['artifact'] = @{ executable = [string]$executable; sha256 = [string](Get-Sha256 $executable); size = [long]$binaryInfo.Length;
+    version = [string]$expected['version']; commit = [string]$expected['commit']; sourceHash = [string]$expected['sourceHash'];
+    buildTarget = [string]$expected['buildTarget']; runtimeManifestSha256 = [string](Get-Sha256 $manifestPath) }
   foreach ($auth in @($false, $true)) {
     $caseDirectory = Join-Path $output ('auth-' + [string][int]$auth)
     $null = [IO.Directory]::CreateDirectory($caseDirectory)
@@ -357,7 +361,17 @@ try {
 } finally {
   $report['completedAtUtc'] = [DateTime]::UtcNow.ToString('o')
   $reportPath = Join-Path $output 'report.json'
-  [IO.File]::WriteAllText($reportPath, $script:Json.Serialize($report), $script:Utf8)
+  try { $reportJson = $script:Json.Serialize($report) }
+  catch {
+    $serializationError = [string]$_.Exception.Message
+    $originalError = [string]$report['error']
+    foreach ($case in @($report['cases'])) {
+      if ($case.ContainsKey('error')) { $originalError += '; case error: ' + [string]$case['error'] }
+      if ($case.ContainsKey('cleanupError')) { $originalError += '; cleanup error: ' + [string]$case['cleanupError'] }
+    }
+    throw ('Smoke report serialization failed: ' + $serializationError + '; original smoke error: ' + $originalError)
+  }
+  [IO.File]::WriteAllText($reportPath, $reportJson, $script:Utf8)
 }
 Write-Output ('Native MCP smoke report: ' + $reportPath)
 if (-not $report['passed']) { exit 1 }
