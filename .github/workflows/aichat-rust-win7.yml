@@ -82,7 +82,13 @@ jobs:
             catch { throw Error('WIN7_RELEASE_PRIVATE_KEY_PEM is not a usable RSA-2048 private key'); }
           } else key = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
           if (key.asymmetricKeyType !== 'rsa' || key.asymmetricKeyDetails.modulusLength !== 2048) throw Error('Use an RSA-2048 release key');
-          fs.writeFileSync(path.join(directory, 'private.pem'), key.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx' });
+          if (process.env.LEGACY_SIGNING_MODE === 'production') {
+            const pinned = crypto.createPublicKey(fs.readFileSync('apps/aichat-rust/keys/win7-release-public.pem'));
+            const expected = pinned.export({ type: 'spki', format: 'der' });
+            const actual = crypto.createPublicKey(key).export({ type: 'spki', format: 'der' });
+            if (!actual.equals(expected)) throw Error('Production signing key does not match the pinned Win7/Win8 trust root');
+          }
+          fs.writeFileSync(path.join(directory, 'private.pem'), key.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 });
           '@ | node
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify the legacy HTTP contract on the modern build host
