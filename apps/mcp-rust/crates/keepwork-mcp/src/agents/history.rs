@@ -11,7 +11,10 @@ fn sidecar(file: &Path, backend: &str, thread: &str) -> Result<Option<PathBuf>, 
     let Some(spec) = definition(backend) else {
         return Ok(None);
     };
-    if !matches!(spec.protocol, Protocol::Acp | Protocol::Antigravity) {
+    if !matches!(
+        spec.protocol,
+        Protocol::Acp | Protocol::Antigravity | Protocol::Trae
+    ) {
         return Ok(None);
     }
     if thread.is_empty()
@@ -134,6 +137,11 @@ pub fn save(file: &Path, data: &Value, native: &Value) -> Result<usize, String> 
         && existing
             .as_ref()
             .is_none_or(|old| old["driver"] == "antigravity-v1");
+    let trae = backend == "trae"
+        && native["driver"] == "trae-agent-v1"
+        && existing
+            .as_ref()
+            .is_none_or(|old| old["driver"] == "trae-agent-v1");
     let mut out = existing.unwrap_or_else(|| json!({"id":thread,"cwd":cwd,"turns":[]}));
     out["id"] = json!(thread);
     out["cwd"] = json!(cwd);
@@ -143,6 +151,9 @@ pub fn save(file: &Path, data: &Value, native: &Value) -> Result<usize, String> 
         if let Some(value) = native.get(key).filter(|value| !value.is_null()) {
             out[key] = safe(value, 0, &mut 2_000_000);
         }
+    }
+    if trae {
+        out["driver"] = json!("trae-agent-v1");
     }
     if antigravity {
         if out["nativeId"].is_string()
@@ -370,6 +381,24 @@ mod tests {
         assert!(preserved.get("driver").is_none());
         assert!(preserved.get("nativeId").is_none());
         assert!(preserved.get("model").is_none());
+        assert_eq!(preserved["turns"], legacy["turns"]);
+    }
+
+    #[test]
+    fn trae_agent_history_preserves_driver_and_never_upgrades_legacy_acp_history() {
+        let (_temp, file, mut data) = setup();
+        data["backend"] = json!("trae");
+        save(&file, &data, &json!({"driver":"trae-agent-v1"})).unwrap();
+        assert_eq!(
+            load(&file, "trae", "thread").unwrap().unwrap()["driver"],
+            "trae-agent-v1"
+        );
+        let cache = sidecar(&file, "trae", "thread").unwrap().unwrap();
+        let legacy = json!({"id":"thread","cwd":data["roots"][0],"turns":[{"id":"old","items":[{"id":"old-item","type":"agentMessage","text":"Saved TraeCode answer"}]}]});
+        std::fs::write(&cache, legacy.to_string()).unwrap();
+        save(&file, &data, &json!({"driver":"trae-agent-v1"})).unwrap();
+        let preserved = load(&file, "trae", "thread").unwrap().unwrap();
+        assert!(preserved.get("driver").is_none());
         assert_eq!(preserved["turns"], legacy["turns"]);
     }
 

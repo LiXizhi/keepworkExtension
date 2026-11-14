@@ -30,7 +30,7 @@ impl AgentManager {
                             "kimi" | "copilot" => (vec!["login"], Some(vec![]), Some("/logout")),
                             "qwen" => (vec![], None, Some("/auth")),
                             "deepseek" => (vec!["web"], None, None),
-                            "trae" => (vec![], Some(vec!["logout"]), None),
+                            "trae" => (vec!["--help"], None, None),
                             _ => (vec![], Some(vec![]), Some("/logout")),
                         };
                     let command = |args: Vec<&str>| {
@@ -45,6 +45,9 @@ impl AgentManager {
                         )
                     };
                     item["actions"]["login"] = json!({"label":"登录","command":command(login)});
+                    if *backend == "trae" {
+                        item["actions"]["login"]["label"] = json!("配置模型提供商");
+                    }
                     if *backend == "qwen" {
                         item["actions"]["login"]["input"] = json!(input);
                     }
@@ -122,6 +125,11 @@ impl AgentManager {
             let spec = definition(backend).unwrap();
             let launch = discover(backend);
             let mut value = json!({"name":spec.name,"protocol":spec.protocol.as_str(),"protocolSupported":spec.protocol.supported(),"installUrl":spec.install_url,"available":launch.is_ok(),"authenticated":null,"authState":"unknown","probe":"executable","models":[]});
+            if backend == "trae" {
+                value["aichatContext"] = json!(false);
+                value["executionMode"] = json!("one-shot");
+                value["supportedModes"] = json!(["craft"]);
+            }
             if backend == "codex" {
                 value["approvalModes"] = json!(approval::MODES);
             }
@@ -195,10 +203,11 @@ impl AgentManager {
                 let harness = self.harness_for(backend, &cwd, cursor_preview).await?;
                 value["probe"] = json!("protocol");
                 value["cli"] = harness.cli_info();
-                if matches!(spec.protocol, Protocol::Codex | Protocol::Claude | Protocol::Antigravity) {
+                if matches!(spec.protocol, Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae) {
                     let account = harness
                         .call("account/read", json!({"refreshToken":false,"refresh":query.get("refresh").map(String::as_str)==Some("1")}), RPC_TIMEOUT)
                         .await?;
+                    if let Some(probe) = account.get("probe") { value["probe"] = probe.clone(); }
                     if account["authUnknown"] == true {
                         value["authenticated"] = Value::Null;
                         value["authState"] = json!("unknown");
@@ -358,6 +367,11 @@ impl AgentManager {
     pub(super) async fn login(self: &Arc<Self>, input: &Value) -> Result<Value, String> {
         let backend = input["backend"].as_str().unwrap_or("codex");
         let spec = definition(backend).ok_or("Unsupported agent backend")?;
+        if backend == "trae" {
+            return Ok(
+                json!({"command":"trae-cli --help","message":"Configure your provider API key and model in Trae Agent’s native trae_config.yaml or environment, then reconnect. Trae Agent has no account login command."}),
+            );
+        }
         if backend != "codex" {
             return Ok(
                 json!({"command":spec.login,"message":"Run this command in your terminal to sign in, then reconnect."}),
@@ -596,7 +610,10 @@ impl AgentManager {
                 parameters["config"]["mcp_servers"] = codex_server(&server)["mcp_servers"].clone();
                 parameters["developerInstructions"]=json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
             }
-        } else if matches!(spec.protocol, Protocol::Claude | Protocol::Antigravity) {
+        } else if matches!(
+            spec.protocol,
+            Protocol::Claude | Protocol::Antigravity | Protocol::Trae
+        ) {
             parameters["roots"] = json!(roots);
             parameters["mode"] = json!(selected_mode);
             if contextual {
@@ -605,7 +622,7 @@ impl AgentManager {
         }
         if matches!(
             spec.protocol,
-            Protocol::Codex | Protocol::Claude | Protocol::Antigravity
+            Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae
         ) {
             if let Some(model) = &requested_model {
                 parameters["model"] = json!(model);
@@ -843,7 +860,10 @@ impl AgentManager {
                     return Err("UNSUPPORTED_FEATURE: This CLI cannot resume its previous native session; start a new conversation".into());
                 }
                 json!({"sessionId":data["threadId"],"cwd":data["roots"][0],"mcpServers":server.into_iter().collect::<Vec<_>>()})
-            } else if matches!(harness.protocol(), Protocol::Claude | Protocol::Antigravity) {
+            } else if matches!(
+                harness.protocol(),
+                Protocol::Claude | Protocol::Antigravity | Protocol::Trae
+            ) {
                 // Public snapshots omit receipts. Read the owned raw record so
                 // a restored conversation retains its existing native identity.
                 let resume = self.sessions.lock().unwrap()[session_id].data["submissions"]
@@ -854,6 +874,10 @@ impl AgentManager {
                         })
                     });
                 let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"roots":data["roots"],"model":data["model"],"mode":data["mode"],"resume":resume,"mcpServers":server.into_iter().collect::<Vec<_>>()});
+                if harness.protocol() == Protocol::Trae {
+                    params["driver"] =
+                        self.sessions.lock().unwrap()[session_id].native["driver"].clone();
+                }
                 if harness.protocol() == Protocol::Antigravity {
                     let sessions = self.sessions.lock().unwrap();
                     let session = &sessions[session_id];
@@ -1070,6 +1094,9 @@ impl AgentManager {
                 .clone();
             let _guard = gate.lock().await;
             let harness = self.load(session_id, owner, &request_id).await?;
+            if harness.protocol() == Protocol::Trae {
+                if !images.is_empty() || selected_mode != "craft" || requested_effort.is_some() { return Err("UNSUPPORTED_FEATURE: Trae Agent supports text-only Craft tasks with no reasoning effort selection.".into()); }
+            }
             if harness.protocol() == Protocol::Antigravity && !images.is_empty() {
                 return Err("UNSUPPORTED_FEATURE: Antigravity supports text input only. Remove the images or switch agents.".into());
             }
@@ -1189,7 +1216,10 @@ impl AgentManager {
             let access =
                 approval::access(&selected_mode, selected_approval.as_deref(), &data["roots"]);
             let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":native_content,"sandboxPolicy":access.sandbox_policy,"approvalPolicy":access.policy});
-            if matches!(harness.protocol(), Protocol::Claude | Protocol::Antigravity) {
+            if matches!(
+                harness.protocol(),
+                Protocol::Claude | Protocol::Antigravity | Protocol::Trae
+            ) {
                 params.as_object_mut().unwrap().remove("sandboxPolicy");
                 params.as_object_mut().unwrap().remove("approvalPolicy");
                 params["mode"] = json!(selected_mode);

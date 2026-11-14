@@ -95,15 +95,11 @@ export function resolveAgentCli(backend: AgentCliBackend, args: string[], overri
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'),
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'codebuddy', 'bin'),
         backend === 'gemini' && env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'agy', 'bin'),
-        path.join(home, '.claude', 'bin'), path.join(home, '.cursor', 'bin'), path.join(home, '.opencode', 'bin'), path.join(home, '.kimi', 'bin'), path.join(home, '.trae', 'bin'),
+        path.join(home, '.claude', 'bin'), path.join(home, '.cursor', 'bin'), path.join(home, '.opencode', 'bin'), path.join(home, '.kimi', 'bin'),
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'cursor-agent'),
         env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'cursor-agent'),
-        env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'TraeCLI', 'bin'),
-        env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'TraeX', 'bin'),
-        env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'trae-cli', 'bin'),
-        backend === 'trae' && env.TRAECLI_INSTALL_DIR,
     ] : [path.join(home, '.local', 'bin'), path.join(home, '.npm-global', 'bin'), path.join(home, '.npm', 'bin'),
-        path.join(home, '.volta', 'bin'), ...['codebuddy', 'claude', 'cursor', 'opencode', 'kimi', 'trae'].map(name => path.join(home, '.' + name, 'bin')), ...(options.systemDirs || ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'])];
+        path.join(home, '.volta', 'bin'), ...['codebuddy', 'claude', 'cursor', 'opencode', 'kimi'].map(name => path.join(home, '.' + name, 'bin')), ...(options.systemDirs || ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'])];
     if (env.npm_config_prefix) common.push(path.join(env.npm_config_prefix, platform === 'win32' ? '' : 'bin'));
     if (platform !== 'win32') {
         const versions = path.join(env.NVM_DIR || path.join(home, '.nvm'), 'versions', 'node');

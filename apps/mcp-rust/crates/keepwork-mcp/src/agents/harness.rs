@@ -73,6 +73,7 @@ impl Drop for PendingRpc {
 
 pub struct Harness {
     antigravity: Option<Arc<super::antigravity::Antigravity>>,
+    trae: Option<Arc<super::trae::Trae>>,
     claude: Option<Arc<super::claude::Claude>>,
     backend: String,
     protocol: Protocol,
@@ -96,6 +97,18 @@ impl Harness {
         params: Value,
         timeout: Duration,
     ) -> Result<PendingRpc, String> {
+        if let Some(trae) = &self.trae {
+            let result = trae.call(method, params, timeout).await?;
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(Ok(result));
+            return Ok(PendingRpc {
+                harness: Weak::new(),
+                id: 0,
+                receiver: Some(receiver),
+                timeout,
+                method: method.into(),
+            });
+        }
         if let Some(antigravity) = &self.antigravity {
             let result = Box::pin(antigravity.call(method, params, timeout)).await?;
             let (sender, receiver) = oneshot::channel();
@@ -167,14 +180,20 @@ impl Harness {
         launch: CliLaunch,
         cwd: &Path,
     ) -> Result<Arc<Self>, String> {
-        if matches!(protocol, Protocol::Claude | Protocol::Antigravity) {
+        if matches!(
+            protocol,
+            Protocol::Claude | Protocol::Antigravity | Protocol::Trae
+        ) {
             let (events, _) = broadcast::channel(128);
             let (shutdown, _) = watch::channel(false);
             let claude = (protocol == Protocol::Claude)
                 .then(|| super::claude::Claude::new(launch.clone(), cwd, events.clone()));
             let antigravity = (protocol == Protocol::Antigravity)
                 .then(|| super::antigravity::Antigravity::new(launch.clone(), cwd, events.clone()));
+            let trae = (protocol == Protocol::Trae)
+                .then(|| super::trae::Trae::new(launch.clone(), cwd, events.clone()));
             return Ok(Arc::new(Self {
+                trae,
                 antigravity,
                 claude,
                 backend: backend.into(),
@@ -239,6 +258,7 @@ impl Harness {
         let (shutdown, mut stop) = watch::channel(false);
         let harness = Arc::new(Self {
             antigravity: None,
+            trae: None,
             claude: None,
             backend: backend.to_string(),
             protocol,
@@ -453,6 +473,9 @@ impl Harness {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
+        if let Some(trae) = &self.trae {
+            return trae.call(method, params, timeout).await;
+        }
         if let Some(antigravity) = &self.antigravity {
             return Box::pin(antigravity.call(method, params, timeout)).await;
         }
@@ -496,6 +519,9 @@ impl Harness {
     }
 
     pub async fn respond(&self, id: Value, result: Value) -> Result<(), String> {
+        if self.trae.is_some() {
+            return Err("Native RPC rejected: UNSUPPORTED_FEATURE: Trae Agent has no interactive approval API".into());
+        }
         if let Some(antigravity) = &self.antigravity {
             return antigravity.respond().await;
         }
@@ -510,6 +536,9 @@ impl Harness {
     }
 
     pub async fn reject(&self, id: Value, code: i64, message: &str) -> Result<(), String> {
+        if self.trae.is_some() {
+            return Err("Native RPC rejected: UNSUPPORTED_FEATURE: Trae Agent has no interactive approval API".into());
+        }
         if let Some(antigravity) = &self.antigravity {
             return antigravity.respond().await;
         }
@@ -613,6 +642,9 @@ impl Harness {
     }
 
     pub fn close(&self) {
+        if let Some(trae) = &self.trae {
+            trae.close();
+        }
         if let Some(antigravity) = &self.antigravity {
             antigravity.close();
         }
@@ -625,6 +657,11 @@ impl Harness {
     /// Reap owned children before the daemon's Tokio runtime exits. Browser
     /// stream disconnection must never call this operation.
     pub async fn shutdown(&self) {
+        if let Some(trae) = &self.trae {
+            self.alive.store(false, Ordering::Release);
+            trae.shutdown().await;
+            return;
+        }
         if let Some(antigravity) = &self.antigravity {
             self.alive.store(false, Ordering::Release);
             antigravity.shutdown().await;
@@ -653,6 +690,9 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        if let Some(trae) = &self.trae {
+            trae.close();
+        }
         if let Some(antigravity) = &self.antigravity {
             antigravity.close();
         }

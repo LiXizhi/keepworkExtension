@@ -18,7 +18,7 @@ impl AgentManager {
                     self.acp_update(&session_id, &params["update"]);
                 } else if matches!(
                     harness.protocol(),
-                    Protocol::Codex | Protocol::Claude | Protocol::Antigravity
+                    Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae
                 ) {
                     self.codex_update(&session_id, &method, &params);
                 }

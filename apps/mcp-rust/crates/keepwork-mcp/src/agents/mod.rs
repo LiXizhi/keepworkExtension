@@ -1,6 +1,7 @@
 //! Native CLI sessions. The browser receives normalized snapshots, never a raw
 //! RPC tunnel or a choice of executable. Credentials and tool grants stay in RAM.
 mod antigravity;
+mod trae;
 mod approval;
 #[cfg(test)]
 mod approval_tests;
@@ -352,6 +353,7 @@ impl AgentManager {
             let needs_native_history = data["backend"] == "codex" && !data["items"].is_array();
             if !data["items"].is_array()
                 || (data["backend"] == "gemini" && !data["nativeMetadata"]["nativeId"].is_string())
+                || (data["backend"] == "trae" && !data["nativeMetadata"]["driver"].is_string())
             {
                 let loaded = history::load(
                     &file,

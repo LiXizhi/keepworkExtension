@@ -13,6 +13,7 @@ pub enum Protocol {
     Codex,
     Claude,
     Antigravity,
+    Trae,
 }
 
 impl Protocol {
@@ -22,13 +23,14 @@ impl Protocol {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Antigravity => "antigravity",
+            Self::Trae => "trae",
         }
     }
 
     pub fn supported(self) -> bool {
         matches!(
             self,
-            Self::Acp | Self::Codex | Self::Claude | Self::Antigravity
+            Self::Acp | Self::Codex | Self::Claude | Self::Antigravity | Self::Trae
         )
     }
 }
@@ -113,13 +115,13 @@ static DEFINITIONS: &[BackendDefinition] = &[
     },
     BackendDefinition {
         id: "trae",
-        name: "Trae",
-        protocol: Protocol::Acp,
-        commands: &["traecli", "traex"],
-        args: &["acp", "serve"],
+        name: "Trae Agent",
+        protocol: Protocol::Trae,
+        commands: &["trae-cli"],
+        args: &[],
         npm: None,
-        login: "traecli",
-        install_url: "https://docs.trae.cn/cli_get-started-with-trae-code-cli-2",
+        login: "trae-cli --help",
+        install_url: "https://github.com/bytedance/trae-agent",
     },
     BackendDefinition {
         id: "qwen",
@@ -322,15 +324,9 @@ pub fn search_dirs() -> Vec<PathBuf> {
             "agy/bin",
             "Programs/cursor-agent",
             "cursor-agent",
-            "Programs/TraeCLI/bin",
-            "Programs/TraeX/bin",
-            "trae-cli/bin",
         ] {
             result.push(local.join(relative));
         }
-    }
-    if let Some(trae) = std::env::var_os("TRAECLI_INSTALL_DIR") {
-        result.push(PathBuf::from(trae));
     }
     let mut seen = HashSet::new();
     result.retain(|path| path.is_absolute() && seen.insert(path.clone()));

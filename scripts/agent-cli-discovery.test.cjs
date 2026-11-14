@@ -135,21 +135,36 @@ test('missing CLIs produce actionable errors and directories are not treated as 
     assert.throws(() => resolveAgentCli('copilot', [], undefined, options), /CLI not found.*KEEPWORK_COPILOT_PATH/);
 });
 
-test('Windows official Cursor and Trae installation directories work without PATH', t => {
+test('Windows official Cursor installation directory works without PATH', t => {
     const { home, options, put } = fixture(t, 'win32');
     options.env.LOCALAPPDATA = path.join(home, 'Local');
     const cursor = put('Local/cursor-agent/cursor-agent.exe');
     assert.equal(resolveAgentCli('cursor', ['acp'], undefined, options).path, cursor);
-    const trae = put('Local/Programs/TraeCLI/bin/traex.exe');
-    const shim = put('Local/Programs/TraeCLI/bin/traecli.cmd', '@echo off\r\n"%~dp0traex.exe" %*\r\n');
-    assert.deepEqual(resolveAgentCli('trae', ['acp', 'serve'], undefined, options), { executable: trae, args: ['acp', 'serve'], path: trae, source: 'common' });
-    assert.equal(resolveAgentCli('trae', [], shim, options).path, trae);
-    put('Local/Programs/TraeCLI/bin/unsafe.cmd', '@echo off\r\n"%~dp0traex.exe" %*\r\necho extra');
+});
+for (const platform of ['win32', 'darwin', 'linux']) test(`${platform}: open-source Trae Agent discovery ignores enterprise TraeCode CLI names`, t => {
+    const { home, options, put } = fixture(t, platform);
+    options.env.LOCALAPPDATA = path.join(home, 'Local');
+    options.env.TRAECLI_INSTALL_DIR = path.join(home, 'enterprise');
+    const suffix = platform === 'win32' ? '.exe' : '';
+    for (const directory of ['legacy-path', 'enterprise', 'Local/Programs/TraeCLI/bin', 'Local/Programs/TraeX/bin', 'Local/trae-cli/bin']) {
+        put(`${directory}/traecli${suffix}`); put(`${directory}/traex${suffix}`);
+    }
+    options.pathDirs = [path.join(home, 'legacy-path')];
+    assert.throws(() => resolveAgentCli('trae', [], undefined, options), /CLI not found.*KEEPWORK_TRAE_PATH/);
+    const entry = put(`.local/bin/trae-cli${suffix}`);
+    const args = ['run', 'text $() & 中文'];
+    assert.deepEqual(resolveAgentCli('trae', args, undefined, options), { executable: entry, args, path: entry, source: 'common' });
+    const configured = put(`custom/trae-cli${suffix}`);
+    options.env.KEEPWORK_TRAE_PATH = configured;
+    assert.deepEqual(resolveAgentCli('trae', args, undefined, options), { executable: configured, args, path: configured, source: 'configured' });
+});
+test('Windows native wrapper resolution rejects extra commands without invoking a shell', t => {
+    const { home, put } = fixture(t, 'win32');
+    const native = put('native/tool.exe');
+    const shim = put('native/tool.cmd', '@echo off\r\n"%~dp0tool.exe" %*\r\n');
+    assert.deepEqual(cliCommand(shim, ['text $() & spaces'], 'win32'), { executable: native, args: ['text $() & spaces'] });
+    put('native/unsafe.cmd', '@echo off\r\n"%~dp0tool.exe" %*\r\necho extra');
     assert.throws(() => cliCommand(path.join(path.dirname(shim), 'unsafe.cmd'), [], 'win32'), /not a shell launcher/);
-    fs.unlinkSync(trae);
-    options.env.TRAECLI_INSTALL_DIR = path.join(home, 'custom');
-    const custom = put('custom/traex.exe');
-    assert.equal(resolveAgentCli('trae', [], undefined, options).path, custom);
 });
 test('a missing CLI can be discovered on a later connection without caching failure or replaying prompts', async t => {
     const { home, put } = fixture(t, process.platform);
