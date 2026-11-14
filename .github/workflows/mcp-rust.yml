@@ -12,19 +12,6 @@ on:
       - "skills/**"
       - "docs/acceptance/rust-release-evidence.schema.json"
       - ".github/workflows/mcp-rust.yml"
-  push:
-    branches: [master, main]
-    paths:
-      - "package.json"
-      - "package-lock.json"
-      - "apps/mcp-rust/**"
-      - "apps/mcp-runtime/**"
-      - "src/**"
-      - "scripts/**"
-      - "skills/**"
-      - "docs/acceptance/rust-release-evidence.schema.json"
-      - "docs/rust-runtime-migration.md"
-      - ".github/workflows/mcp-rust.yml"
 
 permissions:
   contents: read
