@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// A separate legacy publisher. No default release can select this mode.
+// The default all release uses this publisher for the separate legacy channels.
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');

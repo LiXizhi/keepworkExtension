@@ -39,7 +39,7 @@ MCP 继续只监听 `127.0.0.1:8089`，遵守单 daemon 和进程归属保护。
 
 客户端更新验签并下载安装器，由用户完成升级，不宣称安装器具备原子回滚。CEF 更新失败保留已验证缓存，不自动切回并重新启动旧内核；三条更新均不提供定时热更新。关闭 CEF 窗口不结束已有 daemon。
 
-构建、打包与发布准备只使用显式兼容版入口：`apps/mcp-rust/scripts/build-win7.cjs`、`package-win7-runtime.cjs`，以及 `apps/aichat-rust/scripts/build-win7.cjs`、`package-win7.cjs`。技术路径中的 `win7` 和 Rust 目标 `x86_64-win7-windows-msvc` 表示最低系统兼容目标，对外产品标识统一为 `win7-win8`，不是单系统发行承诺。详细操作按 [rust-release 的 Win7/Win8 参考流程](../../../.github/skills/rust-release/references/windows7.md) 执行；普通 `all` 和 `mcp-server` 模式不自动包含专版。远端构建沿用唯一桌面主工作流 `aichat-rust-windows-release.yml`，显式选择 `edition=win7-win8`；默认 `modern` 不构建专版。`aichat-rust-win7.yml` 仅作为主工作流调用的可复用实现，不能用现代 Windows runner 通过替代各目标系统实测。
+专版构建和打包使用独立入口：`apps/mcp-rust/scripts/build-win7.cjs`、`package-win7-runtime.cjs`，以及 `apps/aichat-rust/scripts/build-win7.cjs`、`package-win7.cjs`。技术路径中的 `win7` 和 Rust 目标 `x86_64-win7-windows-msvc` 表示最低系统兼容目标，对外产品标识统一为 `win7-win8`，不是单系统发行承诺。详细操作按 [rust-release 的 Win7/Win8 参考流程](../../../.github/skills/rust-release/references/windows7.md) 执行；默认 `all` 包含专版，`modern` 和 `mcp-server` 明确排除专版。远端构建沿用唯一桌面主工作流 `aichat-rust-windows-release.yml`：默认 `edition=all` 同时构建现代版与专版，仅专版时选择 `edition=win7-win8`。正式发布另须显式选择 `legacy-signing=production` 并通过三个旧系统的验收，不能以预览签名或现代 MCP 的 deferred 模式替代。`aichat-rust-win7.yml` 仅作为主工作流调用的可复用实现，不能用现代 Windows runner 通过替代各目标系统实测。
 
 验收报告的 `nativeLegacyVerified` 仅表示当前记录中的真实旧系统已通过对应测试，必须同时保留 OS 版本和测试范围。Win7 SP1（6.1.7601）、Win8（6.2.9200）、Win8.1（6.3.9600）的 native MCP 和完整安装/CEF/更新结果分别记录；任一系统的一次通过不能代表另外两个系统已验证。
 

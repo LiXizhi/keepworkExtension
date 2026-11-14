@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       edition:
-        description: Desktop edition to build (publication remains a separate local action)
+        description: Desktop editions to build (all includes Win7/Win8; publication remains local)
         type: choice
         required: true
-        default: modern
+        default: all
         options:
+          - all
           - modern
           - win7-win8
       legacy-signing:
@@ -45,7 +46,7 @@ jobs:
 
   build-win7-win8:
     name: Windows 7/8 x64 compatibility edition
-    if: github.event_name == 'workflow_dispatch' && inputs.edition == 'win7-win8'
+    if: github.event_name == 'workflow_dispatch' && (inputs.edition == 'all' || inputs.edition == 'win7-win8' || inputs.edition == '')
     uses: ./.github/workflows/aichat-rust-win7.yml
     with:
       signing: ${{ inputs['legacy-signing'] || 'preview' }}
@@ -278,7 +279,7 @@ jobs:
   prepare-release:
     name: Prepare assets for the local publisher
     needs: [build, build-macos]
-    if: inputs.edition != 'win7-win8' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/aichat-rust-v'))
+    if: github.event_name != 'pull_request' && inputs.edition != 'win7-win8' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/aichat-rust-v'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

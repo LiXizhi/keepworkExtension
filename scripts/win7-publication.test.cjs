@@ -124,6 +124,22 @@ test('legacy downloads keep the fixed source run, dedicated artifact identity an
   assert.throws(() => verifyReceipt(f.request.output, { product: 'desktop', commit }));
 });
 
+test('all-edition runs download only the dedicated legacy artifact into the legacy receipt', t => {
+  const f = downloadFixture(t, { artifacts: [
+    { name: 'aichat-rust-release-packages', expired: false },
+    { name: artifactName, expired: false },
+    { name: 'rust-desktop-validation-windows-latest', expired: false },
+  ] });
+  const receipt = downloadArtifacts(f.request, f);
+  const downloads = f.calls.filter(call => call.args[0] === 'run');
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].args[downloads[0].args.indexOf('--name') + 1], artifactName);
+  assert.deepEqual(receipt.artifacts, [artifactName]);
+  assert.ok(receipt.files.every(file => file.path.startsWith(artifactName + '/')));
+  assert.ok(verifyReceipt(f.request.output, { product: 'win7-win8', commit }));
+  assert.throws(() => verifyReceipt(f.request.output, { product: 'desktop', commit }));
+});
+
 for (const [label, options] of [
   ['a different workflow', { run: { path: '.github/workflows/aichat-rust-win7.yml' } }],
   ['a different run ID', { run: { id: 456 } }],

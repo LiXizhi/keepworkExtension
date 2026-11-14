@@ -1,6 +1,6 @@
 # Win7/Win8 x64 专版构建与发布准备
 
-仅在用户明确选择 Win7、Win8 或 Win8.1 兼容版时读取本流程。`/rust-release win7-win8`（兼容别名 `/rust-release win7`）不进入现代版 `all` 或 `mcp-server` 的构建、CDN 提升和合并步骤。按当次请求区分开发、本地打包、远端构建和发布；实现专版或编写打包流程不代表已要求触发 workflow、推送或发布。需要发布时再依据用户的发布请求和已有授权执行对应写入，不凭本文中的命令自动扩大范围。
+默认 `/rust-release` / `all` 和仅兼容版的 `win7-win8`（兼容别名 `win7`）都必须读取本流程。`all` 将本流程与现代桌面、现代独立 MCP 一并完成；`win7-win8` 仅执行专版构建和渠道发布，发布后仍按主 Skill 合并推送 `main`。`modern` 和 `mcp-server` 不包含专版。按当次请求区分开发、本地打包、远端构建和发布；仅要求修改 Skill、流程或实现时，不触发实际构建、推送或发布。
 
 能力、安全边界和产品支持范围统一以 [Windows CEF 兼容说明](../../../../apps/aichat-rust/docs/windows-cef.md) 为准。目标为 Windows 7 SP1 x64、Windows 8 x64、Windows 8.1 x64；首版是 C++ Launcher + CEF109 + Win7/Win8 专用 Rust MCP，不包含现代 Tauri EXE，也不提供交互式 PTY。完整验收前只能称兼容预览，不能因 Windows 编译成功或一台旧系统通过就宣布三个系统均已验收。
 
@@ -12,7 +12,7 @@
 | Win7/Win8 Rust MCP 归档 | `apps/mcp-rust/scripts/package-win7-runtime.cjs` | `windows-x64`，`variant: "win7-win8"`，最低系统 Win7 SP1 |
 | Win7/Win8 构建入口 | `apps/aichat-rust/scripts/build-win7.cjs` | 编译旧系统 C++ 启动器，并调用专版打包器；固定 legacy CEF109，尝试启动/附着 MCP |
 | Win7/Win8 安装包 | `apps/aichat-rust/scripts/package-win7.cjs` | 组装 Launcher + 兼容版 MCP；拒绝现代 Tauri EXE |
-| 手动构建工作流 | `.github/workflows/aichat-rust-windows-release.yml`，`edition=win7-win8` | 复用 `aichat-rust-win7.yml`；默认 `modern` 不构建专版，构建成功不等于 VM 验收或发布 |
+| 手动构建工作流 | `.github/workflows/aichat-rust-windows-release.yml`，默认 `edition=all`；仅专版为 `win7-win8` | 复用 `aichat-rust-win7.yml`；默认同时构建现代版与专版，构建成功不等于 VM 验收或发布 |
 
 安装目录为 `%LOCALAPPDATA%\Programs\KeepworkWin7Win8`，安装包名为 `Keepwork_Win7_Win8_<version>_x64-setup.exe`，对外标识固定为 `variant: "win7-win8"`。普通现代版和历史 `KeepworkCompatible` 安装包不作为 Win7/Win8 专版的输入。
 
@@ -98,13 +98,19 @@ if ($LASTEXITCODE -ne 0) { throw 'Win7 client packaging failed' }
 
 ## 可选远端构建
 
-用户要求远端构建时，通过唯一桌面主入口显式选择 Win7/Win8，指定已存在的明确 ref：
+用户要求远端构建时，通过唯一桌面主入口指定已存在的明确 ref。默认 `all` 同时构建现代版与专版；以下命令仅构建专版预览：
 
 ```bash
-gh workflow run aichat-rust-windows-release.yml --ref <source-ref> -f edition=win7-win8
+gh workflow run aichat-rust-windows-release.yml --ref <source-ref> -f edition=win7-win8 -f legacy-signing=preview
 ```
 
-记录精确 run ID 和 `headSha`。`aichat-rust-win7.yml` 仅有 `workflow_call`，不直接 dispatch；普通无参数调用保持 `modern`，不得顺带增加 Win7/Win8 构建。现代 Windows runner 的实际构建与 source/fixture 结果独立于 Win7/Win8/Win8.1 VM 回执。
+实际发布须显式选择正式签名；默认全量发布使用：
+
+```bash
+gh workflow run aichat-rust-windows-release.yml --ref <source-ref> -f edition=all -f legacy-signing=production
+```
+
+仅发布专版时把 `edition=all` 改为 `edition=win7-win8`。记录精确 run ID 和 `headSha`；`all` 的专版和现代版共享该 run，但分别下载各自 artifact。`aichat-rust-win7.yml` 仅有 `workflow_call`，不直接 dispatch。构建入口保留 preview 签名默认值，不能用于正式发布；缺 production secret 时停止，不降为 preview。现代 Windows runner 的实际构建与 source/fixture 结果独立于 Win7/Win8/Win8.1 VM 回执。
 
 专版预览工作流先构建并打包签名 CEF109，再把该 release 目录传给桌面构建的 `--cef`，默认保留可在未发布 CEF CDN 时验证内核启动的完整包。预览临时密钥与内置 CEF 必须匹配；不能据此修改现有正式 CEF feed。
 
@@ -167,9 +173,9 @@ CEF109 网页 JS/Web API、系统 TLS/根证书以及原生 DLL 依赖必须在�
 
 ## 发布、回滚与结果报告
 
-本轮开发和流程写入不执行发布。后续用户明确要求 Win7/Win8 发布时，先确认上述产物、正式信任根和三个目标系统的独立 VM 回执完整，再按专版计划逐项操作：不可变对象先上传并下载核验，最后提升对应专版 feed，保留旧对象及已验证缓存。不得调用现代版全平台发布器来发布专版，不得为了通过验收把现代版的 `deferred` 门禁套用为“三个旧系统均已验收”。
+仅修改开发或发布流程不执行发布。用户请求默认 `all` 或仅 Win7/Win8 发布时，先确认上述产物、正式信任根和三个目标系统的独立 VM 回执完整，再按专版计划逐项操作：不可变对象先上传并下载核验，最后提升对应专版 feed，保留旧对象及已验证缓存。缺少条件时报告专版及 `all` 未完成，不能静默改为仅现代版。不得调用现代版全平台发布器来发布专版，不得为了通过验收把现代版的 `deferred` 门禁套用为“三个旧系统均已验收”。
 
-在已要求下载构建产物的流程中，从主工作流对应的精确 run 下载专版 artifact `aichat-rust-win7-win8-x64`，然后本地预检。以下是后续操作示例，本轮文档和实现工作不执行这些命令：
+从主工作流对应的精确 run 下载专版 artifact `aichat-rust-win7-win8-x64`，然后本地预检。以下命令用于实际发布任务，不能因用户仅要求修改流程就执行：
 
 ```bash
 node .github/skills/rust-release/scripts/download-artifacts.cjs \

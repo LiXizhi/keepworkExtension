@@ -74,18 +74,24 @@ test('release and PR builds share real host Windows tests instead of inheriting 
   for (const job of ['build', 'build-macos']) assert.match(release, new RegExp('  ' + job + ':\\n    needs: validate'));
 });
 
-test('edition and event gates keep legacy, modern, and PR build scopes separate even on modern tags', () => {
+test('default and all editions include legacy while explicit modern, legacy and PR scopes stay bounded', () => {
   const source = workflow('aichat-rust-windows-release.yml');
   const jobs = ['validate', 'build-win7-win8', 'build', 'build-macos', 'prepare-release'];
   const scenarios = [
+    ['all branch dispatch', 'workflow_dispatch', 'all', 'refs/heads/main', ['validate', 'build-win7-win8', 'build', 'build-macos']],
+    ['all tagged dispatch', 'workflow_dispatch', 'all', 'refs/tags/v0.2.128', jobs],
+    ['default tagged dispatch', 'workflow_dispatch', '', 'refs/tags/v0.2.128', jobs],
     ['ordinary modern branch dispatch', 'workflow_dispatch', 'modern', 'refs/heads/main', ['validate', 'build', 'build-macos']],
-    ['older caller without an edition', 'workflow_dispatch', '', 'refs/heads/main', ['validate', 'build', 'build-macos']],
+    ['caller without an edition follows the default all scope', 'workflow_dispatch', '', 'refs/heads/main', ['validate', 'build-win7-win8', 'build', 'build-macos']],
     ['modern tagged dispatch', 'workflow_dispatch', 'modern', 'refs/tags/v0.2.126', ['validate', 'build', 'build-macos', 'prepare-release']],
     ['historical modern tag dispatch', 'workflow_dispatch', 'modern', 'refs/tags/aichat-rust-v0.2.126', ['validate', 'build', 'build-macos', 'prepare-release']],
     ['legacy branch dispatch', 'workflow_dispatch', 'win7-win8', 'refs/heads/main', ['build-win7-win8']],
     ['legacy dispatch from a modern release tag', 'workflow_dispatch', 'win7-win8', 'refs/tags/v0.2.126', ['build-win7-win8']],
     ['ordinary pull request', 'pull_request', '', 'refs/pull/1/merge', ['validate']],
+    ['pull request cannot select all signing jobs', 'pull_request', 'all', 'refs/pull/1/merge', ['validate']],
+    ['pull request cannot select modern signing jobs', 'pull_request', 'modern', 'refs/pull/1/merge', ['validate']],
     ['pull request cannot select legacy secrets', 'pull_request', 'win7-win8', 'refs/pull/1/merge', ['validate']],
+    ['pull request with a tag ref cannot prepare or build legacy assets', 'pull_request', 'all', 'refs/tags/v0.2.128', ['validate']],
   ];
   for (const [label, event, edition, ref, expected] of scenarios) {
     const context = { github: { event_name: event, ref }, inputs: { edition } };
@@ -96,7 +102,9 @@ test('edition and event gates keep legacy, modern, and PR build scopes separate 
 test('the legacy workflow has only a reusable trigger and is selected through the single desktop entry', () => {
   const source = workflow('aichat-rust-windows-release.yml');
   const choices = source.slice(0, source.indexOf('  pull_request:'));
-  assert.match(choices, /edition:[\s\S]*?default: modern[\s\S]*?- modern\n\s+- win7-win8/);
+  assert.match(choices, /edition:[\s\S]*?default: all[\s\S]*?- all\n\s+- modern\n\s+- win7-win8/);
+  assert.match(choices, /legacy-signing:[\s\S]*?default: preview/,
+    'build-only dispatches retain preview signing; actual publication explicitly chooses production');
   assert.match(jobBody(source, 'build-win7-win8'), /uses: \.\/\.github\/workflows\/aichat-rust-win7\.yml/);
   const reusable = workflow('aichat-rust-win7.yml');
   const triggers = reusable.slice(0, reusable.indexOf('permissions:'));
