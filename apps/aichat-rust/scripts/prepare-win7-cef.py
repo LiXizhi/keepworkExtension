@@ -117,7 +117,11 @@ def verify_authenticode(file):
         "$s.SignerCertificate.Subject -notmatch '(^|, )CN=Microsoft Corporation(,|$)') "
         "{ throw 'Microsoft D3DCompiler Authenticode validation failed' }"
     )
-    environment = {**os.environ, "KEEPWORK_D3D_VERIFY_FILE": str(file)}
+    # A Python child of pwsh inherits PowerShell 7 module paths. Windows
+    # PowerShell must rebuild its own paths to load its native Security module.
+    environment = {key: value for key, value in os.environ.items()
+                   if key.casefold() != "psmodulepath"}
+    environment["KEEPWORK_D3D_VERIFY_FILE"] = str(file)
     executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command", command],
                             env=environment, capture_output=True, timeout=60,

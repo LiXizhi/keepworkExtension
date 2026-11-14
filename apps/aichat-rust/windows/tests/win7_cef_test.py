@@ -166,6 +166,40 @@ class RedistTests(unittest.TestCase):
         self.assertNotIn(str(candidate), args[0][-1])
         self.assertNotIn("KEEPWORK_D3D_VERIFY_FILE", windows.environ)
 
+    def test_windows_powershell_child_removes_all_module_path_casings_without_mutating_parent(self):
+        result = subprocess.CompletedProcess(["powershell"], 0, "", "")
+        variants = ["PSModulePath", "PSMODULEPATH", "psmodulepath", "PsModulePath"]
+        for inherited_keys in [[key] for key in variants] + [variants]:
+            with self.subTest(inherited_keys=inherited_keys):
+                inherited = {"SystemRoot": "test-system-root", "INHERITED_MARKER": "preserved",
+                             "PSModulePathSuffix": "unrelated-setting"}
+                inherited.update({key: r"C:\Program Files\PowerShell\7\Modules" for key in inherited_keys})
+                original = dict(inherited)
+                windows = SimpleNamespace(name="nt", environ=inherited)
+                with patch.object(module, "os", windows), patch.object(module.subprocess, "run", return_value=result) as process:
+                    self.assertTrue(module.verify_authenticode(Path("candidate.dll")))
+                child = process.call_args.kwargs["env"]
+                self.assertFalse(any(key.lower() == "psmodulepath" for key in child))
+                self.assertEqual(child["INHERITED_MARKER"], "preserved")
+                self.assertEqual(child["PSModulePathSuffix"], "unrelated-setting")
+                self.assertEqual(child["KEEPWORK_D3D_VERIFY_FILE"], str(Path("candidate.dll")))
+                self.assertEqual(inherited, original)
+
+    @unittest.skipUnless(sys.platform == "win32" and os.environ.get("KEEPWORK_WIN7_SDK81_D3D_DLL"),
+                         "Requires Windows and the actual pinned Microsoft SDK 8.1 redistributable")
+    def test_native_windows_authenticode_survives_a_parent_powershell7_module_path(self):
+        # This checks build-host Authenticode/module loading, never native legacy
+        # OS/CEF acceptance. The real Microsoft signature gate is not mocked.
+        candidate = Path(os.environ["KEEPWORK_WIN7_SDK81_D3D_DLL"])
+        data = candidate.read_bytes()
+        self.assertEqual(len(data), module.SOURCE["dllSize"])
+        self.assertEqual(hashlib.sha256(data).hexdigest(), module.SOURCE["dllSha256"])
+        powershell7_modules = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell" / "7" / "Modules")
+        with patch.dict(os.environ, {"PSModulePath": powershell7_modules}):
+            before = dict(os.environ)
+            self.assertTrue(module.verify_authenticode(candidate))
+            self.assertEqual(dict(os.environ), before)
+
     def test_non_windows_signature_verification_is_explicitly_unverified(self):
         with patch.object(module, "os", SimpleNamespace(name="posix")), patch.object(module.subprocess, "run") as process:
             self.assertIs(module.verify_authenticode(Path("not-read-on-this-host.dll")), False)
@@ -193,6 +227,7 @@ class RedistTests(unittest.TestCase):
         with patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as process:
             module.verify_authenticode(Path("signature-gate-fixture.dll"))
         invocation = list(process.call_args.args[0])
+        environment = dict(process.call_args.kwargs["env"])
         command = invocation[-1]
         scenarios = [
             ("Valid", "CN=Microsoft Corporation, O=Microsoft Corporation", True),
@@ -210,7 +245,7 @@ class RedistTests(unittest.TestCase):
                 fixture = "function Get-AuthenticodeSignature { param([string]$LiteralPath); return " + signature + " }; "
                 result = subprocess.run(invocation[:-1] + [fixture + command], capture_output=True,
                                         text=True, encoding="utf-8", errors="replace", timeout=20,
-                                        env={**os.environ, "KEEPWORK_D3D_VERIFY_FILE": "signature-gate-fixture.dll"})
+                                        env=environment)
                 self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
                 diagnostic = json.loads(result.stdout.strip().lstrip("\ufeff"))
                 self.assertEqual(diagnostic["status"], status)
