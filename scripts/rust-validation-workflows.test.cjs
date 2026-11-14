@@ -139,7 +139,9 @@ test('launcher-only diagnosis audits actual executable bytes and retains failed-
   assert.match(launcher, /-DCMAKE_SYSTEM_VERSION=10\.0\.22621\.0\b/);
   assert.match(launcher, /Get-Content launcher-diagnostic\/_deps\/miniz-build\/miniz\.vcxproj -Raw/);
   assert.match(launcher, /ctest --test-dir launcher-diagnostic -C Release --output-on-failure/);
-  assert.match(launcher, /node scripts\/lib\/windows7-pe\.cjs launcher-diagnostic\/Release\/Keepwork\.exe --output launcher-diagnostic\/pe-report\.json/);
+  assert.match(launcher, /node scripts\/lib\/windows7-pe\.cjs launcher-diagnostic\/Release --output launcher-diagnostic\/pe-report\.json/);
+  assert.doesNotMatch(launcher, /windows7-pe\.cjs\s+['"]?[^'"\s]*\.exe(?:['"]?\s|$)/i,
+    'the audit CLI receives the Release directory so every executable is checked');
   const artifact = launcher.slice(launcher.indexOf('uses: actions/upload-artifact@v4'));
   assert.match(artifact, /if: always\(\)/);
   for (const file of ['Release/*.exe', 'Release/*.map', 'CMakeCache.txt', 'pe-report.json']) {

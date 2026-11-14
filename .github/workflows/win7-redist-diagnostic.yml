@@ -42,7 +42,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir launcher-diagnostic -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/lib/windows7-pe.cjs launcher-diagnostic/Release/Keepwork.exe --output launcher-diagnostic/pe-report.json
+          node scripts/lib/windows7-pe.cjs launcher-diagnostic/Release --output launcher-diagnostic/pe-report.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
