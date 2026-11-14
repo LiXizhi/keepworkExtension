@@ -108,14 +108,24 @@ def verify_authenticode(file):
         return False
     command = (
         "$s = Get-AuthenticodeSignature -LiteralPath $env:KEEPWORK_D3D_VERIFY_FILE; "
+        "[ordered]@{status=[string]$s.Status; statusMessage=$s.StatusMessage; "
+        "signerSubject=$s.SignerCertificate.Subject; signerIssuer=$s.SignerCertificate.Issuer; "
+        "signerThumbprint=$s.SignerCertificate.Thumbprint; "
+        "timestampSubject=$s.TimeStamperCertificate.Subject; "
+        "timestampThumbprint=$s.TimeStamperCertificate.Thumbprint} | ConvertTo-Json -Compress; "
         "if ($s.Status -ne 'Valid' -or $null -eq $s.SignerCertificate -or "
         "$s.SignerCertificate.Subject -notmatch '(^|, )CN=Microsoft Corporation(,|$)') "
         "{ throw 'Microsoft D3DCompiler Authenticode validation failed' }"
     )
     environment = {**os.environ, "KEEPWORK_D3D_VERIFY_FILE": str(file)}
     executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command", command],
-                   env=environment, check=True, capture_output=True, timeout=60)
+    result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command", command],
+                            env=environment, capture_output=True, timeout=60,
+                            text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError("Microsoft D3DCompiler Authenticode validation failed "
+                           f"(exit {result.returncode}); stdout={result.stdout[:4096]!r}; "
+                           f"stderr={result.stderr[:4096]!r}")
     return True
 
 

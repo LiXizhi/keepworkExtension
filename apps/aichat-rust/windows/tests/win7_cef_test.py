@@ -3,9 +3,12 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -113,6 +116,105 @@ class RedistTests(unittest.TestCase):
                     module.prepare(payload, cache)
             audit.assert_not_called()
             self.assertEqual((payload / "d3dcompiler_47.dll").read_bytes(), b"original CEF SDK DLL")
+
+    def test_windows_signature_failure_retains_diagnostics_and_never_stages_payload(self):
+        diagnostic = json.dumps({"status": "UnknownError", "statusMessage": "Unable to build the certificate chain",
+                                 "signerSubject": "CN=Microsoft Corporation", "signerIssuer": "Microsoft Code Signing PCA"})
+        result = subprocess.CompletedProcess(["powershell"], 1, diagnostic, "CERT_E_CHAINING 0x800b010a")
+        with tempfile.TemporaryDirectory() as temporary:
+            payload, cache = self.fixture(Path(temporary)); cache.mkdir()
+            windows = SimpleNamespace(name="nt", environ={"SystemRoot": str(Path(temporary) / "Windows")})
+            with patch.object(module, "os", windows), patch.object(module, "download", return_value=cache / "sdk.cab"), \
+                    patch.object(module, "extract", return_value=b"DLL"), \
+                    patch.object(module.subprocess, "run", return_value=result), patch.object(module, "audit") as audit:
+                with self.assertRaises(RuntimeError) as failure:
+                    module.prepare(payload, cache)
+            message = str(failure.exception)
+            for detail in ["exit 1", "UnknownError", "Unable to build the certificate chain", "Microsoft Code Signing PCA", "CERT_E_CHAINING"]:
+                self.assertIn(detail, message)
+            audit.assert_not_called()
+            self.assertEqual((payload / "d3dcompiler_47.dll").read_bytes(), b"original CEF SDK DLL")
+            self.assertFalse((payload / "d3dcompiler-redist-lock.json").exists())
+            self.assertFalse((payload / "D3DCOMPILER-REDIST-NOTICE.txt").exists())
+
+    def test_windows_signature_failure_bounds_both_captured_output_streams(self):
+        result = subprocess.CompletedProcess(["powershell"], 3,
+                                             "S" * 4096 + "STDOUT_AFTER_LIMIT",
+                                             "E" * 4096 + "STDERR_AFTER_LIMIT")
+        windows = SimpleNamespace(name="nt", environ={"SystemRoot": "test-system-root"})
+        with patch.object(module, "os", windows), patch.object(module.subprocess, "run", return_value=result):
+            with self.assertRaises(RuntimeError) as failure:
+                module.verify_authenticode(Path("candidate.dll"))
+        message = str(failure.exception)
+        self.assertIn("exit 3", message)
+        self.assertIn("S" * 4096, message)
+        self.assertIn("E" * 4096, message)
+        self.assertNotIn("STDOUT_AFTER_LIMIT", message)
+        self.assertNotIn("STDERR_AFTER_LIMIT", message)
+        self.assertLessEqual(len(message), 2 * 4096 + 256)
+
+    def test_windows_signature_success_uses_the_literal_file_environment(self):
+        result = subprocess.CompletedProcess(["powershell"], 0,
+                                             json.dumps({"status": "Valid", "signerSubject": "CN=Microsoft Corporation"}), "")
+        windows = SimpleNamespace(name="nt", environ={"SystemRoot": "test-system-root", "INHERITED_MARKER": "preserved"})
+        candidate = Path("directory with spaces") / "literal '$()' candidate.dll"
+        with patch.object(module, "os", windows), patch.object(module.subprocess, "run", return_value=result) as process:
+            self.assertTrue(module.verify_authenticode(candidate))
+        args, options = process.call_args
+        self.assertEqual(options["env"]["KEEPWORK_D3D_VERIFY_FILE"], str(candidate))
+        self.assertEqual(options["env"]["INHERITED_MARKER"], "preserved")
+        self.assertNotIn(str(candidate), args[0][-1])
+        self.assertNotIn("KEEPWORK_D3D_VERIFY_FILE", windows.environ)
+
+    def test_non_windows_signature_verification_is_explicitly_unverified(self):
+        with patch.object(module, "os", SimpleNamespace(name="posix")), patch.object(module.subprocess, "run") as process:
+            self.assertIs(module.verify_authenticode(Path("not-read-on-this-host.dll")), False)
+        process.assert_not_called()
+
+    def test_windows_signature_timeout_never_stages_payload_or_writes_success_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            payload, cache = self.fixture(Path(temporary)); cache.mkdir()
+            windows = SimpleNamespace(name="nt", environ={"SystemRoot": str(Path(temporary) / "Windows")})
+            with patch.object(module, "os", windows), patch.object(module, "download", return_value=cache / "sdk.cab"), \
+                    patch.object(module, "extract", return_value=b"DLL"), \
+                    patch.object(module.subprocess, "run", side_effect=subprocess.TimeoutExpired("powershell", 60)), \
+                    patch.object(module, "audit") as audit:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    module.prepare(payload, cache)
+            audit.assert_not_called()
+            self.assertEqual((payload / "d3dcompiler_47.dll").read_bytes(), b"original CEF SDK DLL")
+            self.assertFalse((payload / "d3dcompiler-redist-lock.json").exists())
+            self.assertFalse((payload / "D3DCOMPILER-REDIST-NOTICE.txt").exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Runs the real PowerShell gate against simulated signature objects on Windows")
+    def test_powershell_gate_requires_valid_status_and_the_actual_microsoft_publisher(self):
+        # Exercise the production command's real PowerShell decisions. The
+        # supplied certificate objects are fixtures, not native trust evidence.
+        with patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as process:
+            module.verify_authenticode(Path("signature-gate-fixture.dll"))
+        invocation = list(process.call_args.args[0])
+        command = invocation[-1]
+        scenarios = [
+            ("Valid", "CN=Microsoft Corporation, O=Microsoft Corporation", True),
+            ("Valid", "O=Microsoft Corporation, CN=Microsoft Corporation", True),
+            ("UnknownError", "CN=Microsoft Corporation", False),
+            ("HashMismatch", "CN=Microsoft Corporation", False),
+            ("Valid", "CN=Other Publisher, O=Microsoft Corporation", False),
+            ("Valid", "CN=Microsoft Corporation Impostor, O=Microsoft Corporation", False),
+            ("Valid", None, False),
+        ]
+        for status, subject, accepted in scenarios:
+            with self.subTest(status=status, subject=subject):
+                certificate = "$null" if subject is None else "@{Subject='" + subject + "';Issuer='fixture issuer';Thumbprint='fixture thumbprint'}"
+                signature = "@{Status='" + status + "';StatusMessage='fixture status';SignerCertificate=" + certificate + ";TimeStamperCertificate=$null}"
+                fixture = "function Get-AuthenticodeSignature { param([string]$LiteralPath); return " + signature + " }; "
+                result = subprocess.run(invocation[:-1] + [fixture + command], capture_output=True,
+                                        text=True, encoding="utf-8", errors="replace", timeout=20,
+                                        env={**os.environ, "KEEPWORK_D3D_VERIFY_FILE": "signature-gate-fixture.dll"})
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+                diagnostic = json.loads(result.stdout.strip().lstrip("\ufeff"))
+                self.assertEqual(diagnostic["status"], status)
+                self.assertEqual(diagnostic["signerSubject"], subject)
 
     def test_rejects_other_hosts_before_network(self):
         for host in [{"cefMajor": 143, "arch": "x64", "sandbox": "cef_sandbox"}, {"cefMajor": 109, "arch": "x86", "sandbox": "cef_sandbox"}, {"cefMajor": 109, "arch": "x64", "sandbox": "disabled"}]:

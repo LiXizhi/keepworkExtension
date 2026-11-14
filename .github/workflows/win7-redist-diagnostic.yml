@@ -1,0 +1,47 @@
+name: Diagnose legacy Microsoft redistributable signature
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signature:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify the pinned official SDK DLL without executing or publishing it
+        shell: pwsh
+        run: |
+          @'
+          import importlib.util
+          from pathlib import Path
+          import tempfile
+          spec = importlib.util.spec_from_file_location('redist', 'apps/aichat-rust/scripts/prepare-win7-cef.py')
+          redist = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(redist)
+          with tempfile.TemporaryDirectory(dir='.') as root:
+              root = Path(root)
+              archive = redist.download(root / 'cache')
+              directory = root / 'extracted'
+              directory.mkdir()
+              data = redist.extract(archive, directory)
+              dll = directory / 'd3dcompiler_47.dll'
+              dll.write_bytes(data)
+              failures = 0
+              for name, candidate in [('relative', dll), ('absolute', dll.resolve())]:
+                  try:
+                      redist.verify_authenticode(candidate)
+                      print(name + ': pinned Microsoft SDK DLL native Authenticode validation passed')
+                  except Exception as error:
+                      failures += 1
+                      print(name + ': ' + str(error))
+              if failures:
+                  raise RuntimeError('Native signature diagnostic failed for ' + str(failures) + ' path forms')
+          '@ | python
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
