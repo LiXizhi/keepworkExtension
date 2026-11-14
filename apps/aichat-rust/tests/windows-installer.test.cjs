@@ -18,15 +18,27 @@ function maintenanceFunction() {
   return match[0];
 }
 
+function upstreamTemplateHash(source) {
+  // Git's Windows checkout may use CRLF; lock the upstream text independently
+  // of checkout line endings without ignoring any other content changes.
+  const normalized = source.replace(/\r\n/g, '\n');
+  const upstream = normalized.slice(normalized.indexOf('Unicode true'))
+    .replace('      !insertmacro KEEPWORK_PREPARE_OLD_UNINSTALL "$4"\n', '');
+  return createHash('sha256').update(upstream).digest('hex');
+}
+
 test('maintenance uninstall stops the old installation before its legacy uninstaller runs', () => {
   const config = JSON.parse(fs.readFileSync(path.join(tauriRoot, 'tauri.windows.conf.json'), 'utf8'));
   assert.equal(config.bundle.windows.nsis.template, 'windows/installer.nsi');
   const source = fs.readFileSync(template, 'utf8');
-  const upstream = source.slice(source.indexOf('Unicode true'))
-    .replace('      !insertmacro KEEPWORK_PREPARE_OLD_UNINSTALL "$4"\n', '');
-  assert.equal(createHash('sha256').update(upstream).digest('hex'),
-    'd00089d3b1a2c4a30d7b6e098079100cb8f25e980f84d4515aca4597b95e967d',
-    'keep the vendored Tauri template intact apart from the explicit old-uninstaller handoff');
+  const expectedHash = 'd00089d3b1a2c4a30d7b6e098079100cb8f25e980f84d4515aca4597b95e967d';
+  for (const newline of ['\n', '\r\n']) {
+    const checkout = source.replace(/\r?\n/g, newline);
+    assert.equal(upstreamTemplateHash(checkout), expectedHash,
+      'keep the vendored Tauri template intact apart from the explicit old-uninstaller handoff');
+    assert.notEqual(upstreamTemplateHash(checkout.replace('Unicode true', 'Unicode false')), expectedHash,
+      'line-ending normalization must still reject changes to upstream template content');
+  }
   const body = maintenanceFunction();
   assert.match(body, /reinst_uninstall:[\s\S]*?ReadRegStr \$4 SHCTX "\$\{MANUPRODUCTKEY\}" ""\s+!insertmacro KEEPWORK_PREPARE_OLD_UNINSTALL "\$4"\s+ReadRegStr \$R1 SHCTX "\$\{UNINSTKEY\}" "UninstallString"[\s\S]*?ExecWait '\$R1' \$0/,
     'PREINSTALL is too late: stop the old install before the selected maintenance uninstall');
