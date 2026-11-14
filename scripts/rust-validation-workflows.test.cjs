@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 // Git's Windows checkout may use CRLF. Validate the same workflow contract on
 // every host instead of treating a checkout's line endings as a CI regression.
@@ -112,6 +113,84 @@ test('the legacy workflow has only a reusable trigger and is selected through th
   assert.doesNotMatch(triggers, /^  (?:workflow_dispatch|push|pull_request):/m);
   assert.match(reusable, /contents: read/);
   assert.doesNotMatch(reusable, /contents: write|gh release|--publish true|KP_QINIU/);
+});
+
+test('legacy packaging pins the Windows 2022 host, v143 compiler and Windows SDK for both native builds', () => {
+  const source = workflow('aichat-rust-win7.yml');
+  assert.match(jobBody(source, 'build'), /runs-on: windows-2022\b/);
+  const toolchain = source.match(/      - uses: ilammy\/msvc-dev-cmd@v1\n        with:\n((?:          .+\n)+)/)?.[1];
+  assert.ok(toolchain, 'the legacy job must configure its own native toolchain');
+  assert.match(toolchain, /vsversion: ['"]?2022['"]?/);
+  assert.match(toolchain, /toolset: ['"]?14\.44['"]?/);
+  assert.match(toolchain, /sdk: ['"]?10\.0\.22621\.0['"]?/);
+  const cefConfigure = source.split('\n').find(line => line.trim().startsWith('cmake -S apps/aichat-rust/windows/cef-host '));
+  assert.ok(cefConfigure, 'the actual legacy CEF configure call must be present');
+  assert.match(cefConfigure, /-G ['"]Visual Studio 17 2022['"]/);
+  assert.match(cefConfigure, /-T ['"]v143,version=14\.44['"]/);
+  assert.match(cefConfigure, /-DCMAKE_SYSTEM_VERSION=10\.0\.22621\.0\b/);
+});
+
+test('launcher-only diagnosis audits actual executable bytes and retains failed-build evidence without publishing', () => {
+  const source = workflow('win7-redist-diagnostic.yml');
+  const launcher = jobBody(source, 'launcher');
+  assert.match(launcher, /runs-on: windows-2022\b/);
+  assert.match(launcher, /-G ['"]Visual Studio 17 2022['"]/);
+  assert.match(launcher, /-T ['"]v143,version=14\.44['"]/);
+  assert.match(launcher, /-DCMAKE_SYSTEM_VERSION=10\.0\.22621\.0\b/);
+  assert.match(launcher, /Get-Content launcher-diagnostic\/_deps\/miniz-build\/miniz\.vcxproj -Raw/);
+  assert.match(launcher, /ctest --test-dir launcher-diagnostic -C Release --output-on-failure/);
+  assert.match(launcher, /node scripts\/lib\/windows7-pe\.cjs launcher-diagnostic\/Release\/Keepwork\.exe --output launcher-diagnostic\/pe-report\.json/);
+  const artifact = launcher.slice(launcher.indexOf('uses: actions/upload-artifact@v4'));
+  assert.match(artifact, /if: always\(\)/);
+  for (const file of ['Release/*.exe', 'Release/*.map', 'CMakeCache.txt', 'pe-report.json']) {
+    assert.ok(artifact.includes('launcher-diagnostic/' + file), 'retain ' + file);
+  }
+  assert.doesNotMatch(source, /contents: write|secrets\.|gh release|--publish true|KP_QINIU/);
+});
+
+test('the launcher build explicitly selects the compatible toolchain instead of inheriting the host default', t => {
+  const { buildWin7 } = require('../apps/aichat-rust/scripts/build-win7.cjs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-win7-configure-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const keyFile = path.join(directory, 'fixture-private.pem');
+  const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  fs.writeFileSync(keyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const stopped = new Error('fixture stops before compilation, packaging or signing');
+  const calls = [];
+  assert.throws(() => buildWin7({ mcpDirectory: path.join(directory, 'unused-runtime'),
+    output: path.join(directory, 'new-build'), privateKeyFile: keyFile }, {
+    platform: 'win32',
+    exec(command, args) { calls.push({ command, args }); throw stopped; },
+  }), error => error === stopped);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'cmake');
+  const { args } = calls[0];
+  for (const [flag, value] of [['-G', 'Visual Studio 17 2022'], ['-A', 'x64'], ['-T', 'v143,version=14.44']]) {
+    assert.equal(args[args.indexOf(flag) + 1], value, flag);
+  }
+  assert.ok(args.includes('-DCMAKE_SYSTEM_VERSION=10.0.22621.0'));
+  assert.ok(args.includes('-DKEEPWORK_WIN7_EDITION=ON'));
+});
+
+test('the actual legacy CMake guard rejects unsupported newer STL toolsets before dependency setup', t => {
+  const source = fs.readFileSync(path.join(__dirname, '../apps/aichat-rust/windows/CMakeLists.txt'), 'utf8').replace(/\r\n?/g, '\n');
+  const guard = source.match(/  if\(KEEPWORK_WIN7_EDITION AND MSVC_VERSION GREATER_EQUAL 1950\)\n[\s\S]*?  endif\(\)/)?.[0];
+  assert.ok(guard, 'the legacy configuration must reject MSVC 14.50 and newer');
+  assert.ok(source.indexOf(guard) < source.indexOf('FetchContent_MakeAvailable('), 'fail before fetching/building dependencies');
+  for (const definition of ['WINVER=0x0601', '_WIN32_WINNT=0x0601']) {
+    assert.ok(source.indexOf(definition) >= 0 && source.indexOf(definition) < source.indexOf('FetchContent_MakeAvailable('),
+      'dependency targets must inherit ' + definition);
+  }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-win7-toolset-guard-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const [legacy, compiler, accepted] of [[true, 1944, true], [true, 1950, false], [true, 1951, false], [false, 1951, true]]) {
+    const script = path.join(directory, `guard-${legacy}-${compiler}.cmake`);
+    fs.writeFileSync(script, `set(KEEPWORK_WIN7_EDITION ${legacy ? 'ON' : 'OFF'})\nset(MSVC_VERSION ${compiler})\n${guard}\n`);
+    const result = spawnSync('cmake', ['-P', script], { encoding: 'utf8', timeout: 10000 });
+    assert.ifError(result.error);
+    assert.equal(result.status === 0, accepted, `legacy=${legacy}, compiler=${compiler}: ${result.stdout}${result.stderr}`);
+    if (!accepted) assert.match((result.stdout + result.stderr).replace(/\s+/g, ' '), /MSVC 14\.50\+ no longer targets these systems/);
+  }
 });
 
 test('wire contract CI builds and requires Node reference and retains failed command receipts', () => {

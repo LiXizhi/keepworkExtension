@@ -19,7 +19,7 @@ permissions:
 jobs:
   build:
     name: Win7 SP1 / Win8 / Win8.1 x64 package
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 90
     defaults:
       run:
@@ -37,6 +37,9 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          vsversion: '2022'
+          toolset: '14.44'
+          sdk: '10.0.22621.0'
       - name: Install the pinned Rust toolchain and Win7 standard-library sources
         id: toolchain
         run: |
@@ -107,7 +110,7 @@ jobs:
           python apps/aichat-rust/scripts/fetch-cef-sdk.py --channel legacy --arch x64 --output win7-cef-sdk
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $sdk = (Get-Content win7-cef-sdk/cef-root.txt -Raw).Trim()
-          cmake -S apps/aichat-rust/windows/cef-host -B win7-cef-build -A x64 "-DCEF_ROOT=$sdk" -DPROJECT_ARCH=x86_64
+          cmake -S apps/aichat-rust/windows/cef-host -B win7-cef-build -G "Visual Studio 17 2022" -A x64 -T "v143,version=14.44" -DCMAKE_SYSTEM_VERSION=10.0.22621.0 "-DCEF_ROOT=$sdk" -DPROJECT_ARCH=x86_64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build win7-cef-build --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -152,7 +155,9 @@ jobs:
             productionTrustRoot = ($env:LEGACY_SIGNING_MODE -eq 'production')
             commit = $env:GITHUB_SHA
             runId = $env:GITHUB_RUN_ID
-            buildHost = 'windows-latest'
+            buildHost = 'windows-2022'
+            msvcToolset = '14.44'
+            windowsSdk = '10.0.22621.0'
             nativeWin7Verified = $false
             nativeWin8Verified = $false
             nativeWin81Verified = $false
