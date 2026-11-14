@@ -1,0 +1,74 @@
+[
+  {
+    "kind": "selection",
+    "path": "/verified",
+    "value": true,
+    "reason": "additional property cannot confer authority"
+  },
+  {
+    "kind": "selection",
+    "path": "/accountId",
+    "value": "",
+    "reason": "empty account"
+  },
+  {
+    "kind": "conversation",
+    "path": "/requestId",
+    "value": null,
+    "reason": "missing retry identity"
+  },
+  {
+    "kind": "voiceOutput",
+    "path": "/leaseGeneration",
+    "value": 0,
+    "reason": "invalid fence"
+  },
+  {
+    "kind": "resumeIntent",
+    "path": "/action",
+    "value": "automatic-reconnect",
+    "reason": "automatic restart"
+  },
+  {
+    "kind": "migration",
+    "path": "/messages/0/role",
+    "value": "system",
+    "reason": "system records excluded"
+  },
+  {
+    "kind": "migration",
+    "path": "/messages/0/fileUrl",
+    "value": "file:///private/data",
+    "reason": "no file references"
+  },
+  {
+    "kind": "migration",
+    "path": "/kind",
+    "value": "private-agent",
+    "reason": "private history excluded"
+  },
+  {
+    "kind": "usage",
+    "path": "/unit",
+    "value": "seconds",
+    "reason": "billing units not agreed"
+  },
+  {
+    "kind": "assetManifest",
+    "path": "/poses/error",
+    "value": null,
+    "reason": "missing required pose"
+  },
+  {
+    "kind": "assetManifest",
+    "path": "/labels/fr-FR",
+    "value": null,
+    "reason": "missing launch locale"
+  },
+  {
+    "kind": "assetManifest",
+    "path": "/poster/path",
+    "value": "../secret.png",
+    "reason": "traversal"
+  }
+]

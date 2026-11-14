@@ -1,0 +1,385 @@
+{
+  "format": "ai-pet.dev.checkpoint-scenarios.v1",
+  "status": "unpublished-offline-only",
+  "scenarios": [
+    {
+      "id": "unknown-query-only",
+      "checkpoint": {
+        "format": "ai-pet.dev.checkpoint.v1",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "previousActivations": [
+          "activation-1"
+        ],
+        "state": {
+          "draft": "",
+          "commands": [
+            {
+              "requestId": "r1",
+              "turnId": "t1",
+              "text": "Synthetic pending",
+              "status": "unknown",
+              "attempt": 1
+            }
+          ],
+          "messages": [],
+          "cursor": 0,
+          "gap": false,
+          "recoveryTarget": 0,
+          "events": [],
+          "cancelled": [],
+          "deletedMessageIds": [],
+          "deletedSourceKeys": [],
+          "deleted": false
+        },
+        "integritySha256": "5e1bc0eb014e6d7a0f1c7ced220ce1c34829db39ed55908d03d0c36955637c56"
+      },
+      "host": {
+        "expectedBinding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "freshEpoch": "activation-2"
+      },
+      "expectState": {
+        "epoch": "activation-2",
+        "commands": [
+          {
+            "requestId": "r1",
+            "turnId": "t1",
+            "status": "unknown",
+            "attempt": 1
+          }
+        ]
+      },
+      "nextAction": {
+        "type": "dispatch",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "epoch": "activation-2",
+        "requestId": "r1"
+      },
+      "expectNextEffects": [
+        {
+          "type": "query-outcome",
+          "requestId": "r1",
+          "attempt": 1
+        }
+      ]
+    },
+    {
+      "id": "deleted-remains-terminal",
+      "checkpoint": {
+        "format": "ai-pet.dev.checkpoint.v1",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "previousActivations": [
+          "activation-1"
+        ],
+        "state": {
+          "draft": "",
+          "commands": [
+            {
+              "requestId": "r1",
+              "turnId": "t1",
+              "status": "deleted",
+              "attempt": 1
+            }
+          ],
+          "messages": [],
+          "cursor": 1,
+          "gap": false,
+          "recoveryTarget": 0,
+          "events": [
+            "a804be362714fe5e2513e69c564faa094b937143a8af09a4253abe50c71a6c62"
+          ],
+          "cancelled": [],
+          "deletedMessageIds": [],
+          "deletedSourceKeys": [],
+          "deleted": true
+        },
+        "integritySha256": "7179c9bfcef41c7e2f324e7db79022c0cf88cce53a4c3de31e8971d5f0d8dba1"
+      },
+      "host": {
+        "expectedBinding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "freshEpoch": "activation-2"
+      },
+      "expectState": {
+        "deleted": true,
+        "draft": "",
+        "messages": [],
+        "commands": [
+          {
+            "requestId": "r1",
+            "status": "deleted"
+          }
+        ]
+      },
+      "nextAction": {
+        "type": "server",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "epoch": "activation-2",
+        "event": {
+          "sequence": 2,
+          "kind": "import-snapshot",
+          "messages": [
+            {
+              "messageId": "late",
+              "sourceKey": "source1",
+              "requestId": "r1",
+              "turnId": "t1",
+              "role": "user",
+              "text": "Synthetic pending"
+            }
+          ]
+        }
+      },
+      "expectNextState": {
+        "messages": [],
+        "deleted": true
+      }
+    },
+    {
+      "id": "gap-preserved",
+      "checkpoint": {
+        "format": "ai-pet.dev.checkpoint.v1",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "previousActivations": [
+          "activation-1"
+        ],
+        "state": {
+          "draft": "",
+          "commands": [
+            {
+              "requestId": "r1",
+              "turnId": "t1",
+              "text": "Synthetic pending",
+              "status": "unknown",
+              "attempt": 1
+            }
+          ],
+          "messages": [],
+          "cursor": 0,
+          "gap": true,
+          "recoveryTarget": 3,
+          "events": [],
+          "cancelled": [],
+          "deletedMessageIds": [],
+          "deletedSourceKeys": [],
+          "deleted": false
+        },
+        "integritySha256": "87743ccfd3cf3a1399af722a196902e35d2c97ada0b97b5312d0184c9d960552"
+      },
+      "host": {
+        "expectedBinding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "freshEpoch": "activation-2"
+      },
+      "expectState": {
+        "cursor": 0,
+        "gap": true,
+        "recoveryTarget": 3
+      }
+    },
+    {
+      "id": "wrong-host-account",
+      "checkpoint": {
+        "format": "ai-pet.dev.checkpoint.v1",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "previousActivations": [
+          "activation-1"
+        ],
+        "state": {
+          "draft": "",
+          "commands": [
+            {
+              "requestId": "r1",
+              "turnId": "t1",
+              "text": "Synthetic pending",
+              "status": "unknown",
+              "attempt": 1
+            }
+          ],
+          "messages": [],
+          "cursor": 0,
+          "gap": false,
+          "recoveryTarget": 0,
+          "events": [],
+          "cancelled": [],
+          "deletedMessageIds": [],
+          "deletedSourceKeys": [],
+          "deleted": false
+        },
+        "integritySha256": "5e1bc0eb014e6d7a0f1c7ced220ce1c34829db39ed55908d03d0c36955637c56"
+      },
+      "host": {
+        "expectedBinding": {
+          "accountId": "other",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "freshEpoch": "activation-2"
+      },
+      "expectError": "checkpoint-host-binding"
+    },
+    {
+      "id": "saved-activation-rejected",
+      "checkpoint": {
+        "format": "ai-pet.dev.checkpoint.v1",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "previousActivations": [
+          "activation-1"
+        ],
+        "state": {
+          "draft": "",
+          "commands": [
+            {
+              "requestId": "r1",
+              "turnId": "t1",
+              "text": "Synthetic pending",
+              "status": "unknown",
+              "attempt": 1
+            }
+          ],
+          "messages": [],
+          "cursor": 0,
+          "gap": false,
+          "recoveryTarget": 0,
+          "events": [],
+          "cancelled": [],
+          "deletedMessageIds": [],
+          "deletedSourceKeys": [],
+          "deleted": false
+        },
+        "integritySha256": "5e1bc0eb014e6d7a0f1c7ced220ce1c34829db39ed55908d03d0c36955637c56"
+      },
+      "host": {
+        "expectedBinding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "freshEpoch": "activation-1"
+      },
+      "expectError": "checkpoint-activation-reuse"
+    },
+    {
+      "id": "old-callback-rejected",
+      "checkpoint": {
+        "format": "ai-pet.dev.checkpoint.v1",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "previousActivations": [
+          "activation-1"
+        ],
+        "state": {
+          "draft": "",
+          "commands": [
+            {
+              "requestId": "r1",
+              "turnId": "t1",
+              "text": "Synthetic pending",
+              "status": "unknown",
+              "attempt": 1
+            }
+          ],
+          "messages": [],
+          "cursor": 0,
+          "gap": false,
+          "recoveryTarget": 0,
+          "events": [],
+          "cancelled": [],
+          "deletedMessageIds": [],
+          "deletedSourceKeys": [],
+          "deleted": false
+        },
+        "integritySha256": "5e1bc0eb014e6d7a0f1c7ced220ce1c34829db39ed55908d03d0c36955637c56"
+      },
+      "host": {
+        "expectedBinding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "freshEpoch": "activation-2"
+      },
+      "nextAction": {
+        "type": "dispatch",
+        "binding": {
+          "accountId": "dev-a",
+          "homeRegion": "dev-region",
+          "characterId": "dev-character",
+          "characterVersion": "1",
+          "conversationId": "dev-conversation"
+        },
+        "epoch": "activation-1",
+        "requestId": "r1"
+      },
+      "expectNextError": "stale-history-context"
+    }
+  ]
+}

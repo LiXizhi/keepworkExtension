@@ -1,0 +1,926 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:keepwork:ai-pet:unpublished:dev:v1",
+  "$comment": "UNPUBLISHED candidate. Shape is not authentication. No canonical service agreement.",
+  "$defs": {
+    "account": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "locale": {
+          "$ref": "#/$defs/locale"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "locale"
+      ],
+      "additionalProperties": true
+    },
+    "locale": {
+      "type": "string",
+      "enum": [
+        "zh-CN",
+        "en-US",
+        "es-ES",
+        "ko-KR",
+        "ja-JP",
+        "fr-FR"
+      ]
+    },
+    "selection": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "appearanceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "appearanceVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "characterId",
+        "characterVersion",
+        "appearanceId",
+        "appearanceVersion"
+      ],
+      "additionalProperties": false
+    },
+    "conversation": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "conversationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "append",
+            "cancel",
+            "status"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "characterId",
+        "characterVersion",
+        "conversationId",
+        "requestId",
+        "turnId",
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "minItems": 1,
+            "maxItems": 20
+          }
+        }
+      },
+      "required": [
+        "contractVersion"
+      ],
+      "additionalProperties": true
+    },
+    "voiceLease": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "conversationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "sessionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "leaseGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "turnGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "expiresAtMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "paused",
+            "ended"
+          ]
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "characterId",
+        "characterVersion",
+        "conversationId",
+        "requestId",
+        "turnId",
+        "sessionId",
+        "leaseGeneration",
+        "turnGeneration",
+        "deviceId",
+        "expiresAtMs",
+        "state"
+      ],
+      "additionalProperties": true
+    },
+    "voiceOutput": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "conversationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "sessionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "leaseGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "turnGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "text",
+            "audio",
+            "end"
+          ]
+        },
+        "payload": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "characterId",
+        "characterVersion",
+        "conversationId",
+        "requestId",
+        "turnId",
+        "sessionId",
+        "leaseGeneration",
+        "turnGeneration",
+        "sequence",
+        "kind"
+      ],
+      "additionalProperties": true
+    },
+    "resumeIntent": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "conversationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "sessionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "leaseGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "turnGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "intentId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "action": {
+          "const": "user-resume"
+        },
+        "pauseRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "characterId",
+        "characterVersion",
+        "conversationId",
+        "requestId",
+        "turnId",
+        "sessionId",
+        "leaseGeneration",
+        "turnGeneration",
+        "deviceId",
+        "intentId",
+        "action",
+        "pauseRevision"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "formatVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "installationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "sourceConversationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "snapshotRevision": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "required": [
+        "format",
+        "formatVersion",
+        "installationId",
+        "sourceConversationId",
+        "snapshotRevision"
+      ],
+      "additionalProperties": false
+    },
+    "migrationMessage": {
+      "type": "object",
+      "properties": {
+        "sourceMessageId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "createdAtMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        },
+        "contentSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "sourceMessageId",
+        "order",
+        "createdAtMs",
+        "role",
+        "text",
+        "contentSha256"
+      ],
+      "additionalProperties": false
+    },
+    "migration": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "batchId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "evidenceRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "kind": {
+          "const": "completed-consumer-history"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/migrationMessage"
+          },
+          "minItems": 1,
+          "maxItems": 200
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "characterId",
+        "characterVersion",
+        "source",
+        "batchId",
+        "evidenceRef",
+        "kind",
+        "messages"
+      ],
+      "additionalProperties": false
+    },
+    "entitlement": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "entitlementId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "allowanceVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "grantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "grantKind": {
+          "type": "string",
+          "enum": [
+            "app-trial",
+            "monthly-subscription"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "pending",
+            "revoked",
+            "expired"
+          ]
+        },
+        "purchaseChannel": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "periodId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "entitlementId",
+        "allowanceVersion",
+        "grantId",
+        "grantKind",
+        "status",
+        "purchaseChannel",
+        "periodId"
+      ],
+      "additionalProperties": true
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "entitlementId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "allowanceVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "periodId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "sessionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "leaseGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reservationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "settlementId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "unit": {
+          "const": "dev-unit-not-billable"
+        },
+        "reservedUnits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "consumedUnits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "contractVersion",
+        "accountId",
+        "homeRegion",
+        "entitlementId",
+        "allowanceVersion",
+        "periodId",
+        "sessionId",
+        "leaseGeneration",
+        "reservationId",
+        "settlementId",
+        "unit",
+        "reservedUnits",
+        "consumedUnits"
+      ],
+      "additionalProperties": false
+    },
+    "assetFile": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\\.(?:png|webp)$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "pose": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "$ref": "#/$defs/assetFile"
+        },
+        "frameCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "frameDurationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "file",
+        "frameCount",
+        "frameDurationMs"
+      ],
+      "additionalProperties": false
+    },
+    "assetManifest": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": "ai-pet.dev.v1"
+        },
+        "appearanceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "appearanceVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "sourceRef": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "licenseRef": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "rightsEvidenceRef": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            }
+          },
+          "required": [
+            "sourceRef",
+            "licenseRef",
+            "rightsEvidenceRef"
+          ],
+          "additionalProperties": false
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "anchor": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "additionalProperties": false
+        },
+        "poster": {
+          "$ref": "#/$defs/assetFile"
+        },
+        "poses": {
+          "type": "object",
+          "properties": {
+            "idle": {
+              "$ref": "#/$defs/pose"
+            },
+            "happy": {
+              "$ref": "#/$defs/pose"
+            },
+            "listening": {
+              "$ref": "#/$defs/pose"
+            },
+            "thinking": {
+              "$ref": "#/$defs/pose"
+            },
+            "speaking": {
+              "$ref": "#/$defs/pose"
+            },
+            "sleeping": {
+              "$ref": "#/$defs/pose"
+            },
+            "error": {
+              "$ref": "#/$defs/pose"
+            }
+          },
+          "required": [
+            "idle",
+            "happy",
+            "listening",
+            "thinking",
+            "speaking",
+            "sleeping",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        "mouthMode": {
+          "const": "amplitude"
+        },
+        "labels": {
+          "type": "object",
+          "properties": {
+            "zh-CN": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "en-US": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "es-ES": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "ko-KR": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "ja-JP": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            },
+            "fr-FR": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32000
+            }
+          },
+          "required": [
+            "zh-CN",
+            "en-US",
+            "es-ES",
+            "ko-KR",
+            "ja-JP",
+            "fr-FR"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "contractVersion",
+        "appearanceId",
+        "appearanceVersion",
+        "characterId",
+        "characterVersion",
+        "provenance",
+        "width",
+        "height",
+        "anchor",
+        "poster",
+        "poses",
+        "mouthMode",
+        "labels"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

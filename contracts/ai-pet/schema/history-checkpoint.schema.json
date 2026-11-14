@@ -1,0 +1,231 @@
+{
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "ai-pet.dev.checkpoint.v1"
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "homeRegion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "characterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "conversationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "required": [
+        "accountId",
+        "homeRegion",
+        "characterId",
+        "characterVersion",
+        "conversationId"
+      ],
+      "additionalProperties": false
+    },
+    "previousActivations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "state": {
+      "type": "object",
+      "properties": {
+        "draft": {
+          "type": "string",
+          "maxLength": 32000
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "turnId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 32000,
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "queued",
+                  "unknown",
+                  "retry-ready",
+                  "accepted",
+                  "cancelled",
+                  "deleted"
+                ]
+              },
+              "attempt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "requestId",
+              "turnId",
+              "status",
+              "attempt"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10000,
+          "uniqueItems": false
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "messageId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "requestId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "turnId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "role": {
+                "enum": [
+                  "user",
+                  "assistant"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 32000,
+                "minLength": 1
+              },
+              "sourceKey": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              }
+            },
+            "required": [
+              "messageId",
+              "requestId",
+              "turnId",
+              "role",
+              "text"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10000,
+          "uniqueItems": false
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "gap": {
+          "type": "boolean"
+        },
+        "recoveryTarget": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "maxItems": 10000,
+          "uniqueItems": false
+        },
+        "cancelled": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "maxItems": 10000,
+          "uniqueItems": true
+        },
+        "deletedMessageIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "maxItems": 10000,
+          "uniqueItems": true
+        },
+        "deletedSourceKeys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "maxItems": 10000,
+          "uniqueItems": true
+        },
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "draft",
+        "commands",
+        "messages",
+        "cursor",
+        "gap",
+        "recoveryTarget",
+        "events",
+        "cancelled",
+        "deletedMessageIds",
+        "deletedSourceKeys",
+        "deleted"
+      ],
+      "additionalProperties": false
+    },
+    "integritySha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "format",
+    "binding",
+    "previousActivations",
+    "state",
+    "integritySha256"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:keepwork:ai-pet:unpublished:checkpoint:v1",
+  "$comment": "Synthetic checkpoint only. Digest is accidental corruption detection, not authentication. Host binding and fresh activation are mandatory at restore."
+}

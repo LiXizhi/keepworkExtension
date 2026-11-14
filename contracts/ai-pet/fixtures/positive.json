@@ -1,0 +1,243 @@
+{
+  "account": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "locale": "ja-JP"
+  },
+  "selection": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "appearanceId": "dev-appearance-a",
+    "appearanceVersion": "1"
+  },
+  "conversation": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "conversationId": "dev-conversation-a",
+    "requestId": "dev-request-a",
+    "turnId": "dev-turn-a",
+    "operation": "append",
+    "text": "Synthetic example"
+  },
+  "capabilities": {
+    "contractVersion": "ai-pet.dev.v1",
+    "capabilities": {
+      "text": [
+        1
+      ],
+      "voice.lease": [
+        1
+      ],
+      "future.feature": [
+        42
+      ]
+    }
+  },
+  "voiceLease": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "conversationId": "dev-conversation-a",
+    "requestId": "dev-request-a",
+    "turnId": "dev-turn-a",
+    "sessionId": "dev-session-a",
+    "leaseGeneration": 2,
+    "turnGeneration": 3,
+    "deviceId": "dev-device-a",
+    "expiresAtMs": 2000,
+    "state": "active"
+  },
+  "voiceOutput": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "conversationId": "dev-conversation-a",
+    "requestId": "dev-request-a",
+    "turnId": "dev-turn-a",
+    "sessionId": "dev-session-a",
+    "leaseGeneration": 2,
+    "turnGeneration": 3,
+    "sequence": 1,
+    "kind": "audio",
+    "payload": "synthetic-no-audio"
+  },
+  "resumeIntent": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "conversationId": "dev-conversation-a",
+    "requestId": "dev-request-a",
+    "turnId": "dev-turn-a",
+    "sessionId": "dev-session-a",
+    "leaseGeneration": 2,
+    "turnGeneration": 3,
+    "deviceId": "dev-device-a",
+    "intentId": "dev-intent-a",
+    "action": "user-resume",
+    "pauseRevision": 1
+  },
+  "migration": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "source": {
+      "format": "dev-export",
+      "formatVersion": "1",
+      "installationId": "dev-install-a",
+      "sourceConversationId": "dev-source-chat-a",
+      "snapshotRevision": "revision-1"
+    },
+    "batchId": "dev-batch-a",
+    "evidenceRef": "dev-evidence-a",
+    "kind": "completed-consumer-history",
+    "messages": [
+      {
+        "sourceMessageId": "dev-message-a",
+        "order": 0,
+        "createdAtMs": 100,
+        "role": "user",
+        "text": "Synthetic example",
+        "contentSha256": "54499a9f3a01995fa3ccd46d851b89936a6cc7419d17a3b3dc4c1f70b274d785"
+      }
+    ]
+  },
+  "entitlement": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "entitlementId": "dev-entitlement-a",
+    "allowanceVersion": "1",
+    "grantId": "dev-grant-a",
+    "grantKind": "app-trial",
+    "status": "active",
+    "purchaseChannel": "dev-no-store",
+    "periodId": "dev-period-a"
+  },
+  "usage": {
+    "contractVersion": "ai-pet.dev.v1",
+    "accountId": "dev-account-a",
+    "homeRegion": "dev-region-a",
+    "entitlementId": "dev-entitlement-a",
+    "allowanceVersion": "1",
+    "periodId": "dev-period-a",
+    "sessionId": "dev-session-a",
+    "leaseGeneration": 2,
+    "reservationId": "dev-reserve-a",
+    "settlementId": "dev-settle-a",
+    "unit": "dev-unit-not-billable",
+    "reservedUnits": 10,
+    "consumedUnits": 3
+  },
+  "assetManifest": {
+    "contractVersion": "ai-pet.dev.v1",
+    "appearanceId": "dev-appearance-a",
+    "appearanceVersion": "1",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "provenance": {
+      "sourceRef": "dev-generated-fixture",
+      "licenseRef": "dev-no-rights-granted",
+      "rightsEvidenceRef": "dev-unverified"
+    },
+    "width": 128,
+    "height": 128,
+    "anchor": {
+      "x": 0.5,
+      "y": 1
+    },
+    "poster": {
+      "path": "synthetic.png",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes": 1
+    },
+    "poses": {
+      "idle": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "happy": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "listening": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "thinking": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "speaking": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "sleeping": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "error": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "bytes": 1
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      }
+    },
+    "mouthMode": "amplitude",
+    "labels": {
+      "zh-CN": "Synthetic pet",
+      "en-US": "Synthetic pet",
+      "es-ES": "Synthetic pet",
+      "ko-KR": "Synthetic pet",
+      "ja-JP": "Synthetic pet",
+      "fr-FR": "Synthetic pet"
+    }
+  }
+}

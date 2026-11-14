@@ -1,0 +1,17 @@
+// Independent product development version. No production bundle ID/signing assigned.
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 3
+AIPET_DEVELOPMENT_VERSION = 0.1.0-dev.3
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+SWIFT_VERSION = 6.0
+ALWAYS_SEARCH_USER_PATHS = NO
+PRODUCT_BUNDLE_IDENTIFIER = com.example.keepwork.aipet.dev
+CODE_SIGNING_ALLOWED = NO
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_KEY_CFBundleDisplayName = AI Pet Dev
+INFOPLIST_KEY_AIPetDevelopmentVersion = $(AIPET_DEVELOPMENT_VERSION)
+INFOPLIST_KEY_UILaunchScreen_Generation = YES
+TARGETED_DEVICE_FAMILY = 1,2
+// Sharing stays unavailable unless the developer configures a real App Group on both targets.
+AIPET_APP_GROUP =
+#include? "Local.xcconfig"

@@ -1,0 +1,64 @@
+{
+  "source": "https://dl.google.com/android/repository/repository2-3.xml",
+  "checkedOn": "2026-11-13",
+  "host": "macos-arm64",
+  "packages": [
+    {
+      "id": "cmdline-tools;19.0",
+      "revision": "19.0",
+      "archive": "commandlinetools-mac-13114758_latest.zip",
+      "sha1": "c3e06a1959762e89167d1cbaa988605f6f7c1d24",
+      "sourceDirectory": "cmdline-tools",
+      "destination": "cmdline-tools/19.0",
+      "sha256": "5673201e6f3869f418eeed3b5cb6c4be7401502bd0aae1b12a29d164d647a54e"
+    },
+    {
+      "id": "platforms;android-35",
+      "revision": "2",
+      "archive": "platform-35_r02.zip",
+      "sha1": "0bb560a90a7a2cbd0dd8348224d518b638fe7949",
+      "sourceDirectory": "android-35",
+      "destination": "platforms/android-35",
+      "sha256": "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0"
+    },
+    {
+      "id": "build-tools;35.0.0",
+      "revision": "35.0.0",
+      "archive": "build-tools_r35_macosx.zip",
+      "sha1": "93ab8ce91230e067b5add4bfa79919c52b27f072",
+      "sourceDirectory": "android-15",
+      "destination": "build-tools/35.0.0",
+      "sha256": "530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48"
+    },
+    {
+      "id": "platform-tools",
+      "revision": "37.0.1",
+      "archive": "platform-tools_r37.0.1-darwin.zip",
+      "sha1": "6ae73f4de6452dc57e62ec02b68eed92a4c21661",
+      "sourceDirectory": "platform-tools",
+      "destination": "platform-tools",
+      "sha256": "ee39ad5967e95c2a07f04dbcbde96b1a0c916ba376096db5d2f498b7727a5d1d"
+    }
+  ],
+  "optionalEmulatorPackages": [
+    {
+      "id": "emulator",
+      "revision": "37.2.13",
+      "archive": "emulator-darwin_aarch64-16740729.zip",
+      "sha1": "6c5e61b873e11c7d1d08683bea089f762baee070",
+      "sourceDirectory": "emulator",
+      "destination": "emulator",
+      "sha256": "9e50ac521c38949d412f69250c0df9a4afa684d5be54ab4b80fc0205a73f5054"
+    },
+    {
+      "id": "system-images;android-35;default;arm64-v8a",
+      "revision": "2",
+      "archive": "arm64-v8a-35_r02.zip",
+      "baseUrl": "https://dl.google.com/android/repository/sys-img/android/",
+      "sha1": "2026a06409db630b56711afdbffb457c1dbaed49",
+      "sourceDirectory": "arm64-v8a",
+      "destination": "system-images/android-35/default/arm64-v8a",
+      "sha256": "1e6ae4fca6449c07278a333311f0ef29c5101d1e3e18ba48fbe9bd2dc5006926"
+    }
+  ]
+}

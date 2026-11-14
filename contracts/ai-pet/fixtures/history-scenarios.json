@@ -1,0 +1,646 @@
+{
+  "format": "ai-pet.dev.history-scenarios.v1",
+  "status": "unpublished-offline-only",
+  "initial": {
+    "binding": {
+      "accountId": "dev-a",
+      "homeRegion": "dev-region",
+      "characterId": "dev-character",
+      "characterVersion": "1",
+      "conversationId": "dev-conversation"
+    },
+    "epoch": "activation-1"
+  },
+  "scenarios": [
+    {
+      "id": "unknown-append-and-reload",
+      "steps": [
+        {
+          "action": {
+            "type": "draft",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "text": "Synthetic draft"
+          },
+          "expectState": {
+            "draft": "Synthetic draft",
+            "messages": []
+          }
+        },
+        {
+          "action": {
+            "type": "queue",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "requestId": "r1",
+            "turnId": "t1"
+          },
+          "expectState": {
+            "draft": "",
+            "messages": []
+          }
+        },
+        {
+          "action": {
+            "type": "dispatch",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "requestId": "r1"
+          },
+          "expectState": {
+            "commands": [
+              {
+                "requestId": "r1",
+                "status": "unknown",
+                "attempt": 1
+              }
+            ]
+          }
+        },
+        {
+          "reload": true,
+          "expectState": {
+            "commands": [
+              {
+                "status": "unknown"
+              }
+            ]
+          },
+          "expectEffects": []
+        },
+        {
+          "action": {
+            "type": "dispatch",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "requestId": "r1"
+          },
+          "expectEffects": [
+            {
+              "type": "query-outcome",
+              "requestId": "r1",
+              "attempt": 1
+            }
+          ]
+        },
+        {
+          "action": {
+            "type": "outcome",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "requestId": "r1",
+            "attempt": 1,
+            "outcome": "definitively-absent"
+          },
+          "expectEffects": []
+        },
+        {
+          "action": {
+            "type": "dispatch",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "requestId": "r1"
+          },
+          "expectState": {
+            "commands": [
+              {
+                "requestId": "r1",
+                "turnId": "t1",
+                "text": "Synthetic draft",
+                "attempt": 2
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "gap-duplicate-out-of-order",
+      "steps": [
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 2,
+              "kind": "message",
+              "message": {
+                "messageId": "m2",
+                "requestId": "r1",
+                "turnId": "t1",
+                "role": "user",
+                "text": "Synthetic draft",
+                "sourceKey": "source-2"
+              }
+            }
+          },
+          "expectState": {
+            "cursor": 0,
+            "gap": true,
+            "messages": []
+          },
+          "expectEffects": [
+            {
+              "type": "recover-after",
+              "cursor": 0
+            }
+          ]
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 1,
+              "kind": "message",
+              "message": {
+                "messageId": "m1",
+                "requestId": "r1",
+                "turnId": "t1",
+                "role": "user",
+                "text": "Synthetic draft",
+                "sourceKey": "source-1"
+              }
+            }
+          },
+          "expectState": {
+            "cursor": 1,
+            "gap": true
+          }
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 1,
+              "kind": "message",
+              "message": {
+                "messageId": "m1",
+                "requestId": "r1",
+                "turnId": "t1",
+                "role": "user",
+                "text": "Synthetic draft",
+                "sourceKey": "source-1"
+              }
+            }
+          },
+          "expectState": {
+            "cursor": 1
+          },
+          "expectEffects": []
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 2,
+              "kind": "message",
+              "message": {
+                "messageId": "m2",
+                "requestId": "r1",
+                "turnId": "t1",
+                "role": "user",
+                "text": "Synthetic draft",
+                "sourceKey": "source-2"
+              }
+            }
+          },
+          "expectState": {
+            "cursor": 2,
+            "gap": false,
+            "messages": [
+              {
+                "messageId": "m1"
+              },
+              {
+                "messageId": "m2"
+              }
+            ]
+          }
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 1,
+              "kind": "message",
+              "message": {
+                "messageId": "m1",
+                "requestId": "r1",
+                "turnId": "t1",
+                "role": "user",
+                "text": "changed",
+                "sourceKey": "source-1"
+              }
+            }
+          },
+          "expectError": "conflicting-server-sequence"
+        }
+      ]
+    },
+    {
+      "id": "stale-account-and-persona",
+      "steps": [
+        {
+          "action": {
+            "type": "draft",
+            "binding": {
+              "accountId": "other",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "text": "wrong"
+          },
+          "expectError": "stale-history-context"
+        },
+        {
+          "action": {
+            "type": "draft",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "other",
+              "characterVersion": "1",
+              "conversationId": "other"
+            },
+            "epoch": "activation-1",
+            "text": "wrong"
+          },
+          "expectError": "stale-history-context"
+        },
+        {
+          "action": {
+            "type": "draft",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "old-activation",
+            "text": "old callback"
+          },
+          "expectError": "stale-history-context"
+        }
+      ]
+    },
+    {
+      "id": "cancel-late-generation",
+      "steps": [
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 1,
+              "kind": "message",
+              "message": {
+                "messageId": "m1",
+                "requestId": "r1",
+                "turnId": "t1",
+                "role": "user",
+                "text": "Synthetic draft",
+                "sourceKey": "source-1"
+              }
+            }
+          }
+        },
+        {
+          "action": {
+            "type": "cancel",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "requestId": "r1"
+          },
+          "expectEffects": [
+            {
+              "type": "cancel-generation",
+              "requestId": "r1"
+            }
+          ]
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 2,
+              "kind": "message",
+              "message": {
+                "messageId": "reply",
+                "requestId": "r1",
+                "turnId": "t1",
+                "role": "assistant",
+                "text": "Synthetic draft",
+                "sourceKey": "reply-source"
+              }
+            }
+          },
+          "expectState": {
+            "cursor": 2,
+            "messages": [
+              {
+                "messageId": "m1"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "deletion-before-and-during-import",
+      "steps": [
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 1,
+              "kind": "delete-message",
+              "messageId": "m1",
+              "sourceKey": "source-1"
+            }
+          }
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 2,
+              "kind": "import-snapshot",
+              "messages": [
+                {
+                  "messageId": "alias",
+                  "requestId": "r1",
+                  "turnId": "t1",
+                  "role": "user",
+                  "text": "Synthetic draft",
+                  "sourceKey": "source-1"
+                }
+              ]
+            }
+          },
+          "expectState": {
+            "messages": []
+          }
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 3,
+              "kind": "import-snapshot",
+              "messages": [
+                {
+                  "messageId": "m2",
+                  "requestId": "r1",
+                  "turnId": "t1",
+                  "role": "user",
+                  "text": "Synthetic draft",
+                  "sourceKey": "source-2"
+                }
+              ]
+            }
+          },
+          "expectState": {
+            "messages": [
+              {
+                "messageId": "m2"
+              }
+            ]
+          }
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 4,
+              "kind": "delete-message",
+              "messageId": "m2",
+              "sourceKey": "source-2"
+            }
+          },
+          "expectState": {
+            "messages": []
+          }
+        },
+        {
+          "reload": true,
+          "expectState": {
+            "messages": []
+          },
+          "expectEffects": []
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 5,
+              "kind": "import-snapshot",
+              "messages": [
+                {
+                  "messageId": "alias2",
+                  "requestId": "r1",
+                  "turnId": "t1",
+                  "role": "user",
+                  "text": "Synthetic draft",
+                  "sourceKey": "source-2"
+                }
+              ]
+            }
+          },
+          "expectState": {
+            "messages": []
+          }
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 6,
+              "kind": "delete-conversation"
+            }
+          },
+          "expectState": {
+            "deleted": true
+          }
+        },
+        {
+          "action": {
+            "type": "server",
+            "binding": {
+              "accountId": "dev-a",
+              "homeRegion": "dev-region",
+              "characterId": "dev-character",
+              "characterVersion": "1",
+              "conversationId": "dev-conversation"
+            },
+            "epoch": "activation-1",
+            "event": {
+              "sequence": 7,
+              "kind": "import-snapshot",
+              "messages": [
+                {
+                  "messageId": "m3",
+                  "requestId": "r1",
+                  "turnId": "t1",
+                  "role": "user",
+                  "text": "Synthetic draft",
+                  "sourceKey": "source-3"
+                }
+              ]
+            }
+          },
+          "expectState": {
+            "messages": []
+          }
+        }
+      ]
+    }
+  ]
+}

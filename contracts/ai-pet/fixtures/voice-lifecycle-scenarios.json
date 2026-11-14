@@ -1,0 +1,166 @@
+{
+  "format": "ai-pet.dev.scenarios.v1",
+  "status": "unpublished-offline-only",
+  "scenarios": [
+    {
+      "id": "background-lock-continuation",
+      "initial": {
+        "session": "active",
+        "capture": true,
+        "leaseGeneration": 2,
+        "turnGeneration": 3
+      },
+      "steps": [
+        {
+          "event": "background",
+          "expect": {
+            "session": "active",
+            "capture": true
+          }
+        },
+        {
+          "event": "lock",
+          "expect": {
+            "session": "active",
+            "capture": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "interruption-deliberate-resume",
+      "initial": {
+        "session": "active",
+        "capture": true,
+        "leaseGeneration": 2,
+        "turnGeneration": 3
+      },
+      "steps": [
+        {
+          "event": "network-loss",
+          "expect": {
+            "session": "paused",
+            "capture": false
+          }
+        },
+        {
+          "event": "transport-restored",
+          "expect": {
+            "session": "paused",
+            "capture": false
+          }
+        },
+        {
+          "event": "user-resume",
+          "checks": {
+            "permission": true,
+            "lease": true,
+            "entitlement": true,
+            "audioFocus": true,
+            "nativeStartEligible": true
+          },
+          "expect": {
+            "session": "active",
+            "capture": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "stale-turn-output",
+      "initial": {
+        "session": "active",
+        "capture": true,
+        "leaseGeneration": 2,
+        "turnGeneration": 3
+      },
+      "steps": [
+        {
+          "event": "spoken-interruption",
+          "expect": {
+            "turnGeneration": 4,
+            "playback": false
+          }
+        },
+        {
+          "event": "output",
+          "leaseGeneration": 2,
+          "turnGeneration": 3,
+          "expect": {
+            "accepted": false,
+            "playback": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "lease-expiry",
+      "initial": {
+        "session": "active",
+        "capture": true,
+        "leaseGeneration": 2,
+        "turnGeneration": 3
+      },
+      "steps": [
+        {
+          "event": "lease-expired",
+          "expect": {
+            "session": "ended",
+            "capture": false,
+            "playback": false
+          }
+        },
+        {
+          "event": "transport-restored",
+          "expect": {
+            "session": "ended",
+            "capture": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "lease-revoked",
+      "initial": {
+        "session": "active",
+        "capture": true,
+        "leaseGeneration": 2,
+        "turnGeneration": 3
+      },
+      "steps": [
+        {
+          "event": "lease-revoked",
+          "expect": {
+            "session": "ended",
+            "capture": false,
+            "playback": false
+          }
+        },
+        {
+          "event": "output",
+          "leaseGeneration": 2,
+          "turnGeneration": 3,
+          "expect": {
+            "accepted": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "wrong-account-migration",
+      "initial": {
+        "accountId": "dev-account-a"
+      },
+      "steps": [
+        {
+          "event": "migration-binding",
+          "envelopeAccountId": "dev-account-b",
+          "authorityAccountId": "dev-account-a",
+          "expect": {
+            "accepted": false
+          }
+        }
+      ]
+    }
+  ]
+}
