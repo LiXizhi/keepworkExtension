@@ -97,7 +97,7 @@ function Invoke-Http([string]$Base, [string]$Route, [string]$Method = 'GET',
     $document = $null
     if ($text) { try { $document = $script:Json.DeserializeObject($text) } catch {} }
     return @{ Status = [int]$response.StatusCode; Text = $text; Json = $document;
-      Session = $response.Headers['mcp-session-id'] }
+      Session = [string]$response.Headers['mcp-session-id'] }
   } finally { if ($null -ne $response) { $response.Close() } }
 }
 
@@ -165,18 +165,18 @@ function Test-FolderLocations($Document, [string]$ProfileDirectory, [string]$Wor
   if ($workspaceDrive -match '^[C-Z]:\\$') {
     Assert-Condition ($seenVolumes.ContainsKey($workspaceDrive)) 'Folder picker omitted the existing workspace drive'
   }
-  return @{ home = $Document['home']; commonFolders = $common; volumeCount = $seenVolumes.Count;
+  return @{ home = [string]$Document['home']; commonFolders = $common; volumeCount = [int]$seenVolumes.Count;
     allSixCommonFoldersRequired = $false }
 }
 
 function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Expected) {
-  $caseProfileDirectory = Join-Path $CaseDirectory 'isolated-profile'
-  $workspace = Join-Path $CaseDirectory 'workspace with spaces'
+  [string]$caseProfileDirectory = Join-Path $CaseDirectory 'isolated-profile'
+  [string]$workspace = Join-Path $CaseDirectory 'workspace with spaces'
   $null = [IO.Directory]::CreateDirectory($caseProfileDirectory)
   $null = [IO.Directory]::CreateDirectory($workspace)
   $listener = New-Object Net.Sockets.TcpListener -ArgumentList @([Net.IPAddress]::Loopback, 0)
   $listener.Start()
-  try { $port = $listener.LocalEndpoint.Port } finally { $listener.Stop() }
+  try { [int]$port = $listener.LocalEndpoint.Port } finally { $listener.Stop() }
   Assert-Condition ($port -ne 8089) 'Smoke must never use the shared MCP port'
   $base = 'http://127.0.0.1:' + $port
   $start = New-Object Diagnostics.ProcessStartInfo
@@ -191,7 +191,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
   foreach ($entry in @(@{ key = 'APPDATA'; directory = 'AppData\Roaming' },
       @{ key = 'LOCALAPPDATA'; directory = 'AppData\Local' },
       @{ key = 'TEMP'; directory = 'Temp' }, @{ key = 'TMP'; directory = 'Temp' })) {
-    $isolatedDirectory = Join-Path $caseProfileDirectory $entry['directory']
+    [string]$isolatedDirectory = Join-Path $caseProfileDirectory $entry['directory']
     $null = [IO.Directory]::CreateDirectory($isolatedDirectory)
     $start.EnvironmentVariables[$entry['key']] = $isolatedDirectory
   }
@@ -202,10 +202,10 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
   }
   $child = New-Object Diagnostics.Process
   $child.StartInfo = $start
-  $caseReport = @{ requireAuth = $Auth; port = $port; passed = $false; checks = @(); profileIsolated = $true }
+  $caseReport = @{ requireAuth = [bool]$Auth; port = [int]$port; passed = $false; checks = @(); profileIsolated = $true }
   try {
     Assert-Condition ($child.Start()) 'Could not start the owned runtime'
-    $caseReport['pid'] = $child.Id
+    $caseReport['pid'] = [int]$child.Id
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     $health = $null
     while ($null -eq $health -and [DateTime]::UtcNow -lt $deadline) {
@@ -223,7 +223,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
     Assert-Condition ($null -ne $health) 'Owned runtime did not become healthy within 20 seconds'
     $token = ''
     if ($Auth) {
-      $tokenPath = Join-Path $caseProfileDirectory '.keepwork-mcp\token'
+      [string]$tokenPath = Join-Path $caseProfileDirectory '.keepwork-mcp\token'
       Assert-Condition ([IO.File]::Exists($tokenPath)) 'Isolated token was not created'
       $token = [IO.File]::ReadAllText($tokenPath).Trim()
       Assert-Condition ($token.Length -gt 0 -and $token.Length -le 4096 -and $token.IndexOf([char]10) -lt 0 -and $token.IndexOf([char]13) -lt 0) 'Invalid isolated token'
@@ -238,7 +238,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
       }
     } $token
     Assert-Condition ($init.Status -eq 200 -and $init.Session -and $null -ne $init.Json['result']) 'MCP initialization failed'
-    $sessionHeaders = @{ 'mcp-session-id' = $init.Session }
+    $sessionHeaders = @{ 'mcp-session-id' = [string]$init.Session }
     $list = Invoke-Owned $child $base $workspace $Expected $Auth '/mcp' 'POST' @{ jsonrpc = '2.0'; id = 2; method = 'tools/list' } $token $sessionHeaders
     Assert-Condition ($list.Status -eq 200 -and $null -ne $list.Json['result']['tools']) 'MCP tools/list failed'
     $caseReport['checks'] += 'owned-health-and-mcp-initialize'
@@ -254,7 +254,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
 
     $fileName = ([string][char]0x4e2d) + ([string][char]0x6587) + ' note.txt'
     $query = '?root=' + [Uri]::EscapeDataString($workspace) + '&path=' + [Uri]::EscapeDataString($fileName)
-    $content = 'WIN7_NATIVE_FILE_ROUNDTRIP'
+    [string]$content = 'WIN7_NATIVE_FILE_ROUNDTRIP'
     $written = Invoke-Owned $child $base $workspace $Expected $Auth ('/fs/file' + $query) 'PUT' $content $token
     Assert-Condition ($written.Status -eq 200) 'Confined file write failed'
     $read = Invoke-Owned $child $base $workspace $Expected $Auth ('/fs/file' + $query) 'GET' $null $token
@@ -263,15 +263,15 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
     $caseReport['checks'] += 'utf8-filename-and-file-roundtrip'
 
     foreach ($operation in @(
-        @{ id = 3; name = 'grep_files'; arguments = @{ pattern = $content; path = '.'; maxMatches = 10 } },
-        @{ id = 4; name = 'run_terminal'; arguments = @{ command = 'echo WIN7_NATIVE_COMMAND_OK'; cwd = $workspace; timeoutMs = 5000 } }
+        @{ id = 3; name = 'grep_files'; arguments = @{ pattern = [string]$content; path = '.'; maxMatches = 10 } },
+        @{ id = 4; name = 'run_terminal'; arguments = @{ command = 'echo WIN7_NATIVE_COMMAND_OK'; cwd = [string]$workspace; timeoutMs = 5000 } }
       )) {
-      $reply = Invoke-Owned $child $base $workspace $Expected $Auth '/mcp' 'POST' @{ jsonrpc = '2.0'; id = $operation['id']; method = 'tools/call'; params = @{ name = $operation['name']; arguments = $operation['arguments'] } } $token $sessionHeaders
+      $reply = Invoke-Owned $child $base $workspace $Expected $Auth '/mcp' 'POST' @{ jsonrpc = '2.0'; id = [int]$operation['id']; method = 'tools/call'; params = @{ name = [string]$operation['name']; arguments = [hashtable]$operation['arguments'] } } $token $sessionHeaders
       Assert-Condition ($reply.Status -eq 200 -and $null -ne $reply.Json['result'] -and -not $reply.Json['result']['isError']) ('MCP tool failed: ' + $operation['name'])
       $toolText = $script:Json.Serialize($reply.Json['result']['content'])
       if ($operation['name'] -eq 'grep_files') { Assert-Condition ($toolText.Contains($content)) 'grep_files did not find the isolated file' }
       else { Assert-Condition ($toolText.Contains('WIN7_NATIVE_COMMAND_OK')) 'Ordinary command output is missing' }
-      $caseReport['checks'] += $operation['name']
+      $caseReport['checks'] += [string]$operation['name']
     }
     $pty = Invoke-Owned $child $base $workspace $Expected $Auth '/terminal/sessions' 'POST' @{} $token
     Assert-Condition ($pty.Status -eq 501 -and $pty.Json['code'] -eq 'UNSUPPORTED_FEATURE' -and $pty.Json['feature'] -eq 'pty-session-v1') 'PTY must return a bounded unsupported-feature error'
@@ -287,7 +287,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
     $caseReport['checks'] += 'owned-graceful-shutdown'
     $caseReport['passed'] = $true
   } catch {
-    $caseReport['error'] = $_.Exception.Message
+    $caseReport['error'] = [string]$_.Exception.Message
   } finally {
     try {
       $child.Refresh()
@@ -303,7 +303,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
       $caseReport['isolatedProfileRemoved'] = $true
     } catch {
       $caseReport['passed'] = $false
-      $caseReport['cleanupError'] = $_.Exception.Message
+      $caseReport['cleanupError'] = [string]$_.Exception.Message
     }
     $child.Dispose()
   }
@@ -311,8 +311,8 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
 }
 
 Assert-Condition ($env:OS -eq 'Windows_NT') 'Run this acceptance harness on Windows'
-$runtime = [IO.Path]::GetFullPath($RuntimeDirectory)
-$output = [IO.Path]::GetFullPath($OutputDirectory)
+[string]$runtime = [IO.Path]::GetFullPath($RuntimeDirectory)
+[string]$output = [IO.Path]::GetFullPath($OutputDirectory)
 Assert-Condition (-not (Test-Path -LiteralPath $output)) 'Use a new output directory'
 $null = [IO.Directory]::CreateDirectory($output)
 $report = @{ schemaVersion = 1; scope = 'mcp-native-basic-smoke'; nativeLegacyVerified = $false; nativeWin7Verified = $false;
@@ -321,9 +321,12 @@ try {
   $osInfo = Get-WmiObject -Class Win32_OperatingSystem
   $computer = Get-WmiObject -Class Win32_ComputerSystem
   $osVersion = [Version]([string]$osInfo.Version)
-  $report['system'] = @{ caption = $osInfo.Caption; version = $osInfo.Version; servicePackMajor = $osInfo.ServicePackMajorVersion;
-    architecture = $osInfo.OSArchitecture; productType = $osInfo.ProductType; manufacturer = $computer.Manufacturer; model = $computer.Model;
-    powershell = $PSVersionTable.PSVersion.ToString(); clr = [Environment]::Version.ToString() }
+  # WMI properties carry PowerShell adapters. Give the .NET 3.5 serializer
+  # explicit CLR scalars so it never traverses those adapter/property graphs.
+  $report['system'] = @{ caption = [string]$osInfo.Caption; version = [string]$osInfo.Version; servicePackMajor = [int]$osInfo.ServicePackMajorVersion;
+    architecture = [string]$osInfo.OSArchitecture; productType = [int]$osInfo.ProductType;
+    manufacturer = [string]$computer.Manufacturer; model = [string]$computer.Model;
+    powershell = [string]($PSVersionTable.PSVersion.ToString()); clr = [string]([Environment]::Version.ToString()) }
   $isNativeWin7 = $osInfo.Version.StartsWith('6.1.') -and $osVersion.Build -ge 7601 -and [int]$osInfo.ServicePackMajorVersion -ge 1 -and [int]$osInfo.ProductType -eq 1 -and $osInfo.OSArchitecture -match '^64'
   $osFamily = 'other-windows'
   if ($osInfo.Version.StartsWith('6.1.')) {
@@ -335,15 +338,16 @@ try {
     ($osFamily -eq 'windows8' -and $osVersion.Build -ge 9200) -or
     ($osFamily -eq 'windows8.1' -and $osVersion.Build -ge 9600))
   $isNativeLegacy = [int]$osInfo.ProductType -eq 1 -and $osInfo.OSArchitecture -match '^64' -and $legacyBaselinePassed
-  $manifestPath = Join-Path $runtime 'runtime.json'
+  [string]$manifestPath = Join-Path $runtime 'runtime.json'
   $expected = $script:Json.DeserializeObject([IO.File]::ReadAllText($manifestPath))
   Assert-Condition ($expected['variant'] -eq 'win7-win8' -and $expected['buildTarget'] -eq 'x86_64-win7-windows-msvc' -and $expected['platform'] -eq 'windows' -and $expected['arch'] -eq 'x64' -and $expected['entry'] -eq 'bin/keepwork-mcp.exe') 'Supply a staged Win7/Win8 x64 MCP runtime'
-  $executable = Join-Path $runtime 'bin\keepwork-mcp.exe'
+  [string]$executable = Join-Path $runtime 'bin\keepwork-mcp.exe'
   $binaryInfo = New-Object IO.FileInfo -ArgumentList $executable
-  $report['artifact'] = @{ executable = $executable; sha256 = Get-Sha256 $executable; size = $binaryInfo.Length;
-    version = $expected['version']; commit = $expected['commit']; sourceHash = $expected['sourceHash']; buildTarget = $expected['buildTarget']; runtimeManifestSha256 = Get-Sha256 $manifestPath }
+  $report['artifact'] = @{ executable = [string]$executable; sha256 = [string](Get-Sha256 $executable); size = [long]$binaryInfo.Length;
+    version = [string]$expected['version']; commit = [string]$expected['commit']; sourceHash = [string]$expected['sourceHash'];
+    buildTarget = [string]$expected['buildTarget']; runtimeManifestSha256 = [string](Get-Sha256 $manifestPath) }
   foreach ($auth in @($false, $true)) {
-    $caseDirectory = Join-Path $output ('auth-' + [string][int]$auth)
+    [string]$caseDirectory = Join-Path $output ('auth-' + [string][int]$auth)
     $null = [IO.Directory]::CreateDirectory($caseDirectory)
     $caseResult = Run-Case $auth $executable $caseDirectory $expected
     $report['cases'] += $caseResult
@@ -353,11 +357,21 @@ try {
   $report['nativeLegacyVerified'] = [bool]$isNativeLegacy
   $report['nativeWin7Verified'] = [bool]$isNativeWin7
 } catch {
-  $report['error'] = $_.Exception.Message
+  $report['error'] = [string]$_.Exception.Message
 } finally {
   $report['completedAtUtc'] = [DateTime]::UtcNow.ToString('o')
-  $reportPath = Join-Path $output 'report.json'
-  [IO.File]::WriteAllText($reportPath, $script:Json.Serialize($report), $script:Utf8)
+  [string]$reportPath = Join-Path $output 'report.json'
+  try { $reportJson = $script:Json.Serialize($report) }
+  catch {
+    $serializationError = [string]$_.Exception.Message
+    $originalError = [string]$report['error']
+    foreach ($case in @($report['cases'])) {
+      if ($case.ContainsKey('error')) { $originalError += '; case error: ' + [string]$case['error'] }
+      if ($case.ContainsKey('cleanupError')) { $originalError += '; cleanup error: ' + [string]$case['cleanupError'] }
+    }
+    throw ('Smoke report serialization failed: ' + $serializationError + '; original smoke error: ' + $originalError)
+  }
+  [IO.File]::WriteAllText($reportPath, $reportJson, $script:Utf8)
 }
 Write-Output ('Native MCP smoke report: ' + $reportPath)
 if (-not $report['passed']) { exit 1 }

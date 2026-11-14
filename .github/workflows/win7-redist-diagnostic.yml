@@ -2,11 +2,93 @@ name: Verify legacy Windows build prerequisites
 
 on:
   workflow_dispatch:
+    inputs:
+      legacy-runtime-run-id:
+        description: Optional previous build artifact to probe with the current QA harness
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
+  smoke:
+    if: inputs['legacy-runtime-run-id'] != ''
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/github-script@v7
+        env:
+          LEGACY_FIXTURE_RUN_ID: ${{ inputs['legacy-runtime-run-id'] }}
+        with:
+          script: |
+            const id = process.env.LEGACY_FIXTURE_RUN_ID;
+            if (!/^[1-9]\d*$/.test(id)) throw Error('Use an exact fixture run ID');
+            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: Number(id) });
+            if (run.event !== 'workflow_dispatch' || run.path !== '.github/workflows/aichat-rust-windows-release.yml'
+              || run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}`
+              || !/^[a-f0-9]{40}$/.test(run.head_sha)) throw Error('Require a trusted manual legacy build fixture');
+            core.exportVariable('LEGACY_FIXTURE_COMMIT', run.head_sha);
+      - uses: actions/download-artifact@v4
+        with:
+          name: aichat-rust-win7-win8-x64
+          run-id: ${{ inputs['legacy-runtime-run-id'] }}
+          github-token: ${{ github.token }}
+          path: legacy-smoke-fixture
+      - name: Verify production signatures and bytes before launching the fixture
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs'), assert = require('node:assert/strict');
+          const legacy = require('./scripts/lib/win7-release.cjs');
+          const { collectRelease } = require('./.github/skills/rust-release/scripts/publish-win7.cjs');
+          const root = 'legacy-smoke-fixture';
+          const publicKey = fs.readFileSync('apps/aichat-rust/keys/win7-release-public.pem');
+          const client = legacy.verifyEnvelope(JSON.parse(fs.readFileSync(root + '/client/windows-x64/latest-client.json')), publicKey);
+          const mcp = legacy.verifyEnvelope(JSON.parse(fs.readFileSync(root + '/mcp/windows-x64.json')), publicKey);
+          assert.equal(client.sourceDirty, false);
+          assert.equal(client.commit, process.env.LEGACY_FIXTURE_COMMIT);
+          collectRelease(root, { version: client.version, mcpVersion: mcp.version, commit: client.commit, publicKey });
+          console.log('Trusted fixture signatures, identity, archives and runtime bytes verified; diagnostic scope only');
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Probe the existing runtime with the current QA script without changing its build evidence
+        shell: pwsh
+        env:
+          LEGACY_FIXTURE_RUN_ID: ${{ inputs['legacy-runtime-run-id'] }}
+        run: |
+          $runtime = 'legacy-smoke-fixture/installer-payload/resources/win7-mcp'
+          $manifest = Get-Content "$runtime/runtime.json" -Raw | ConvertFrom-Json
+          New-Item -ItemType Directory -Path legacy-native-smoke-diagnostic | Out-Null
+          @{
+            scope = 'qa-harness-diagnostic-only'
+            fixtureRunId = $env:LEGACY_FIXTURE_RUN_ID
+            runtimeVersion = $manifest.version
+            runtimeCommit = $manifest.commit
+            runtimeSourceHash = $manifest.sourceHash
+            runtimeSha256 = (Get-FileHash "$runtime/bin/keepwork-mcp.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+            harnessCommit = $env:GITHUB_SHA
+            harnessSha256 = (Get-FileHash apps/aichat-rust/scripts/win7-native-smoke.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content legacy-native-smoke-diagnostic/identity.json -Encoding utf8
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/aichat-rust/scripts/win7-native-smoke.ps1 -RuntimeDirectory $runtime -OutputDirectory legacy-native-smoke-diagnostic/results
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content legacy-native-smoke-diagnostic/results/report.json -Raw | ConvertFrom-Json
+          if (-not $report.passed -or $report.nativeLegacyVerified) { throw 'Require passed modern-host smoke without legacy native certification' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: legacy-native-smoke-diagnostic
+          path: legacy-native-smoke-diagnostic/
+          if-no-files-found: warn
+          retention-days: 30
   launcher:
     runs-on: windows-2022
     timeout-minutes: 15
@@ -42,7 +124,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir launcher-diagnostic -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/lib/windows7-pe.cjs launcher-diagnostic/Release/Keepwork.exe --output launcher-diagnostic/pe-report.json
+          node scripts/lib/windows7-pe.cjs launcher-diagnostic/Release --output launcher-diagnostic/pe-report.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
