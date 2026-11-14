@@ -1,14 +1,15 @@
 ---
 name: rust-release
-description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；支持 /rust-release 双产品发布与 /rust-release mcp-server 仅发布 MCP Rust。执行构建、CDN 上传和 feed 提升，核对下载地址；新版本打包、补发或排查发布流水线时使用。
+description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；支持双产品和仅 MCP 发布。GitHub 构建后经本机代理下载产物，再由本机上传七牛、提升 feed 并核验下载地址；用于打包新版本、补发和发布排查。
 ---
 
 # Rust 双产品发布
 
 用户说“按 rust-release 发新版本”或“打包新的版本”时，默认完成桌面端和 MCP Rust 服务器两条发布链。
-除非用户明确限定“只发桌面”或“只发 MCP”，不能省略 `Rust MCP daemon` 构建 Action，
-以及 **Review or publish an accepted Rust MCP runtime** 上传 CDN 的 Action。
-用户只要求修改 Skill、总结或解释流程时，仅处理文档，不触发发布。
+除非用户明确限定“只发桌面”或“只发 MCP”，不能省略 `Rust MCP daemon` 构建 Action 和独立 MCP CDN 发布。
+GitHub Actions 负责构建和保存 artifacts；**此设备经 `http://127.0.0.1:7890` 下载，再由此设备直连七牛上传**。
+不再调用远端上传七牛的 Action，也不在代理不可用时回退到 GitHub 上传。
+用户只要求修改 Skill、流程、总结或解释时，完成相应改动，不触发实际构建、发布或推送。
 
 ## 调用命令与参数
 
@@ -24,8 +25,8 @@ description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；支�
 
 1. 检查 MCP 清单、线上 feed 和源提交；只同步 MCP 的两个版本文件，不修改桌面版本。
 2. 执行 **Rust MCP daemon**，或复用本次相同提交、相同 MCP 版本且已成功的构建产物。
-3. 逐平台执行 **Review or publish an accepted Rust MCP runtime**，显式传入 `publish=true`。
-4. 确认各平台 publish job 成功，核验 MCP CDN 的版本、提交、归档大小和 SHA-256，汇总发布地址。
+3. 用本 Skill 的下载脚本经本机代理下载三个 MCP artifacts，保留完整证据目录；本地预检后显式 `--publish true` 发布四个目标。
+4. 确认本地发布命令成功，核验 MCP CDN 的版本、提交、归档大小和 SHA-256，汇总发布地址。
 5. 把本次新增、修复和版本提交合并并推送到 `main`，核对远端已包含这些提交。
 
 该模式执行第 1、3、4 节、第 5 节的 MCP 核验及第 6、7 节的收尾，跳过第 2 节桌面发布。
@@ -34,8 +35,8 @@ description: 发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；支�
 
 | 产品 | 构建 Action / 文件 | CDN 发布 |
 | --- | --- | --- |
-| aichat-rust 桌面 | AIChat Rust release packages / `.github/workflows/aichat-rust-windows-release.yml` | 同一 workflow 在发布 tag 上上传安装包、提升三个桌面 feed 并写 Release 正文 |
-| mcp-rust 服务器 | **Rust MCP daemon** / `.github/workflows/mcp-rust.yml` | 构建只生成 artifacts；还必须逐平台运行 **Review or publish an accepted Rust MCP runtime** / `.github/workflows/mcp-rust-publish.yml` 上传归档并提升 MCP feed |
+| aichat-rust 桌面 | AIChat Rust release packages / `.github/workflows/aichat-rust-windows-release.yml` | tag 构建汇总为 `aichat-rust-release-packages`；本地上传安装包、提升三个桌面 feed 并公开 GitHub Release |
+| mcp-rust 服务器 | **Rust MCP daemon** / `.github/workflows/mcp-rust.yml` | 本地下载三个原始 artifacts，校验证据后上传四个 ZIP 并提升 MCP feed |
 
 **桌面安装包捆绑新版 MCP，不等于独立 MCP 服务器已上传 CDN。**
 `Rust MCP daemon` 变绿也不等于 CDN 已更新。两条发布链和 CDN 核验全部完成后，才能报告“双产品发布完成”。
@@ -67,10 +68,25 @@ done
 完成相关检查并提交代码后再打包。双产品发布尽量使用同一个固定 tag 对应的源提交，
 不能在构建中途移动 tag 或用变化中的分支头代替产物实际提交。
 
+### 本机下载和上传环境
+
+本机需有已登录的 `gh`、Node.js，以及可用的 `http://127.0.0.1:7890` HTTP 代理。
+MCP 证据验证依赖仓库根目录的 Node 依赖；尚未安装时先执行 `npm ci --ignore-scripts`，已有依赖可复用。
+从仓库根目录运行下文脚本。所有 GitHub `gh` 子进程（包括下载产物、修改 Release 和上传附件）
+均使用该代理并剔除七牛密钥，清除 `NO_PROXY` 绕过项；
+用精确 run ID、完整提交 SHA 和产品工作流校验成功的非 PR 构建，缺少或过期产物时中止。
+每次 `--output` 使用全新目录，下载回执记录构建身份和本地文件校验值，不混入其他 run 的同名文件。
+
+本地上传从环境读取 `KP_QINIU_ACCESS_KEY`、`KP_QINIU_SECRET_KEY`，不得把密钥写进参数、日志或仓库。
+GitHub 仓库 secrets 不会自动出现在本机；缺少本机凭据时说明缺项，不尝试导出仓库 secrets。
+七牛发布器自身清除代理设置后直连七牛，沿用既有的不可变归档、SHA-256 和 feed 提升顺序。
+默认仅预检；只有 `--publish true` 执行写入。保留下载目录与报告；发布日志和新增回执存到下载目录外，
+不要向 artifacts 根目录添加文件，否则重试时下载回执的文件清单校验会失败。
+
 ## 2. 桌面打包与发布
 
 新桌面发布使用标准 `v<desktop_version>` tag，匹配四处桌面版本。
-历史 `aichat-rust-v*` 仅用于重跑已有历史 Release。分支上的 dispatch 只构建，不上传桌面 CDN 或创建 Release。
+历史 `aichat-rust-v*` 仅用于重跑已有历史 Release。分支上的 dispatch 只构建；tag 上也只准备产物，不上传七牛或公开 Release。
 
 ```bash
 git push origin HEAD:main
@@ -79,9 +95,26 @@ git push origin v<desktop_version>
 gh workflow run aichat-rust-windows-release.yml --ref v<desktop_version>
 ```
 
-记录这次 dispatch 的 run ID，等待 validate、Windows x64/ARM64、macOS Universal 和 publish 全部成功。
-发布作业自动上传三个安装包、提升三个 `latest-client.json`，并在 Release 正文的
-`<!-- keepwork-cdn-downloads:start -->` / `<!-- keepwork-cdn-downloads:end -->` 之间写桌面 CDN 下载表。
+记录这次 dispatch 的 `desktop_run_id` 和完整 `desktop_commit`，等待 validate、Windows x64/ARM64、
+macOS Universal、`prepare-release` 全部成功。汇总 artifact 包含三个安装包、Windows manifests 和
+`SHA256SUMS-<desktop_version>.txt`。在此设备下载、预检，再执行本地发布：
+
+```bash
+node .github/skills/rust-release/scripts/download-artifacts.cjs \
+  --product desktop --run-id <desktop_run_id> --commit <desktop_commit> \
+  --output .tmp/rust-release/desktop-<desktop_run_id>
+node .github/skills/rust-release/scripts/publish-local.cjs \
+  --product desktop --artifacts .tmp/rust-release/desktop-<desktop_run_id> \
+  --version <desktop_version> --commit <desktop_commit> --tag v<desktop_version>
+node .github/skills/rust-release/scripts/publish-local.cjs \
+  --product desktop --artifacts .tmp/rust-release/desktop-<desktop_run_id> \
+  --version <desktop_version> --commit <desktop_commit> --tag v<desktop_version> --publish true
+```
+
+本地脚本核对下载回执与构建校验和，再创建或复用 draft Release，调用原桌面发布器上传三个安装包。
+三个安装包全部验证后才提升三个 `latest-client.json`，在 Release 正文的
+`<!-- keepwork-cdn-downloads:start -->` / `<!-- keepwork-cdn-downloads:end -->` 区块写 CDN 下载表，
+最后上传 GitHub 附件并公开 Release。失败时新建 Release 保持草稿；不得提前公开或替换附件绕过 CDN 校验。
 
 ## 3. 必须执行 Rust MCP daemon
 
@@ -117,7 +150,6 @@ gh run view <mcp_run_id> --json headSha,conclusion,url
 `mcp-rust.yml` 只保留上述三个构建组，不构建或打包 Linux 发行产物。
 Windows ARM64 使用原生 ARM64 runner；macOS Universal 组分别构建并打包两套原生切片，
 不能把一个架构的 ZIP 复制改名当作另一个架构。目标架构的交叉编译成功不能冒充原生 live 验收通过。
-发布 workflow 的 Ubuntu runner 只是校验和上传宿主，不代表发布 Linux。
 历史 Linux CDN 归档和 feed 保留，不删除或改写；新发布入口不再接受 Linux target。
 
 每个目标使用实际 artifact 名称，包内必须有 `package/<target>.zip` 和对应的 `report-<target>.json`，
@@ -128,36 +160,32 @@ gh api repos/LiXizhi/keepworkExtension/actions/runs/<mcp_run_id>/artifacts \
   --jq '.artifacts[] | select(.expired == false) | .name'
 ```
 
-## 4. 执行 Review or publish an accepted Rust MCP runtime 上传 CDN
+## 4. 本机下载并上传独立 MCP CDN
 
-使用上一步的 `mcp_run_id` 和各平台 artifact，**逐平台触发名为 Review or publish an accepted Rust MCP runtime 的 Action**
-（文件：`.github/workflows/mcp-rust-publish.yml`）。这一步才会把 MCP Rust 服务器上传 CDN。
-下面命令按上表逐个 MCP target 执行，默认共四个目标，不发布 Linux。
-`mcp_version` 是 MCP 自己的版本，`mcp_commit` 是构建产物的完整 40 位提交。
-发布 workflow 的 `--ref` 应包含当前发布脚本；已有旧产物需要新版发布脚本时，ref 可以与产物源 ref 不同，
-但 `run_id`、版本和 `commit` 必须始终匹配产物身份。
+使用上一步的 `mcp_run_id` 和完整 `mcp_commit`，在此设备下载、预检，再本地发布。
+下载器保留三个 artifact 的独立目录，包含原始 `package/`、各目标报告和日志；不能只下载 ZIP，
+也不能把 Mac 两个报告合并为一个或改写 CI 的验收结果。
 
 ```bash
-gh workflow run mcp-rust-publish.yml --ref <publisher-ref> \
-  -f run_id=<mcp_run_id> \
-  -f artifact_name=<该目标实际 artifact_name> \
-  -f target=<windows-x64 或 windows-arm64 或 macos-arm64 或 macos-x64> \
-  -f report_path=report-<target>.json \
-  -f version=<mcp_version> \
-  -f commit=<mcp_commit> \
-  -f publish=true -f acceptance=deferred
+node .github/skills/rust-release/scripts/download-artifacts.cjs \
+  --product mcp --run-id <mcp_run_id> --commit <mcp_commit> \
+  --output .tmp/rust-release/mcp-<mcp_run_id>
+node .github/skills/rust-release/scripts/publish-local.cjs \
+  --product mcp --artifacts .tmp/rust-release/mcp-<mcp_run_id> \
+  --version <mcp_version> --commit <mcp_commit> --acceptance deferred
+node .github/skills/rust-release/scripts/publish-local.cjs \
+  --product mcp --artifacts .tmp/rust-release/mcp-<mcp_run_id> \
+  --version <mcp_version> --commit <mcp_commit> --acceptance deferred --publish true
 ```
 
-每次记下 publish run ID，等待该 Action **completed successfully**，并确认 `review` 和 `publish` 两个 job
-均为 success；`publish` 不能是 skipped。`publish` 默认是 false，省略 `-f publish=true` 只做 review，
-即使整个 run 成功也没有上传。
-Mac 两个目标使用同一个 `mcp-rust-validation-macos-universal` artifact，但各自指定包对应的报告。
-历史构建若只有 `report.json`，明确传 `report_path=report.json` 并核对其目标身份；不能用 ARM64 报告发布 x64 包。
+本地脚本先对四个目标全部执行归档身份与验收预检，通过后才逐个调用
+`apps/mcp-rust/scripts/publish-runtime.cjs` 上传。`mcp_version` 为 MCP 独立版本，
+版本、完整提交、target、sourceHash、二进制嵌入身份和报告必须匹配。
+发布器代码可来自后续修复提交，但不能把当前 HEAD、当前工作区或本机重跑的测试冒充原始 CI 证据。
+历史只有 `report.json` 的 artifact 需先明确核对对应 target；若本地入口不支持该布局，报告不支持并保留原产物，
+不得静默选择其他报告或回退到远端七牛上传。
 
-```bash
-gh run watch <mcp_publish_run_id> --exit-status
-gh run view <mcp_publish_run_id> --json conclusion,jobs,url
-```
+旧 `.github/workflows/mcp-rust-publish.yml` 作为历史独立入口保留；本 Skill 不再触发该上传 Action。
 
 归档和固定 feed 分别写到：
 
@@ -169,20 +197,20 @@ gh run view <mcp_publish_run_id> --json conclusion,jobs,url
 
 ### 验收模式
 
-- 按本项目既有的 CI 发布约定，命令显式选择 `acceptance=deferred`：允许指定的六个验收门禁保留 pending，
+- 按本项目既有的发布约定，命令显式选择 `--acceptance deferred`：允许指定的六个验收门禁保留 pending，
   但 source/fixture 检查必须通过、源码必须干净，归档身份和字节校验仍然执行。
   缺少的 package-integrity、runtime-live-identity、runtime-update-rollback、compatibility-matrix、
-  cli-live、messaging-live 验收会写入 Job Summary，不能称为完整实机验收。
-- 用户要求完整验收时使用 `acceptance=required`。它要求完整报告，其中真实 CLI/消息验收需要真实账号与网络回执；
+  cli-live、messaging-live 验收会记录在本地发布输出，不能称为完整实机验收。
+- 用户要求完整验收时使用 `--acceptance required`。它要求完整报告，其中真实 CLI/消息验收需要真实账号与网络回执；
   当前 CI 的 source/fixture 报告不足以满足它。不得伪造 passed，或为了让流程变绿更改验收含义。
-- workflow 默认仍是 `required`；不要把显式 `deferred` 改成静默默认。
+- 本地入口默认仍是 `required`；不要把显式 `deferred` 改成静默默认。
 
 ## 5. 核对两个产品的 CDN，并补 GitHub Release
 
 双产品模式检查桌面 Release 非 draft、三个安装包可下载、三个 `latest-client.json` 指向预期桌面版本。
 `mcp-server` 模式跳过桌面检查及下列桌面示例命令，只检查 MCP。
 MCP：对每个已发布 target 检查固定 feed 的 `version`、完整 `commit`、`url`、`size`、`sha256`，
-然后下载**实际归档**核对大小和 SHA-256。不能只看 workflow 绿灯或 HTTP HEAD 200。
+然后直连 CDN 下载**实际归档**核对大小和 SHA-256。不能只看 workflow 绿灯、本地命令退出码或 HTTP HEAD 200。
 
 ```bash
 gh release view v<desktop_version> --json body,isDraft,assets
@@ -241,14 +269,13 @@ git push origin main
 
 双产品发布只有在以下步骤完成后才算结束：
 
-1. 桌面 Action 完成安装包与桌面 CDN 发布。
+1. 桌面 Action 生成安装包，此设备经 `127.0.0.1:7890` 下载、本地上传并完成桌面 CDN 发布。
 2. **Rust MCP daemon** 构建成功，覆盖桌面三个安装包对应的四个 MCP target，版本和源提交正确。
-3. **Review or publish an accepted Rust MCP runtime** 逐平台 completed successfully，
-   且 publish job 成功完成 ZIP 上传和固定 feed 提升。
+3. 此设备经同一本机代理下载三个 MCP artifacts，本地发布命令完成四个目标的 ZIP 上传和固定 feed 提升。
 4. 两个产品 CDN 已核验，GitHub Release 同时包含桌面和 MCP 下载地址。
 5. 本次新增及修复提交已合并并推送到远端 `main`，主分支包含完整发布代码。
 
-汇总两个独立版本号、源提交、构建与发布 run 链接、各平台 CDN 地址、验收模式及未验证项目。
+汇总两个独立版本号、源提交、构建 run 链接、本地下载回执和发布日志、各平台 CDN 地址、验收模式及未验证项目。
 任何一个目标失败都明确列出，不把桌面成功说成双产品成功。
 `mcp-server` 模式以 MCP 构建、逐平台 CDN 发布、核验及合并推送 `main` 全部完成为结束条件；仅汇总 MCP 版本与结果，
 不把未执行的桌面步骤算作失败或待办。

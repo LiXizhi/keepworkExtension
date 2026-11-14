@@ -418,6 +418,20 @@ pub(super) fn desktop_pet_result(
     Ok(true)
 }
 
+/// Browser-owned capture needs a visible permission UI on Windows as well as
+/// macOS. Negotiated pet capture owns its own microphone and keeps main hidden.
+fn prepare_legacy_media_owner(
+    snapshot: &Value,
+    name: &str,
+    pet_capture: bool,
+    prepare: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if !pet_capture && pet::starts_media_capture(snapshot, name) {
+        prepare()?;
+    }
+    Ok(())
+}
+
 async fn request_pet_command(
     app: &AppHandle,
     core: &AppCore,
@@ -461,25 +475,21 @@ async fn request_pet_command(
     } else {
         None
     };
-    #[cfg(target_os = "macos")]
-    if !pet_capture && pet::starts_media_capture(&snapshot, name) {
-        // WebKit defers getUserMedia while its owner document is hidden. The
-        // pet's click does not make the retained main WebView visible. Keep the
-        // pet open so its draft and Stop control remain available.
-        let prepared = (|| -> Result<(), String> {
-            let main = app
-                .get_webview_window("main")
-                .ok_or_else(|| "无法打开录音页面，请重新打开 AIChat 主窗口后重试。".to_string())?;
-            main.unminimize()
-                .and_then(|_| main.show())
-                .and_then(|_| main.set_focus())
-                .map_err(|_| "无法显示录音页面，请打开 AIChat 主窗口后重试。".to_string())
-        })();
-        if let Err(error) = prepared {
-            core.pet
-                .resolve_command(&json!({ "requestId": request_id, "ok": false, "error": error }));
-            return Err(error);
-        }
+    // A pet click does not reveal the retained main webview or its browser
+    // permission UI. Prepare it before dispatching a legacy media start on
+    // every platform; keep the pet and its Stop control available.
+    if let Err(error) = prepare_legacy_media_owner(&snapshot, name, pet_capture, || {
+        let main = app
+            .get_webview_window("main")
+            .ok_or_else(|| "无法打开录音页面，请重新打开 AIChat 主窗口后重试。".to_string())?;
+        main.unminimize()
+            .and_then(|_| main.show())
+            .and_then(|_| main.set_focus())
+            .map_err(|_| "无法显示录音页面，请打开 AIChat 主窗口后重试。".to_string())
+    }) {
+        core.pet
+            .resolve_command(&json!({ "requestId": request_id, "ok": false, "error": error }));
+        return Err(error);
     }
     if let Some(id) = capture_id.as_deref() {
         let delivered = core
@@ -705,6 +715,88 @@ pub(super) async fn desktop_pet_action(
 
 #[cfg(test)]
 mod pet_drag_host_tests {
+    use serde_json::json;
+
+    #[test]
+    fn legacy_microphone_starts_prepare_the_owner_on_all_platforms() {
+        let ready = json!({
+            "ready": true, "canCall": true, "compactVoice": true,
+            "classroomRecording": { "enabled": false }
+        });
+        // Absent and unknown optional capabilities keep the browser-owned
+        // capture contract. In particular, Windows must not skip preparation.
+        for version in [serde_json::Value::Null, json!(2), json!("1")] {
+            let mut snapshot = ready.clone();
+            snapshot["petVoiceAudioVersion"] = version;
+            for action in ["dictation", "call", "voice-start", "record-start"] {
+                let mut prepared = 0;
+                super::prepare_legacy_media_owner(&snapshot, action, false, || {
+                    prepared += 1;
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(prepared, 1, "{action}");
+            }
+        }
+    }
+
+    #[test]
+    fn pet_capture_and_non_start_commands_never_reveal_main() {
+        let ready = json!({
+            "ready": true, "canCall": true, "compactVoice": true,
+            "classroomRecording": { "enabled": false }
+        });
+        let must_stay_hidden = || -> Result<(), String> { panic!("main must stay hidden") };
+        for action in ["dictation", "call", "voice-start", "record-start"] {
+            super::prepare_legacy_media_owner(&ready, action, true, must_stay_hidden).unwrap();
+            for (key, value) in [
+                ("ready", json!(false)),
+                ("dictating", json!(true)),
+                ("voice", json!({ "active": true })),
+            ] {
+                let mut unavailable = ready.clone();
+                unavailable[key] = value;
+                super::prepare_legacy_media_owner(&unavailable, action, false, must_stay_hidden)
+                    .unwrap();
+            }
+        }
+        for action in [
+            "input",
+            "send",
+            "stop",
+            "mute",
+            "voice-stop",
+            "record-stop",
+            "toggle-target",
+        ] {
+            super::prepare_legacy_media_owner(&ready, action, false, must_stay_hidden).unwrap();
+        }
+        super::prepare_legacy_media_owner(
+            &json!({ "ready": true }),
+            "call",
+            false,
+            must_stay_hidden,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_owner_preparation_returns_the_error_without_retry() {
+        let mut attempts = 0;
+        let error = super::prepare_legacy_media_owner(
+            &json!({ "ready": true }),
+            "dictation",
+            false,
+            || {
+                attempts += 1;
+                Err("Cannot reveal the microphone permission UI".to_string())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error, "Cannot reveal the microphone permission UI");
+    }
+
     #[test]
     fn macos_button_mask_distinguishes_primary_from_other_buttons() {
         for (mask, pressed) in [

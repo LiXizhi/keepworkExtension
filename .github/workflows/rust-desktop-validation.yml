@@ -51,7 +51,7 @@ jobs:
       - name: Node contracts and Windows installer regressions
         # The Windows matrix runs the Windows-only process ownership and NSIS
         # cases, rather than counting macOS platform skips as Windows coverage.
-        run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-node --level fixture --output .test-runtime/rust-desktop -- node --test --test-reporter=tap apps/aichat-rust/tests/*.test.cjs
+        run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-node --level fixture --output .test-runtime/rust-desktop -- node --test --test-reporter=tap apps/aichat-rust/tests/*.test.cjs scripts/rust-local-release.test.cjs
       - name: Native PTY and lifecycle smoke fixtures
         run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-smoke --level fixture --output .test-runtime/rust-desktop -- node apps/aichat-rust/scripts/smoke.cjs
       - name: Save honest release acceptance summary

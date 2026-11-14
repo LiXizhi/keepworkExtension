@@ -12,6 +12,7 @@ on:
       - "package*.json"
       - "docs/acceptance/rust-release-evidence.schema.json"
       - ".github/workflows/*rust*.yml"
+      - ".github/skills/rust-release/**"
 
 permissions:
   contents: read
@@ -247,17 +248,12 @@ jobs:
           path: release-packages/*
           if-no-files-found: error
 
-  publish:
-    name: Publish release assets
+  prepare-release:
+    name: Prepare assets for the local publisher
     needs: [build, build-macos]
     if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/aichat-rust-v')
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    concurrency:
-      group: aichat-rust-desktop-feed-publish
-      cancel-in-progress: false
-    permissions:
-      contents: write
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -271,9 +267,10 @@ jobs:
           version="$(node apps/aichat-rust/scripts/publish-release.cjs --version-from-tag "$TAG")"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Check release publication contracts
-        run: node --test apps/aichat-rust/tests/release-tags.test.cjs apps/aichat-rust/tests/release-publication.test.cjs apps/aichat-rust/tests/automatic-update-publication.test.cjs
+        run: node --test scripts/rust-local-release.test.cjs apps/aichat-rust/tests/release-tags.test.cjs apps/aichat-rust/tests/release-publication.test.cjs apps/aichat-rust/tests/automatic-update-publication.test.cjs
       - uses: actions/download-artifact@v4
         with:
+          pattern: aichat-rust-*-rust
           path: dist
           merge-multiple: true
       - name: Collect assets and checksums
@@ -283,45 +280,12 @@ jobs:
           version="${{ steps.release.outputs.version }}"
           ls -l dist
           node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --tag "$TAG" --dry-run
-          (cd dist && shasum -a 256 *.exe *.dmg) > "SHA256SUMS-${version}.txt"
-          cat "SHA256SUMS-${version}.txt"
-      - name: Ensure the GitHub release exists
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          version="${{ steps.release.outputs.version }}"
-          if ! gh release view "$TAG" > /dev/null 2>&1; then
-            if [[ "$TAG" == aichat-rust-v* ]]; then
-              echo '::error::Historical tags may only rerun an existing GitHub release.'
-              exit 1
-            fi
-            gh release create "$TAG" --verify-tag --draft \
-              --title "KeepWork 第二大脑 ${version}（Windows / macOS）" --generate-notes
-          fi
-      - name: Publish installers to CDN and add download links to release notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
-          KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
-          # Cross-border upload to Qiniu z2: bigger parts, more concurrency.
-          KP_QINIU_PART_SIZE_MB: '16'
-          KP_QINIU_PART_CONCURRENCY: '12'
-          KP_QINIU_PART_TIMEOUT_MS: '300000'
-          TAG: ${{ github.ref_name }}
-        run: |
-          version="${{ steps.release.outputs.version }}"
-          node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version "$version" --tag "$TAG"
-      # An existing version must pass CDN byte-for-byte verification before any
-      # GitHub attachment is replaced; newly created releases stay draft on error.
-      - name: Upload verified assets and publish the GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          version="${{ steps.release.outputs.version }}"
-          gh release upload "$TAG" dist/*.exe dist/*.dmg dist/release-manifest-${version}-*.json "SHA256SUMS-${version}.txt" --clobber
-          gh release edit "$TAG" --draft=false --latest
+          (cd dist && shasum -a 256 *.exe *.dmg release-manifest-${version}-*.json) > "dist/SHA256SUMS-${version}.txt"
+          cat "dist/SHA256SUMS-${version}.txt"
+      # CDN publication runs on the operator's device after a proxied download.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aichat-rust-release-packages
+          path: dist/*
+          compression-level: 0
+          if-no-files-found: error

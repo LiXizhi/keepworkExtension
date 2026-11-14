@@ -217,7 +217,9 @@ xcrun swiftc -parse-as-library -module-cache-path /private/tmp/aichat-wk-module-
 
 从 2026-11-13 起，后续桌面发布统一使用标准 `v<主版本>.<次版本>.<补丁版本>` 标签，例如 `v0.2.112`，标签中的版本必须与四处桌面清单一致。此约定同时记录在根目录 [AGENTS.md](../../AGENTS.md#rust-desktop-release-tags-appsaichat-rust)，供后续开发和发布遵循；其他产品继续使用各自独立的版本与标签约定。
 
-在 `v<版本>` 标签上手动触发 [Rust 安装包发布工作流](../../.github/workflows/aichat-rust-windows-release.yml) 时，发布任务使用仓库 secrets `KP_QINIU_ACCESS_KEY` 和 `KP_QINIU_SECRET_KEY` 上传 Windows x64 / ARM64 EXE 与 macOS Universal DMG，并校验 CDN 文件的大小与 SHA-256。工作流保持手动触发，不因创建或推送标签自动发布。三个安装包全部校验通过后，工作流会把完整、可点击的 CDN 下载地址写入 GitHub Release 正文顶部，保留原有发布说明，再上传安装包、Windows 产物验证清单及校验和并公开 Release。新建 Release 在验证失败时保留为草稿；重跑时替换同一自动区块。
+在 `v<版本>` 标签上手动触发 [Rust 安装包发布工作流](../../.github/workflows/aichat-rust-windows-release.yml) 后，GitHub 负责构建、校验 Windows x64 / ARM64 EXE 与 macOS Universal DMG，并将三个安装包、Windows 产物验证清单和 `SHA256SUMS-<版本>.txt` 汇总为 `aichat-rust-release-packages` artifact。GitHub 不再上传七牛或公开 Release；创建或推送标签也不会自动发布。
+
+产物由此设备通过 `http://127.0.0.1:7890` 下载，本地核对 run ID、完整源提交和校验和后，由此设备直连七牛上传。七牛凭据使用本机环境中的 `KP_QINIU_ACCESS_KEY`、`KP_QINIU_SECRET_KEY`，不写入命令参数或仓库。三个安装包全部通过 CDN 大小与 SHA-256 校验后，本地发布器才提升三个更新 feed、在 GitHub Release 正文顶部写入可点击的 CDN 下载地址，最后上传附件并公开 Release。新建 Release 在失败时保持草稿；重跑时保留原说明并替换同一自动下载区块。
 
 历史 `aichat-rust-v<版本>` 标签、Release 与下载地址保留原样，发布脚本仅为重跑已有历史发布保留旧标签兼容；不再新建旧格式标签，也不通过重命名、移动或重建历史标签调整显示顺序。标准标签便于 GitHub 识别版本，但不保证所有历史 Release 严格按版本倒序；`Latest` 标记与列表顺序是两回事。
 
@@ -225,7 +227,22 @@ xcrun swiftc -parse-as-library -module-cache-path /private/tmp/aichat-wk-module-
 
 此发布流程使用按版本存放的安装包路径 `https://cdn.keepwork.com/keepwork/aichat-rust/<版本>/<安装包文件名>`，以及 Rust 专用的 `win32-x64`、`win32-arm64`、`darwin-universal` 三个自动更新 feed；历史 Electron / Launcher 地址保持原状。只有对应版本完成实际上传和校验后，该版本的下载链接与更新清单才可视为已发布。
 
-从仓库根目录预览本地安装包的发布计划（不上传）：
+从仓库根目录下载与预检。每次下载使用全新输出目录，默认只预检，不上传：
+
+```bash
+node .github/skills/rust-release/scripts/download-artifacts.cjs \
+  --product desktop --run-id <构建runID> --commit <完整源提交SHA> \
+  --output .tmp/rust-release/desktop-<构建runID>
+node .github/skills/rust-release/scripts/publish-local.cjs \
+  --product desktop --artifacts .tmp/rust-release/desktop-<构建runID> \
+  --version <版本> --commit <完整源提交SHA> --tag v<版本>
+```
+
+实际发布时给第二条命令显式添加 `--publish true`。所有 GitHub `gh` 子进程（包括 Release 附件上传）均强制使用本机代理并剔除七牛密钥；七牛发布器自身清除代理后直连七牛。代理不可用、身份不匹配或验收失败时中止，不回退到 GitHub 上传七牛。保留下载目录不变，发布日志和新增回执存到目录外，避免重试时文件清单校验失败。
+
+独立 MCP 四个目标也采用同样的本机下载和上传路径。其证据验证需要仓库根目录的 Node 依赖，尚未安装时先运行 `npm ci --ignore-scripts`，已有依赖可复用。完整双产品流程与验收要求见 [rust-release Skill](../../.github/skills/rust-release/SKILL.md)。
+
+已有本地安装包仍可使用原入口预览 CDN 发布计划（不上传）：
 
 ```bash
 node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version <版本> --dry-run

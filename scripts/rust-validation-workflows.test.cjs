@@ -33,12 +33,15 @@ test('PRs validate both Rust products without entering installer or publication 
     assert.match(body, /needs: validate/);
     assert.match(body, /if: github\.event_name != 'pull_request'/);
   }
-  // Publication stays manual-dispatch on a tag; a PR or main push can never reach it.
-  const publish = jobBody(desktop, 'publish');
-  assert.match(publish, /^    if: startsWith\(github\.ref, 'refs\/tags\/v'\) \|\| /m);
-  assert.match(publish, /contents: write/);
-  // Anything that reads a secret or publishes must be gated off pull requests.
-  for (const job of ['build', 'build-macos', 'publish']) {
+  // Tagged builds only prepare downloadable assets; the local publisher owns CDN writes.
+  const prepare = jobBody(desktop, 'prepare-release');
+  assert.match(prepare, /^    if: startsWith\(github\.ref, 'refs\/tags\/v'\) \|\| /m);
+  assert.match(prepare, /needs: \[build, build-macos\]/);
+  assert.match(prepare, /actions\/upload-artifact@v4/);
+  assert.match(prepare, /name: aichat-rust-release-packages/);
+  assert.doesNotMatch(desktop, /^  publish:|contents: write|KP_QINIU|gh release|--draft=false|--latest/m);
+  // Signing credentials are still unavailable to pull requests.
+  for (const job of ['build', 'build-macos', 'prepare-release']) {
     const body = jobBody(desktop, job);
     if (/secrets\.|gh release/.test(body)) {
       assert.match(body, /if: (github\.event_name != 'pull_request'|startsWith\(github\.ref, 'refs\/tags\/)/, job);
