@@ -189,6 +189,7 @@ function desktopFixture(t, options = {}) {
       }
       const checksums = files.sort().map(name => `${digest(fs.readFileSync(path.join(directory, name)))}  ${name}`).join('\n');
       fs.writeFileSync(path.join(directory, `SHA256SUMS-${version}.txt`), checksums + '\n');
+      if (options.ciFeeds) desktopPublisher.collectUpdateFeeds(entries, version, '2020-01-01T00:00:00.000Z');
     },
   });
   downloadArtifacts(f.request, f);
@@ -278,6 +279,103 @@ test('successful local desktop publication verifies CDN before attachments, publ
     assert.deepEqual(events, ['CDN-verified', 'notes', 'assets', 'public']);
     assert.match(result.publication, /published/);
     assert.deepEqual({ ...process.env }, before, 'temporary direct publication settings are restored');
+  });
+});
+
+function desktopPublication(t, options = {}) {
+  const f = desktopFixture(t, options);
+  const remote = new Map();
+  const uploads = [];
+  const githubWrites = [];
+  let body = 'original release notes';
+  let isDraft = true;
+  let interruptFeed = options.interruptFeed;
+  const ciFiles = options.ciFeeds ? ['win32-x64', 'win32-arm64', 'darwin-universal'].map(target => {
+    const file = path.join(f.output, names.desktop[0], 'update-feeds', target, 'latest-client.json');
+    return { file, bytes: fs.readFileSync(file) };
+  }) : [];
+  const exec = (_file, args) => {
+    if (args[0] === 'api') return commit;
+    if (args[1] === 'view') return JSON.stringify({ isDraft, body });
+    githubWrites.push(args);
+    if (args.includes('--notes-file')) body = fs.readFileSync(args[args.indexOf('--notes-file') + 1], 'utf8');
+    if (args.includes('--draft=false')) isDraft = false;
+    return '';
+  };
+  const transport = {
+    async uploadEntry(config, entry) {
+      const feed = entry.name.endsWith('latest-client.json');
+      assert.equal(config.insertOnly, !feed);
+      if (feed && entry.name === interruptFeed) {
+        interruptFeed = undefined;
+        throw Error('fixture interrupted feed upload');
+      }
+      if (!feed) assert.equal(remote.has(entry.url), false, 'retries must reuse existing immutable installers');
+      remote.set(entry.url, fs.readFileSync(entry.filePath));
+      uploads.push(entry.name);
+    },
+    async refreshUrls() {},
+    async verifyEntriesWithRetry(entries) {
+      for (const entry of entries) {
+        const bytes = remote.get(entry.url);
+        assert.ok(bytes, 'verification requires uploaded CDN bytes: ' + entry.name);
+        assert.equal(bytes.length, entry.size);
+        assert.equal(digest(bytes), entry.sha256);
+      }
+    },
+  };
+  const dependencies = {
+    env: credentials, exec,
+    desktopPublisher: {
+      ...desktopPublisher,
+      async publishRelease(entries, config, settings) {
+        return desktopPublisher.publishRelease(entries, config, {
+          ...settings, transport, publishedAt: '2026-01-01T00:00:00.000Z',
+          async fetchImpl(url) {
+            const parsed = new URL(url);
+            const bytes = remote.get(parsed.origin + parsed.pathname);
+            return bytes ? new Response(bytes) : new Response('', { status: 404 });
+          },
+        });
+      },
+    },
+  };
+  const request = { ...f.request, publish: true };
+  return {
+    ...f, uploads, githubWrites, publish: () => publishLocal(request, dependencies),
+    verifyOriginal() {
+      assert.ok(verifyReceipt(f.output, { product: 'desktop', commit }));
+      for (const { file, bytes } of ciFiles) assert.deepEqual(fs.readFileSync(file), bytes,
+        'the original CI-generated feed bytes must remain unchanged');
+    },
+  };
+}
+
+test('real desktop publication preserves downloaded evidence and permits an identical successful retry', async t => {
+  for (const ciFeeds of [false, true]) await t.test(ciFeeds ? 'with original CI feeds' : 'without original CI feeds', async t => {
+    const f = desktopPublication(t, { ciFeeds });
+    assert.match((await f.publish()).publication, /published/);
+    f.verifyOriginal();
+    assert.match((await f.publish()).publication, /published/);
+    f.verifyOriginal();
+    assert.equal(f.uploads.filter(name => !name.endsWith('latest-client.json')).length, 3,
+      'a successful retry does not replace any installer');
+    assert.equal(f.uploads.filter(name => name.endsWith('latest-client.json')).length, 6);
+  });
+});
+
+test('an interrupted real desktop feed upload preserves evidence and permits the same publication to resume', async t => {
+  for (const ciFeeds of [false, true]) await t.test(ciFeeds ? 'with original CI feeds' : 'without original CI feeds', async t => {
+    const f = desktopPublication(t, { ciFeeds, interruptFeed: 'win32-arm64/latest-client.json' });
+    await assert.rejects(f.publish(), /interrupted feed upload/);
+    assert.equal(f.githubWrites.length, 0, 'a partially promoted feed must not publish GitHub notes or assets');
+    assert.ok(f.uploads.includes('win32-x64/latest-client.json'), 'failure follows a completed feed upload');
+    f.verifyOriginal();
+    assert.match((await f.publish()).publication, /published/);
+    f.verifyOriginal();
+    assert.equal(f.uploads.filter(name => !name.endsWith('latest-client.json')).length, 3,
+      'resume reuses all previously uploaded immutable installer bytes');
+    assert.equal(f.uploads.filter(name => name.endsWith('latest-client.json')).length, 4);
   });
 });
 

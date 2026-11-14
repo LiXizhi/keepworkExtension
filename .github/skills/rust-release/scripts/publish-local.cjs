@@ -118,7 +118,11 @@ async function publishLocal({ product, artifacts, version, commit, tag, acceptan
           gh(['release', 'edit', tag, '--repo', receipt.repository, '--notes-file', notes]);
         },
       };
-      const feeds = await desktopPublisher.publishRelease(plan.entries, config, { github });
+      // Download receipts cover the entire original tree, including CI's dry-run
+      // feeds. Keep newly generated manifests outside that immutable evidence.
+      const feeds = await desktopPublisher.publishRelease(plan.entries, config, {
+        github, feedDirectory: path.join(lock, 'update-feeds'),
+      });
       // Preserve the old ordering: verified CDN bytes precede any attachment replacement.
       gh(['release', 'upload', tag, '--repo', receipt.repository, ...plan.assets, '--clobber']);
       // A retry of an older public release must not steal Latest from a newer one.

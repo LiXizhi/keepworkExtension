@@ -58,7 +58,7 @@ function compareVersions(a, b) {
   return 0;
 }
 
-function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}) {
+function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}, feedDirectory) {
   qiniu.normalizeVersion(version);
   return UPDATE_TARGETS.map(target => {
     const windows = target.startsWith('win32-');
@@ -106,7 +106,7 @@ function collectUpdateFeeds(entries, version, publishedAt, previousByTarget = {}
       ...installer, installer,
     };
     validateDesktopManifest(manifest, { target });
-    const filePath = path.join(path.dirname(entries[0].filePath), 'update-feeds', target, 'latest-client.json');
+    const filePath = path.join(feedDirectory ?? path.join(path.dirname(entries[0].filePath), 'update-feeds'), target, 'latest-client.json');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(manifest, null, 2)}\n`);
     const remoteKey = updateKey(target);
@@ -137,7 +137,7 @@ function updateReleaseBody(body, entries) {
 }
 
 async function publishRelease(entries, config, {
-  transport = qiniu, fetchImpl = fetch, github, publishedAt = new Date().toISOString(),
+  transport = qiniu, fetchImpl = fetch, github, publishedAt = new Date().toISOString(), feedDirectory,
 } = {}) {
   const missing = [];
   // Check every versioned object before making the first CDN change. A retry
@@ -172,7 +172,7 @@ async function publishRelease(entries, config, {
       if (response.status !== 404) throw new Error(`Desktop feed preflight HTTP ${response.status}: ${target}`);
     }
   }
-  const feeds = collectUpdateFeeds(entries, entries[0].version, publishedAt, previousByTarget);
+  const feeds = collectUpdateFeeds(entries, entries[0].version, publishedAt, previousByTarget, feedDirectory);
   // Enforce immutability at storage as well as at the CDN: a cached 404 must
   // never permit overwriting an existing version with different installer bytes.
   for (const entry of missing) await transport.uploadEntry({ ...config, insertOnly: true }, entry);
