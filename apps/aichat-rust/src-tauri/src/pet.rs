@@ -104,7 +104,7 @@ impl PetHitRegion {
     fn clipped(mut self, area: WorkArea) -> Option<Self> {
         if !matches!(
             self.id.as_str(),
-            "pet" | "panel" | "bubble" | "compact-controls" | "exit-bubble" | "permission-bubble"
+            "pet" | "panel" | "bubble" | "exit-bubble" | "permission-bubble"
         ) || ![self.left, self.top, self.width, self.height]
             .iter()
             .all(|n| n.is_finite())
