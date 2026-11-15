@@ -31,11 +31,14 @@ test('native delivery uses current focus and only an explicit final voice comman
   const mac = fs.readFileSync(path.join(root, 'src-tauri/src/remote_voice/native_input_macos.m'), 'utf8');
   const production = native.split('#[cfg(test)]')[0];
   assert.doesNotMatch(production, /pub struct Target|may_paste|pub fn target|Delivery::Copied/);
-  assert.doesNotMatch(mac, /AXSelectedTextRange|keepwork_voice_input_target/);
-  assert.doesNotMatch(mac.split('// Clear alone')[0], /AXUIElementCopyAttributeValue/);
+  assert.doesNotMatch(mac, /keepwork_voice_input_target/);
+  for (const operation of ['copy', 'paste', 'submit']) {
+    const body = mac.split('bool keepwork_voice_input_' + operation + '(')[1].split('\n}')[0];
+    assert.doesNotMatch(body, /AXUIElement|AXSelectedTextRange|copyFocusedInput|clear_back|CGEventPostToPid/);
+  }
   assert.match(mac, /AXUIElementIsAttributeSettable/);
   assert.match(mac, /kAXSecureTextFieldSubrole/);
-  assert.doesNotMatch(mac, /activateWithOptions|activateIgnoringOtherApps|makeKeyAndOrderFront|CGEventPostToPid/);
+  assert.doesNotMatch(mac, /activateWithOptions|activateIgnoringOtherApps|makeKeyAndOrderFront/);
   assert.match(production, /deliver_current\(&self\.enabled, &self\.platform, text\)/);
   assert.match(production, /Delivery::ModifiersHeld/);
   assert.match(production, /Delivery::Submitted/);
@@ -93,4 +96,67 @@ test('Home navigation cannot insert its function glyph into desktop text fields'
   emit('keydown', { key: 'Home' });
   emit('blur');
   assert.equal(insert('\uF729'), true);
+});
+
+test('physical Back resolves the pet before invoking a single native clear', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src-tauri/src/remote_voice.rs'), 'utf8');
+  const body = source.split('    fn clear(&self, generation: u64)')[1].split('    fn input_result')[0];
+  const pet = body.indexOf('self.back_route.get()');
+  const native = body.indexOf('native.clear_back()');
+  assert.ok(pet >= 0 && native > pet);
+  assert.equal(body.match(/native\.clear_back\(/g).length, 1);
+  const route = body.slice(pet, native);
+  assert.match(route, /Ok\(BackRoute::Pet\)\s*=>\s*\{[^}]*return;/);
+  assert.match(route, /Ok\(BackRoute::MainComposer\)\s*=>\s*\{[^}]*"cleared"[^}]*return;/);
+  assert.match(route, /Err\(error\)\s*=>\s*\{[^}]*return;/);
+  assert.match(route, /Ok\(BackRoute::Native\)\s*=>\s*\{\s*\}/);
+});
+
+test('physical Back clears a disposable external AppKit, WebKit or Chromium editor with the pet hidden', {
+  skip: process.platform !== 'darwin' || process.env.AICHAT_TEST_MACOS_REMOTE_BACK !== '1',
+  timeout: 150_000,
+}, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-remote-back-'));
+  try {
+    const [host, editor] = await require('./fixtures/appkit-pair.cjs')(dir, 'remote-back');
+    await execute('clang', ['-fobjc-arc', '-Wall', '-Werror', '-framework', 'Cocoa', '-framework', 'WebKit',
+      '-framework', 'ApplicationServices', '-framework', 'IOKit', path.join(__dirname, 'fixtures/remote_back_editor_macos.m'), '-o', host]);
+    fs.copyFileSync(host, editor);
+    for (const mode of ['native', 'web', 'web-main']) {
+      await t.test(mode, async subtest => {
+        const scratch = path.join(dir, mode);
+        fs.mkdirSync(scratch);
+        try {
+          const result = await execute(host, [editor, mode, scratch], { timeout: 25_000, env: { ...process.env,
+            AICHAT_BACK_MAIN_FIXTURE: path.join(__dirname, 'fixtures/remote_back_main_webview.html'),
+            AICHAT_BACK_MAIN_SCRIPT: path.join(__dirname, '../src-tauri/src/app/remote_voice_clear_composer.js'),
+          } });
+          if (result.stderr.trim()) subtest.diagnostic(result.stderr.trim());
+          assert.match(result.stdout, /passed external .* active field clear/);
+        } catch (error) {
+          if (error.code !== 77) throw error;
+          subtest.skip(error.stderr.trim() || 'Foreground fixture unavailable');
+        }
+      });
+    }
+    const electron = path.resolve(__dirname, '../../aichat-desktop/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron');
+    for (const [runtime, binary] of [['Chrome', '/Applications/Google Chrome.app'], ['Electron', electron], ['Electron cold', electron],
+      ['Electron paste then Back', electron], ['Electron paste then Back, AX wrapper', electron],
+      ['Electron paste then Back, in flight', electron]]) {
+      await t.test(runtime + ' contenteditable', { skip: !fs.existsSync(binary) }, async subtest => {
+        try {
+          const directory = path.join(dir, runtime);
+          fs.mkdirSync(directory);
+          await require('./fixtures/remote-back-chrome.cjs')(host, message => subtest.diagnostic(message),
+            runtime.startsWith('Electron') ? { executablePath: electron, directory, cold: runtime === 'Electron cold',
+              paste: runtime.includes('paste then Back'), wrapper: runtime.includes('AX wrapper'), immediate: runtime.includes('in flight') } : undefined);
+        } catch (error) {
+          if (error.code !== 77) throw error;
+          subtest.skip('Accessibility permission unavailable');
+        }
+      });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -10,6 +10,8 @@ mod main_window;
 mod native_startup;
 mod pet_audio_host;
 mod pet_host;
+#[cfg(target_os = "macos")]
+mod pet_home_overlay;
 mod platform;
 mod remote_voice_host;
 mod remote_dialogue;

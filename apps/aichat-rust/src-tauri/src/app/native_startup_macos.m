@@ -220,3 +220,13 @@ int keepwork_voice_prepare_document(void *rawOwner) {
     if (!NSApp.active || NSApp.keyWindow != window || window.attachedSheet) return 0;
     return KeepworkVoiceDocumentResponder(owner, window);
 }
+
+// Back may edit only the WKWebView that already owns native keyboard events.
+bool keepwork_voice_document_has_input(void *rawOwner) {
+    NSView *owner = (__bridge NSView *)rawOwner;
+    NSWindow *window = owner.window;
+    if (!NSThread.isMainThread || !NSApp.active || !window || NSApp.keyWindow != window || window.attachedSheet) return false;
+    NSResponder *responder = window.firstResponder;
+    if (!responder || responder == window || (responder == window.contentView && responder != owner)) return false;
+    return KeepworkVoiceDocumentResponder(owner, window) == 1;
+}

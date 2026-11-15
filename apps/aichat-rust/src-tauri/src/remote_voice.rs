@@ -40,14 +40,17 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 pub(crate) type RecordingFocus = Result<Option<tokio::sync::oneshot::Receiver<bool>>, String>;
-pub(crate) enum RecordingPhase { Recording, Preview(String), Transcribing, End }
+pub(crate) enum RecordingPhase { Recording, Preview(String), Transcribing, NoAudio, End }
 /// A caption shows the newest words. Keep the full transcript only in the recognizer.
 pub(crate) fn preview_tail(text: &str) -> &str {
     let start = text.char_indices().rev().nth(159).map_or(0, |(i, _)| i);
     &text[start..]
 }
 
+pub(crate) type PetDelivery = dyn Fn(&str, &str) -> Result<tokio::sync::oneshot::Receiver<bool>, String> + Send + Sync;
+
 pub(crate) struct RecordingFeedback {
+    pub(crate) pet_delivery: Option<Box<PetDelivery>>,
     pub(crate) focus: Option<tokio::sync::oneshot::Receiver<bool>>,
     pub(crate) notify: Box<dyn Fn(RecordingPhase) + Send + Sync>,
 }
@@ -91,6 +94,8 @@ struct Inner {
     session_config: Option<VoiceConfig>,
     resume_config: Option<VoiceConfig>,
 }
+pub(crate) enum BackRoute { Pet, MainComposer, Native }
+
 pub struct RemoteVoice {
     pub(crate) dialogue: Arc<dialogue::Dialogue>,
     config_path: PathBuf,
@@ -99,7 +104,7 @@ pub struct RemoteVoice {
     recording_focus: std::sync::OnceLock<Box<RecordingFocusCallback>>,
     composer_focus: std::sync::OnceLock<Box<ComposerFocusCallback>>,
     home_pressed: std::sync::OnceLock<Box<dyn Fn(u64) + Send + Sync>>,
-    pet_back: std::sync::OnceLock<Box<dyn Fn(u64) -> Result<bool, String> + Send + Sync>>,
+    back_route: std::sync::OnceLock<Box<dyn Fn(u64) -> Result<BackRoute, String> + Send + Sync>>,
 }
 impl RemoteVoice {
     pub fn new(profile: &Path) -> Self {
@@ -122,7 +127,7 @@ impl RemoteVoice {
             composer_focus: std::sync::OnceLock::new(),
             dialogue: Arc::new(dialogue::Dialogue::default()),
             home_pressed: std::sync::OnceLock::new(),
-            pet_back: std::sync::OnceLock::new(),
+            back_route: std::sync::OnceLock::new(),
             inner: Mutex::new(Inner {
                 generation: 0,
                 cancel: None,
@@ -148,6 +153,14 @@ impl RemoteVoice {
         let inner = self.inner.lock().unwrap();
         Self::snapshot_locked(&inner)
     }
+    pub(crate) fn pet_readiness(&self) -> String {
+        let inner = self.inner.lock().unwrap();
+        let voice = &inner.snapshot;
+        if voice.state == "waiting-paired" && voice.config.device.is_empty() && voice.device.is_empty() {
+            return String::new();
+        }
+        voice.state.clone()
+    }
     pub(crate) fn set_recording_focus(&self, callback: impl Fn() -> RecordingTarget + Send + Sync + 'static) {
         let _ = self.recording_focus.set(Box::new(callback));
     }
@@ -157,8 +170,8 @@ impl RemoteVoice {
     pub(crate) fn set_home_pressed(&self, callback: impl Fn(u64) + Send + Sync + 'static) {
         let _ = self.home_pressed.set(Box::new(callback));
     }
-    pub(crate) fn set_pet_back(&self, callback: impl Fn(u64) -> Result<bool, String> + Send + Sync + 'static) {
-        let _ = self.pet_back.set(Box::new(callback));
+    pub(crate) fn set_back_route(&self, callback: impl Fn(u64) -> Result<BackRoute, String> + Send + Sync + 'static) {
+        let _ = self.back_route.set(Box::new(callback));
     }
     fn prepare_composer(&self) -> RecordingFocus {
         self.composer_focus.get().map_or(Ok(None), |callback| callback())
@@ -450,13 +463,40 @@ impl RemoteVoice {
             }
         }
     }
-    fn deliver(&self, generation: u64, text: &str) {
-        self.deliver_recognition(generation, text, true);
-    }
-    fn deliver_literal(&self, generation: u64, text: &str) -> bool {
-        self.deliver_recognition(generation, text, false)
-    }
-    fn deliver_recognition(&self, generation: u64, text: &str, complete: bool) -> bool {
+    async fn deliver_recognition(&self, generation: u64, owner: Option<&RecordingFeedback>, text: &str, complete: bool) -> bool {
+        if let Some(edit) = owner.and_then(|target| target.pet_delivery.as_ref()) {
+            {
+                let mut inner = self.inner.lock().unwrap();
+                if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return false; }
+                if inner.native.as_deref().is_some_and(NativeInput::modifiers_down) {
+                    Self::input_result(&mut inner.snapshot, Ok(Delivery::ModifiersHeld));
+                    return false;
+                }
+            }
+            if text.len() > 64_000 || text.contains('\0') {
+                self.update(generation, "input-blocked", "识别文字过长或包含无效字符。", None);
+                return false;
+            }
+            let (action, outcome) = if complete && native_input::is_clear_command(text) {
+                ("clear", Delivery::Cleared)
+            } else if complete && native_input::is_submit_command(text) {
+                ("submit", Delivery::Submitted)
+            } else {
+                ("insert", Delivery::Pasted)
+            };
+            let accepted = match edit(action, if action == "insert" { text } else { "" }) {
+                Ok(reply) => matches!(tokio::time::timeout(std::time::Duration::from_secs(1), reply).await, Ok(Ok(true))),
+                Err(_) => false,
+            };
+            if !accepted {
+                self.update(generation, "input-blocked", "桌宠输入框已关闭或已切换。", None);
+                return false;
+            }
+            let mut inner = self.inner.lock().unwrap();
+            if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return false; }
+            Self::input_result(&mut inner.snapshot, Ok(outcome));
+            return outcome == Delivery::Pasted;
+        }
         let mut inner = self.inner.lock().unwrap();
         if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) {
             return false;
@@ -492,9 +532,9 @@ impl RemoteVoice {
     fn clear(&self, generation: u64) {
         if !self.current(generation) || self.dialogue.exit("back") { return; }
         // The window queries may need the UI thread. Keep the voice mutex free.
-        if let Some(route) = self.pet_back.get() {
+        if let Some(route) = self.back_route.get() {
             match route(generation) {
-                Ok(true) => {
+                Ok(BackRoute::Pet) => {
                     self.update(generation, "ready", "", None);
                     return;
                 }
@@ -502,13 +542,27 @@ impl RemoteVoice {
                     self.update(generation, "input-blocked", &error, None);
                     return;
                 }
-                Ok(false) => {}
+                Ok(BackRoute::MainComposer) => {
+                    self.update(generation, "cleared", "", None);
+                    return;
+                }
+                Ok(BackRoute::Native) => {}
             }
         }
+        let native = {
+            let inner = self.inner.lock().unwrap();
+            if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return; }
+            let Some(native) = inner.native.clone() else { return; };
+            native
+        };
+        // A cold external editor can take a few seconds to expose its text field.
+        // Keep settings and session cancellation available during that AX lookup.
+        #[cfg(target_os = "macos")]
+        let result = native.clear_back();
+        #[cfg(not(target_os = "macos"))]
+        let result = native.clear();
         let mut inner = self.inner.lock().unwrap();
         if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return; }
-        let Some(native) = &inner.native else { return; };
-        let result = native.clear();
         Self::input_result(&mut inner.snapshot, result);
     }
     fn input_result(snapshot: &mut VoiceSnapshot, result: Result<Delivery, String>) {
@@ -607,8 +661,8 @@ mod tests {
         assert!(!json.contains("old-exe") && !json.contains("old-model"));
         let _ = std::fs::remove_dir_all(dir);
     }
-    #[test]
-    fn cancelled_generation_never_changes_status_or_delivers_late_text() {
+    #[tokio::test]
+    async fn cancelled_generation_never_changes_status_or_delivers_late_text() {
         let voice = RemoteVoice::new(Path::new("unused-voice-fixture"));
         let (cancel, _receiver) = watch::channel(false);
         {
@@ -621,8 +675,8 @@ mod tests {
         assert_eq!(voice.snapshot().state, "recording");
         voice.stop();
         voice.update(1, "pasted", "", None);
-        voice.deliver(1, "private transcript");
-        voice.deliver(1, "发送提示词。");
+        voice.deliver_recognition(1, None, "private transcript", true).await;
+        voice.deliver_recognition(1, None, "发送提示词。", true).await;
         assert_eq!(voice.snapshot().state, "stopping");
         voice.finish(1, Some("late network failure".into()));
         assert_eq!(voice.snapshot().state, "stopped");
@@ -850,8 +904,40 @@ mod tests {
         std::fs::remove_dir_all(profile).unwrap();
     }
 
-    #[test]
-    fn disabling_automatic_start_cancels_an_existing_session_and_prevents_late_voice_actions() {
+    #[tokio::test]
+    async fn pet_final_edits_use_the_press_owner_including_partial_commands_and_rejected_edits() {
+        let (voice, _stop, profile) = active_voice_before_sleep(true);
+        let edits = Arc::new(Mutex::new(Vec::new()));
+        let recorded = edits.clone();
+        let owner = RecordingFeedback {
+            focus: None,
+            notify: Box::new(|_| {}),
+            pet_delivery: Some(Box::new(move |action, text| {
+                recorded.lock().unwrap().push((action.to_owned(), text.to_owned()));
+                let (reply, ack) = tokio::sync::oneshot::channel();
+                reply.send(text != "hidden").unwrap();
+                Ok(ack)
+            })),
+        };
+        for (text, complete, action, state) in [
+            ("draft", true, "insert", "pasted"),
+            ("发送提示词。", true, "submit", "submitted"),
+            ("清除提示词", true, "clear", "cleared"),
+            ("发送提示词", false, "insert", "pasted"),
+            ("hidden", true, "insert", "input-blocked"),
+        ] {
+            voice.deliver_recognition(1, Some(&owner), text, complete).await;
+            assert_eq!(voice.snapshot().state, state);
+            assert_eq!(edits.lock().unwrap().last().unwrap(), &(action.into(), if action == "insert" { text } else { "" }.into()));
+        }
+        voice.stop();
+        voice.deliver_recognition(1, Some(&owner), "late", true).await;
+        assert_eq!(edits.lock().unwrap().len(), 5);
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabling_automatic_start_cancels_an_existing_session_and_prevents_late_voice_actions() {
         let profile = auto_profile("off-cancels");
         let voice = RemoteVoice::new(&profile);
         let (cancel, receiver) = watch::channel(false);
@@ -864,8 +950,8 @@ mod tests {
         let snapshot = voice.set_auto_start(false).unwrap();
         assert!(!snapshot.config.auto_start && *receiver.borrow());
         assert_eq!(snapshot.state, "stopping");
-        voice.deliver(1, "late transcript");
-        voice.deliver(1, "发送提示词");
+        voice.deliver_recognition(1, None, "late transcript", true).await;
+        voice.deliver_recognition(1, None, "发送提示词", true).await;
         assert_eq!(voice.snapshot().state, "stopping");
         voice.finish(1, Some("late backend error".into()));
         assert!(!voice.snapshot().running);

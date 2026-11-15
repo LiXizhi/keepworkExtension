@@ -25,6 +25,9 @@ pub(crate) trait DeliveryBackend {
 pub(crate) fn is_submit_command(text: &str) -> bool {
     is_command(text, "发送提示词")
 }
+pub(crate) fn is_clear_command(text: &str) -> bool {
+    is_command(text, "清除提示词")
+}
 fn is_command(text: &str, command: &str) -> bool {
     text.trim().trim_end_matches(|ch: char| {
         ch.is_whitespace() || matches!(ch, '。' | '．' | '.' | '！' | '!' | '？' | '?')
@@ -73,7 +76,7 @@ fn deliver_transcript(
     if !enabled.load(Ordering::Acquire) {
         return Ok(Delivery::Cancelled);
     }
-    if complete && is_command(text, "清除提示词") {
+    if complete && is_clear_command(text) {
         return clear_current(enabled, backend);
     }
     // Only the complete final utterance is a command. Quotes and embedded or
@@ -146,12 +149,17 @@ impl NativeInput {
     pub fn stop(&self) {
         // Revoke before acquiring the gate; a pending delivery must not begin.
         self.enabled.store(false, Ordering::Release);
+        #[cfg(target_os = "macos")]
+        platform::interrupt_back();
         if let Ok(_gate) = self.gate.lock() {
             self.enabled.store(false, Ordering::Release);
             self.platform.stop();
         }
     }
 
+    pub fn modifiers_down(&self) -> bool {
+        self.platform.modifiers_down()
+    }
     pub fn deliver(&self, text: &str) -> Result<Delivery, String> {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
         deliver_current(&self.enabled, &self.platform, text)
@@ -160,6 +168,15 @@ impl NativeInput {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
         deliver_transcript(&self.enabled, &self.platform, text, false)
     }
+    #[cfg(target_os = "macos")]
+    pub fn clear_back(&self) -> Result<Delivery, String> {
+        let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(Delivery::Cancelled);
+        }
+        platform::clear_back()
+    }
+    #[cfg(not(target_os = "macos"))]
     pub fn clear(&self) -> Result<Delivery, String> {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
         clear_current(&self.enabled, &self.platform)
@@ -206,6 +223,22 @@ mod platform {
         fn keepwork_voice_input_paste() -> bool;
         fn keepwork_voice_input_submit() -> bool;
         fn keepwork_voice_input_clear() -> i32;
+        fn keepwork_voice_input_clear_back() -> i32;
+        fn keepwork_voice_interrupt_back();
+    }
+
+    pub(super) fn interrupt_back() {
+        unsafe { keepwork_voice_interrupt_back() }
+    }
+    pub(super) fn clear_back() -> Result<super::Delivery, String> {
+        use super::Delivery;
+        match unsafe { keepwork_voice_input_clear_back() } {
+            0 => Ok(Delivery::Cleared),
+            1 => Ok(Delivery::NotEditable),
+            3 => Ok(Delivery::ModifiersHeld),
+            5 => Ok(Delivery::Cancelled),
+            _ => Err("无法清空当前输入框，请检查辅助功能权限或目标应用的编辑支持。".into()),
+        }
     }
 
     fn permission_error(code: i32) -> &'static str {

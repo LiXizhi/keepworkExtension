@@ -39,7 +39,7 @@ pub(super) fn sync(app: &AppHandle) {
                 .is_some_and(|id| core.remote_voice.dialogue.owns("main", id))
                 && verify_main_sender(&main, &core).is_ok()
                 && verify_pet_sender(pet, &core).is_ok()
-                && super::pet_host::pet_is_active(&main, pet).unwrap_or(false)
+                && super::pet_host::pet_is_active(pet).unwrap_or(false)
                 && core.page_connection.lock().unwrap().presentation()
                     == crate::page_connection::Presentation::Hidden
         });

@@ -17,58 +17,111 @@ use windows_sys::Win32::{
 };
 
 static ACTIVE: AtomicU64 = AtomicU64::new(0);
-// IDs increase for every press. A delayed phase from an older press can never
-// supersede a newer waiting ID or turn a fresh recording into a waiting cue.
-static TRANSCRIBING: AtomicU64 = AtomicU64::new(0);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Phase {
+    #[default]
+    Preparing,
+    Recording,
+    Transcribing,
+    Retry,
+}
+
+#[derive(Default)]
+struct Feedback {
+    id: u64,
+    phase: Option<Phase>,
+    transcript: String,
+}
+
+impl Feedback {
+    fn start(&mut self, id: u64) -> bool {
+        if id <= self.id {
+            return false;
+        }
+        self.id = id;
+        self.phase = Some(Phase::Preparing);
+        self.transcript.clear();
+        true
+    }
+
+    fn advance(&mut self, id: u64, phase: Phase) {
+        if id == self.id && self.phase.is_some_and(|current| phase > current) {
+            self.phase = Some(phase);
+            if phase == Phase::Retry {
+                self.transcript.clear();
+            }
+        }
+    }
+
+    fn preview(&mut self, id: u64, text: &str) {
+        if self.id == id && self.phase.is_some_and(|phase| phase != Phase::Retry) {
+            text.clone_into(&mut self.transcript);
+        }
+    }
+
+    fn end(&mut self, id: u64) -> bool {
+        if self.id != id || self.phase.take().is_none() {
+            return false;
+        }
+        self.transcript.clear();
+        true
+    }
+}
+
+static FEEDBACK: Mutex<Feedback> = Mutex::new(Feedback {
+    id: 0,
+    phase: None,
+    transcript: String::new(),
+});
 struct Workers {
     probe: thread::Thread,
     frames: mpsc::Sender<Option<Frame>>,
 }
 static WORKERS: OnceLock<Option<Workers>> = OnceLock::new();
 
-pub(super) fn start(id: u64) {
-    if let Some(workers) = WORKERS.get_or_init(Workers::spawn) {
-        ACTIVE.store(id, Ordering::Release);
+fn wake() {
+    if let Some(Some(workers)) = WORKERS.get() {
+        let _ = workers.frames.send(None);
         workers.probe.unpark();
     }
 }
 
-pub(super) fn transcribing(id: u64) {
-    if ACTIVE.load(Ordering::Acquire) == id {
-        TRANSCRIBING.fetch_max(id, Ordering::AcqRel);
-        if let Some(Some(workers)) = WORKERS.get() {
-            // Wake the window thread directly, even if UIA is still inside its first call.
-            let _ = workers.frames.send(None);
-            workers.probe.unpark();
+pub(super) fn start(id: u64) {
+    if WORKERS.get_or_init(Workers::spawn).is_some() {
+        let mut feedback = FEEDBACK.lock().unwrap();
+        if feedback.start(id) {
+            ACTIVE.store(id, Ordering::Release);
+            wake();
         }
     }
 }
 
-// Coalesce caption revisions; the paint thread owns the HWND and never takes focus.
-static CAPTION: Mutex<Option<(u64, String)>> = Mutex::new(None);
+fn advance(id: u64, phase: Phase) {
+    FEEDBACK.lock().unwrap().advance(id, phase);
+    wake();
+}
+
+pub(super) fn recording(id: u64) {
+    advance(id, Phase::Recording);
+}
+pub(super) fn transcribing(id: u64) {
+    advance(id, Phase::Transcribing);
+}
+pub(super) fn retry(id: u64) {
+    advance(id, Phase::Retry);
+}
 
 pub(super) fn preview(id: u64, text: &str) {
-    if let Ok(mut value) = CAPTION.lock() {
-        if ACTIVE.load(Ordering::Acquire) != id { return; }
-        *value = (!text.is_empty()).then(|| (id, text.to_owned()));
-    }
-    if let Some(Some(workers)) = WORKERS.get() {
-        let _ = workers.frames.send(None);
-    }
+    FEEDBACK.lock().unwrap().preview(id, text);
+    wake();
 }
 
 pub(super) fn end(id: u64) {
-    if ACTIVE
-        .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        if let Ok(mut value) = CAPTION.lock() {
-            if value.as_ref().is_some_and(|(owner, _)| *owner == id) { *value = None; }
-        }
-        if let Some(Some(workers)) = WORKERS.get() {
-            let _ = workers.frames.send(None);
-            workers.probe.unpark();
-        }
+    if FEEDBACK.lock().unwrap().end(id) {
+        ACTIVE
+            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .ok();
+        wake();
     }
 }
 
@@ -574,71 +627,322 @@ fn cue_bounds(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Symbol {
+    Spinner,
+    SoundBars,
+    Retry,
+}
+
+impl Phase {
+    fn symbol(self) -> Option<Symbol> {
+        match self {
+            Self::Preparing => Some(Symbol::Spinner),
+            Self::Recording => Some(Symbol::SoundBars),
+            Self::Retry => Some(Symbol::Retry),
+            Self::Transcribing => None, // Existing waiting dots.
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IconFrame {
+    symbol: Symbol,
+    step: u8,
+}
+
+fn icon_frame(symbol: Symbol, age: Duration, animate: bool) -> IconFrame {
+    IconFrame {
+        symbol,
+        step: if animate {
+            (age.as_millis() / 140 % 8) as u8
+        } else {
+            0
+        },
+    }
+}
+
+unsafe fn paint_icon(dc: HDC, bounds: RECT, icon: IconFrame) {
+    let cx = (bounds.right - bounds.left) / 2;
+    let cy = (bounds.bottom - bounds.top) / 2;
+    let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    let old_brush = SelectObject(dc, GetStockObject(DC_BRUSH));
+    SetDCBrushColor(dc, 0x00ffffff);
+    match icon.symbol {
+        Symbol::Spinner => {
+            let ring = [
+                (0, -7),
+                (5, -5),
+                (7, 0),
+                (5, 5),
+                (0, 7),
+                (-5, 5),
+                (-7, 0),
+                (-5, -5),
+            ];
+            for (i, (x, y)) in ring.into_iter().enumerate() {
+                let shade = 255 - ((usize::from(icon.step) + 8 - i) % 8) as u32 * 24;
+                SetDCBrushColor(dc, shade * 0x010101);
+                Ellipse(dc, cx + x - 2, cy + y - 2, cx + x + 2, cy + y + 2);
+            }
+        }
+        Symbol::SoundBars => {
+            let heights = [3, 5, 8, 6, 4, 2, 4, 6];
+            for i in 0..5 {
+                let x = cx - 9 + 4 * i as i32;
+                let h = heights[(usize::from(icon.step) + i * 2) % heights.len()];
+                RoundRect(dc, x, cy - h, x + 3, cy + h, 2, 2);
+            }
+        }
+        Symbol::Retry => {
+            let cy = cy - i32::from(matches!(icon.step, 2 | 3));
+            let point = |x, y| POINT {
+                x: cx + x,
+                y: cy + y,
+            };
+            let curve = [
+                point(5, 6),
+                point(2, 8),
+                point(-2, 8),
+                point(-6, 6),
+                point(-8, 2),
+                point(-8, -2),
+                point(-6, -6),
+                point(-2, -8),
+                point(2, -8),
+                point(5, -6),
+                point(7, -3),
+            ];
+            let pen = CreatePen(PS_SOLID, 2, 0x00ffffff);
+            if !pen.is_null() {
+                let previous = SelectObject(dc, pen);
+                Polyline(dc, curve.as_ptr(), curve.len() as i32);
+                SelectObject(dc, previous);
+                DeleteObject(pen);
+            }
+            let head = [point(9, -1), point(9, -9), point(2, -3)];
+            Polygon(dc, head.as_ptr(), head.len() as i32);
+        }
+    }
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+}
+
 struct Caption {
     hwnd: HWND,
     displayed: String,
+    icon: Option<IconFrame>,
     width: i32,
+}
+
+unsafe extern "system" fn paint_caption(
+    hwnd: HWND,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+    _id: usize,
+    _data: usize,
+) -> isize {
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    if message != WM_PAINT {
+        return DefSubclassProc(hwnd, message, wparam, lparam);
+    }
+    let mut paint = PAINTSTRUCT::default();
+    let dc = BeginPaint(hwnd, &mut paint);
+    if !dc.is_null() {
+        let mut bounds = RECT::default();
+        GetClientRect(hwnd, &mut bounds);
+        FillRect(dc, &bounds, GetStockObject(BLACK_BRUSH));
+        // GWLP_USERDATA contains a paint-thread-owned copy of the symbol frame.
+        let data = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        let symbol = match data >> 3 {
+            1 => Some(Symbol::Spinner),
+            2 => Some(Symbol::SoundBars),
+            3 => Some(Symbol::Retry),
+            _ => None,
+        };
+        if let Some(symbol) = symbol {
+            paint_icon(
+                dc,
+                bounds,
+                IconFrame {
+                    symbol,
+                    step: (data & 7) as u8,
+                },
+            );
+        } else {
+            let old_font = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+            SetBkMode(dc, TRANSPARENT as i32);
+            SetTextColor(dc, 0x00ffffff);
+            // The recognizer limits the caption to the last 160 Unicode characters.
+            let mut text = [0u16; 321];
+            let count = GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32);
+            DrawTextW(
+                dc,
+                text.as_ptr(),
+                count,
+                &mut bounds,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            SelectObject(dc, old_font);
+        }
+    }
+    EndPaint(hwnd, &paint);
+    0
 }
 
 impl Caption {
     unsafe fn new() -> Option<Self> {
         use windows_sys::Win32::System::SystemServices::{SS_CENTER, SS_CENTERIMAGE, SS_NOPREFIX};
-        let hwnd = CreateWindowExW(STYLE, windows_sys::w!("STATIC"), std::ptr::null(),
+        let hwnd = CreateWindowExW(
+            STYLE,
+            windows_sys::w!("STATIC"),
+            std::ptr::null(),
             WS_POPUP | WS_BORDER | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
-            0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null());
-        if hwnd.is_null() { return None; }
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null(),
+        );
+        if hwnd.is_null() {
+            return None;
+        }
+        if windows_sys::Win32::UI::Shell::SetWindowSubclass(hwnd, Some(paint_caption), 1, 0) == 0 {
+            DestroyWindow(hwnd);
+            return None;
+        }
         SetLayeredWindowAttributes(hwnd, 0, 244, LWA_ALPHA);
-        SendMessageW(hwnd, WM_SETFONT, GetStockObject(DEFAULT_GUI_FONT) as usize, 0);
-        Some(Self { hwnd, displayed: String::new(), width: 0 })
+        SendMessageW(
+            hwnd,
+            WM_SETFONT,
+            GetStockObject(DEFAULT_GUI_FONT) as usize,
+            0,
+        );
+        Some(Self {
+            hwnd,
+            displayed: String::new(),
+            icon: None,
+            width: 0,
+        })
     }
 
-    unsafe fn show(&mut self, text: &str, field: Option<Bounds>, waiting: bool) {
-        let Some(anchor) = field.and_then(|b| field_dot_bounds(b)).or_else(|| cursor_dot_bounds()) else {
+    unsafe fn show(
+        &mut self,
+        text: &str,
+        icon: Option<IconFrame>,
+        field: Option<Bounds>,
+        waiting: bool,
+    ) {
+        let Some(anchor) = field
+            .and_then(|b| field_dot_bounds(b))
+            .or_else(|| cursor_dot_bounds())
+        else {
             ShowWindow(self.hwnd, SW_HIDE);
             return;
         };
-        let point = POINT { x: anchor.left, y: anchor.top };
-        let Some(work) = monitor_work_area(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)) else { return; };
+        let point = POINT {
+            x: anchor.left,
+            y: anchor.top,
+        };
+        let Some(work) = monitor_work_area(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST))
+        else {
+            return;
+        };
         let max_width = (work.right - work.left).min(460);
-        if max_width < 30 { ShowWindow(self.hwnd, SW_HIDE); return; }
-        if self.displayed != text || self.width > max_width {
+        if max_width < 30 {
+            ShowWindow(self.hwnd, SW_HIDE);
+            return;
+        }
+        let icon_changed = self.icon != icon;
+        if icon_changed {
+            let data = icon.map_or(0, |frame| {
+                let kind = match frame.symbol {
+                    Symbol::Spinner => 1,
+                    Symbol::SoundBars => 2,
+                    Symbol::Retry => 3,
+                };
+                (kind << 3) | isize::from(frame.step)
+            });
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, data);
+            self.icon = icon;
+            InvalidateRect(self.hwnd, std::ptr::null(), 0);
+        }
+        if icon.is_some() {
+            self.width = 38.min(max_width);
+            if !self.displayed.is_empty() {
+                self.displayed.clear();
+                SetWindowTextW(self.hwnd, windows_sys::w!(""));
+            }
+        } else if self.displayed != text || self.width > max_width || icon_changed {
             let dc = GetDC(self.hwnd);
-            if dc.is_null() { return; }
+            if dc.is_null() {
+                return;
+            }
             let old_font = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
             let mut wide: Vec<u16> = text.replace(['\n', '\r'], " ").encode_utf16().collect();
             let mut start = 0;
             let mut extent = SIZE::default();
             while start < wide.len() {
-                if GetTextExtentPoint32W(dc, wide[start..].as_ptr(), (wide.len()-start) as i32, &mut extent) == 0
-                    || extent.cx + 20 <= max_width { break; }
+                if GetTextExtentPoint32W(
+                    dc,
+                    wide[start..].as_ptr(),
+                    (wide.len() - start) as i32,
+                    &mut extent,
+                ) == 0
+                    || extent.cx + 20 <= max_width
+                {
+                    break;
+                }
                 start += 1;
-                if wide.get(start).is_some_and(|unit| (0xdc00..=0xdfff).contains(unit)) { start += 1; }
+                if wide
+                    .get(start)
+                    .is_some_and(|unit| (0xdc00..=0xdfff).contains(unit))
+                {
+                    start += 1;
+                }
             }
             SelectObject(dc, old_font);
             ReleaseDC(self.hwnd, dc);
             self.width = (extent.cx + 20).clamp(30, max_width);
             wide.push(0);
             SetWindowTextW(self.hwnd, wide[start..].as_ptr());
+            InvalidateRect(self.hwnd, std::ptr::null(), 0);
             self.displayed = text.to_owned();
         }
         let left = anchor.left.clamp(work.left, work.right - self.width);
         let top = (anchor.top - 32 - if waiting { 4 } else { 0 }).max(work.top);
-        SetWindowPos(self.hwnd, HWND_TOPMOST, left, top, self.width, 28, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetWindowPos(
+            self.hwnd,
+            HWND_TOPMOST,
+            left,
+            top,
+            self.width,
+            28,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 
 impl Drop for Caption {
-    fn drop(&mut self) { unsafe { DestroyWindow(self.hwnd); } }
+    fn drop(&mut self) {
+        unsafe {
+            DestroyWindow(self.hwnd);
+        }
+    }
 }
 
 fn paint_frames(rx: mpsc::Receiver<Option<Frame>>) {
     let mut visible: Option<(HWND, (u64, Bounds, Cue))> = None;
     let mut caption: Option<Caption> = None;
     let mut latest_field: Option<(u64, Target)> = None;
-    let mut waiting: Option<(u64, Instant, bool)> = None;
+    let mut clock: Option<(u64, Phase, Instant, bool)> = None;
     let mut last_observed = Instant::now();
     loop {
-        let next = if visible.is_some() || waiting.is_some() {
+        let next = if visible.is_some() || clock.is_some() {
             match rx.recv_timeout(Duration::from_millis(16)) {
                 Ok(frame) => frame,
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -657,15 +961,24 @@ fn paint_frames(rx: mpsc::Receiver<Option<Frame>>) {
         }
         latest_field = next_target(active, latest_field, next);
         unsafe {
-            let cue = if active != 0 && TRANSCRIBING.load(Ordering::Acquire) == active {
-                if waiting.is_none_or(|(id, _, _)| id != active) {
-                    waiting = Some((active, Instant::now(), animations_enabled()));
+            let (phase, text) = {
+                let feedback = FEEDBACK.lock().unwrap();
+                (
+                    feedback
+                        .phase
+                        .filter(|_| active != 0 && active == feedback.id),
+                    feedback.transcript.clone(),
+                )
+            };
+            if clock.map(|(id, phase, _, _)| (id, phase)) != phase.map(|phase| (active, phase)) {
+                clock = phase.map(|phase| (active, phase, Instant::now(), animations_enabled()));
+            }
+            let waiting = phase == Some(Phase::Transcribing);
+            let cue = match clock {
+                Some((_, Phase::Transcribing, began, animate)) => {
+                    waiting_cue(began.elapsed(), animate)
                 }
-                let (_, began, animate) = waiting.unwrap();
-                waiting_cue(began.elapsed(), animate)
-            } else {
-                waiting = None;
-                Cue::Outline
+                _ => Cue::Outline,
             };
             // Retain the field through a phase-only wake, but don't show stale UIA geometry
             // if a provider stalls or focus changes while recognition is running.
@@ -676,14 +989,24 @@ fn paint_frames(rx: mpsc::Receiver<Option<Frame>>) {
                 (fg as usize == target.foreground && info.hwndFocus as usize == target.focus)
                     .then_some(target.bounds)
             });
-            let text = CAPTION.lock().ok().and_then(|v| v.as_ref().filter(|(id, _)| *id == active).map(|(_, s)| s.clone()));
-            if let Some(text) = text {
-                if caption.is_none() { caption = Caption::new(); }
-                if let Some(window) = &mut caption { window.show(&text, field, waiting.is_some()); }
+            let icon = clock
+                .and_then(|(_, phase, began, animate)| {
+                    phase
+                        .symbol()
+                        .map(|symbol| icon_frame(symbol, began.elapsed(), animate))
+                })
+                .filter(|_| text.is_empty());
+            if phase.is_some() && (!text.is_empty() || icon.is_some()) {
+                if caption.is_none() {
+                    caption = Caption::new();
+                }
+                if let Some(window) = &mut caption {
+                    window.show(&text, icon, field, waiting);
+                }
             } else {
                 caption = None;
             }
-            let new_frame = if active == 0 {
+            let new_frame = if phase.is_none() || phase == Some(Phase::Retry) {
                 None
             } else {
                 cue_bounds(cue, field, |b| field_dot_bounds(b), || cursor_dot_bounds())
@@ -720,6 +1043,46 @@ fn paint_frames(rx: mpsc::Receiver<Option<Frame>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_symbols_follow_press_and_stop_after_expiry_or_replacement() {
+        let mut feedback = Feedback::default();
+        assert!(feedback.start(10));
+        assert_eq!(feedback.phase.unwrap().symbol(), Some(Symbol::Spinner));
+        feedback.advance(10, Phase::Recording);
+        assert_eq!(feedback.phase.unwrap().symbol(), Some(Symbol::SoundBars));
+        feedback.preview(10, "actual words");
+        assert_eq!(feedback.transcript, "actual words");
+        feedback.advance(10, Phase::Retry);
+        assert_eq!(feedback.phase.unwrap().symbol(), Some(Symbol::Retry));
+        feedback.preview(10, "late words");
+        assert!(feedback.transcript.is_empty());
+        assert!(feedback.start(11));
+        feedback.advance(10, Phase::Retry);
+        assert!(!feedback.end(10));
+        assert_eq!(feedback.phase, Some(Phase::Preparing));
+        feedback.advance(11, Phase::Transcribing);
+        feedback.advance(11, Phase::Recording);
+        assert_eq!(feedback.phase.unwrap().symbol(), None);
+        assert!(feedback.end(11));
+        assert!(!feedback.start(10));
+        assert_eq!(feedback.phase, None);
+    }
+
+    #[test]
+    fn windows_symbols_have_static_and_animated_frames() {
+        for symbol in [Symbol::Spinner, Symbol::SoundBars, Symbol::Retry] {
+            let later = Duration::from_millis(420);
+            assert_eq!(
+                icon_frame(symbol, Duration::ZERO, true),
+                icon_frame(symbol, later, false)
+            );
+            assert_ne!(
+                icon_frame(symbol, Duration::ZERO, true),
+                icon_frame(symbol, later, true)
+            );
+        }
+    }
 
     #[test]
     fn provider_geometry_is_clipped_to_foreground_including_negative_desktop_coordinates() {

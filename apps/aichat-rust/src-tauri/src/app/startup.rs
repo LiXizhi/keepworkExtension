@@ -336,7 +336,8 @@ pub fn run() {
         zoom: Mutex::new(1.0),
         signed_in: AtomicBool::new(true),
         quitting: AtomicBool::new(false),
-        pet_temporarily_hidden: AtomicBool::new(false),
+        #[cfg(target_os = "macos")]
+        pet_home_overlay: Mutex::new(None),
         replacing_instance: AtomicBool::new(false),
         channels: Mutex::new(channel_states(&Value::Null)),
         lock: Mutex::new(None),
@@ -411,7 +412,8 @@ pub fn run() {
             #[cfg(windows)]
             crate::remote_voice::home_windows::install();
             let back_app = app_handle.clone();
-            core_for_setup.remote_voice.set_pet_back(move |generation| {
+            core_for_setup.remote_voice.set_back_route(move |generation| {
+                use crate::remote_voice::BackRoute;
                 let handle = back_app.clone();
                 let pressed = std::time::Instant::now();
                 let (done, result) = std::sync::mpsc::sync_channel(1);
@@ -423,7 +425,16 @@ pub fn run() {
                     let routed = if active { super::pet_host::route_remote_back(&handle) } else { Ok(true) };
                     let _ = done.send(routed);
                 }).map_err(|e| e.to_string())?;
-                result.recv_timeout(Duration::from_secs(1)).map_err(|e| e.to_string())?
+                let pet_handled = result.recv_timeout(Duration::from_secs(1)).map_err(|e| e.to_string())??;
+                if pet_handled { return Ok(BackRoute::Pet); }
+                #[cfg(target_os = "macos")]
+                {
+                    let voice = back_app.state::<Arc<AppCore>>().remote_voice.clone();
+                    if super::remote_voice_host::clear_main_composer(&back_app, pressed, move || voice.current(generation))? {
+                        return Ok(BackRoute::MainComposer);
+                    }
+                }
+                Ok(BackRoute::Native)
             });
             let home_app = app_handle.clone();
             core_for_setup.remote_voice.set_home_pressed(move |generation| {

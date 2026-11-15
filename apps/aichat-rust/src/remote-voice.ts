@@ -15,7 +15,7 @@ const labels: Record<string, string> = {
   "waiting-paired": "自动开启已启用 · 等待配对或唤醒遥控器",
   "needs-permission": "已检测到遥控器 · 请授权后按住语音键说话",
   "auto-error": "自动开启已暂停 · 可手动启动重试",
-  scanning: "正在查找遥控器", connecting: "正在连接蓝牙", ready: "已就绪 · 按住语音键说话",
+  scanning: "正在查找遥控器", connecting: "正在连接蓝牙", "preparing-microphone": "正在准备麦克风…", ready: "已就绪 · 按住语音键说话",
   "no-audio": "未收到遥控器音频 · 请再次按住语音键说话",
   "audio-too-short": "录音太短 · 请按住语音键，说完再松手",
   "silent-audio": "录音音量过低 · 请靠近遥控器麦克风再试",
@@ -44,7 +44,7 @@ function render(next: Snapshot, replaceConfig = false) {
   button("start").disabled = !next.supported || next.running || pending;
   button("start").hidden = next.running;
   button("begin").hidden = !next.running;
-  button("begin").disabled = pending || ["sleeping", "stopping", "scanning", "connecting", "reconnecting"].includes(next.state);
+  button("begin").disabled = pending || ["sleeping", "stopping", "scanning", "connecting", "preparing-microphone", "reconnecting"].includes(next.state);
   button("stop").disabled = pending || !next.supported || (!next.running && !["sleeping", "reconnecting"].includes(next.state) && (next.config.autoStart === false || next.autoPaused === true));
   document.getElementById("connected-device")!.textContent = next.device ? "当前蓝牙设备：" + next.device : "";
   const keys = next.buttons;
@@ -57,7 +57,7 @@ function render(next: Snapshot, replaceConfig = false) {
     : "单独说“清除提示词”；识别后清空。";
   text("key-status", keys?.error || (keys?.ready
     ? "返回键已连接 · " + keys.device
-    : next.running ? "返回键未连接，可使用语音清除口令。" : "启动后会检测返回键；OK 使用系统原生回车。"));
+    : next.running ? "返回键未连接，可使用语音清除口令。" : "启动后会检测遥控器按键来源。"));
 }
 async function action(command: "remote_voice_start" | "remote_voice_stop" | "remote_voice_begin_input" | "remote_voice_set_auto_start") {
   const enabled = input("auto-start").checked;

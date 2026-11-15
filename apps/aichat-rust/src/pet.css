@@ -19,51 +19,100 @@ body.dragging #art{filter:none}
   outline: 1.5px solid rgba(169, 78, 86, .5);
   outline-offset: -1px;
 }
-#remote-recording-status {
-  display: inline-flex;
-  align-items: center;
+#remote-voice-indicator {
+  display: inline-grid;
+  place-items: center;
+  position: relative;
   flex: none;
-  gap: 5px;
+  width: 32px;
+  height: 28px;
   margin-right: 8px;
-  color: #90575d;
-  font-weight: 600;
+  border-radius: 9px;
 }
-#remote-recording-status::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentColor;
+#remote-voice-indicator svg { width: 21px; height: 21px; }
+#remote-voice-indicator svg > g { display: none; }
+#remote-voice-indicator[data-icon="link"] .link,
+#remote-voice-indicator[data-icon="prepare"] .prepare,
+#remote-voice-indicator[data-icon="ready"] .ready,
+#remote-voice-indicator[data-icon="record"] .record,
+#remote-voice-indicator[data-icon="transcribe"] .transcribe,
+#remote-voice-indicator[data-icon="retry"] .retry,
+#remote-voice-indicator[data-icon="permission"] .permission { display: inline; }
+#target svg { display: none; }
+#panel.remote-voice-station #target { position: relative; }
+#panel.remote-voice-station #target svg { display: block; width: 24px; height: 24px; }
+#target[data-kind="session"] .persona,
+#target[data-kind="persona"] .session { display: none; }
+#remote-voice-label,
+#panel.remote-voice-station .target-text,
+#panel.remote-voice-station .action-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+#panel .actions svg { display: none; }
+#panel.remote-voice-station #draft::placeholder { opacity: 0; }
+#panel.remote-voice-station .actions button {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  min-width: 36px;
+  height: 32px;
+  padding: 5px;
+}
+#panel.remote-voice-station .actions svg {
+  display: block;
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+#panel .actions svg .alternate,
+#panel .actions .alternate-action svg .normal { display: none; }
+#panel .actions .alternate-action svg .alternate { display: inline; }
+#remote-voice-indicator,
+#remote-voice-preview,
+#draft.dictating {
+  background: #181818;
+  color: #fff;
+}
+#draft.dictating {
+  opacity: 1;
+  -webkit-text-fill-color: currentColor;
 }
 #remote-voice-preview {
-  max-height: 2.8em;
-  flex-shrink: 0;
+  align-self: flex-start;
+  max-width: 100%;
+  flex: none;
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 20px;
+  white-space: nowrap;
   overflow: hidden;
-  overflow-wrap: anywhere;
-  line-height: 1.4;
-  color: #496053;
-}
-#remote-transcribing-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-right: 8px;
-  color: #637268;
-}
-#remote-transcribing-status > span {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
+  pointer-events: none;
 }
 @media (prefers-reduced-motion: no-preference) {
-  #remote-transcribing-status > span { animation: remote-transcribing-dot 1.2s ease-in-out infinite; }
-  #remote-transcribing-status > span:nth-child(2) { animation-delay: 150ms; }
-  #remote-transcribing-status > span:nth-child(3) { animation-delay: 300ms; }
-  @keyframes remote-transcribing-dot {
-    0%, 60%, 100% { opacity: .4; }
-    30% { opacity: 1; }
+  #remote-voice-indicator .prepare { transform-origin: 12px 12px; animation: remote-spin 1.2s linear infinite; }
+  #remote-voice-indicator .link,
+  #remote-voice-indicator .transcribe circle { animation: remote-pulse 1.4s ease-in-out infinite alternate; }
+  #remote-voice-indicator .transcribe circle:nth-child(2) { animation-delay: -.35s; }
+  #remote-voice-indicator .transcribe circle:nth-child(3) { animation-delay: -.7s; }
+  #remote-voice-indicator .record path {
+    transform-origin: 12px 12px;
+    animation: remote-wave .76s ease-in-out infinite alternate;
   }
+  #remote-voice-indicator .record path:nth-child(even) { animation-delay: -.52s; }
+  #remote-voice-indicator .record path:nth-child(3) { animation-delay: -.28s; }
+  @keyframes remote-spin { to { transform: rotate(360deg); } }
+  @keyframes remote-pulse { from { opacity: .5; } to { opacity: 1; } }
+  @keyframes remote-wave { from { transform: scaleY(.45); } to { transform: scaleY(1); } }
 }
 #pet{right:auto;bottom:auto}
 #exit-bubble{position:relative;min-height:0;padding:14px;border:1px solid #bed5c7;border-radius:18px;background:#f7fbf8fc;box-shadow:0 3px 8px #0002;overflow-y:auto}#exit-bubble p{margin:10px 0;line-height:1.5}#exit-personas{padding-left:20px;max-height:160px;overflow-y:auto;overflow-wrap:anywhere}#exit-personas:empty{display:none}#exit-confirm{margin-left:auto;background:#a63630;color:white}#exit-status{font-size:12px;color:#637268}

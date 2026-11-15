@@ -38,10 +38,25 @@
     <output id="compact-status" aria-label="语音状态" hidden></output>
     <section id="panel" hidden>
       <header>
-        <button id="target" type="button"><span id="target-title">AIChat</span><span id="target-detail"></span></button>
-        <span id="remote-recording-status" role="status" hidden></span>
-        <span id="remote-transcribing-status" role="status" aria-label="正在识别语音" hidden>
-          <span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span>
+        <button id="target" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <g class="persona"><circle cx="12" cy="8" r="3.2"/><path d="M5 20v-1a7 7 0 0 1 14 0v1"/></g>
+            <path class="session" d="M20.5 11.5a8.5 8.5 0 0 1-8.5 8.2 9.2 9.2 0 0 1-4-.9L3.5 20l1.2-4.2a8.1 8.1 0 0 1-1.2-4.3A8.5 8.5 0 0 1 12 3.3a8.5 8.5 0 0 1 8.5 8.2Z"/>
+          </svg>
+          <span class="target-text"><span id="target-title">AIChat</span><span id="target-detail"></span></span>
+        </button>
+        <span id="remote-voice-indicator" role="status" aria-atomic="true" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <g class="link"><path d="m7 7 9 10-4 4V3l4 4-9 10"/></g>
+            <g class="prepare"><circle cx="12" cy="12" r="7.5" opacity=".24"/><path d="M12 4.5a7.5 7.5 0 0 1 7.5 7.5"/></g>
+            <g class="ready"><path d="m5 12 4.5 4.5L19 7"/></g>
+            <g class="record"><path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 7v10"/><path d="M20 10v4"/></g>
+            <g class="transcribe" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></g>
+            <g class="retry"><path d="M4.5 10a7.5 7.5 0 1 1 1.1 7.2M4.5 4.5V10H10"/></g>
+            <g class="permission"><rect x="5.5" y="10" width="13" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></g>
+          </svg>
+          <span id="remote-voice-label"></span>
         </span>
         <button id="collapse" type="button" title="收起面板" aria-label="收起面板">−</button>
         <button id="open" type="button" title="打开桌面窗口" aria-label="打开桌面窗口">□</button>
@@ -49,12 +64,24 @@
       <div id="status"></div>
       <div id="error"></div>
       <div id="remote-voice-preview" aria-label="语音预览" hidden></div>
-      <textarea id="draft" rows="3" maxlength="32000" placeholder="和宠物说点什么…"></textarea>
+      <textarea id="draft" aria-label="聊天草稿" rows="3" maxlength="32000" placeholder="和宠物说点什么…"></textarea>
       <div class="actions">
-        <button id="dictation" type="button">语音输入</button>
-        <button id="call" type="button">通话</button>
-        <button id="mute" type="button" hidden>静音</button>
-        <button id="send" type="button">发送</button>
+        <button id="dictation" type="button">
+          <span id="dictation-label" class="action-label">语音输入</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><g class="normal"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></g><rect class="alternate" x="6" y="6" width="12" height="12" rx="2"/></svg>
+        </button>
+        <button id="call" type="button">
+          <span id="call-label" class="action-label">通话</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="normal" d="m8 3 2.2 4.7-2.7 2a15.4 15.4 0 0 0 6.9 6.9l2-2.7L21 16.1l-.7 3.1c-.2 1-1 1.7-2 1.6C10.4 20.1 3.9 13.6 3.2 5.7c-.1-1 .6-1.8 1.6-2L8 3Z"/><path class="alternate" d="M3 13a13 13 0 0 1 18 0l-1.5 3.5-4-1 .1-3a12 12 0 0 0-7.2 0l.1 3-4 1L3 13Z"/></svg>
+        </button>
+        <button id="mute" type="button" hidden>
+          <span id="mute-label" class="action-label">静音</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path class="normal" d="m16 9 5 6m0-6-5 6"/><path class="alternate" d="M15 9a4 4 0 0 1 0 6m3-9a8 8 0 0 1 0 12"/></svg>
+        </button>
+        <button id="send" type="button">
+          <span id="send-label" class="action-label">发送</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="normal" d="m5 5 16 7-16 7 3-7-3-7Zm3 7h12"/><rect class="alternate" x="6" y="6" width="12" height="12" rx="2"/></svg>
+        </button>
       </div>
     </section>
   </div>

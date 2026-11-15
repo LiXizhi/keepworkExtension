@@ -116,6 +116,54 @@ pub(super) fn prepare_main_composer(app: &AppHandle) -> RecordingFocus {
     Ok(Some(receive))
 }
 
+/// Called on the remote worker after the pet declines Back. A positive result
+/// consumes this press. Only an untouched target may fall through to native AX.
+#[cfg(target_os = "macos")]
+pub(super) fn clear_main_composer(
+    app: &AppHandle,
+    pressed: std::time::Instant,
+    is_current: impl FnOnce() -> bool + Send + 'static,
+) -> Result<bool, String> {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    const SCRIPT: &str = include_str!("remote_voice_clear_composer.js");
+    const STALE: &str = "输入目标已改变。";
+    const BLOCKED: &str = "无法清空当前聊天输入框。";
+    let Some(main) = app.get_webview_window("main") else { return Ok(false); };
+    if !main.is_focused().map_err(|e| e.to_string())? { return Ok(false); }
+    let Some(url) = super::sender::loaded_page_url(&main)? else { return Err(STALE.into()); };
+    let core = app.state::<Arc<AppCore>>();
+    if !crate::security::trusted_page(url.as_str(), core.current_dev_url().as_deref()) { return Ok(false); }
+    let remaining = || Duration::from_secs(1).checked_sub(pressed.elapsed()).ok_or(STALE);
+    let expires = (SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| STALE)? + remaining()?).as_millis();
+    let page = serde_json::json!(url.as_str());
+    let script = format!("(location.href === {page} && Date.now() <= {expires}) ? ({SCRIPT}) : -1");
+    let (send, reply) = std::sync::mpsc::sync_channel(1);
+    let document = main.clone();
+    main.with_webview(move |view| {
+        extern "C" {
+            fn keepwork_voice_document_has_input(view: *mut std::ffi::c_void) -> bool;
+            fn keepwork_voice_input_modifiers() -> bool;
+        }
+        if !is_current() ||
+            pressed.elapsed() >= Duration::from_secs(1) || unsafe { keepwork_voice_input_modifiers() } {
+            let _ = send.send(-1);
+            return;
+        }
+        if !unsafe { keepwork_voice_document_has_input(view.inner()) } {
+            let _ = send.send(0);
+            return;
+        }
+        let _ = document.eval_with_callback(script, move |result| {
+            let _ = send.send(result.parse::<i8>().unwrap_or(-1));
+        });
+    }).map_err(|e| e.to_string())?;
+    match reply.recv_timeout(remaining()?).map_err(|_| STALE)? {
+        1 => Ok(true),
+        0 if main.is_focused().unwrap_or(false) => Ok(false),
+        _ => Err(BLOCKED.into()),
+    }
+}
+
 pub(super) fn trusted_voice_settings(label: &str, url: &url::Url) -> bool {
     if label != "remote-voice"
         || url.path() != "/remote-voice.html"

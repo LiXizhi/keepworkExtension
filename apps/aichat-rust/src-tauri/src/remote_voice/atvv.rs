@@ -301,6 +301,15 @@ impl Ptt {
         self.open_pending = None;
         self.busy = false;
     }
+    /// Consume controls received before Clear, even if setup delayed their processing.
+    /// A press still held at Clear remains discarded until physical release.
+    pub fn discard_buffered_control(&mut self, data: &[u8]) -> Result<Vec<Action>, String> {
+        match data {
+            [0x08 | 0x10, ..] | [0x04 | 0x11, _, 2, _, ..] if data.len() <= 256 => Ok(self.discard_press(data)),
+            [0x00 | 0x13, ..] => self.control(data),
+            _ => Ok(vec![]),
+        }
+    }
     /// The remote may require MIC_OPEN before it reports release. Complete
     /// that handshake without constructing a decoder or recognition stream.
     pub fn discard_press(&mut self, control: &[u8]) -> Vec<Action> {

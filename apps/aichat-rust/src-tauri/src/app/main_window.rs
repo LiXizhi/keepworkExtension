@@ -32,7 +32,6 @@ pub(super) fn handle_main_page_load(
 }
 
 pub fn show_main_window(app: &AppHandle, core: &AppCore) {
-    core.pet_temporarily_hidden.store(false, Ordering::Relaxed);
     stop_pet_audio(app, core, None, "已打开主窗口，语音输入已停止", false);
     core.page_connection.lock().unwrap().set_foreground(true);
     super::remote_phone_view::sync(app);
@@ -100,6 +99,10 @@ pub(super) fn toggle_remote_home(app: &AppHandle) {
     let Some(main) = app.get_webview_window("main") else {
         return;
     };
+    #[cfg(target_os = "macos")]
+    if super::pet_home_overlay::handle_home(app, &core, &main) {
+        return;
+    }
     if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
         dismiss_main_window(app, &core, DismissAction::RemoteHome);
     } else {

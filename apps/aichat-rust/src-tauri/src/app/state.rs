@@ -54,7 +54,8 @@ pub struct AppCore {
     pub pet_audio: Arc<pet_audio::PetAudioRelay>,
     pub remote_voice: Arc<crate::remote_voice::RemoteVoice>,
     pub pet_menu: pet_menu::Session,
-    pub pet_temporarily_hidden: AtomicBool,
+    #[cfg(target_os = "macos")]
+    pub pet_home_overlay: Mutex<Option<crate::pet::WorkArea>>,
     pub dev_server: Mutex<Option<DevServer>>,
     pub entry_url: Mutex<String>,
     pub local_source_enabled: AtomicBool,
