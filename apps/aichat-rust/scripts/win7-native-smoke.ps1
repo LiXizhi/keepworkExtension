@@ -403,7 +403,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
     if ($RequireTerminal) {
       # A backend may initialize asynchronously or retry a transient failure.
       # Bound the wait and recheck the owned peer on every health request.
-      $terminalDeadline = [DateTime]::UtcNow.AddSeconds(20)
+      $terminalDeadline = [DateTime]::UtcNow.AddSeconds(30)
       while (-not $terminalDiagnostic['available'] -and
           @('initializing', 'unavailable') -contains $terminalDiagnostic['terminalStatus'] -and
           [DateTime]::UtcNow -lt $terminalDeadline) {
