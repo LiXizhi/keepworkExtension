@@ -11,7 +11,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::FromRawHandle;
 use std::path::Path;
-use std::ptr::{null, null_mut};
+use std::ptr::null_mut;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
