@@ -694,6 +694,13 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Barrier, Condvar, Weak};
 
+    #[cfg(all(windows, not(any(target_vendor = "win7", feature = "win7-compat"))))]
+    #[test]
+    #[ignore = "manual Windows PTY differential diagnostic; not release acceptance"]
+    fn windows_pty_startup_differential_diagnostic() {
+        super::super::native::diagnose_windows_startup(shell_spec(), POWERSHELL_UTF8_INIT);
+    }
+
     struct NativeOwnership {
         manager: Weak<TerminalManager>,
         master_drops: AtomicUsize,
