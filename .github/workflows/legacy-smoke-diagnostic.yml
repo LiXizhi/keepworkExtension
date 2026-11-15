@@ -27,6 +27,10 @@ jobs:
         with:
           node-version: 22
           architecture: x64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
       - name: Validate original build provenance
         id: source
         uses: actions/github-script@v7
@@ -139,6 +143,15 @@ jobs:
           }
           assert.equal(provenance.diagnosticOnly, true); assert.equal(provenance.acceptance, false);
           '@ | node
+          exit $LASTEXITCODE
+      - name: Observe verified WinPTY raw Unicode bytes
+        if: always() && steps.verified.outcome == 'success'
+        shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ inputs.source-commit }}
+        run: |
+          $diagnosticRuntimeInfo = Get-Content .test-runtime/legacy-input/installer-payload/resources/win7-mcp/runtime.json -Raw | ConvertFrom-Json
+          python apps/aichat-rust/scripts/winpty-unicode-diagnostic.py --runtime-directory .test-runtime/legacy-input/installer-payload/resources/win7-mcp --output-directory .test-runtime/legacy-smoke-diagnostic/raw-unicode --expected-version $diagnosticRuntimeInfo.version --expected-commit $env:SOURCE_COMMIT
           exit $LASTEXITCODE
       - name: Preserve diagnostic reports only (never release inputs)
         if: always()
