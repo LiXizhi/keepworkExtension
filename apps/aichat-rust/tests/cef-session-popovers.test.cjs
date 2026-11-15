@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const host = path.resolve(__dirname, '../windows/cef-host');
 const read = name => fs.readFileSync(path.join(host, name), 'utf8');
-const template = read('compatibility_script.h.in').match(/R"KW_POPOVER\(([\s\S]*?)\)KW_POPOVER"/)[1];
+const template = [...read('compatibility_script.h.in').matchAll(/R"([A-Za-z0-9_]*)\(([\s\S]*?)\)\1"/g)]
+  .map(match => match[2]).join('');
 const production = template.replace('@KEEPWORK_POPOVER_SCRIPT@', read('vendor/popover.iife.min.js'))
   .replace('@KEEPWORK_SESSION_POPOVERS_SCRIPT@', read('session_popovers.js'));
 const fixture = legacy => `<!doctype html><meta charset="utf-8"><style>

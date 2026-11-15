@@ -22,6 +22,11 @@ test('CEF native menu, theme and pet regressions run against production C++ stat
     return result.stdout + result.stderr;
   };
   run(['-S', sourceRoot, '-B', build, '-DKEEPWORK_POLICY_TESTS_ONLY=ON', '-DCMAKE_BUILD_TYPE=Debug']);
+  const header = fs.readFileSync(path.join(build, 'compatibility_script.h'), 'utf8');
+  const literals = [...header.matchAll(/R"([A-Za-z0-9_]*)\(([\s\S]*?)\)\1"/g)];
+  assert.ok(literals.length > 1, 'the combined script must not be one oversized MSVC raw literal');
+  for (const [, delimiter, text] of literals)
+    assert.ok(Buffer.byteLength(text) < 16380, `${delimiter} exceeds the MSVC raw literal byte limit`);
   run(['--build', build, '--config', 'Debug']);
   const output = run(['-E', 'chdir', build, 'ctest', '-C', 'Debug', '--output-on-failure']);
   assert.match(output, /Test\s+#\d+:\s+cef-menu-tracking\s/);
@@ -31,5 +36,19 @@ test('CEF native menu, theme and pet regressions run against production C++ stat
   assert.match(output, /Test\s+#\d+:\s+cef-popup-layout\s/);
   assert.match(output, /Test\s+#\d+:\s+cef-pet-chat-state\s/);
   assert.match(output, /Test\s+#\d+:\s+cef-pet-input-policy\s/);
+  assert.match(output, /Test\s+#\d+:\s+cef-embedded-script\s/);
+  // C++ translation normalizes physical source newlines, including Windows
+  // checkouts. Preserve the existing runtime bytes rather than checkout CRLF.
+  const sourceText = file => fs.readFileSync(path.join(sourceRoot, file), 'utf8').replace(/\r\n?/g, '\n');
+  const expected = '(() => {\n  const nativePopover = \'popover\' in HTMLElement.prototype && typeof HTMLElement.prototype.showPopover === \'function\';\n  '
+    + sourceText('vendor/popover.iife.min.js')
+    + '\n  if (!nativePopover) {\n    '
+    + sourceText('session_popovers.js') + '\n  }\n})()';
+  assert.deepEqual(fs.readFileSync(path.join(build, 'compiled-compatibility-script.js')), Buffer.from(expected),
+    'the actual C++ compiler must concatenate the original wrapper and both JavaScript sources without changing bytes');
+  const cmakeSource = fs.readFileSync(path.join(sourceRoot, 'CMakeLists.txt'), 'utf8');
+  for (const target of ['cef-window-adapter-test', 'cef-pet-chat-panel-test'])
+    assert.ok(cmakeSource.includes(`target_link_options(${target} PRIVATE /MANIFEST:NO)`),
+      `${target} must use its explicit RT_MANIFEST instead of also generating another manifest`);
   assert.match(output, /100% tests passed/);
 });

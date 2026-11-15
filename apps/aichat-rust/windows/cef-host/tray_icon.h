@@ -41,12 +41,12 @@ class TrayIcon {
     }
     added_ = false; window_ = nullptr;
   }
-  bool Notify(const std::wstring& message) {
+  bool Notify(const std::wstring& text) {
     if (!added_) return false;
     NOTIFYICONDATAW data{}; data.cbSize = sizeof(data); data.hWnd = window_; data.uID = id;
     data.uFlags = NIF_INFO; data.dwInfoFlags = NIIF_INFO;
     lstrcpynW(data.szInfoTitle, L"Keepwork 更新已就绪", ARRAYSIZE(data.szInfoTitle));
-    lstrcpynW(data.szInfo, message.c_str(), ARRAYSIZE(data.szInfo));
+    lstrcpynW(data.szInfo, text.c_str(), ARRAYSIZE(data.szInfo));
     return Shell_NotifyIconW(NIM_MODIFY, &data) != FALSE;
   }
   UINT Event(WPARAM w, LPARAM l) const {

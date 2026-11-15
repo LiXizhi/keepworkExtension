@@ -40,9 +40,9 @@ struct TerminalSession {
     id: String,
     owner: String,
     cwd: String,
-    master: Mutex<Box<dyn PtyControl>>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    child: Mutex<Box<dyn ChildControl>>,
+    master: Mutex<Option<Box<dyn PtyControl>>>,
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    child: Mutex<Option<Box<dyn ChildControl>>>,
     output: Mutex<String>,
     base_cursor: AtomicU64,
     closed: AtomicBool,
@@ -71,6 +71,18 @@ impl TerminalSession {
             return;
         }
         let mut listeners = self.listeners.lock().expect("terminal listeners");
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        self.broadcast(text, false, &mut listeners);
+    }
+
+    fn broadcast(
+        &self,
+        text: &str,
+        closed: bool,
+        listeners: &mut Vec<tokio::sync::mpsc::UnboundedSender<TerminalOutputEvent>>,
+    ) {
         let event = {
             let mut output = self.output.lock().expect("terminal output");
             output.push_str(text);
@@ -83,10 +95,38 @@ impl TerminalSession {
                 cursor: base + utf16_len(&output),
                 reset: false,
                 output: text.to_string(),
-                closed: self.closed.load(Ordering::SeqCst),
+                closed,
             }
         };
         listeners.retain(|listener| listener.send(event.clone()).is_ok());
+    }
+
+    fn finish(&self) {
+        let mut listeners = self.listeners.lock().expect("terminal listeners");
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            // Neither EOF nor an explicit close supplies a verified exit code.
+            self.broadcast("\r\n[terminal closed]\r\n", true, &mut listeners);
+        }
+        listeners.clear();
+    }
+
+    fn terminate(&self) {
+        self.finish();
+        let child = self.child.lock().expect("terminal child").take();
+        // A reader holds an Arc to this session. Release native ownership now
+        // instead of waiting for that Arc to drop after EOF. In particular,
+        // ConPTY may keep output open until its master is closed. No locks are
+        // held while killing/dropping; the reader keeps draining late output.
+        if let Some(mut child) = child {
+            let _ = child.kill();
+        }
+        // Closing the master also releases a pipe write that is blocked on a
+        // child which stopped consuming input. Never wait for the writer lock
+        // before shutting down that native endpoint.
+        let master = self.master.lock().expect("terminal master").take();
+        drop(master);
+        let writer = self.writer.lock().expect("terminal writer").take();
+        drop(writer);
     }
 
     fn output_since(&self, cursor: usize) -> Value {
@@ -259,9 +299,9 @@ impl TerminalManager {
             id: uuid::Uuid::new_v4().to_string(),
             owner: owner.to_string(),
             cwd: cwd_text,
-            master: Mutex::new(opened.master),
-            writer: Mutex::new(opened.writer),
-            child: Mutex::new(opened.child),
+            master: Mutex::new(Some(opened.master)),
+            writer: Mutex::new(Some(opened.writer)),
+            child: Mutex::new(Some(opened.child)),
             output: Mutex::new(String::new()),
             base_cursor: AtomicU64::new(0),
             closed: AtomicBool::new(false),
@@ -293,10 +333,8 @@ impl TerminalManager {
             let mut final_text = String::with_capacity(4);
             let _ = decoder.decode_to_string(&[], &mut final_text, true);
             reader_session.append(&final_text);
-            if !reader_session.closed.swap(true, Ordering::SeqCst) {
-                // EOF alone does not provide an exit status. Never claim 0.
-                reader_session.append("\r\n[terminal closed]\r\n");
-            }
+            drop(reader);
+            reader_session.terminate();
         });
 
         Ok(snapshot)
@@ -315,6 +353,8 @@ impl TerminalManager {
             .writer
             .lock()
             .expect("terminal writer")
+            .as_mut()
+            .ok_or("terminal session is closed")?
             .write_all(data.as_bytes())
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -352,6 +392,8 @@ impl TerminalManager {
             .master
             .lock()
             .expect("terminal master")
+            .as_ref()
+            .ok_or("terminal session is closed")?
             .resize(PtySize {
                 rows: next_rows,
                 cols: next_cols,
@@ -387,7 +429,9 @@ impl TerminalManager {
         // Replay first, then live output, through one ordered channel.
         let _ = sender.send(event);
         listeners.retain(|listener| !listener.is_closed());
-        listeners.push(sender);
+        if !session.closed.load(Ordering::SeqCst) {
+            listeners.push(sender);
+        }
         Ok(receiver)
     }
 
@@ -397,10 +441,8 @@ impl TerminalManager {
 
     pub fn close(&self, id: &str, owner: &str) -> Result<(), String> {
         let session = self.get(id, owner)?;
-        if let Ok(mut child) = session.child.lock() {
-            let _ = child.kill();
-        }
         self.sessions.lock().expect("terminals").remove(id);
+        session.terminate();
         Ok(())
     }
 
@@ -412,23 +454,21 @@ impl TerminalManager {
             .filter(|session| now - session.touched_at.load(Ordering::SeqCst) > TERMINAL_IDLE_MS)
             .map(|session| session.id.clone())
             .collect();
-        for id in stale {
-            if let Some(session) = sessions.remove(&id) {
-                if let Ok(mut child) = session.child.lock() {
-                    let _ = child.kill();
-                }
-            }
+        let removed: Vec<_> = stale
+            .into_iter()
+            .filter_map(|id| sessions.remove(&id))
+            .collect();
+        drop(sessions);
+        for session in removed {
+            session.terminate();
         }
     }
 
     pub fn close_all(&self) {
-        let mut sessions = self.sessions.lock().expect("terminals");
-        for session in sessions.values() {
-            if let Ok(mut child) = session.child.lock() {
-                let _ = child.kill();
-            }
+        let sessions = std::mem::take(&mut *self.sessions.lock().expect("terminals"));
+        for session in sessions.into_values() {
+            session.terminate();
         }
-        sessions.clear();
     }
 
     fn get(&self, id: &str, owner: &str) -> Result<Arc<TerminalSession>, String> {
@@ -651,6 +691,238 @@ fn stream_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Barrier, Condvar, Weak};
+
+    struct NativeOwnership {
+        manager: Weak<TerminalManager>,
+        master_drops: AtomicUsize,
+        writer_drops: AtomicUsize,
+        child_drops: AtomicUsize,
+        child_kills: AtomicUsize,
+        writes: AtomicUsize,
+        resizes: AtomicUsize,
+        check_manager_lock: AtomicBool,
+        teardown_held_manager_lock: AtomicBool,
+    }
+
+    impl NativeOwnership {
+        fn observe_teardown(&self) {
+            if !self.check_manager_lock.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Some(manager) = self.manager.upgrade() {
+                if manager.sessions.try_lock().is_err() {
+                    self.teardown_held_manager_lock
+                        .store(true, Ordering::SeqCst);
+                }
+            }
+        }
+
+        fn assert_counts(&self, expected: usize) {
+            assert_eq!(self.master_drops.load(Ordering::SeqCst), expected);
+            assert_eq!(self.writer_drops.load(Ordering::SeqCst), expected);
+            assert_eq!(self.child_drops.load(Ordering::SeqCst), expected);
+            assert_eq!(self.child_kills.load(Ordering::SeqCst), expected);
+            assert!(
+                !self.teardown_held_manager_lock.load(Ordering::SeqCst),
+                "native teardown must not hold the manager's session-map lock"
+            );
+        }
+    }
+
+    struct HeldMaster(Arc<NativeOwnership>);
+    impl PtyControl for HeldMaster {
+        fn resize(&self, _size: PtySize) -> Result<(), String> {
+            self.0.resizes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    impl Drop for HeldMaster {
+        fn drop(&mut self) {
+            self.0.observe_teardown();
+            self.0.master_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct HeldWriter(Arc<NativeOwnership>);
+    impl Write for HeldWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Drop for HeldWriter {
+        fn drop(&mut self) {
+            self.0.observe_teardown();
+            self.0.writer_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct HeldChild(Arc<NativeOwnership>);
+    impl ChildControl for HeldChild {
+        fn kill(&mut self) -> Result<(), String> {
+            self.0.observe_teardown();
+            self.0.child_kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    impl Drop for HeldChild {
+        fn drop(&mut self) {
+            self.0.observe_teardown();
+            self.0.child_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockedInput {
+        released: Mutex<bool>,
+        wake: Condvar,
+        kills_when_master_closed: AtomicUsize,
+    }
+    impl BlockedInput {
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.wake.notify_all();
+        }
+    }
+
+    struct BlockingMaster {
+        master: HeldMaster,
+        input: Arc<BlockedInput>,
+    }
+    impl PtyControl for BlockingMaster {
+        fn resize(&self, size: PtySize) -> Result<(), String> {
+            self.master.resize(size)
+        }
+    }
+    impl Drop for BlockingMaster {
+        fn drop(&mut self) {
+            self.input.kills_when_master_closed.store(
+                self.master.0.child_kills.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            // Killing a child need not unblock a ConPTY input pipe. This fake
+            // writer remains blocked until ownership of its master is released.
+            self.input.release();
+        }
+    }
+
+    struct BlockingWriter {
+        writer: HeldWriter,
+        input: Arc<BlockedInput>,
+        entered: std::sync::mpsc::Sender<()>,
+    }
+    impl Write for BlockingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
+            let mut released = self.input.released.lock().unwrap();
+            while !*released {
+                released = self.input.wake.wait(released).unwrap();
+            }
+            self.writer.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.writer.flush()
+        }
+    }
+
+    const TEST_OWNER: &str = "https://keepwork.com";
+    const CLOSED_TEXT: &str = "\r\n[terminal closed]\r\n";
+    type OutputReceiver = tokio::sync::mpsc::UnboundedReceiver<TerminalOutputEvent>;
+
+    fn held_reader_session(
+        manager: &Arc<TerminalManager>,
+        id: &str,
+    ) -> (Arc<TerminalSession>, Arc<NativeOwnership>) {
+        held_reader_session_with_blocked_input(manager, id, None)
+    }
+
+    fn held_reader_session_with_blocked_input(
+        manager: &Arc<TerminalManager>,
+        id: &str,
+        blocked: Option<(Arc<BlockedInput>, std::sync::mpsc::Sender<()>)>,
+    ) -> (Arc<TerminalSession>, Arc<NativeOwnership>) {
+        let native = Arc::new(NativeOwnership {
+            manager: Arc::downgrade(manager),
+            master_drops: AtomicUsize::new(0),
+            writer_drops: AtomicUsize::new(0),
+            child_drops: AtomicUsize::new(0),
+            child_kills: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
+            resizes: AtomicUsize::new(0),
+            check_manager_lock: AtomicBool::new(true),
+            teardown_held_manager_lock: AtomicBool::new(false),
+        });
+        let master: Box<dyn PtyControl> = if let Some((input, _)) = &blocked {
+            Box::new(BlockingMaster {
+                master: HeldMaster(Arc::clone(&native)),
+                input: Arc::clone(input),
+            })
+        } else {
+            Box::new(HeldMaster(Arc::clone(&native)))
+        };
+        let writer: Box<dyn Write + Send> = if let Some((input, entered)) = blocked {
+            Box::new(BlockingWriter {
+                writer: HeldWriter(Arc::clone(&native)),
+                input,
+                entered,
+            })
+        } else {
+            Box::new(HeldWriter(Arc::clone(&native)))
+        };
+        let now = now_millis();
+        let reader = Arc::new(TerminalSession {
+            id: id.into(),
+            owner: TEST_OWNER.into(),
+            cwd: "isolated fixture".into(),
+            master: Mutex::new(Some(master)),
+            writer: Mutex::new(Some(writer)),
+            child: Mutex::new(Some(Box::new(HeldChild(Arc::clone(&native))))),
+            output: Mutex::new(String::new()),
+            base_cursor: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+            created_at: now,
+            touched_at: AtomicI64::new(now),
+            cols: AtomicU64::new(80),
+            rows: AtomicU64::new(24),
+            listeners: Mutex::new(Vec::new()),
+        });
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(id.into(), Arc::clone(&reader));
+        // This Arc stands in for a blocked native reader. It stays alive and
+        // never supplies EOF; removing the map entry must still release every
+        // native owner and finish an already-subscribed output stream.
+        (reader, native)
+    }
+
+    fn assert_closed_stream(receiver: &mut OutputReceiver, prefix: &str) {
+        let mut events = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    panic!("the final event must release all output channel senders")
+                }
+            }
+        }
+        assert_eq!(events.iter().filter(|event| event.closed).count(), 1);
+        assert!(events.last().unwrap().closed);
+        let mut combined = String::new();
+        for event in events {
+            combined.push_str(&event.output);
+            assert_eq!(event.cursor, combined.encode_utf16().count());
+            assert!(!event.reset);
+        }
+        assert_eq!(combined, format!("{prefix}{CLOSED_TEXT}"));
+    }
 
     #[test]
     fn deny_list_blocks_destructive_commands() {
@@ -690,5 +962,200 @@ mod tests {
         assert_eq!(clamp_dimension(Some(0.0), 80, 2, 500), 2);
         assert_eq!(clamp_dimension(Some(9999.0), 80, 2, 500), 500);
         assert_eq!(clamp_dimension(None, 24, 1, 200), 24);
+    }
+
+    #[test]
+    fn close_releases_native_owners_before_reader_eof_and_preserves_foreign_ownership() {
+        let manager = Arc::new(TerminalManager::default());
+        let (reader, native) = held_reader_session(&manager, "owned");
+        let mut receiver = manager.subscribe("owned", TEST_OWNER, 0).unwrap();
+        reader.append("中文😀");
+        assert!(Arc::strong_count(&reader) > 1);
+
+        assert!(manager.close("owned", "http://localhost:3001").is_err());
+        native.assert_counts(0);
+        assert!(!reader.closed.load(Ordering::SeqCst));
+        assert!(manager.get("owned", TEST_OWNER).is_ok());
+
+        manager.close("owned", TEST_OWNER).unwrap();
+        native.assert_counts(1);
+        assert!(manager.get("owned", TEST_OWNER).is_err());
+        assert_closed_stream(&mut receiver, "中文😀");
+        let finished = reader.output_since(0);
+        reader.append("late reader bytes must not follow closure");
+        reader.finish();
+        reader.terminate();
+        assert_eq!(reader.output_since(0), finished);
+        native.assert_counts(1);
+    }
+
+    #[test]
+    fn idle_prune_releases_stale_native_owners_and_keeps_a_fresh_terminal_usable() {
+        let manager = Arc::new(TerminalManager::default());
+        let (stale_reader, stale_native) = held_reader_session(&manager, "stale");
+        let (fresh_reader, fresh_native) = held_reader_session(&manager, "fresh");
+        let mut stale_stream = manager.subscribe("stale", TEST_OWNER, 0).unwrap();
+        let mut fresh_stream = manager.subscribe("fresh", TEST_OWNER, 0).unwrap();
+        stale_reader.append("过期😀");
+        stale_reader
+            .touched_at
+            .store(now_millis() - TERMINAL_IDLE_MS - 1_000, Ordering::SeqCst);
+
+        manager.prune();
+        stale_native.assert_counts(1);
+        fresh_native.assert_counts(0);
+        assert!(manager.get("stale", TEST_OWNER).is_err());
+        assert_closed_stream(&mut stale_stream, "过期😀");
+        manager.write("fresh", TEST_OWNER, "still usable").unwrap();
+        manager
+            .resize("fresh", TEST_OWNER, Some(101.0), Some(31.0))
+            .unwrap();
+        assert_eq!(fresh_native.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(fresh_native.resizes.load(Ordering::SeqCst), 1);
+        assert!(!fresh_reader.closed.load(Ordering::SeqCst));
+
+        manager.close_all();
+        fresh_native.assert_counts(1);
+        stale_native.assert_counts(1);
+        assert_closed_stream(&mut fresh_stream, "");
+    }
+
+    #[test]
+    fn close_all_releases_every_native_owner_while_all_reader_arcs_remain_alive() {
+        let manager = Arc::new(TerminalManager::default());
+        let sessions: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|id| {
+                let (reader, native) = held_reader_session(&manager, id);
+                let stream = manager.subscribe(id, TEST_OWNER, 0).unwrap();
+                reader.append(id);
+                (reader, native, stream, id)
+            })
+            .collect();
+
+        manager.close_all();
+        manager.close_all();
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        for (reader, native, mut stream, prefix) in sessions {
+            native.assert_counts(1);
+            assert_closed_stream(&mut stream, prefix);
+            reader.append("late output");
+            reader.terminate();
+            native.assert_counts(1);
+        }
+    }
+
+    #[test]
+    fn eof_and_explicit_termination_share_one_final_event_and_reject_late_output() {
+        let manager = Arc::new(TerminalManager::default());
+        let (reader, native) = held_reader_session(&manager, "eof-race");
+        let mut stream = manager.subscribe("eof-race", TEST_OWNER, 0).unwrap();
+        reader.append("先前😀");
+        let barrier = Arc::new(Barrier::new(3));
+        std::thread::scope(|scope| {
+            for eof in [true, false] {
+                let reader = Arc::clone(&reader);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    if eof {
+                        reader.finish();
+                        reader.append("late EOF decoder tail");
+                    } else {
+                        reader.terminate();
+                    }
+                });
+            }
+            barrier.wait();
+        });
+        native.assert_counts(1);
+        assert_closed_stream(&mut stream, "先前😀");
+        assert!(manager.write("eof-race", TEST_OWNER, "late input").is_err());
+        assert!(manager
+            .resize("eof-race", TEST_OWNER, Some(90.0), Some(25.0))
+            .is_err());
+
+        // A subscriber arriving after native EOF receives one closed replay
+        // and no sender remains waiting for another reader callback.
+        let mut replay = manager.subscribe("eof-race", TEST_OWNER, 0).unwrap();
+        assert_closed_stream(&mut replay, "先前😀");
+        assert!(reader.listeners.lock().unwrap().is_empty());
+        manager.close("eof-race", TEST_OWNER).unwrap();
+        native.assert_counts(1);
+    }
+
+    #[test]
+    fn concurrent_subscription_and_close_cannot_leave_an_open_output_channel() {
+        for _ in 0..16 {
+            let manager = Arc::new(TerminalManager::default());
+            let (reader, native) = held_reader_session(&manager, "subscribe-race");
+            // The concurrent subscriber may briefly hold the map lock on a
+            // different thread. Sequential teardown tests check lock ownership;
+            // this race checks that every possible subscription still closes.
+            native.check_manager_lock.store(false, Ordering::SeqCst);
+            reader.append("回放😀");
+            let barrier = Arc::new(Barrier::new(2));
+            let subscriber_manager = Arc::clone(&manager);
+            let subscriber_barrier = Arc::clone(&barrier);
+            let subscriber = std::thread::spawn(move || {
+                subscriber_barrier.wait();
+                subscriber_manager.subscribe("subscribe-race", TEST_OWNER, 0)
+            });
+            barrier.wait();
+            manager.close("subscribe-race", TEST_OWNER).unwrap();
+            match subscriber.join().unwrap() {
+                Ok(mut stream) => assert_closed_stream(&mut stream, "回放😀"),
+                Err(error) => assert_eq!(error, "terminal session not found"),
+            }
+            native.assert_counts(1);
+            assert!(reader.listeners.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn close_releases_the_master_before_waiting_for_a_blocked_input_writer() {
+        let manager = Arc::new(TerminalManager::default());
+        let input = Arc::new(BlockedInput::default());
+        let (entered, entered_receiver) = std::sync::mpsc::channel();
+        let (reader, native) = held_reader_session_with_blocked_input(
+            &manager,
+            "blocked-input",
+            Some((Arc::clone(&input), entered)),
+        );
+        let mut stream = manager.subscribe("blocked-input", TEST_OWNER, 0).unwrap();
+        reader.append("阻塞😀");
+        let writing_manager = Arc::clone(&manager);
+        let writing = std::thread::spawn(move || {
+            writing_manager.write(
+                "blocked-input",
+                TEST_OWNER,
+                "input waiting for the native pipe",
+            )
+        });
+        let entered = entered_receiver.recv_timeout(std::time::Duration::from_secs(2));
+        if entered.is_err() {
+            input.release();
+            writing.join().unwrap().unwrap();
+            panic!("the fake input must be blocked before closing its terminal");
+        }
+        let closing_manager = Arc::clone(&manager);
+        let (closed, closed_receiver) = std::sync::mpsc::channel();
+        let closing = std::thread::spawn(move || {
+            let _ = closed.send(closing_manager.close("blocked-input", TEST_OWNER));
+        });
+        let result = closed_receiver.recv_timeout(std::time::Duration::from_secs(2));
+        // A failing implementation must not leave a stuck test process. Only
+        // after recording failure may the harness release the blocked write.
+        if result.is_err() {
+            input.release();
+        }
+        writing.join().unwrap().unwrap();
+        closing.join().unwrap();
+        result
+            .expect("close must release the native master before waiting for its writer lock")
+            .unwrap();
+        assert_eq!(input.kills_when_master_closed.load(Ordering::SeqCst), 1);
+        native.assert_counts(1);
+        assert_closed_stream(&mut stream, "阻塞😀");
     }
 }

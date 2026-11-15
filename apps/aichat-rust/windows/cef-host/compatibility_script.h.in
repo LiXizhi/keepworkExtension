@@ -3,9 +3,13 @@ namespace keepwork_cef {
 // Pinned BSD-3-Clause browser API polyfill. No desktop APIs or IPC are exposed.
 inline constexpr char kPopoverScript[] = R"KW_POPOVER((() => {
   const nativePopover = 'popover' in HTMLElement.prototype && typeof HTMLElement.prototype.showPopover === 'function';
-  @KEEPWORK_POPOVER_SCRIPT@
+  )KW_POPOVER"
+R"KW_POLYFILL(@KEEPWORK_POPOVER_SCRIPT@)KW_POLYFILL"
+R"KW_GUARD(
   if (!nativePopover) {
-    @KEEPWORK_SESSION_POPOVERS_SCRIPT@
+    )KW_GUARD"
+R"KW_SESSION(@KEEPWORK_SESSION_POPOVERS_SCRIPT@)KW_SESSION"
+R"KW_END(
   }
-})())KW_POPOVER";
+})())KW_END";
 }
