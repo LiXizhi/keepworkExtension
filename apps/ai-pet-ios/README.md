@@ -1,10 +1,11 @@
 # AI Pet iOS — offline development foundation
 
-Independent development component **0.1.0-dev.3**, policy contract `ios-offline-policy-v1`.
+Independent development component **0.1.0-dev.4**, policy contract `ios-offline-policy-v1`.
 No real account, backend, microphone, provider, billing or licensed catalog is connected.
 The Swift package has no external dependencies or cross-app imports.
 
-For a guided manual Simulator review, see [HUMAN-REVIEW.md](HUMAN-REVIEW.md).
+Current presentation verification and walkthrough: [SLICE4-VALIDATION.md](SLICE4-VALIDATION.md).
+[HUMAN-REVIEW.md](HUMAN-REVIEW.md) remains the dated dev.3 review record.
 
 ## Portable checks
 
@@ -142,7 +143,7 @@ UI screenshots and precise scope are recorded in VALIDATION.md. Device
 App Group sharing, shared-preview widget updates/sign-out, 30-minute background/lock audio, Bluetooth,
 phone/recorder interruptions, echo/speech detection, power and latency remain unverified.
 Backend account/home-region identity, catalog rights, history, leases/providers,
-quota/settlement, billing, six-locale content, signing and distribution remain external.
+quota/settlement, billing, production translations/speech quality, signing and distribution remain external.
 
 Official references checked 2026-11-13 (Asia/Tokyo):
 
@@ -152,3 +153,18 @@ Official references checked 2026-11-13 (Asia/Tokyo):
 - [Audio interruptions](https://developer.apple.com/documentation/AVFAudio/handling-audio-interruptions)
 - [Creating a Widget Extension](https://developer.apple.com/documentation/widgetkit/creating-a-widget-extension)
 - [Widget timelines](https://developer.apple.com/documentation/widgetkit/timelineprovider)
+
+## Development presentation (dev.4)
+
+App copy is bundled for zh-CN, en-US, es-ES, ko-KR, ja-JP and fr-FR. The language
+picker persists a device-local preference independently of account/home region.
+The static widget uses system language unless a validated, unexpired synthetic
+shared snapshot supplies a language; selecting an app language does not publish it.
+Both app and extension include the Swift Package JSON resource bundle. Direct
+swiftc policy harnesses compile without Bundle.module and do not exercise resources.
+
+The original geometric pet has seven manual demo poses and a synthetic speaking
+mouth slider. It has no catalog identity, microphone, timer, or continuous animation.
+Reduce Motion, inactive/background and invisible states suppress animation and
+close the mouth. Text uses system fonts and scrolling layout; the pet has a localized
+VoiceOver label, and pose/language pickers and mouth slider expose native controls.

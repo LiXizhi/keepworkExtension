@@ -15,6 +15,24 @@ import Foundation
 }
 @main struct QAConformance {
     @MainActor static func main() throws {
+        precondition(DemoPose.allCases.count == 7)
+        for active in [false, true] { for visible in [false, true] { for reduced in [false, true] {
+            precondition(DemoPresentation.allowsMotion(reduceMotion: reduced, sceneActive: active, visible: visible) == (active && visible && !reduced))
+            precondition(DemoPresentation.mouthOpening(1, pose: .speaking, sceneActive: active, reduceMotion: reduced, visible: visible) == (active && visible && !reduced ? 1 : 0))
+        } } }
+        for level in [Double.nan, .infinity, -.infinity, -1, 0, 1, 2] {
+            let value = DemoPresentation.mouthOpening(level, pose: .speaking, sceneActive: true)
+            precondition(value.isFinite && (0...1).contains(value))
+            precondition(DemoPresentation.mouthOpening(level, pose: .idle, sceneActive: true) == 0)
+            precondition(DemoPresentation.mouthOpening(level, pose: .speaking, sceneActive: false) == 0)
+        }
+        for locale in PetLocale.allCases {
+            for key in CopyKey.allCases {
+                precondition(!(DevelopmentCopy.catalog[locale.rawValue]?[key.rawValue] ?? "").isEmpty)
+            }
+            precondition(LanguagePreference.resolve(locale.rawValue, system: ["en-US"]) == locale)
+        }
+
         let a = ConversationContext(accountID: "qa-a", homeRegion: "qa-region", personaID: "qa-pet", conversationID: "qa-chat")
         let b = ConversationContext(accountID: "qa-b", homeRegion: "qa-region", personaID: "qa-pet", conversationID: "qa-chat")
         let now = Date(timeIntervalSince1970: 100)

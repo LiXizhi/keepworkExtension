@@ -150,6 +150,7 @@ fun main() {
         }
     }
     passed += overlayTests()
+    passed += developmentPresentationTests()
     sharedFixtures()
     println("$passed deterministic Kotlin scenario groups passed")
 }

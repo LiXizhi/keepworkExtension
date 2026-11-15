@@ -3,7 +3,8 @@ package com.keepwork.aipet.core
 enum class PetLocale(val tag: String) {
     CHINESE("zh-CN"), ENGLISH("en-US"), SPANISH("es-ES"), KOREAN("ko-KR"), JAPANESE("ja-JP"), FRENCH("fr-FR");
     companion object {
-        fun resolve(tag: String): PetLocale = entries.firstOrNull { it.tag.equals(tag, true) }
+        fun resolve(tag: String): PetLocale = resolveNormalized(tag.trim().replace('_', '-'))
+        private fun resolveNormalized(tag: String): PetLocale = entries.firstOrNull { it.tag.equals(tag, true) }
             ?: entries.firstOrNull { it.tag.substringBefore('-').equals(tag.substringBefore('-'), true) }
             ?: ENGLISH
     }

@@ -3,6 +3,27 @@ package com.keepwork.aipet.qa
 import com.keepwork.aipet.core.*
 
 fun main() {
+    val openGate = PreviewGate(true, true, true, true, false, false, true)
+    for (blocked in listOf(openGate.copy(attached=false), openGate.copy(visible=false), openGate.copy(active=false), openGate.copy(interactive=false), openGate.copy(locked=true), openGate.copy(reducedMotion=true), openGate.copy(systemMotion=false))) {
+        check(blocked.mouth(Pose.SPEAKING, 1f) == 0f)
+    }
+    for (level in listOf(Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY, -1f, 0f, 1f, 2f)) {
+        val mouth = openGate.mouth(Pose.SPEAKING, level)
+        check(mouth.isFinite() && mouth in 0f..1f)
+        check(openGate.mouth(Pose.IDLE, level) == 0f)
+    }
+    val languageStore = object : LanguageStore {
+        var saved: String? = null
+        var writable = true
+        override fun read() = saved
+        override fun write(tag: String): Boolean { if (!writable) return false; saved=tag; return true }
+    }
+    val preference = LanguagePreference(languageStore, "ja-JP")
+    check(preference.select(PetLocale.FRENCH))
+    check(LanguagePreference(languageStore, "en-US").locale == PetLocale.FRENCH)
+    languageStore.writable=false
+    check(!preference.select(PetLocale.KOREAN) && preference.locale == PetLocale.FRENCH)
+
     val audio = FakeAudio()
     val voice = VoiceOwner(audio, FakeTransport()) { 0L }
     val admission = Admission(true, true, true, true)

@@ -1,12 +1,12 @@
 # AI Pet Android — offline development foundation
 
-Version **0.1.0-dev.3**. This standalone Kotlin project implements backend-independent M0 work. It is not a production client, launch catalog, account login, voice service, or billing integration. It imports no sibling app code.
+Version **0.1.0-dev.4**. This standalone Kotlin project implements backend-independent M0 work. It is not a production client, launch catalog, account login, voice service, or billing integration. It imports no sibling app code.
 
 ## Components
 
 - `core/`: pure Kotlin voice owner, monotonic lease expiry, session/turn/fencing identities with per-admission local epochs, admission checks, deliberate interruption recovery, mute, idempotent cleanup, simulated lease authority and deterministic audio/transport drivers.
 - `core/`: synthetic catalog, account-bound selection, independent home region/language, six locale identifiers (`zh-CN`, `en-US`, `es-ES`, `ko-KR`, `ja-JP`, `fr-FR`) and transient bounded/reduced-motion presentation.
-- `app/`: minimal native Activity with explicitly labeled offline controls. It can demonstrate fake start, reply, spoken interruption, network loss, transport restoration, deliberate resume, mute and stop. No audio bytes, credentials, history, raw microphone data or user content are persisted. A non-exported development `specialUse` foreground service owns a real small draggable overlay after explicit Show. It can remain on Home and has in-app, pet-tap and notification Stop controls. Overlay/foreground-service/notification permissions are declared; no network, microphone, billing or boot permission is present. See [service ownership and current evidence](docs/service-overlay-validation.md). Locale identifiers are present; complete UI translations and ASR/TTS are not implemented.
+- `app/`: minimal native Activity with explicitly labeled offline controls. It can demonstrate fake start, reply, spoken interruption, network loss, transport restoration, deliberate resume, mute and stop. No audio bytes, credentials, history, raw microphone data or user content are persisted. A non-exported development `specialUse` foreground service owns a real small draggable overlay after explicit Show. It can remain on Home and has in-app, pet-tap and notification Stop controls. Overlay/foreground-service/notification permissions are declared; no network, microphone, billing or boot permission is present. See [service ownership and current evidence](docs/service-overlay-validation.md). The native development UI now has six selectable, independently persisted locales and an original geometric seven-pose pet with synthetic mouth controls. ASR/TTS remain unimplemented. See [presentation validation](docs/presentation-locales-validation.md).
 - `scripts/prepare-shared-fixtures.mjs`: reads shared JSON fixtures and translates five explicitly supported voice scenarios to test-only TSV. Unknown scenarios/events/checkpoints fail. The wrong-account migration scenario is explicitly excluded because this app has no migration implementation.
 
 All audio/transport ports are nonblocking, nonthrowing, non-reentrant contracts and called by a serialized owner. Future platform drivers must marshal callbacks onto the owner and convert hardware errors into pause/end events, never throw through cleanup. The current fake ports contain no hardware or consumer endpoint access.
@@ -38,11 +38,26 @@ python3 scripts/setup-android-sdk.py
 scripts/build-android.sh
 ```
 
-Android plugin **8.9.2**, Gradle **8.11.1**, Kotlin **2.2.10**, JDK **17**; development minimum API **26**, compile/target API **35**, application ID `com.keepwork.aipet.dev`, versionCode **3**. These are development pins, not a statement of current Play submission eligibility. Production identifiers, signing, target SDK/store qualification remain release gates.
+Android plugin **8.9.2**, Gradle **8.11.1**, Kotlin **2.2.10**, JDK **17**; development minimum API **26**, compile/target API **35**, application ID `com.keepwork.aipet.dev`, versionCode **4**. These are development pins, not a statement of current Play submission eligibility. Production identifiers, signing, target SDK/store qualification remain release gates.
 
 The build entry point runs core scenarios, debug packaging and Android lint, checks prerequisites, and prints the APK path on success. Tool downloads are separate from the build. Optional emulator setup and runtime evidence are described in [native validation](docs/native-validation.md).
 
 Compatibility was checked against primary documentation on 2026-11-13: [AGP 8.9 requirements](https://developer.android.com/build/releases/agp-8-9-0-release-notes), [Kotlin Gradle/AGP compatibility](https://kotlinlang.org/docs/gradle-configure-project.html). Native microphone integration must separately satisfy [Android foreground-service type and permission rules](https://developer.android.com/develop/background-work/services/fgs/service-types).
+
+## Runtime verification on this Mac
+
+After the app-local emulator/system image and initialized `AiPetOfflineApi35` AVD exist, use the verified hardware-renderer profile from this directory:
+
+```sh
+python3 scripts/owned_emulator.py start --gpu host --boot-seconds 180
+# Only after startup succeeds; stop the owned device even if smoke fails:
+(
+  trap 'python3 scripts/owned_emulator.py stop' EXIT
+  python3 scripts/smoke-emulator.py --attach
+)
+```
+
+The launcher requires actual hardware GLES in the emulator log and rejects a software fallback. It uses only the owned AVD, emulator ports 5584/5585 and dedicated adb 5039; it does not wipe initialized data or change global AVD settings. Evidence is written under `build/native-evidence/runs`. The optional `python3 scripts/targeted-runtime-checks.py --budget-seconds 300` checks font/Stop and removal/reopen behavior on the retained instance before full smoke. Other platforms can use their supported emulator renderer, but must verify the actual renderer and rerun acceptance; this Mac's auto/software profiles previously produced System UI ANRs. See [diagnosis and exact evidence](docs/runtime-diagnostics.md).
 
 ## Lifecycle policy and shared contract mapping
 
@@ -56,9 +71,9 @@ The shared `contracts/ai-pet/fixtures/voice-lifecycle-scenarios.json` is consume
 
 ## Evidence and remaining gates
 
-- Pinned Gradle **8.11.1** / Kotlin **2.2.10** / scoped Temurin JDK **17.0.21**: `:core:check` **BUILD SUCCESSFUL**, 21 local scenario groups (including 100 concurrent revoke/output races) + all 5 shared voice scenarios passed.
-- Pure Kotlin source compiled and executed on a scoped JDK 17 using the Gradle-bundled Kotlin 2.0.20 compiler: **21 deterministic local scenario groups + all 5 shared voice scenarios passed**.
-- Native Android debug APK: **built successfully** with `scripts/build-android.sh`; Cross-app Home/drag, all three Stop paths, revocation and forced process relaunch checks passed on the isolated API 35 emulator; lint has 0 errors / 21 development warnings. Current runtime results and screenshots are tracked in [service overlay validation](docs/service-overlay-validation.md). The prior Activity-scoped results are retained in [dev.2 native validation](docs/native-validation.md). No physical device tested.
+- Pinned Gradle **8.11.1** / Kotlin **2.2.10** / scoped Temurin JDK **17.0.21**: `:core:check` **BUILD SUCCESSFUL**, 23 local scenario groups (including 100 concurrent revoke/output races) + all 5 shared voice scenarios passed.
+- Pure Kotlin source compiled and executed on a scoped JDK 17 using the Gradle-bundled Kotlin 2.0.20 compiler: **23 deterministic local scenario groups + all 5 shared voice scenarios passed**.
+- Native Android dev.4 debug APK built successfully; lint has 0 errors / 6 development warnings. Final APK full runtime smoke **passed on 2026-11-15**, using verified Apple M5 hardware GLES on the isolated API 35 emulator: six locale selections/persistence, seven poses/preview controls, normal/2x font final Stop, Home/drag, all three overlay Stop paths, revoke/restore and force-stop/reopen without resurrection. Separate early-session checks also passed real reopen interaction and timed Stop acceptance. See [presentation validation](docs/presentation-locales-validation.md) and [renderer/diagnostic evidence](docs/runtime-diagnostics.md). Original tested device settings were restored and read back; owned emulator/adb process and ports verified closed. No physical device tested.
 - Real microphone, production-qualified foreground service and cross-app overlay/input behavior, echo cancellation, audio routes, lock/background OS scheduling, interruption latency/power, process-death recovery and permissions: not implemented/device-gated. The shell uses fake resources and ends them on Activity destruction; it is not evidence of native continuous voice.
 - Login/recovery, official licensed catalog/assets, history sync/migration/deletion, remote authority/fencing, usage settlement, store billing, regional and six-language service quality: external-gated.
 - No production deployment, signing, distribution, real-account copy, microphone use or consumer service connection occurred.

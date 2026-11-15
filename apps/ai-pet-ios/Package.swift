@@ -7,7 +7,7 @@ let package = Package(
     products: [.library(name: "AIPetCore", targets: ["AIPetCore"]),
                .executable(name: "AIPetCoreChecks", targets: ["AIPetCoreChecks"])],
     targets: [
-        .target(name: "AIPetCore"),
+        .target(name: "AIPetCore", resources: [.process("Resources")]),
         .executableTarget(name: "AIPetCoreChecks", dependencies: ["AIPetCore"], path: "Tests/AIPetCoreTests")
     ]
 )

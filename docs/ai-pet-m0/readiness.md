@@ -1,5 +1,11 @@
 # M0 readiness and evidence gates
 
+## Current checkpoint — 2026-11-15
+
+The offline dev.4 mobile runtime slice is accepted in its tested scope: iOS visible checks/restoration passed; unchanged Android final APK now passes both targeted and full API35 emulator smoke on verified Apple M5/Metal host GLES. Normal/2× Stop, strengthened stop/revoke and actual interactive reopen gaps are closed. Settings and dedicated runtime cleanup records were independently reviewed; avatar workloads and iOS were unchanged during this successful Android follow-up. QA harness dev.7 includes five passing independent runtime-evidence tests; root reports all 13 integrated harness tests (8 owner + 5 QA), localization and layout checks passed.
+
+**Production M0 remains open.** Real service/identity/rights/retention contracts, App Group, physical devices, broader OS/OEM/accessibility/performance coverage and distribution qualification remain required. Historical pending/failed checkpoints below are retained chronologically and do not override this current offline-runtime result. Detailed proof and limitations are in [verification](verification.md).
+
 Evidence date: 2026-11-13 (Asia/Tokyo). Accepted baseline: [plan](../ai-pet-cross-platform-plan.md), [specification](../ai-pet-implementation-spec.md), repository `6332c09`. **M0 remains open.** Offline fixtures and native core scaffolds can proceed; no production service integration or release readiness is claimed. Accountable roles below are responsibilities to assign, not invented named people or proof of staffing.
 
 ## Current native-tooling status — slice 2
@@ -103,3 +109,49 @@ QA read the ownership/cleanup record and confirmed the dedicated normal-inventor
 ## Slice 3 current local readiness
 
 Contracts and QA are **dev.4**; Android is **dev.3/code 3**, iOS remains **dev.3/build 3**. Compact checkpoint checks pass, including host binding/fresh activation, uncertain-outcome reconciliation, deletion aliases and retained replay fences. This does not erase old journals/backups or supply trusted service identity. Android service native build and API 35 cross-app overlay/Stop/revocation/no-auto-restart smoke pass; QA inspected artifacts, assertions, screenshots and cleanup logs. Lint has 21 development warnings and no errors. iOS generic installed Widget rendering/tap and app-link handling pass in unavailable-sharing mode. Detailed evidence and limits are in verification.md. All authentic backend, provisioning/shared-preview, physical-device and store gates remain open.
+
+## Slice 4 current checkpoint (2026-11-14)
+
+Contracts/QA are dev.5; both mobile artifacts are dev.4/build or code 4. Independent asset probes (5), resource completeness, native core motion/persistence probes and artifact metadata checks pass. iOS resource-aware QA includes the combined reduced-motion/visibility/activity mouth gate and preserved voice/account/disk conformance. Actual App and Widget bundles include the six-locale resource payload. Android APK contains the six locale configurations and retains the four approved development overlay/FGS/notification permissions; lint is 0 errors / 6 warnings. Owner native builds and core suites passed.
+
+New dev.4 UI evidence is **not yet accepted**. Android cold boot timed out before application checks; its retry was stopped to avoid competing with iOS. iOS boot readiness also reached its 600-second limit before the app ran. Device cleanup/final runtime handoff is tracked in verification.md. Prior dev.3 Widget human review and overlay runtime evidence remain historical, not verification of new poses, mouth controls, layout or persisted language. Genuine rights, translation quality, shared App Group/device/service/store gates remain open.
+
+### Slice 4 final bounded checkpoint
+
+The later authorized iOS review-device run supersedes the initial all-UI-blocked status for a limited scope: Japanese language/persistence, Speaking mouth, owner-observed maximum text-size scrolling, generic static Widget and App/Widget language isolation. QA visually confirmed Japanese Speaking and Home Screen Widget screenshots; the saved Dynamic Type image is Home Screen, so App large-text layout remains owner-observed only. Reduce Motion system toggle, all individual poses and unsupported-link delivery are still unverified on dev.4. Review simulator is retained, not cleaned up; dev.3 human review is historical.
+
+Android uncovered an actual bottom-control overlap. Owner fixed ScrollView insets and rebuilt; final hash `afb8995888d1a3c5f97065c6b32481d33fd598f1cd544b9a04df97d65856da40`, lint 0 errors/6 warnings. Final APK runtime remains unverified after bounded boot failures; pre-fix language/pose/overlay partial evidence is not final acceptance. QA probes/resources/build checks pass, but full mobile UI acceptance and external M0 gates remain open.
+
+## Runtime recovery current checkpoint (2026-11-14)
+
+This checkpoint supersedes the earlier Slice 4 UI-pending entries above. QA harness is dev.6; contracts remain dev.5 and mobile artifacts remain dev.4. Five runtime-harness regression checks pass. iOS current visible runtime checks now pass: all seven poses/six languages, actual Reduce Motion comparison, genuine large-text App capture, application-level safe/unsupported links and refreshed Widget tap-open. Installed artifact hashes match; Japanese preference, Reduce Motion and text size were restored. Invisible background mouth state remains policy-test evidence; physical VoiceOver and App Group/service gates remain open.
+
+Android final inset APK remains runtime **UNVERIFIED**. Measured bounded RAM/host-condition/Vulkan comparisons reached OS readiness but repeated System UI ANRs blocked real controls. Traces evidence compositor-service waiting without establishing its root cause. Requested 2048 MiB was actually clamped to 2560 MiB. Original font/airplane settings were read back restored, and owner emulator/private ADB cleanup is evidenced. No pre-fix UI result is promoted to final-APK acceptance.
+
+Root is awaiting the user's decision about temporarily pausing unrelated avatar workloads for one controlled run. No additional run or unrelated workload change is authorized yet. The retained iOS review device was temporarily shut down by root for the controlled comparison; root reboot succeeded, but App launch timed out at 30 seconds; the iOS follow-up observed a white launch surface and no responsive App content. Saved Japanese/large-text/Reduce Motion-off values are preserved, but responsive foreground restoration remains unconfirmed. Earlier successful iOS runtime evidence remains valid. Full mobile runtime acceptance and M0 remain open. Detailed artifact identities, evidence and remaining checks are in [verification](verification.md).
+
+### Authorized recovery follow-up (22:49 JST)
+
+The user authorized one lower-load comparison; root paused the two identified avatar processes under a 20-minute automatic resume guard. iOS has the first runtime slot, Android waits. New outcome and workload restoration evidence are pending; earlier feature evidence and remaining acceptance gaps remain unchanged.
+
+Lower-load iOS follow-up: responsive dev.4 foreground is now confirmed by owner interaction and QA-inspected actual App screenshot. Japanese/large text/Reduce Motion-off remain intact; safe-link state is correct. The earlier white-launch restoration blocker is resolved. Android final runtime outcome and root-owned workload resumption are still pending.
+
+### Lower-load run outcome (23:10 JST)
+
+Final Android APK now has segmented locale/pose/preview, overlay and permission/force-stop lifecycle evidence, superseding the earlier entirely blocked status for those scopes. The full run still does not pass: final normal/2× Stop visibility and actual click remain unverified after a foreground App focus-event ANR and unsuccessful bounded relaunch. QA inspected the ANR main-thread sample (message loop, differing from earlier System UI GPU-query wait); no unique root cause or justified product fix is established.
+
+Dedicated Android AVD/ADB cleanup is documented. The root guard records both paused avatar processes resumed by 23:10:03 JST. iOS recovery succeeded before Android, then the review device was deliberately shut down for serial testing; final post-Android interactive restoration is pending. M0 and full runtime acceptance remain open.
+
+### Final minimized attempt (23:36 JST)
+
+The second authorized lower-load window produced **zero new passing checks**: System UI ANR blocked the actual-UI gate before normal/2× Stop checks. Final APK is unchanged; settings restoration and owned Android runtime cleanup were independently inspected. Previous segmented results do not establish the newly strengthened live-before/absent-after in-app Stop/revoke assertions or stable reopened App UI; those and final Stop remain open. No more Android experiments are planned this turn. iOS review restoration and second-window workload resumption remain pending final confirmation. Production M0 gates are unchanged and open.
+
+Final iOS restoration (23:38 JST) is confirmed by owner-observed dev.4 Japanese UI and responsive scrolling; retained settings remain unchanged. Only second-window host-process resumption confirmation remains pending for environment handoff; Android acceptance gaps above remain open.
+
+### Final environment handoff (23:40 JST)
+
+Both avatar processes were resumed in both authorized windows; QA read guard events, and root verified R/S running states with CPU use afterward. Android dedicated runtime is cleaned; retained iOS dev.4 is responsive with Japanese, large text and Reduce Motion off preserved. Environment recovery is complete. Runtime acceptance remains partial: normal/2× final Stop, strengthened live-before in-app Stop/revoke, and stable reopened UI are unverified; unresolved App/System UI ANRs remain recorded. No production M0 gate is closed by this recovery work.
+
+## Hardware-GLES follow-up (2026-11-15)
+
+QA dev.7 adds three real-helper evidence regressions; all five independent runtime-harness tests pass. Same final APK now passes the formerly open targeted checks on observed Apple M5/Metal GLES: normal/2× complete bottom Stop and real session end, live-before/absent-after in-app Stop/revoke, restored-permission and force-stop interactive reopen without resurrection. QA inspected result records, screenshot and unchanged settings readbacks. Full corrected long-sequence smoke remains pending. Avatar processes and iOS remain unchanged; all external production M0 gates remain open.

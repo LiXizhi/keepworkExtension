@@ -1,0 +1,8 @@
+<resources>
+    <string-array name="language_names" translatable="false">
+        <item>简体中文</item><item>English (US)</item><item>Español</item><item>한국어</item><item>日本語</item><item>Français</item>
+    </string-array>
+    <item name="language_picker" type="id"/><item name="pose_picker" type="id"/>
+    <item name="pet_preview" type="id"/><item name="mouth_level" type="id"/>
+    <item name="reduce_motion" type="id"/><item name="preview_visible" type="id"/>
+</resources>

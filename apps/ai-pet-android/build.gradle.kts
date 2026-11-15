@@ -10,4 +10,4 @@ plugins {
     base
     kotlin("jvm") version "2.2.10" apply false
 }
-allprojects { version = "0.1.0-dev.3" }
+allprojects { version = "0.1.0-dev.4" }

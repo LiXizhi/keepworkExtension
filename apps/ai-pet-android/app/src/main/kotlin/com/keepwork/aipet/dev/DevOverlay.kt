@@ -13,9 +13,9 @@ import com.keepwork.aipet.core.*
 /** Native window driver owned only by OverlayService. */
 class DevOverlay(private val activity: Context, private val stop: () -> Unit) : OverlayDriver {
     private val manager = activity.getSystemService(WindowManager::class.java)
-    private var view: TextView? = null
-    private val width = (132 * activity.resources.displayMetrics.density).toInt()
-    private val height = (80 * activity.resources.displayMetrics.density).toInt()
+    private var view: DeveloperPetView? = null
+    private val width = (112 * activity.resources.displayMetrics.density).toInt()
+    private val height = (112 * activity.resources.displayMetrics.density).toInt()
     private val drag = OverlayDrag(ViewConfiguration.get(activity).scaledTouchSlop.toFloat())
     private val params = WindowManager.LayoutParams(width, height,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -26,13 +26,9 @@ class DevOverlay(private val activity: Context, private val stop: () -> Unit) : 
             x = 32; y = 140
         }
     override fun attach(): Boolean {
-        val pet = TextView(activity).apply {
-            text = "◆ Dev pet\nDrag · tap to close"
-            contentDescription = "Development pet overlay. Tap to remove; drag to move."
-            gravity = Gravity.CENTER
-            textSize = 15f
-            setTextColor(Color.WHITE)
-            background = GradientDrawable().apply { setColor(Color.rgb(63, 70, 155)); cornerRadius = 24f }
+        val pet = DeveloperPetView(activity).apply {
+            contentDescription = DevLanguage.wrap(activity).getString(R.string.overlay_description)
+            active = false // Static idle artwork; overlay never schedules animation.
             setOnClickListener { stop() }
             setOnTouchListener { target, event ->
                 when (event.actionMasked) {
@@ -58,6 +54,7 @@ class DevOverlay(private val activity: Context, private val stop: () -> Unit) : 
         catch (_: WindowManager.BadTokenException) { false }
         catch (_: WindowManager.InvalidDisplayException) { false }
     }
+    fun refreshLabels() { view?.contentDescription = DevLanguage.wrap(activity).getString(R.string.overlay_description) }
     override fun detach() {
         drag.cancel()
         val attached = view; view = null

@@ -1,0 +1,8 @@
+[
+  {"path":"/poses/error","remove":true,"reason":"required pose missing"},
+  {"path":"/anchor/x","value":-0.1,"reason":"anchor outside normalized frame"},
+  {"path":"/poses/idle/frameDurationMs","value":19,"reason":"unsupported frame timing"},
+  {"path":"/poses/idle/frameCount","value":2,"reason":"same path cannot name incompatible poster and frame strip"},
+  {"path":"/poster/path","value":"../untrusted.png","reason":"unsafe resource path"},
+  {"path":"/width","value":2049,"reason":"bounded frame dimension"}
+]

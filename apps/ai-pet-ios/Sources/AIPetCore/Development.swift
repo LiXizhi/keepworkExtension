@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Development {
-    public static let version = "0.1.0-dev.3"
+    public static let version = "0.1.0-dev.4"
     public static let contract = "ios-offline-policy-v1"
     public static let isOffline = true
 }

@@ -3,6 +3,7 @@ set -eu
 AI_PET_ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 . "$AI_PET_ROOT/scripts/android-env.sh"
 cd "$AI_PET_ROOT"
+python3 scripts/check-locales.py
 test -x "$JAVA_HOME/bin/java" || { echo 'JDK 17 required; set JAVA_HOME.' >&2; exit 1; }
 java_version=$("$JAVA_HOME/bin/java" -version 2>&1)
 case "$java_version" in

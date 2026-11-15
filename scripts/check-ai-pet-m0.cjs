@@ -45,6 +45,13 @@ const components = {
       CLANG_MODULE_CACHE_PATH: path.join(ios, '.cache/clang') },
   }),
   qa: () => ({ command: nodeTests('tests/ai-pet-m0'), cwd: root }),
+  localization: () => ({ command: ['python3', ['tests/ai-pet-m0/inspect-localization.py']], cwd: root }),
+  'runtime-harness': () => ({ commands: [
+    ['python3', ['apps/ai-pet-android/scripts/test_emulator_runtime.py']],
+    ['python3', ['apps/ai-pet-android/scripts/test_emulator_ui.py']],
+    ['python3', ['apps/ai-pet-android/scripts/test_owned_emulator.py']],
+    ['python3', ['tests/ai-pet-m0/test_runtime_harness.py']],
+  ], cwd: root }),
   'native-qa': () => {
     const env = process.env.AI_PET_QA_JAVA ? { ...process.env } : androidEnvironment();
     env.AI_PET_QA_JAVA ||= path.join(env.JAVA_HOME, 'bin/java');
@@ -55,7 +62,7 @@ const components = {
 
 const args = process.argv.slice(2);
 if (args.length === 1 && ['--help', '--list'].includes(args[0])) {
-  process.stdout.write('Usage: node scripts/check-ai-pet-m0.cjs [contracts android ios qa native-qa layout]\n');
+  process.stdout.write('Usage: node scripts/check-ai-pet-m0.cjs [contracts android ios qa localization runtime-harness native-qa layout]\n');
   process.stdout.write('Default: all components. Offline host checks only; dependencies/toolchains must already exist.\n');
 } else {
   const selected = args.length ? args : Object.keys(components);
@@ -67,12 +74,14 @@ if (args.length === 1 && ['--help', '--list'].includes(args[0])) {
     for (const name of [...new Set(selected)]) {
       process.stdout.write(`\n[AI Pet M0] ${name}\n`);
       try {
-        const { command: [command, commandArgs], cwd, env } = components[name]();
-        const result = spawnSync(command, commandArgs, {
-          cwd, env: env || process.env, stdio: 'inherit', timeout: 600_000,
-        });
-        if (result.error || result.status !== 0) {
-          throw new Error(result.error?.message || `exit ${result.status}, signal ${result.signal || 'none'}`);
+        const spec = components[name]();
+        for (const [command, commandArgs] of spec.commands || [spec.command]) {
+          const result = spawnSync(command, commandArgs, {
+            cwd: spec.cwd, env: spec.env || process.env, stdio: 'inherit', timeout: 600_000,
+          });
+          if (result.error || result.status !== 0) {
+            throw new Error(result.error?.message || `exit ${result.status}, signal ${result.signal || 'none'}`);
+          }
         }
       } catch (error) {
         failures.push(name);

@@ -1,4 +1,4 @@
-# AI Pet candidate contracts — 0.1.0-dev.4
+# AI Pet candidate contracts — 0.1.0-dev.5
 
 **Unpublished, offline development package. Pending canonical service agreement.** These schemas and deterministic checks implement a first M0 slice of the accepted AI Pet specification. They are not live APIs, a cloud identity provider, a historical exporter, an atomic billing ledger, or evidence of device behavior. No endpoints, real accounts, microphone consumers or network consumers are present. The package is private and independently versioned; existing products are unchanged.
 
@@ -81,3 +81,30 @@ Deletion fixes in this slice scrub command plaintext for every user row actually
 The original `createJournal`/`appendJournal`/`restoreJournal` APIs and `ai-pet.dev.journal.v1` fixture behavior remain unchanged. `restoreJournal` still reconstructs its stored activation and is explicitly **not** the host-reactivation entry point. To migrate synthetic journals, reconstruct them in a trusted context, compact their state, then call `restoreCheckpoint` with independent host binding/fresh activation. There is no silent journal-version migration and no new disk adapter.
 
 Deleting bytes from prior journals, temporary files, snapshots, backups, filesystem blocks and external services remains unimplemented. The returned compact JSON omits known deleted plaintext/obsolete actions, but creating that JSON does not securely erase old copies or make a crash-atomic replacement. Tests use synthetic values only. Portable checkpoint cases live in `fixtures/checkpoint-scenarios.json`; their execution protocol is documented in `fixtures/README.md`.
+
+## Slice 4: bounded asset admission (development only)
+
+`asset-verifier.cjs` exports `verifyAssetBundle(manifest, { approval, resources, nowMs })`, `manifestDigest(manifest)` and immutable `LIMITS`. Existing manifest schemas remain unchanged; this verifier intentionally admits only a narrower, explicitly supported rendering profile. No fetching, extraction, filesystem cache, rendering, account selection or rights acquisition occurs.
+
+`resources` is an exact `Map<string, Uint8Array>` (Buffers accepted) of manifest paths to bytes. `approval` must come from an **independent trusted host adapter**, with this shape:
+
+```js
+{
+  usage: 'development-preview', status: 'approved',
+  identity: { appearanceId, appearanceVersion, characterId, characterVersion },
+  provenance: { sourceRef, licenseRef, rightsEvidenceRef },
+  manifestSha256, validUntilMs
+}
+```
+
+The adapter supplies a trusted `nowMs` separately. Every identity/provenance field, the complete manifest digest and a strictly future expiry must match. The full manifest digest pins poses, geometry, paths, file hashes, labels and timing too. `manifestDigest` recursively sorts object keys and hashes UTF-8 `JSON.stringify` output; it is a candidate local canonicalization, not a published service signature. Computing a digest from an untrusted manifest is **not** approval. The approval object is a trust-boundary input, not something to accept from a download or UI flag. Its `status` and evidence references do not authenticate themselves. The caller must independently establish account/region eligibility, rights scope, current revocation/catalog status, trustworthy time, provenance and manifest authenticity before supplying it. No real rights or official character is asserted by the synthetic fixture.
+
+Admitted profile: noninterlaced RGBA8 PNG, only `IHDR`, one or more contiguous `IDAT`, and `IEND` chunks. WebP, APNG, palettes, grayscale, 16-bit channels, ancillary chunks (including color/EXIF metadata) and other unsupported profiles fail closed. Header dimensions, chunk order/length, CRCs, zlib completion/input consumption, exact inflated row length and filter-byte ranges are checked. This is a constrained container/scanline verifier, not a general-purpose image decoder or visual-content validator; it does not render/unfilter pixels or validate artwork quality. All possible RGBA sample byte values are permitted. The host must still use its supported maintained decoder and handle render failure safely.
+
+Manifest width/height are **per-frame pixels**. Poster dimensions are exactly one frame; pose images are a single horizontal strip of `frameCount` frames with no padding. Anchors are normalized [0,1] within each frame. The existing schema requires all seven poses and six locale labels. Development limits: frame width/height 1–2048; sheet width at most 4096; at most 4,194,304 pixels/image; 1–32 frames; 20–10,000 ms/frame and at most 60,000 ms/cycle; at most 64 PNG chunks/image; at most 2 MiB/file and 8 MiB/unique bundle; at most eight unique resource paths, 256 characters each. These are local profile limits, not final product budgets or animation policy. Reduced-motion and playback scheduling remain native duties.
+
+Every supplied resource must be referenced and every reference supplied, with exact byte size and SHA-256. Repeated exact paths are allowed only when hash, size and expected geometry agree (for example several static poses sharing the poster). Case-folding collisions are rejected for portability. Paths are schema-confined relative PNG names; this makes no filesystem/symlink extraction promise because no filesystem operation exists here. SharedArrayBuffer input is rejected. Bytes are copied before hashing; a successful result includes copied manifest/resources, identity and manifest digest under `ai-pet.dev.asset-admission.v1`. Any failure throws before a result is returned and causes no side effects; no subset is admitted. The caller owns the returned mutable copies and must not alter them or swap resources before rendering. Revalidate new data or changed approval, and do not mistake a successful earlier check for indefinite authorization.
+
+Fixtures: `fixtures/asset-bundle.json` contains tiny synthetic PNG bytes as base64 and deliberately synthetic approval, including a two-frame speaking strip. `fixtures/asset-negative.json` contains portable manifest mutations. Tests also build malformed but correctly hashed/independently pinned PNGs to verify format checks cannot be bypassed merely by recomputing hashes. Old shape-only `positive.json` asset data remains illustrative and is intentionally not byte-admissible.
+
+Primary references verified 2026-11-14: [W3C PNG specification](https://www.w3.org/TR/png-3/) for image/chunk/CRC/scanline structure and [Node zlib options](https://nodejs.org/api/zlib.html) for bounded synchronous inflation and result information. Tests exercise the minimum required APIs on the installed Node runtime; no native/device decoder compatibility or production asset rights have been established.

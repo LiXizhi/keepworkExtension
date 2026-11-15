@@ -24,6 +24,13 @@ class OverlayService : Service() {
         }
     }
     private var owner: OverlayOwner? = null
+    private var driver: DevOverlay? = null
+    private val languageListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == DevLanguage.KEY && owner?.showing == true && !ending) {
+            driver?.refreshLabels()
+            getSystemService(NotificationManager::class.java).notify(41, notification())
+        }
+    }
     private var displays: DisplayManager? = null
     private var displayId = -1
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -49,7 +56,9 @@ class OverlayService : Service() {
             val context = if (Build.VERSION.SDK_INT >= 30)
                 createDisplayContext(display).createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
                 else this
-            owner = OverlayOwner(DevOverlay(context) { finish() })
+            driver = DevOverlay(context) { finish() }
+            owner = OverlayOwner(driver!!)
+            DevLanguage.prefs(this).registerOnSharedPreferenceChangeListener(languageListener)
             displays = manager
             manager.registerDisplayListener(displayListener, handler)
         } catch (_: RuntimeException) { finish() }
@@ -65,21 +74,25 @@ class OverlayService : Service() {
         }
         if (ending || owner == null || !Settings.canDrawOverlays(this) || !notificationsAllowed(this)) { finish(); return START_NOT_STICKY }
         try {
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(NotificationChannel(CHANNEL, "Development overlay", NotificationManager.IMPORTANCE_LOW))
-            val stop = PendingIntent.getService(this, 1, Intent(this, OverlayService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            val open = PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            val notification = Notification.Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Synthetic AI Pet overlay")
-                .setContentText("Development experiment · no microphone · tap Stop to remove")
-                .setContentIntent(open).setOngoing(true)
-                .addAction(Notification.Action.Builder(null, "Stop overlay", stop).build()).build()
+            val notification = notification()
             if (Build.VERSION.SDK_INT >= 34) startForeground(41, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             else startForeground(41, notification)
             if (owner?.show(true, true) != true) finish()
             else { handler.removeCallbacks(watchdog); handler.post(watchdog) }
         } catch (_: RuntimeException) { finish() } // Native admission/window failure leaves no owned resources.
         return START_NOT_STICKY
+    }
+    private fun notification(): Notification {
+        val copy = DevLanguage.wrap(this)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, copy.getString(R.string.notification_channel), NotificationManager.IMPORTANCE_LOW))
+        val stop = PendingIntent.getService(this, 1, Intent(this, OverlayService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val open = PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        return Notification.Builder(this, CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(copy.getString(R.string.notification_title))
+            .setContentText(copy.getString(R.string.notification_body))
+            .setContentIntent(open).setOngoing(true)
+            .addAction(Notification.Action.Builder(null, copy.getString(R.string.notification_stop), stop).build()).build()
     }
     private fun finish() {
         if (ending) return
@@ -91,6 +104,7 @@ class OverlayService : Service() {
         stopSelf()
     }
     override fun onDestroy() {
+        DevLanguage.prefs(this).unregisterOnSharedPreferenceChangeListener(languageListener)
         displays?.unregisterDisplayListener(displayListener)
         handler.removeCallbacks(watchdog)
         owner?.stop()

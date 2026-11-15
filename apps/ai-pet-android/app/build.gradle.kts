@@ -9,8 +9,8 @@ android {
         applicationId = "com.keepwork.aipet.dev"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.0-dev.3"
+        versionCode = 4
+        versionName = "0.1.0-dev.4"
     }
     signingConfigs {
         getByName("debug") { storeFile = rootProject.file(".toolchains/dev-debug.keystore") }

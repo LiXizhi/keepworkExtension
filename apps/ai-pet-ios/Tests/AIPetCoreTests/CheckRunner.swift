@@ -31,7 +31,11 @@ struct CheckFailure: Error, CustomStringConvertible {
         let widget = WidgetSnapshotTests()
         let shared = SharedScenarioTests()
         let disk = FileWidgetStorageTests()
+        let presentation = PresentationTests()
         let checks: [(String, () throws -> Void)] = [
+            ("six language resources", presentation.resourceCoverage),
+            ("persisted preference and widget isolation", presentation.preferenceAndWidgetIsolation),
+            ("motion and mouth policy", presentation.presentationPolicy),
             ("admission authorities", voice.admissionRequiresEveryAuthority),
             ("audio interruption", { try voice.recoveryNeedsUserAndFreshValidation(reason: .audioInterruption) }),
             ("network interruption", { try voice.recoveryNeedsUserAndFreshValidation(reason: .networkLoss) }),

@@ -1,3 +1,6 @@
+Current dev.4 presentation checks: [SLICE4-VALIDATION.md](SLICE4-VALIDATION.md).
+The record below remains the dated dev.3 evidence.
+
 # iOS foundation validation
 
 Date: 2026-11-13, Asia/Tokyo. Product **0.1.0-dev.3**, native build **3**.

@@ -11,10 +11,16 @@ struct AIPetDevelopmentApp: App {
 }
 
 struct DevelopmentView: View {
-    @State private var locale: PetLocale = .english
-    @State private var selected = false
+    @AppStorage(LanguagePreference.key) private var localeID = ""
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var visible = false
+    @State private var pose: DemoPose = .idle
+    @State private var mouth = 0.35
+    private var locale: PetLocale { LanguagePreference.resolve(localeID, system: Locale.preferredLanguages) }
+    private func copy(_ key: CopyKey) -> String { DevelopmentCopy.text(key, locale) }
     @State private var snapshotStore: WidgetSnapshotStore?
-    @State private var widgetStatus = "App Group sharing is not configured."
+    @State private var widgetStatus: CopyKey = .sharingUnavailable
     private let context = ConversationContext(accountID: "dev-account", homeRegion: "dev-region", personaID: "dev-persona", conversationID: "dev-conversation")
 
     private func prepareWidget() {
@@ -22,61 +28,66 @@ struct DevelopmentView: View {
         do {
             let store = WidgetSnapshotStore(storage: try FileWidgetStorage(directory: directory))
             snapshotStore = store
-            widgetStatus = store.lastStorageError == nil ? "Synthetic sharing ready." : "Snapshot cleanup failed; sharing is disabled."
+            widgetStatus = store.lastStorageError == nil ? .sharingReady : .cleanupFailed
             WidgetCenter.shared.reloadTimelines(ofKind: DevelopmentWidgetBridge.kind)
-        } catch { widgetStatus = "Snapshot storage unavailable." }
+        } catch { widgetStatus = .storageUnavailable }
     }
 
     private func publishPreview() {
         guard let store = snapshotStore else { return }
         store.select(context)
         let value = WidgetSnapshot(personaID: "dev-persona", appearanceID: "dev-shape", conversationID: "dev-conversation", locale: locale, updatedAt: Date())
-        widgetStatus = store.publish(value, scopeToken: store.scopeToken) ? "Synthetic snapshot saved." : "Snapshot write failed; sharing is disabled."
+        widgetStatus = store.publish(value, scopeToken: store.scopeToken) ? .saved : .writeFailed
         WidgetCenter.shared.reloadTimelines(ofKind: DevelopmentWidgetBridge.kind)
     }
 
     private func clearPreview() {
         snapshotStore?.signOut()
-        selected = false
-        widgetStatus = snapshotStore?.lastStorageError == nil ? "Snapshot cleared." : "Snapshot removal failed; retry required."
+        widgetStatus = snapshotStore?.lastStorageError == nil ? .cleared : .removalFailed
         WidgetCenter.shared.reloadTimelines(ofKind: DevelopmentWidgetBridge.kind)
     }
     var body: some View {
         NavigationStack {
             Form {
-                Section("Offline development") {
+                Section(copy(.offline)) {
                     Text("AI Pet \(Development.version)")
-                    Text("Synthetic preview only. Login, official catalog, conversation and voice services are not connected.")
+                    Text(copy(.offlineDetail))
                 }
-                Section("Language identifier") {
-                    Picker("Language", selection: $locale) {
-                        ForEach(PetLocale.allCases, id: \.self) { locale in
-                            Text(locale.rawValue).tag(locale)
-                        }
-                    }
-                    Text("Six locale identifiers are available; translated product copy and speech quality remain unverified.")
+                Section(copy(.language)) {
+                    Picker(copy(.language), selection: Binding(get: { locale }, set: { localeID = $0.rawValue })) {
+                        ForEach(PetLocale.allCases, id: \.self) { Text($0.nativeName).tag($0) }
+                    }.accessibilityIdentifier("language-picker")
+                    Text(copy(.languageNote))
                 }
-                Section("Development preview") {
-                    Image(systemName: "sparkles")
-                        .font(.largeTitle)
-                        .accessibilityLabel("Synthetic development placeholder")
-                    Text(selected ? "Local preview selected" : "No preview selected")
-                    Button(selected ? "Clear local preview" : "Select local preview") { selected.toggle() }
+                Section(copy(.pet)) {
+                    DeveloperPetView(pose: pose, mouth: DemoPresentation.mouthOpening(mouth, pose: pose, sceneActive: scenePhase == .active, reduceMotion: reduceMotion, visible: visible), locale: locale)
+                        .frame(height: 160)
+                        .animation(DemoPresentation.allowsMotion(reduceMotion: reduceMotion, sceneActive: scenePhase == .active, visible: visible) ? .easeInOut(duration: 0.18) : nil, value: pose)
+                    Text(copy(.petNote))
+                    Picker(copy(.pose), selection: $pose) {
+                        ForEach(DemoPose.allCases, id: \.self) { Text(copy($0.labelKey)).tag($0) }
+                    }.accessibilityIdentifier("pose-picker")
+                    Slider(value: $mouth, in: 0...1) { Text(copy(.mouth)) }
+                        .disabled(pose != .speaking || !DemoPresentation.allowsMotion(reduceMotion: reduceMotion, sceneActive: scenePhase == .active, visible: visible))
+                        .accessibilityLabel(copy(.mouth))
+                        .accessibilityValue(mouth.formatted(.percent.precision(.fractionLength(0))))
+                    if reduceMotion || scenePhase != .active { Text(copy(.motionPaused)) }
                 }
-                Section("Widget development") {
-                    Text(widgetStatus)
-                    Button("Publish synthetic widget snapshot", action: publishPreview).disabled(snapshotStore == nil)
-                    Button("Clear snapshot / development sign-out", action: clearPreview).disabled(snapshotStore == nil)
+                Section(copy(.widget)) {
+                    Text(copy(widgetStatus)).accessibilityIdentifier("widget-status")
+                    Button(copy(.publish), action: publishPreview).disabled(snapshotStore == nil)
+                    Button(copy(.clear), action: clearPreview).disabled(snapshotStore == nil)
                 }
-                Section("Voice unavailable") {
-                    Text("This build never requests microphone access or opens a service connection. Native policy is verified separately by Swift Package tests.")
-                }
+                Section(copy(.voice)) { Text(copy(.voiceDetail)) }
             }
-            .navigationTitle("AI Pet · Development")
+            .navigationTitle(copy(.title))
+            .environment(\.locale, Locale(identifier: locale.rawValue))
+            .onAppear { visible = true }
+            .onDisappear { visible = false }
             .task { prepareWidget() }
             .onOpenURL { url in
-                guard WidgetLink.accepts(url) else { widgetStatus = "Unsupported link."; return }
-                widgetStatus = snapshotStore?.snapshot == nil ? "No current authorized development preview." : "Opened current synthetic preview."
+                guard WidgetLink.accepts(url) else { widgetStatus = .unsupported; return }
+                widgetStatus = snapshotStore?.snapshot == nil ? .previewMissing : .previewOpened
             }
         }
     }

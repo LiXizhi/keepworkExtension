@@ -1,6 +1,6 @@
 # Independent M0 QA probes
 
-QA harness version: **0.1.0-dev.4**. No product code, external service or hardware adapter is implemented here. Execute from the repository root:
+QA harness version: **0.1.0-dev.7**. No product code, external service or hardware adapter is implemented here. Execute from the repository root:
 
 ```sh
 node --test contracts/ai-pet/test/*.test.cjs tests/ai-pet-m0/*.test.cjs
@@ -34,3 +34,11 @@ The dev.4 slice targets compact history checkpoint restore with host-supplied bi
 Slice 3 supersedes the earlier iOS prompt-only limitation: actual generic Home Screen Widget render/tap and unsupported-link rejection were independently viewed; safe-link status was owner-verified through accessibility text. Real App Group sharing remains unverified. Five checkpoint probes and two deletion-order/alias probes were added; the Android probe now covers service ownership and one-use volatile start admission.
 
 Final dev.4 slice results: 9 history + 5 checkpoint cases passed; together with the 7 existing contract probes covered by the integration run, the independent Node suite has 21 cases. Changed Kotlin service/admission probes passed. Android dev.3 native build and isolated API 35 service evidence were reviewed, including Home persistence, three Stop paths, revoke cleanup and no automatic restoration. See verification.md for incremental-build details, 21 lint warnings, permission setup and untested notification-denial/device paths.
+
+Dev.5 adds `asset-conformance.test.cjs` with independent PNG construction and adversarial byte/approval/decode checks, and `python3 tests/ai-pet-m0/inspect-localization.py` for six-locale resource completeness and placeholder parity. This does not certify translations. The native harness creates an isolated resource-aware Swift Package from actual core sources/resources, then runs actual Kotlin sources; it selects installed Xcode per command when DEVELOPER_DIR is unset and does not alter the global toolchain.
+
+Dev.5 final bounded QA: 26 independent Node cases (5 new asset cases), resource-aware Swift and Kotlin probes, and six-locale completeness checks pass. Runtime evidence is partial: Android inset fix built but final APK could not be exercised after boot timeouts; iOS Japanese/Speaking/static Widget observed, with remaining motion/link/pose checks unverified. See the final Slice 4 verification record for screenshot attribution and retained review-device state.
+
+Dev.6 adds `python3 tests/ai-pet-m0/test_runtime_harness.py`: independent actual-helper checks for deadline-preserving readiness after timeouts and visible measured system-bar bounds. These do not substitute for native runtime acceptance.
+
+Dev.7 runtime evidence regressions exercise the actual shared capture/toggle helpers: successful capture followed by an exit-success error cannot reuse old XML, a confirmed dump with failed read cannot fall back to local evidence, and a changed but unrestored toggle is rejected. The independent runtime-harness suite now has five cases.

@@ -1,0 +1,122 @@
+{
+  "format": "ai-pet.dev.asset-fixture.v1",
+  "manifest": {
+    "contractVersion": "ai-pet.dev.v1",
+    "appearanceId": "dev-appearance-a",
+    "appearanceVersion": "1",
+    "characterId": "dev-official-a",
+    "characterVersion": "1",
+    "provenance": {
+      "sourceRef": "synthetic-test-only",
+      "licenseRef": "no-real-license",
+      "rightsEvidenceRef": "synthetic-adapter-evidence"
+    },
+    "width": 2,
+    "height": 2,
+    "anchor": {
+      "x": 0.5,
+      "y": 1
+    },
+    "poster": {
+      "path": "synthetic.png",
+      "sha256": "b27425d71b4b0f571a68155ffc0a2df2dbc532d0b1bd0e0bc78126f775e6d513",
+      "bytes": 73
+    },
+    "poses": {
+      "idle": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "b27425d71b4b0f571a68155ffc0a2df2dbc532d0b1bd0e0bc78126f775e6d513",
+          "bytes": 73
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "happy": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "b27425d71b4b0f571a68155ffc0a2df2dbc532d0b1bd0e0bc78126f775e6d513",
+          "bytes": 73
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "listening": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "b27425d71b4b0f571a68155ffc0a2df2dbc532d0b1bd0e0bc78126f775e6d513",
+          "bytes": 73
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "thinking": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "b27425d71b4b0f571a68155ffc0a2df2dbc532d0b1bd0e0bc78126f775e6d513",
+          "bytes": 73
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "speaking": {
+        "file": {
+          "path": "speaking.png",
+          "sha256": "51f5ce2aa99df22839ad5bb24eac90550f078525d0c6ac22ff0fc9f002350f25",
+          "bytes": 74
+        },
+        "frameCount": 2,
+        "frameDurationMs": 100
+      },
+      "sleeping": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "b27425d71b4b0f571a68155ffc0a2df2dbc532d0b1bd0e0bc78126f775e6d513",
+          "bytes": 73
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      },
+      "error": {
+        "file": {
+          "path": "synthetic.png",
+          "sha256": "b27425d71b4b0f571a68155ffc0a2df2dbc532d0b1bd0e0bc78126f775e6d513",
+          "bytes": 73
+        },
+        "frameCount": 1,
+        "frameDurationMs": 100
+      }
+    },
+    "mouthMode": "amplitude",
+    "labels": {
+      "zh-CN": "Synthetic pet",
+      "en-US": "Synthetic pet",
+      "es-ES": "Synthetic pet",
+      "ko-KR": "Synthetic pet",
+      "ja-JP": "Synthetic pet",
+      "fr-FR": "Synthetic pet"
+    }
+  },
+  "approval": {
+    "usage": "development-preview",
+    "status": "approved",
+    "identity": {
+      "appearanceId": "dev-appearance-a",
+      "appearanceVersion": "1",
+      "characterId": "dev-official-a",
+      "characterVersion": "1"
+    },
+    "provenance": {
+      "sourceRef": "synthetic-test-only",
+      "licenseRef": "no-real-license",
+      "rightsEvidenceRef": "synthetic-adapter-evidence"
+    },
+    "manifestSha256": "a787a4f532ed5bebaa192da070f2981b86f89ee1d61b6264836cd8829d5d44d4",
+    "validUntilMs": 2000
+  },
+  "nowMs": 1000,
+  "resourcesBase64": {
+    "synthetic.png": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGNgaPj/H4xhDABS0gn5PEa22gAAAABJRU5ErkJggg==",
+    "speaking.png": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEUlEQVR4nGNgaPj/HwWjCwAARTET8aX9clMAAAAASUVORK5CYII="
+  }
+}
