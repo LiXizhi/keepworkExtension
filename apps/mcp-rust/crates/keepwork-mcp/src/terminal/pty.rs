@@ -229,9 +229,11 @@ fn shell_spec() -> (String, Vec<String>) {
     (shell, Vec::new())
 }
 
-// New-Object also works in Windows 7's inbox PowerShell 2.0. The ::new syntax
-// and PSDefaultParameterValues were introduced in later PowerShell versions.
-const POWERSHELL_UTF8_INIT: &str = "$utf8 = New-Object System.Text.UTF8Encoding; [Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8; if ($PSDefaultParameterValues) { $PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; $PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8' }";
+// Activator invokes the same parameterless, no-BOM UTF8Encoding constructor
+// without a PowerShell cmdlet. New-Object stalls during startup on the native
+// Windows ARM64 runner even without a PTY. Static method syntax also preserves
+// Windows 7's inbox PowerShell 2.0 support; ::new requires PowerShell 5.0.
+const POWERSHELL_UTF8_INIT: &str = "$utf8 = [System.Activator]::CreateInstance([System.Text.UTF8Encoding]); [Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8; if ($PSDefaultParameterValues) { $PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; $PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8' }";
 
 fn base64_utf16le(text: &str) -> String {
     let mut bytes = Vec::with_capacity(text.len() * 2);
@@ -699,6 +701,74 @@ mod tests {
     #[ignore = "manual Windows PTY differential diagnostic; not release acceptance"]
     fn windows_pty_startup_differential_diagnostic() {
         super::super::native::diagnose_windows_startup(shell_spec(), POWERSHELL_UTF8_INIT);
+    }
+
+    #[test]
+    fn powershell_utf8_init_keeps_legacy_static_constructor_syntax() {
+        assert!(POWERSHELL_UTF8_INIT.starts_with(
+            "$utf8 = [System.Activator]::CreateInstance([System.Text.UTF8Encoding]);"
+        ));
+        assert!(!POWERSHELL_UTF8_INIT.contains("New-Object"));
+        assert!(!POWERSHELL_UTF8_INIT.contains("::new"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_utf8_init_preserves_constructor_semantics_without_cmdlet_lookup() {
+        // Run the actual initializer with module auto-loading disabled and a
+        // throwing New-Object shadow. All checks use language/.NET features
+        // available to the legacy shell; no helper cmdlets or JSON conversion.
+        let literal = POWERSHELL_UTF8_INIT.replace('\'', "''");
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; function New-Object {{ throw 'New-Object must not run during UTF8 initialization' }}; {POWERSHELL_UTF8_INIT};
+if ($utf8.GetType() -ne [System.Text.UTF8Encoding]) {{ throw 'Unexpected encoding type' }};
+if ($utf8.CodePage -ne 65001 -or [Console]::InputEncoding.CodePage -ne 65001 -or [Console]::OutputEncoding.CodePage -ne 65001 -or $OutputEncoding.CodePage -ne 65001) {{ throw 'UTF8 console or pipeline encoding changed' }};
+if ($utf8.GetPreamble().Length -ne 0) {{ throw 'UTF8 constructor emitted a BOM' }};
+$text = '中文😀'; $bytes = $utf8.GetBytes($text);
+if ([BitConverter]::ToString($bytes) -cne 'E4-B8-AD-E6-96-87-F0-9F-98-80' -or $utf8.GetString($bytes) -cne $text) {{ throw 'UTF8 bytes or roundtrip changed' }};
+if ($utf8.GetString([byte[]]@(255)) -cne [string][char]65533) {{ throw 'Decoder replacement fallback changed' }};
+if ([BitConverter]::ToString($utf8.GetBytes([string][char]55296)) -cne 'EF-BF-BD') {{ throw 'Encoder replacement fallback changed' }};
+$parseErrors = $null; $tokens = [System.Management.Automation.PSParser]::Tokenize('{literal}', [ref]$parseErrors);
+if ($parseErrors.Count -ne 0) {{ throw 'Initializer parsing failed' }};
+foreach ($token in $tokens) {{ if ($token.Type -eq 'Command') {{ throw 'Initializer requires command lookup' }} }};
+[Console]::Out.WriteLine('KW_UTF8_CONSTRUCTOR_VERIFIED');"#
+        );
+        let (shell, _) = shell_spec();
+        let encoded = base64_utf16le(&script);
+        let start = std::time::Instant::now();
+        let mut child = std::process::Command::new(shell)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &encoded,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the actual Windows PowerShell UTF8 initializer");
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if start.elapsed() >= std::time::Duration::from_secs(10) {
+                let _ = child.kill();
+                panic!("actual PowerShell UTF8 initialization must complete within 10 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The fixed script emits one bounded marker or a fixed assertion
+        // error, and it never starts descendants that can retain these pipes.
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("KW_UTF8_CONSTRUCTOR_VERIFIED"),
+            "{stdout}\n{stderr}"
+        );
     }
 
     struct NativeOwnership {

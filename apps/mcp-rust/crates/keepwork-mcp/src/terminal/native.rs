@@ -188,8 +188,10 @@ mod startup_diagnostic {
 
     fn instrument(init: &str) -> String {
         let mut script = init.to_string();
+        let constructor = init.split_once(';').expect("UTF8 constructor statement").0;
+        assert!(constructor.starts_with("$utf8 = "));
         for (statement, label) in [
-            ("$utf8 = New-Object System.Text.UTF8Encoding", "new-object"),
+            (constructor, "utf8-constructor"),
             ("[Console]::InputEncoding = $utf8", "input-encoding"),
             ("[Console]::OutputEncoding = $utf8", "output-encoding"),
             ("$OutputEncoding = $utf8", "output-variable"),
