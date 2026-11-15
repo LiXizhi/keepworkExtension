@@ -9,20 +9,25 @@ mod atvv;
 mod auto_start;
 #[path = "remote_voice/buttons.rs"]
 mod buttons;
+#[path = "remote_voice/gestures.rs"]
 mod gestures;
+#[path = "remote_voice/dialogue.rs"]
 pub(crate) mod dialogue;
 #[cfg(windows)]
+#[path = "remote_voice/home_windows.rs"]
 pub(crate) mod home_windows;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[path = "remote_voice/ble.rs"]
 mod ble;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+#[path = "remote_voice/focus_highlight.rs"]
 mod focus_highlight;
 #[path = "remote_voice/native_input.rs"]
 mod native_input;
 #[path = "remote_voice/paired.rs"]
 mod paired;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+#[path = "remote_voice/power.rs"]
 mod power;
 
 use crate::files::atomic_json_write;

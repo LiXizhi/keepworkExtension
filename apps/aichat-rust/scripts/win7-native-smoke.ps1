@@ -175,6 +175,7 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
   $sessionRoute = ''
   $response = $null
   $reader = $null
+  $phase = 'create-and-owner-boundaries'
   try {
     $traversal = Invoke-Owned $Child $Base $Workspace $Expected $Auth '/terminal/sessions' 'POST' @{ cwd = '../escaped-pty' } $Token
     Assert-Condition ($traversal.Status -ge 400 -and $traversal.Status -lt 600) 'Relative PTY cwd escaped the isolated workspace'
@@ -191,6 +192,7 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
     Assert-Condition ($blocked.Status -eq 400) 'Model command deny-list was weakened by the PTY backend'
     # The final marker is computed by the real shell and is absent from its
     # echoed input. This cannot pass by merely displaying submitted input.
+    $phase = 'computed-execution-and-resize'
     $inputReply = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('$p = ''WIN7_PTY_''; Write-Output ($p + ''EXECUTED'')' + [char]13) } $Token
     Assert-Condition ($inputReply.Status -eq 202) 'PTY rejected user input'
     $output = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_EXECUTED'
@@ -199,6 +201,7 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
     $resized = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/resize') 'POST' @{ cols = 101; rows = 31 } $Token
     Assert-Condition ($resized.Status -eq 200 -and $resized.Json['cols'] -eq 101 -and $resized.Json['rows'] -eq 31) 'PTY dimensions did not update'
 
+    $phase = 'stream-initial-replay'
     $null = Get-OwnedHealth $Child $Base $Workspace $Expected $Auth
     $request = [Net.HttpWebRequest]::Create($Base + $sessionRoute + '/stream?cursor=' + $cursor)
     $request.Method = 'GET'; $request.Proxy = $null; $request.AllowAutoRedirect = $false
@@ -210,6 +213,7 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
     $reader = New-Object IO.StreamReader -ArgumentList @($response.GetResponseStream(), $script:Utf8)
     $initial = Read-PtyEvent $reader
     Assert-Condition ([long]$initial['cursor'] -ge $cursor -and -not $initial['reset']) 'PTY stream did not replay from its existing cursor'
+    $phase = 'unicode-live-stream'
     $unicode = ([string][char]0x4e2d) + ([string][char]0x6587) + ([string][char]0xd83d) + ([string][char]0xde00)
     $command = 'Write-Output ([string][char]0x4e2d + [char]0x6587 + [char]0xd83d + [char]0xde00)' + [char]13
     $null = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = [string]$command } $Token
@@ -221,12 +225,14 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
       Assert-Condition ($live.Length -le 1048576) 'PTY stream exceeded its smoke size limit'
     }
     Assert-Condition ($live.ToString().Contains($unicode)) 'PTY live output did not preserve Chinese and surrogate-pair text'
+    $phase = 'unicode-replay'
     $unicodeOutput = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token $unicode
     Assert-Condition ([long]$unicodeOutput['cursor'] -eq ([string]$unicodeOutput['output']).Length) 'Unicode terminal replay changed cursor units'
     $reader.Close(); $reader = $null; $response.Close(); $response = $null
 
     # A computed marker proves the long command actually started. A write
     # acknowledgement or echoed command cannot establish that boundary.
+    $phase = 'long-command-start'
     $longCommand = 'function prompt { ''WIN7_PTY_'' + ''READY> '' }; $p = ''WIN7_PTY_''; Write-Output ($p + ''SLEEPING''); Start-Sleep -Seconds 30' + [char]13
     $started = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = [string]$longCommand } $Token
     Assert-Condition ($started.Status -eq 202) 'PTY rejected the long command'
@@ -238,14 +244,17 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
     Assert-Condition ($pending.Status -eq 200 -and $null -ne $pending.Json -and $pending.Json.ContainsKey('closed') -and
       $pending.Json['closed'] -is [bool] -and $pending.Json['closed'] -eq $false -and
       -not ([string]$pending.Json['output']).Contains('WIN7_PTY_READY> ')) 'PTY long command was not running before Ctrl+C'
+    $phase = 'interrupt-recovery'
     $interrupted = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/interrupt') 'POST' @{} $Token
     Assert-Condition ($interrupted.Status -eq 200) 'PTY Ctrl+C was not accepted'
     # Cancellation is asynchronous and can flush pending input. Wait for a
     # newly produced prompt before submitting the following command once.
     $null = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_READY> ' $beforeInterrupt
+    $phase = 'post-interrupt-execution'
     $continued = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('$p = ''WIN7_PTY_''; Write-Output ($p + ''AFTER_INTERRUPT'')' + [char]13) } $Token
     Assert-Condition ($continued.Status -eq 202) 'PTY rejected input after Ctrl+C recovery'
     $null = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_AFTER_INTERRUPT'
+    $phase = 'owned-close'
     $otherClose = Invoke-Owned $Child $Base $Workspace $Expected $Auth $sessionRoute 'DELETE' $null $Token @{ Origin = 'http://localhost:31338' }
     Assert-Condition ($otherClose.Status -eq 404) 'A different terminal owner could close this session'
     $closed = Invoke-Owned $Child $Base $Workspace $Expected $Auth $sessionRoute 'DELETE' $null $Token
@@ -256,6 +265,20 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
     return @{ ptyVerified = $true; terminalApi = 'pty-session-v1';
       checks = @('real-shell-output', 'utf16-cursor-and-unicode', 'ndjson-replay-and-live-output',
         'resize', 'ctrl-c-and-continued-input', 'origin-auth-owner', 'relative-cwd-confinement', 'owned-close') }
+  } catch {
+    $failure = [string]$_.Exception.Message
+    $snapshot = 'unavailable'
+    if ($sessionRoute) {
+      try {
+        $latest = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/output?cursor=0') 'GET' $null $Token
+        if ($latest.Status -eq 200 -and $null -ne $latest.Json) {
+          $tail = [string]$latest.Json['output']
+          if ($tail.Length -gt 2048) { $tail = $tail.Substring($tail.Length - 2048) }
+          $snapshot = $script:Json.Serialize(@{ cursor = $latest.Json['cursor']; closed = $latest.Json['closed']; outputTail = $tail })
+        }
+      } catch {}
+    }
+    throw ('PTY phase=' + $phase + '; error=' + $failure + '; snapshot=' + $snapshot)
   } finally {
     if ($null -ne $reader) { $reader.Close() }
     if ($null -ne $response) { $response.Close() }

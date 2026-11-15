@@ -70,7 +70,8 @@ fn run(profile: std::path::PathBuf) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let _entered = runtime.enter();
     let voice = Arc::new(RemoteVoice::new(&profile));
-    voice.start_automatic();
+    // Setup UI belongs to the parent CEF process; this companion opens none.
+    voice.start_automatic(|| false);
     let input = io::stdin();
     let mut input = input.lock();
     let output = io::stdout();

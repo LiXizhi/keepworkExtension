@@ -95,6 +95,9 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
         }
         ((void (*)(id, SEL, BOOL))objc_msgSend)(cfg.preferences, setMock, YES);
         Check(((BOOL (*)(id, SEL))objc_msgSend)(cfg.preferences, getMock), @"mock capture enabled before creating any media-capable view");
+        SEL setMediaDevices = NSSelectorFromString(@"_setMediaDevicesEnabled:");
+        Check([cfg.preferences respondsToSelector:setMediaDevices], @"WebKit media devices fixture preference is available");
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(cfg.preferences, setMediaDevices, YES);
         NSRect desktop = NSMakeRect(40, 60, 840, 560);
         FixtureWindow *main = [[FixtureWindow alloc] initWithContentRect:desktop styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
         FixtureWindow *petWindow = [[FixtureWindow alloc] initWithContentRect:NSMakeRect(30, 40, 160, 160)
@@ -126,6 +129,11 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
         Check([viewport isEqual:@"840x560"], @"desktop viewport established");
         [main orderOut:nil];
         Check(Until(^BOOL { return [Eval(mainView, @"document.hidden") boolValue]; }, 3), @"main page initially hidden");
+        NSDictionary *mediaApi = Eval(mainView, @"({url:location.href,secure:isSecureContext,hidden:document.hidden,"
+            "mediaDevices:typeof navigator.mediaDevices,getUserMedia:typeof navigator.mediaDevices?.getUserMedia})");
+        Check([mediaApi isKindOfClass:NSDictionary.class] && [mediaApi[@"secure"] boolValue] &&
+            [mediaApi[@"mediaDevices"] isEqual:@"object"] && [mediaApi[@"getUserMedia"] isEqual:@"function"],
+            [NSString stringWithFormat:@"secure mock media API must exist before capture: %@", mediaApi]);
         // Start in exactly the state where WebKit can defer getUserMedia. Reparenting must unblock this same request.
         Eval(mainView, @"startPhone();true");
         BOOL earlyDecision = Until(^BOOL { return ![Eval(mainView, @"captureState") isEqual:@"waiting"]; }, 0.25);
