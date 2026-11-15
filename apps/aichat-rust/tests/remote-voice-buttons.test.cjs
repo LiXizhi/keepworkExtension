@@ -32,17 +32,16 @@ test('begin-input is an explicit local settings action without a remote keyboard
   assert.doesNotMatch(bridge, /remote_voice_begin_input/);
 });
 
-test('remote buttons expose only Clear and leave OK to its native Enter behavior', () => {
+test('Home and Back are independent remote controls and OK retains native Enter', () => {
   const source = read('src-tauri/src/remote_voice/buttons.rs');
-  const actions = source.match(/pub enum ButtonAction\s*\{([\s\S]*?)\}/)?.[1];
-  assert.ok(actions);
-  assert.match(actions, /Clear/);
-  assert.doesNotMatch(actions, /Submit|Send|Enter|Power/);
   const mac = read('src-tauri/src/remote_voice/buttons_macos.m');
-  assert.doesNotMatch(source + mac, /CGEventPost|SendInput|SetWindowsHookEx|WH_KEYBOARD_LL/);
+  const windows = read('src-tauri/src/remote_voice/home_windows.rs');
+  assert.doesNotMatch(source + mac + windows, /CGEventPost|SendInput|SetWindowsHookEx|WH_KEYBOARD_LL/);
+  assert.match(source, /keepwork_remote_home_poll/);
+  assert.match(source, /keepwork_remote_buttons_poll/);
+  assert.match(source, /pub fn poll_home\(listener: &Listener\) -> bool\s*\{\s*listener\.poll\(\)/);
   const fallback = source.slice(source.indexOf('#[cfg(not(target_os = "macos"))]'));
-  assert.match(fallback, /pub fn start\(\)[\s\S]*?Err\(/);
-  assert.match(fallback, /pub fn poll\(\) -> bool\s*\{\s*false\s*\}/);
+  assert.match(fallback, /pub fn poll_clear\(_:\s*&Listener\) -> bool\s*\{\s*false\s*\}/);
   const input = read('src-tauri/src/remote_voice/native_input.rs');
   assert.ok(source.includes('清除提示词'));
   assert.ok(input.includes('is_command(text, "清除提示词")'));
@@ -77,6 +76,18 @@ test('macOS button classifier isolates device identity and short-release dedupli
     const result = await execute(executable, [], { timeout: 5000 });
     assert.match(result.stdout, /device-scoped remote button fixtures passed/);
     assert.equal(result.stderr, '');
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('physical Record distinguishes completed double taps, held dictation and dialogue controls', async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-remote-record-'));
+  try {
+    const executable = path.join(temporary, process.platform === 'win32' ? 'gestures.exe' : 'gestures');
+    await execute('rustc', ['--test', '--edition=2021',
+      path.join(__dirname, 'fixtures/remote_voice_record_gestures.rs'), '-o', executable], { timeout: 20000 });
+    await execute(executable, [], { timeout: 5000 });
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

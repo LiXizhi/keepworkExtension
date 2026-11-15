@@ -58,6 +58,26 @@ bool keepwork_startup_smoke_passive_application(void) {
     return true;
 }
 
+// Dispatch via AppKit's installed Tao delegate outside an active Tao callback,
+// just as the Dock's reopen Apple event does. Only fixture windows are queried.
+bool keepwork_startup_smoke_dock_reopen(bool expectedVisible) {
+    if (![NSThread isMainThread]) return false;
+    id<NSApplicationDelegate> delegate = NSApp.delegate;
+    if (![delegate respondsToSelector:@selector(applicationShouldHandleReopen:hasVisibleWindows:)]) return false;
+    BOOL visible = NO;
+    for (NSWindow *window in NSApp.windows) {
+        if (window.visible && !window.miniaturized) {
+            visible = YES;
+            break;
+        }
+    }
+    if (visible != expectedVisible) return false;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [delegate applicationShouldHandleReopen:NSApp hasVisibleWindows:visible];
+    });
+    return true;
+}
+
 void keepwork_startup_smoke_restore_application(void) {
     if (KeepworkSmokeApplication && KeepworkSmokeOriginalActivation) {
         class_replaceMethod(KeepworkSmokeApplication, NSSelectorFromString(@"activateIgnoringOtherApps:"),
@@ -102,10 +122,11 @@ bool keepwork_startup_smoke_document_focused(void *rawWindow) {
 bool keepwork_startup_smoke_action(void *rawWindow, unsigned int action) {
     if (![NSThread isMainThread] || !rawWindow) return false;
     NSWindow *window = (__bridge NSWindow *)rawWindow;
-    if (action == 0) {
-        NSButton *close = [window standardWindowButton:NSWindowCloseButton];
-        if (!close || close.hidden || !close.enabled) return false;
-        [close performClick:nil];
+    if (action == 0 || action == 3) {
+        NSWindowButton type = action == 0 ? NSWindowCloseButton : NSWindowMiniaturizeButton;
+        NSButton *button = [window standardWindowButton:type];
+        if (!button || button.hidden || !button.enabled) return false;
+        [button performClick:nil];
     } else if (action == 1) {
         NSView *overlay = KeepworkSmokeOverlay(window);
         if (!overlay) return false;

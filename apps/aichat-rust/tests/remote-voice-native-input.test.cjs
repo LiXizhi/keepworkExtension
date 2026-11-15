@@ -39,7 +39,7 @@ test('native delivery uses current focus and only an explicit final voice comman
   assert.match(production, /deliver_current\(&self\.enabled, &self\.platform, text\)/);
   assert.match(production, /Delivery::ModifiersHeld/);
   assert.match(production, /Delivery::Submitted/);
-  assert.match(production, /if is_submit_command\(text\)/);
+  assert.match(production, /if complete && is_submit_command\(text\)/, 'only complete dictation may execute the submit command');
   assert.match(production, /backend\.submit\(\)\?/);
   assert.match(mac, /keepwork_voice_input_submit\(void\)[\s\S]*?postKeyboardPair\(36, 0\)/);
   const main = fs.readFileSync(path.join(root, 'src-tauri/src/remote_voice.rs'), 'utf8');
@@ -53,4 +53,44 @@ test('native delivery uses current focus and only an explicit final voice comman
   assert.match(html, /发送提示词/);
   assert.match(html, /口令文字不会填入，也不改动剪贴板/);
   assert.match(html, /普通口述[^。]*不会自动按回车/);
+});
+
+test('macOS remote voice outline tracks editable field bounds and preserves focus', {
+  skip: process.platform !== 'darwin', timeout: 30000,
+}, async (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-voice-outline-'));
+  try {
+    const executable = path.join(temporary, 'outline');
+    await execute('clang', ['-fobjc-arc', '-Wall', '-Werror', '-framework', 'AppKit',
+      '-framework', 'ApplicationServices', path.join(__dirname, 'fixtures/remote_voice_highlight_macos.m'),
+      '-o', executable], { timeout: 15000 });
+    const result = await execute(executable, [], { timeout: 8000 });
+    if (result.stdout.includes('headless:')) return t.skip(result.stdout.trim());
+    assert.match(result.stdout, /AppKit current-field outline passed/);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('Home navigation cannot insert its function glyph into desktop text fields', () => {
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../src-tauri/src/app/home_text_guard.js'), 'utf8');
+  const window = new EventTarget();
+  vm.runInNewContext(source, { window });
+  const emit = (type, properties = {}) =>
+    window.dispatchEvent(Object.assign(new Event(type, { cancelable: true }), properties));
+  const insert = (data, inputType = 'insertText', isComposing = false) =>
+    emit('beforeinput', { data, inputType, isComposing });
+  for (const navigation of [{ key: 'Home' }, { key: 'Unidentified', code: 'Home' }, { key: '\uF729' }]) {
+    assert.equal(emit('keydown', navigation), true);
+    assert.equal(insert('\uF729'), false);
+    assert.equal(insert('普通内容'), true);
+    assert.equal(insert('\uF729', 'insertFromPaste'), true);
+    assert.equal(insert('\uF729', 'insertText', true), true);
+    emit('keyup', navigation);
+    assert.equal(insert('\uF729'), true);
+  }
+  emit('keydown', { key: 'Home' });
+  emit('blur');
+  assert.equal(insert('\uF729'), true);
 });

@@ -334,6 +334,24 @@ fn truncate_str(raw: &str, max_chars: usize) -> String {
     raw.chars().take(max_chars).collect()
 }
 
+fn supports_streaming_speech(raw: &Value) -> bool {
+    raw["petReplyPresentationVersion"].as_u64() == Some(1)
+        && raw["petStreamingSpeechVersion"].as_u64() == Some(1)
+}
+
+fn pet_speech(raw: &Value) -> Option<Value> {
+    if !supports_streaming_speech(raw) { return None; }
+    let speech = &raw["petSpeech"];
+    let id = speech["requestId"].as_str().filter(|s| !s.is_empty() && s.len() <= 128)?;
+    let state = speech["state"].as_str()?;
+    if !matches!(state, "waiting" | "speaking" | "paused" | "ended" | "unavailable") { return None; }
+    let mut result = json!({ "requestId": id, "state": state });
+    if let Some(text) = speech["text"].as_str() {
+        result["text"] = json!(truncate_str(text, 8000));
+    }
+    Some(result)
+}
+
 pub fn sanitize_pet_state(
     raw: &Value,
     expanded: bool,
@@ -411,6 +429,7 @@ pub fn sanitize_pet_state(
         })
         .unwrap_or_default();
 
+    let presentation_version = raw["petReplyPresentationVersion"].as_u64().filter(|v| *v == 1);
     let reply = raw.get("reply").and_then(|r| {
         if r.is_null() {
             return None;
@@ -446,16 +465,20 @@ pub fn sanitize_pet_state(
                     .collect()
             })
             .unwrap_or_default();
-        if text.is_empty() && options.is_empty() {
-            None
-        } else {
-            Some(json!({
-                "text": text,
-                "thinking": thinking,
-                "immediate": immediate,
-                "options": options,
-            }))
+        let mut reply = json!({
+            "text": text, "thinking": thinking, "immediate": immediate, "options": options,
+        });
+        if presentation_version.is_some() {
+            if let Some(id) = r["requestId"].as_str().filter(|s| !s.is_empty() && s.len() <= 128) {
+                reply["requestId"] = json!(id);
+                if let Some(spoken) = r["speechText"].as_str() {
+                    reply["speechText"] = json!(truncate_str(spoken, 8000));
+                }
+                // An owned media-only answer still completes the waiting turn.
+                return Some(reply);
+            }
         }
+        (!text.is_empty() || !options.is_empty()).then_some(reply)
     });
 
     let voice = raw.get("voice").map(|v| {
@@ -506,6 +529,13 @@ pub fn sanitize_pet_state(
         "richDraft": raw.get("richDraft").and_then(|v| v.as_bool()).unwrap_or(false),
         "canCall": raw.get("canCall").and_then(|v| v.as_bool()).unwrap_or(false),
         "compactVoice": raw.get("compactVoice").and_then(|v| v.as_bool()).unwrap_or(false),
+        "petReplyPresentationVersion": presentation_version,
+        "petStreamingSpeechVersion": supports_streaming_speech(raw).then_some(1),
+        "petSpeech": pet_speech(raw),
+        "remotePhoneVersion": raw["remotePhoneVersion"].as_u64().filter(|v| *v == 1),
+        "remoteDialogue": dialogue_state(raw),
+        "phoneState": phone_state(raw, &raw["phoneState"]),
+        "phoneError": raw["phoneError"].as_str().filter(|_| raw["remotePhoneVersion"] == 1).map(|s| truncate_str(s, 300)),
         "petVoiceAudioVersion": raw.get("petVoiceAudioVersion").and_then(|v| v.as_u64()).filter(|v| *v == 1),
         "draft": raw.get("draft").and_then(|v| v.as_str()).map(|s| truncate_str(s, MAX_PET_INPUT_CHARS)).unwrap_or_default(),
         "attention": raw.get("attention").and_then(|v| v.as_str()).map(|s| truncate_str(s, 240)).unwrap_or_default(),
@@ -517,6 +547,19 @@ pub fn sanitize_pet_state(
         "exitPrompt": exit_prompt,
         "permission": permission_prompt,
     })
+}
+
+fn phone_state<'a>(raw: &Value, phase: &'a Value) -> Option<&'a str> {
+    if raw["remotePhoneVersion"] != 1 { return None; }
+    phase.as_str().filter(|s| matches!(*s, "starting" | "listening" | "thinking" | "speaking" | "paused" | "stopping"))
+}
+
+fn dialogue_state(raw: &Value) -> Option<Value> {
+    let dialogue = &raw["remoteDialogue"];
+    let state = phone_state(raw, &dialogue["state"])?;
+    let id = dialogue["id"].as_str()?;
+    Uuid::parse_str(id).ok()?;
+    Some(json!({ "id": id, "state": state }))
 }
 
 pub fn sanitize_exit_personas(raw: &Value) -> Vec<PetPersonaSummary> {
@@ -572,6 +615,7 @@ type PetCommandResult = Result<Value, String>;
 
 #[derive(Default)]
 struct PetPageState {
+    speech_request: Option<String>,
     raw: Value,
     pending: HashMap<String, oneshot::Sender<PetCommandResult>>,
 }
@@ -585,6 +629,7 @@ fn pet_context(raw: &Value) -> String {
 
 impl PetPageState {
     fn cancel_pending(&mut self) {
+        self.speech_request = None;
         for (_, sender) in self.pending.drain() {
             let _ = sender.send(Err("会话已改变，请打开 AIChat 检查。".to_string()));
         }
@@ -842,11 +887,21 @@ impl PetController {
         snap
     }
 
+    pub fn starting_phone_id(&self) -> Option<String> {
+        let page = self.page_state.lock().ok()?;
+        let dialogue = &page.raw["remoteDialogue"];
+        if page.raw["remotePhoneVersion"] != 1 || dialogue["state"] != "starting" { return None; }
+        dialogue["id"].as_str().map(str::to_owned)
+    }
+
     pub fn update_raw_state(&self, next: Value) -> Value {
         if let Ok(mut page) = self.page_state.lock() {
             if pet_context(&page.raw) != pet_context(&next) {
                 page.cancel_pending();
                 self.clear_hit_regions();
+            }
+            if !supports_streaming_speech(&next) {
+                page.speech_request = None;
             }
             page.raw = next;
         }
@@ -866,6 +921,22 @@ impl PetController {
         self.snapshot()
     }
 
+    pub fn owns_speech_request(&self, id: &str) -> bool {
+        self.page_state.lock().is_ok_and(|page| page.speech_request.as_deref() == Some(id))
+    }
+
+    /// Lifecycle events can arrive while the pet webview is suspended. Address
+    /// the retained chat page directly, with the actual native send identity.
+    pub fn take_speech_cancellation(&self, expected_id: Option<&str>) -> Option<Value> {
+        let mut page = self.page_state.lock().ok()?;
+        if expected_id.is_some() && expected_id != page.speech_request.as_deref() { return None; }
+        let id = page.speech_request.take()?;
+        Some(json!({
+            "version": 1, "requestId": Uuid::new_v4().to_string(), "action": "cancel-speech",
+            "context": pet_context(&page.raw), "speechRequestId": id
+        }))
+    }
+
     /// Match the existing Electron/AIChat Bridge v1 envelope. Forwarding a
     /// command is not acknowledgement: the page must confirm its request ID.
     pub fn begin_command(
@@ -878,12 +949,18 @@ impl PetController {
         if args.get("context").and_then(Value::as_str) != Some(context.as_str()) {
             return Err("会话已改变，请打开 AIChat 检查。".to_string());
         }
+        if matches!(action, "pause-speech" | "resume-speech" | "cancel-speech")
+            && (!supports_streaming_speech(&page.raw) || page.speech_request.is_none()
+                || args["speechRequestId"].as_str() != page.speech_request.as_deref())
+        {
+            return Err("这条回复的朗读已结束。".to_string());
+        }
         if !page
             .raw
             .get("ready")
             .and_then(Value::as_bool)
             .unwrap_or(false)
-            && !matches!(action, "exit-info" | "toggle-target" | "hide")
+            && !matches!(action, "exit-info" | "toggle-target" | "hide" | "cancel-speech")
         {
             return Err("请先在 AIChat 中连接本机服务和第二大脑，草稿已保留。".to_string());
         }
@@ -891,6 +968,9 @@ impl PetController {
             return Err("宠物操作过多，请稍候。".to_string());
         }
         let request_id = Uuid::new_v4().to_string();
+        if action == "send" && supports_streaming_speech(&page.raw) {
+            page.speech_request = Some(request_id.clone());
+        }
         let (sender, receiver) = oneshot::channel();
         let mut command = args.as_object().cloned().unwrap_or_default();
         command.insert("version".to_string(), json!(1));
@@ -1259,17 +1339,40 @@ where
 }
 
 #[cfg(test)]
+#[path = "pet_speech_tests.rs"]
+mod speech_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
 
-    fn command_controller() -> PetController {
+    pub(super) fn command_controller() -> PetController {
         let controller = PetController::new(
             std::env::temp_dir().join(format!("aichat-pet-commands-{}.json", Uuid::new_v4())),
         );
         controller.update_raw_state(json!({ "context": "alice", "ready": true }));
         controller
+    }
+
+    #[test]
+    fn reply_presentation_preserves_owned_silent_completion_and_legacy_snapshots() {
+        let pet = command_controller();
+        let mut raw = json!({ "context": "alice", "petReplyPresentationVersion": 1,
+            "reply": { "text": "", "requestId": "own-turn", "speechText": "" } });
+        let reply = &pet.update_raw_state(raw.clone())["reply"];
+        assert_eq!(reply["requestId"], "own-turn");
+        assert_eq!(reply["speechText"], "");
+        for version in [Value::Null, json!(2)] {
+            raw["petReplyPresentationVersion"] = version;
+            assert!(pet.update_raw_state(raw.clone())["reply"].is_null());
+        }
+        raw["reply"]["text"] = json!("legacy answer");
+        let legacy = pet.update_raw_state(raw);
+        assert_eq!(legacy["reply"]["text"], "legacy answer");
+        assert!(legacy["reply"].get("requestId").is_none());
+        assert!(legacy["reply"].get("speechText").is_none());
     }
 
     #[test]

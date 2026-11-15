@@ -10,8 +10,9 @@ use super::sender::{verify_main_sender, verify_pet_sender};
 use super::state::AppCore;
 use crate::pet::{PetController, WorkArea};
 use crate::{pet, pet_audio, pet_canvas, pet_menu};
+use crate::remote_voice::{RecordingFeedback, RecordingPhase, RecordingTarget};
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{
@@ -302,10 +303,122 @@ fn start_pet_pointer_tracker(app: &AppHandle, window: &WebviewWindow, pet: &Arc<
     });
 }
 
+fn remote_voice_pet_mode(main_visible: bool, main_minimized: bool, pet_visible: bool, pet_minimized: bool) -> bool {
+    (!main_visible || main_minimized) && pet_visible && !pet_minimized
+}
+
+pub(super) fn pet_is_active(main: &WebviewWindow, pet: &WebviewWindow) -> tauri::Result<bool> {
+    Ok(remote_voice_pet_mode(
+        main.is_visible()?,
+        main.is_minimized()?,
+        pet.is_visible()?,
+        pet.is_minimized()?,
+    ))
+}
+
+fn pet_back_context_matches(snapshot: &Value, context: &Value) -> bool {
+    context.is_string()
+        && snapshot["context"] == *context
+        && snapshot["permission"].is_null()
+        && snapshot["exitPrompt"].is_null()
+}
+
+/// Route a physical Back to the actual pet editor (which may have an unsynced
+/// local draft). Once routed, never repeat it as a system-wide delete.
+pub(super) fn route_remote_back(app: &AppHandle) -> Result<bool, String> {
+    let core = app.state::<Arc<AppCore>>();
+    if core.pet_temporarily_hidden.load(Ordering::Relaxed) {
+        return Ok(true);
+    }
+    let Some(pet) = app.get_webview_window("pet") else { return Ok(false) };
+    let main = app.get_webview_window("main").ok_or("主窗口不可用")?;
+    if !pet_is_active(&main, &pet).map_err(|e| e.to_string())? {
+        return Ok(false);
+    }
+    verify_pet_sender(&pet, &core)?;
+    let snapshot = core.pet.snapshot();
+    if snapshot["permission"].is_null() && snapshot["exitPrompt"].is_null() {
+        let detail = json!({"context": snapshot["context"]});
+        pet.eval(format!("window.dispatchEvent(new CustomEvent('aichat:remote-back', {{detail:{detail},cancelable:true}}))"))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+/// The physical remote requests focus once, at the start of the utterance.
+/// Other applications keep the ordinary current-focus dictation behavior.
+pub(super) fn focus_pet_for_remote_voice(
+    app: &AppHandle,
+) -> RecordingTarget {
+    static NEXT_PRESS: AtomicU64 = AtomicU64::new(1);
+    const UNAVAILABLE: &str = "无法聚焦桌宠输入框，请打开桌宠聊天后重新录音。";
+    let Some(pet) = app.get_webview_window("pet") else { return Ok(None); };
+    let main = app.get_webview_window("main").ok_or(UNAVAILABLE)?;
+    if !pet_is_active(&main, &pet).map_err(|_| UNAVAILABLE)? {
+        return Ok(None);
+    }
+
+    let core = app.state::<Arc<AppCore>>();
+    verify_pet_sender(&pet, &core).map_err(|_| UNAVAILABLE)?;
+    let snap = core.pet.snapshot();
+    if !snap["exitPrompt"].is_null() || !snap["permission"].is_null()
+        || snap["richDraft"] == true || snap["dictating"] == true {
+        return Err("桌宠输入框当前不可编辑，请先完成当前操作再录音。".into());
+    }
+    pet.set_focus().map_err(|_| UNAVAILABLE)?;
+    app.get_webview("pet").ok_or(UNAVAILABLE)?.set_focus().map_err(|_| UNAVAILABLE)?;
+    let expanded = core.pet.set_expanded(true);
+    pet.emit_to("pet", "aichat-desktop:pet-state", &expanded).map_err(|_| UNAVAILABLE)?;
+    // The response only acknowledges focus. Audio and transcript never enter
+    // this event; the existing native paste handles the eventual result.
+    let (reply, focused) = tokio::sync::oneshot::channel();
+    let reply = std::sync::Mutex::new(Some(reply));
+    let press = NEXT_PRESS.fetch_add(1, Ordering::Relaxed);
+    cancel_pet_speech(app, &core);
+    let pet_url = pet.url().map_err(|_| UNAVAILABLE)?;
+    let local_preview = pet_url.path() == "/pet.html" && match (pet_url.scheme(), pet_url.host_str()) {
+        ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost")) => true,
+        ("http", Some("127.0.0.1")) => cfg!(debug_assertions) && pet_url.port() == Some(1430),
+        _ => false,
+    };
+    let preview_url = json!(pet_url.as_str());
+    pet.eval_with_callback(
+        format!("(!window.dispatchEvent(new CustomEvent('aichat:remote-voice-focus', {{detail:{press}, cancelable:true}}))) && document.hasFocus()"),
+        move |result| {
+            if let Some(reply) = reply.lock().unwrap().take() {
+                let _ = reply.send(result == "true");
+            }
+        },
+    ).map_err(|_| UNAVAILABLE)?;
+    Ok(Some(RecordingFeedback {
+        focus: Some(focused),
+        notify: Box::new(move |phase| {
+            let event = match phase {
+                RecordingPhase::Preview(text) => {
+                    // Only the original local pet page can receive the ephemeral caption.
+                    if local_preview {
+                        let detail = json!({"press": press, "text": crate::remote_voice::preview_tail(&text)});
+                        let _ = pet.eval(format!("if (window === window.top && location.href === {preview_url}) window.dispatchEvent(new CustomEvent('aichat:remote-voice-preview', {{detail:{detail}}}));"));
+                    }
+                    return;
+                }
+                RecordingPhase::Recording => "aichat:remote-voice-recording",
+                RecordingPhase::Transcribing => "aichat:remote-voice-transcribing",
+                RecordingPhase::End => "aichat:remote-voice-end",
+            };
+            let _ = pet.eval(format!("window.dispatchEvent(new CustomEvent('{event}', {{detail:{press}}}))"));
+        }),
+    }))
+}
+
 pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
+    if show_now {
+        core.pet_temporarily_hidden.store(false, Ordering::Relaxed);
+    }
     if let Some(existing) = app.get_webview_window("pet") {
         if show_now {
             let _ = existing.show();
+            super::remote_phone_view::sync(app);
             sync_pet_pointer(&existing, &core.pet, app);
         }
         broadcast_pet_state(app, core);
@@ -317,6 +430,7 @@ pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
 
     if let Ok(builder) = WebviewWindowBuilder::new(app, "pet", WebviewUrl::App("pet.html".into()))
         .title("桌面宠物")
+        .initialization_script(super::main_window::HOME_TEXT_GUARD)
         .position(area.x as f64, area.y as f64)
         .inner_size(area.width as f64, area.height as f64)
         .decorations(false)
@@ -358,6 +472,7 @@ pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
                 }
             }
         });
+        super::remote_phone_view::sync(app);
         start_pet_pointer_tracker(app, &builder, &core.pet);
         broadcast_pet_state(app, core);
     }
@@ -373,13 +488,16 @@ pub(super) fn desktop_publish_pet_state(
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state_mgr)?;
     let incoming = state.unwrap_or_else(|| json!({}));
-    let supports_audio = (incoming["petDictationAudioVersion"].as_u64()
-        == Some(pet_audio::VERSION)
-        || (incoming["target"].as_str() == Some("persona")
-            && incoming["petVoiceAudioVersion"].as_u64() == Some(pet_audio::VERSION)))
-        && incoming["ready"].as_bool() == Some(true);
-    state_mgr.pet.update_raw_state(incoming);
-    let context = state_mgr.pet.snapshot()["context"]
+    let dictation_audio = incoming["petDictationAudioVersion"].as_u64() == Some(pet_audio::VERSION);
+    let persona_audio = incoming["target"].as_str() == Some("persona")
+        && incoming["petVoiceAudioVersion"].as_u64() == Some(pet_audio::VERSION);
+    let supports_audio = incoming["ready"].as_bool() == Some(true) && (dictation_audio || persona_audio);
+    let previous_start = state_mgr.pet.starting_phone_id();
+    let snapshot = state_mgr.pet.update_raw_state(incoming);
+    if previous_start != state_mgr.pet.starting_phone_id() {
+        super::remote_phone_view::sync(&app);
+    }
+    let context = snapshot["context"]
         .as_str()
         .unwrap_or("")
         .to_string();
@@ -439,6 +557,9 @@ async fn request_pet_command(
     args: &Value,
 ) -> Result<Value, String> {
     let (mut command, receiver) = core.pet.begin_command(name, args)?;
+    if matches!(name, "stop" | "dictation" | "call" | "record-start" | "voice-start" | "toggle-target") {
+        cancel_pet_speech(app, core);
+    }
     let request_id = command["requestId"]
         .as_str()
         .unwrap_or_default()
@@ -503,7 +624,31 @@ async fn request_pet_command(
                 .resolve_command(&json!({"requestId":request_id,"ok":false,"error":error}));
             return Err(error);
         }
+    } else if name == "send" && snapshot["petStreamingSpeechVersion"] == 1 {
+        // Serialize send delivery with native presentation. If a Dock/Home/hide
+        // intervened before dispatch, never start speech in a hidden pet.
+        let handle = app.clone();
+        let command = command.clone();
+        let dispatch = app.run_on_main_thread(move || {
+            let core = handle.state::<Arc<AppCore>>();
+            let id = command["requestId"].as_str().unwrap_or_default();
+            let visible = handle.get_webview_window("pet").is_some_and(|w| w.is_visible().unwrap_or(false));
+            if !visible || !core.pet.owns_speech_request(id) {
+                core.pet.resolve_command(&json!({"requestId": id, "ok": false, "error": "桌宠状态已改变，草稿已保留。"}));
+                return;
+            }
+            core.pet.set_expanded(false);
+            broadcast_pet_state(&handle, &core);
+            broadcast_to_main(&handle, "pet-command", &command);
+        });
+        if let Err(error) = dispatch {
+            core.pet.resolve_command(&json!({"requestId": request_id, "ok": false, "error": error.to_string()}));
+        }
     } else {
+        if name == "send" {
+            core.pet.set_expanded(false);
+            broadcast_pet_state(app, core);
+        }
         broadcast_to_main(app, "pet-command", &command);
     }
     let result = core
@@ -515,17 +660,73 @@ async fn request_pet_command(
             stop_pet_audio(app, core, Some(id), "语音输入未能启动", false);
         }
     }
+    if name == "send" {
+        // If acceptance was lost, the page might already be playing speech.
+        // Stop only that send's audio, leaving the chat mutation alone.
+        if result.as_ref().ok().and_then(|ack| ack["requestId"].as_str()) != Some(request_id.as_str()) {
+            if let Some(cancel) = core.pet.take_speech_cancellation(Some(&request_id)) {
+                broadcast_to_main(app, "pet-command", &cancel);
+            }
+        }
+        return result.map(|ack| {
+            let mut snapshot = core.pet.snapshot();
+            if ack["requestId"].as_str() == Some(request_id.as_str()) && snapshot["context"] == command["context"] {
+                snapshot["sentRequestId"] = json!(request_id);
+            }
+            snapshot
+        });
+    }
     result
+}
+
+fn cancel_pet_speech(app: &AppHandle, core: &AppCore) {
+    if let Some(command) = core.pet.take_speech_cancellation(None) {
+        broadcast_to_main(app, "pet-command", &command);
+    }
+}
+
+pub(super) fn dismiss_pet_view(window: &WebviewWindow) -> tauri::Result<()> {
+    window.hide()?;
+    let app = window.app_handle();
+    super::remote_phone_view::sync(app);
+    cancel_pet_speech(app, &app.state::<Arc<AppCore>>());
+    let _ = window.eval("window.dispatchEvent(new Event('aichat:pet-hidden'))");
+    Ok(())
 }
 
 pub(super) fn hide_pet_window(app: &AppHandle, core: &AppCore) {
     core.update_settings(|settings| settings.pet_visible = false);
+    core.pet_temporarily_hidden.store(false, Ordering::Relaxed);
+    if let Some(window) = app.get_webview_window("pet") {
+        let _ = dismiss_pet_view(&window);
+    }
+    finish_pet_hide(app, core);
+}
+
+/// Runs on the UI thread, serialized with Home and native window presentation.
+pub(super) fn temporarily_hide_pet(
+    app: &AppHandle,
+    core: &AppCore,
+    context: &Value,
+) -> Result<(), String> {
+    let main = app.get_webview_window("main").ok_or("主窗口不可用")?;
+    let window = app.get_webview_window("pet").ok_or("桌宠窗口不可用")?;
+    let pet = core.pet.snapshot();
+    if !pet_is_active(&main, &window).map_err(|e| e.to_string())?
+        || !pet_back_context_matches(&pet, context)
+        || pet["expanded"] != false
+    {
+        return Err("桌宠状态已改变。".into());
+    }
+    dismiss_pet_view(&window).map_err(|e| e.to_string())?;
+    core.pet_temporarily_hidden.store(true, Ordering::Relaxed);
+    finish_pet_hide(app, core);
+    Ok(())
+}
+
+fn finish_pet_hide(app: &AppHandle, core: &AppCore) {
     stop_pet_audio(app, core, None, "宠物已隐藏", false);
     core.pet.cancel_exit_prompt();
-    if let Some(window) = app.get_webview_window("pet") {
-        let _ = window.hide();
-    }
-    // The same hide lifecycle is shared by tray and pet-menu actions.
     broadcast_to_main(
         app,
         "pet-command",
@@ -616,9 +817,24 @@ pub(super) async fn desktop_pet_action(
                 .get("expanded")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            if let Some(context) = args.get("context") {
+                if !pet_back_context_matches(&state.pet.snapshot(), context) {
+                    return Err("桌宠状态已改变。".into());
+                }
+            }
             let snap = state.pet.set_expanded(expanded);
             broadcast_pet_state(&app, &state);
             Ok(snap)
+        }
+        "hide-temporarily" => {
+            let handle = app.clone();
+            let (done, result) = tokio::sync::oneshot::channel();
+            super::main_window::run_on_window_thread(&app, move || {
+                let core = handle.state::<Arc<AppCore>>();
+                let _ = done.send(temporarily_hide_pet(&handle, &core, &args["context"]));
+            }).map_err(|e| e.to_string())?;
+            result.await.map_err(|e| e.to_string())??;
+            Ok(state.pet.snapshot())
         }
         "open" => {
             show_main_window(&app, &state);
@@ -694,20 +910,21 @@ pub(super) async fn desktop_pet_action(
         }
         "permission-choice" => {
             stop_pet_audio(&app, &state, None, "宠物窗口已隐藏", false);
-            let _ = window.hide();
+            let _ = dismiss_pet_view(&window);
             let snap = state.pet.set_permission_prompt(None);
             broadcast_pet_state(&app, &state);
             Ok(snap)
         }
         "input" | "send" | "stop" | "dictation" | "call" | "mute" | "voice-start"
-        | "voice-stop" | "record-start" | "record-stop" | "toggle-target" => {
+        | "voice-stop" | "record-start" | "record-stop" | "toggle-target"
+        | "pause-speech" | "resume-speech" | "cancel-speech" => {
             if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
                 if text.chars().count() > crate::pet::MAX_PET_INPUT_CHARS {
                     return Err("输入内容过长，请在桌面主窗口中编辑".to_string());
                 }
             }
-            request_pet_command(&app, &state, &name, &args).await?;
-            Ok(state.pet.snapshot())
+            let result = request_pet_command(&app, &state, &name, &args).await?;
+            if name == "send" { Ok(result) } else { Ok(state.pet.snapshot()) }
         }
         _ => Ok(state.pet.snapshot()),
     }
@@ -716,6 +933,17 @@ pub(super) async fn desktop_pet_action(
 #[cfg(test)]
 mod pet_drag_host_tests {
     use serde_json::json;
+
+    #[test]
+    fn only_a_visible_pet_with_the_main_chat_put_away_claims_remote_voice() {
+        for (main_visible, minimized, expected) in [
+            (false, false, true), (true, true, true), (true, false, false),
+        ] {
+            assert_eq!(super::remote_voice_pet_mode(main_visible, minimized, true, false), expected);
+            assert!(!super::remote_voice_pet_mode(main_visible, minimized, false, false));
+            assert!(!super::remote_voice_pet_mode(main_visible, minimized, true, true));
+        }
+    }
 
     #[test]
     fn legacy_microphone_starts_prepare_the_owner_on_all_platforms() {

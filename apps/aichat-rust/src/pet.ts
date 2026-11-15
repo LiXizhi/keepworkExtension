@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DesktopPetBridge } from "./types";
 import { installPetAudioCapture } from "./petAudio";
+import { petSpokenText, startPetNarration } from "./petNarration";
 
 interface PetOption {
   icon?: string;
@@ -9,6 +10,8 @@ interface PetOption {
 }
 
 interface PetReply {
+  requestId?: string;
+  speechText?: string;
   text?: string;
   thinking?: boolean;
   immediate?: boolean;
@@ -31,6 +34,12 @@ interface PetExitPrompt {
 interface PetPermissionPrompt {
   id: string;
   client: string;
+}
+
+interface PetSpeech {
+  requestId: string;
+  state: "waiting" | "speaking" | "paused" | "ended" | "unavailable";
+  text?: string;
 }
 
 interface PetSnapshot {
@@ -68,6 +77,13 @@ interface PetSnapshot {
   richDraft?: boolean;
   canCall?: boolean;
   reply?: PetReply | null;
+  petReplyPresentationVersion?: number;
+  petStreamingSpeechVersion?: number;
+  petSpeech?: PetSpeech | null;
+  remoteDialogue?: { state?: string } | null;
+  phoneState?: string;
+  phoneError?: string;
+  sentRequestId?: string;
   exitPrompt?: PetExitPrompt | null;
   permission?: PetPermissionPrompt | null;
   classroomRecording?: { enabled?: boolean; phase?: string; error?: string } | null;
@@ -142,6 +158,35 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let releasedTap = false;
   let firstTap = false;
   let renderedMessages = "";
+  let shownReply: PetReply | null = null;
+  let previousReply = "";
+  const recentReplies = new Set<string>();
+  let pinnedReply = false;
+  let textExpired = false;
+  let paused = false;
+  let narration: ReturnType<typeof startPetNarration> = null;
+  let presentationTimer = 0;
+  let presentationSequence = 0;
+  let optimisticCollapse = false;
+  type PendingTurn = {
+    correlated: boolean;
+    context?: string;
+    streaming: boolean;
+    speechControlPending?: boolean;
+    earlySpeech: Map<string, PetSpeech>;
+    timingSilentFinal?: boolean;
+    baseline: string;
+    initialError?: string;
+    reopen: boolean;
+    accepted: boolean;
+    sawBusy: boolean;
+    timedOut?: boolean;
+    requestId?: string;
+    // Native publications can arrive ahead of the send acknowledgement.
+    earlyReplies: Map<string, PetReply>;
+    legacyResult?: PetReply;
+  };
+  let waiting: PendingTurn | null = null;
   let choosing = false;
   let hitRegionsQueued = false;
   let hitRegionsSignature = "";
@@ -214,6 +259,240 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
   }
 
+  function stopPresentation(): void {
+    ++presentationSequence;
+    if (presentationTimer) window.clearTimeout(presentationTimer);
+    presentationTimer = 0;
+    narration?.cancel();
+    narration = null;
+    paused = false;
+    if (waiting?.streaming && waiting.requestId) {
+      cancelSpeech(waiting.context, waiting.requestId);
+    }
+    waiting = null;
+  }
+
+  function cancelSpeech(context: string | undefined, speechRequestId: string): void {
+    void api.action("cancel-speech", { context, speechRequestId }).catch(() => {});
+  }
+
+  function currentSpeech(): PetSpeech | undefined {
+    return waiting?.streaming && waiting.requestId ? waiting.earlySpeech.get(waiting.requestId) : undefined;
+  }
+
+  function paintBubble(): void {
+    const speech = currentSpeech();
+    const thinking = (!!waiting && !shownReply?.text && speech?.state !== "ended" &&
+      (!waiting.timedOut || !!state.busy)) || !!shownReply?.thinking;
+    const textVisible = !thinking && !textExpired && !!shownReply?.text;
+    const desktopPhone = state.phoneState || state.remoteDialogue?.state;
+    const phoneState = desktopPhone || (state.voice?.active ? state.voice.state || "listening" : "");
+    const phoneIcon = $("dialogue-icon");
+    const phoneLabels: Record<string, string> = {
+      starting: "正在连接", listening: "聆听中", thinking: "正在思考", speaking: "正在说话",
+      paused: "已暂停", stopping: "正在结束", discussing: "讨论中",
+    };
+    phoneIcon.hidden = !phoneState || document.hidden;
+    phoneIcon.dataset.state = phoneState;
+    phoneIcon.title = phoneLabels[phoneState] ? `语音通话 · ${phoneLabels[phoneState]}` : "语音通话";
+    phoneIcon.setAttribute("aria-label", phoneIcon.title);
+    const errorButton = $("phone-error");
+    const collapsedError = !expanded && !phoneState && state.phoneError;
+    errorButton.hidden = !collapsedError;
+    errorButton.textContent = collapsedError ? `${collapsedError} · 打开 AIChat` : "";
+    $("bubble").hidden = !!state.exitPrompt || !!state.permission || !!desktopPhone ||
+      !(collapsedError || thinking || textVisible || shownReply?.options?.length);
+    $("bubble").classList.toggle("thinking", thinking);
+    $("thinking").hidden = !thinking;
+    const reply = $("reply");
+    reply.hidden = !textVisible;
+    const canControl = speech && !["ended", "unavailable"].includes(speech.state);
+    reply.title = canControl || narration
+      ? (speech?.state === "paused" || paused ? "点击继续朗读" : "点击暂停朗读")
+      : "点击打开桌面查看完整回复";
+    reply.setAttribute("aria-label", [shownReply?.text, reply.title].filter(Boolean).join("，"));
+    scheduleHitRegions();
+  }
+
+  function showReply(reply: PetReply | null, speak: boolean): void {
+    stopPresentation();
+    shownReply = reply;
+    textExpired = false;
+    if (!reply || reply.thinking) return;
+    const sequence = presentationSequence;
+    const expire = () => {
+      if (sequence !== presentationSequence) return;
+      narration = null;
+      paused = false;
+      textExpired = true;
+      paintBubble();
+      positionLayers();
+    };
+    const timeDisplay = () => {
+      if (reply.text) {
+        presentationTimer = window.setTimeout(expire, replyDisplayTime(reply.text));
+      }
+    };
+    const prose = speak ? reply.speechText ?? petSpokenText(reply.text || "") : "";
+    if (prose && !state.voice?.active && !state.dictating && !activeRemotePress) {
+      const speech = startPetNarration(prose, completed => {
+        if (sequence !== presentationSequence) return;
+        narration = null;
+        paused = false;
+        if (completed) expire();
+        else { timeDisplay(); paintBubble(); }
+      });
+      if (!textExpired && !presentationTimer) narration = speech;
+    }
+    if (!narration && !presentationTimer && !textExpired) timeDisplay();
+  }
+
+  function dismissPresentation(): void {
+    stopPresentation();
+    pinnedReply = true;
+    optimisticCollapse = false;
+    shownReply = null;
+    textExpired = true;
+    paintBubble();
+    positionLayers();
+  }
+
+  function beginTurn(): PendingTurn {
+    const turn: PendingTurn = {
+      correlated: state.petReplyPresentationVersion === 1,
+      context: state.context,
+      streaming: state.petReplyPresentationVersion === 1 && state.petStreamingSpeechVersion === 1,
+      earlySpeech: new Map(),
+      baseline: JSON.stringify(state.reply || null),
+      initialError: state.error,
+      reopen: expanded,
+      accepted: false,
+      sawBusy: false,
+      earlyReplies: new Map(),
+    };
+    showReply(null, false);
+    waiting = turn;
+    pinnedReply = true;
+    optimisticCollapse = expanded;
+    expanded = false;
+    $("panel").hidden = true;
+    $("panel").classList.remove("remote-voice-open");
+    // If a page stops publishing, retire the indicator. A later, positively
+    // identified reply can still complete a slow tool call in this context.
+    presentationTimer = window.setTimeout(() => {
+      if (waiting !== turn) return;
+      if (!turn.accepted || (!turn.correlated && !state.busy)) dismissPresentation();
+      else {
+        turn.timedOut = true;
+        paintBubble();
+        positionLayers();
+      }
+    }, 180000);
+    render(state as unknown as Record<string, unknown>);
+    return turn;
+  }
+
+  function rememberSpeech(turn: PendingTurn, speech: PetSpeech): void {
+    if (turn.requestId && speech.requestId !== turn.requestId) return;
+    const previous = turn.earlySpeech.get(speech.requestId);
+    // A late publication or acknowledgement cannot restart a finished stream.
+    if (previous?.state === "ended" || previous?.state === "unavailable") return;
+    turn.earlySpeech.set(speech.requestId, { ...speech, text: speech.text ?? previous?.text });
+    if (turn.earlySpeech.size > 4) {
+      const oldest = turn.earlySpeech.keys().next().value;
+      if (oldest) turn.earlySpeech.delete(oldest);
+    }
+  }
+
+  function presentStream(turn: PendingTurn, final: PetReply | undefined): void {
+    const speech = currentSpeech();
+    if (final && (speech?.state === "unavailable" || speech?.state === "ended")) {
+      turn.streaming = false; // Already terminal on the owner page.
+      showReply(final, false);
+      if (speech.state === "ended") textExpired = true;
+      return;
+    }
+    textExpired = speech?.state === "ended";
+    shownReply = final || (speech?.text ? { text: speech.text } : null);
+    if (final && !speech && !turn.timingSilentFinal) {
+      // If a negotiated page disappears between delivering text and its audio
+      // status, preserve visual-only expiry and scope any late audio to this send.
+      turn.timingSilentFinal = true;
+      window.clearTimeout(presentationTimer);
+      presentationTimer = window.setTimeout(() => {
+        if (waiting !== turn || currentSpeech()) return;
+        showReply(final, false);
+        textExpired = true;
+        paintBubble();
+      }, replyDisplayTime(final.text || ""));
+    }
+  }
+
+  function replyDisplayTime(text: string): number {
+    return Math.max(3000, Math.min(15000, Array.from(text).length * 120));
+  }
+
+  function updatePresentation(): void {
+    const reply = state.reply || null;
+    const signature = JSON.stringify(reply);
+    const turn = waiting;
+    if (document.hidden || state.exitPrompt || state.permission || state.phoneState || state.remoteDialogue?.state ||
+        (turn?.streaming && state.petStreamingSpeechVersion !== 1) ||
+        ((turn || narration) && (!state.ready || state.voice?.active || state.dictating))) {
+      dismissPresentation();
+    } else if (turn) {
+      if (state.error && state.error !== turn.initialError) {
+        dismissPresentation();
+        if (turn.reopen) void expand(true).catch(() => {});
+      } else {
+        turn.sawBusy ||= !!state.busy;
+        if (turn.streaming && state.petSpeech) rememberSpeech(turn, state.petSpeech);
+        if (!state.busy && reply && !reply.thinking) {
+          if (reply.requestId) {
+            turn.earlyReplies.set(reply.requestId, reply);
+            if (turn.earlyReplies.size > 4) {
+              const oldest = turn.earlyReplies.keys().next().value;
+              if (oldest) turn.earlyReplies.delete(oldest);
+            }
+          } else if (signature !== turn.baseline && !recentReplies.has(signature)) {
+            turn.legacyResult = reply;
+          }
+        }
+        if (turn.accepted) {
+          const final = turn.correlated
+            ? turn.requestId && turn.earlyReplies.get(turn.requestId)
+            : turn.legacyResult;
+          if (turn.streaming) {
+            presentStream(turn, final || undefined);
+          } else if (final) {
+            const legacyClassroom = !turn.correlated && (!!state.classroomRecording ||
+              ["课堂互动助手", "classroom-interaction-assistant"].includes(state.skill || ""));
+            // A legacy host can coalesce its busy transition and final reply.
+            // Show that fresh result, but speak only with evidence of our turn.
+            showReply(final, !legacyClassroom && (turn.correlated || turn.sawBusy));
+          } else if (!turn.correlated && turn.sawBusy && !state.busy &&
+                     (!reply || signature === turn.baseline)) {
+            dismissPresentation();
+          }
+        }
+      }
+    } else if (signature !== previousReply) {
+      // An unrelated incoming message still exposes its current quick replies.
+      // Repeated drag/visibility snapshots must not revive an earlier result.
+      const freshInbound = reply && !reply.requestId && !reply.thinking && !state.busy && !recentReplies.has(signature);
+      if (!reply?.requestId && (!pinnedReply || freshInbound)) showReply(reply, false);
+    }
+    if (reply && !reply.thinking && !state.busy && !recentReplies.has(signature)) {
+      recentReplies.add(signature);
+      if (recentReplies.size > 16) {
+        const oldest = recentReplies.values().next().value;
+        if (oldest) recentReplies.delete(oldest);
+      }
+    }
+    previousReply = signature;
+    paintBubble();
+  }
+
   function render(raw: Record<string, unknown> | null): void {
     let next = (raw || {}) as PetSnapshot;
     if (!next || next.version !== 1) return;
@@ -227,6 +506,11 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const closingExit = !next.exitPrompt && !!state.exitPrompt;
     const draftEl = $<HTMLTextAreaElement>("draft");
     if (next.context !== state.context) {
+      showReply(null, false);
+      pinnedReply = false;
+      previousReply = "";
+      recentReplies.clear();
+      optimisticCollapse = false;
       edits = 0;
       draftRevision++;
       unsynced = false;
@@ -235,8 +519,10 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
     state = next;
     if (typeof next.expanded === "boolean") {
-      expanded = next.expanded;
+      if (!next.expanded) optimisticCollapse = false;
+      expanded = next.expanded && !optimisticCollapse;
       $("panel").hidden = !expanded;
+      if (!expanded) $("panel").classList.remove("remote-voice-open");
     }
     const pet = state.preferences?.appearance === "dragon" ? {} : state.pet || {};
     if ($("art").textContent !== "") $("art").textContent = "";
@@ -260,7 +546,8 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }\n点击切换到${state.target === "persona" ? "聊天会话" : "我的分身"}`;
     targetBtn.disabled =
       !state.canSwitchTarget || !!state.dictating || !!state.voice?.active || !!edits || unsynced;
-    $("badge").hidden = !(state.busy || state.voice?.active || state.attention || state.error || localError);
+    $("badge").hidden = !!state.phoneState || !!state.remoteDialogue?.state ||
+      !(state.busy || state.voice?.active || state.attention || state.error || localError);
 
     if (!edits && !unsynced) draftEl.value = state.draft || "";
     draftEl.disabled = !!state.richDraft || !!state.dictating;
@@ -304,11 +591,10 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       $("status").textContent = [$("status").textContent, "可先输入草稿，连接后点击发送。"]
         .filter(Boolean).join("\n");
     }
-    $("error").textContent = localError || state.error || "";
+    $("error").textContent = localError || state.phoneError || state.error || "";
 
-    const reply = state.reply;
-    $("bubble").hidden = !reply || (!reply.text && !reply.options?.length);
-    $("bubble").classList.toggle("thinking", !!reply?.thinking);
+    updatePresentation();
+    const reply = shownReply;
     const signature = JSON.stringify([state.context, reply]);
     if (signature !== renderedMessages) {
       renderedMessages = signature;
@@ -403,7 +689,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
     const rec = state.classroomRecording;
     const active = !!state.voice?.active;
-    $("compact-controls").hidden = expanded || !!exit || !!permission || !state.compactVoice;
+    $("compact-controls").hidden = expanded || !!exit || !!permission || !!state.phoneState || !!state.remoteDialogue?.state || !state.compactVoice;
     const compactRecordBtn = $<HTMLButtonElement>("compact-record");
     compactRecordBtn.hidden = !rec;
     compactRecordBtn.textContent = rec?.enabled ? "停止录音" : "开始录音";
@@ -458,16 +744,28 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     };
   }
 
-  function action(name: string, args: Record<string, unknown> = {}): Promise<boolean> {
+  function action(name: string, args: Record<string, unknown> = {}, stillValid?: () => boolean): Promise<boolean> {
     const context = state.context;
+    if (name === "send" && waiting && !waiting.accepted) return Promise.resolve(false);
+    const turn = name === "send" ? beginTurn() : null;
     const task = queue.then(async () => {
+      if (stillValid && !stillValid()) return false;
+      if (turn && waiting !== turn) return false;
       if (context !== state.context) throw new Error("会话已改变，请重试");
       if (["input", "send"].includes(name) && !state.ready) {
         throw new Error("请先在 AIChat 中连接本机服务和第二大脑，草稿已保留。");
       }
       const next = await api.action(name, { ...args, context });
+      if (turn?.streaming && waiting !== turn && typeof next?.sentRequestId === "string") {
+        cancelSpeech(context, next.sentRequestId);
+      }
       if (context !== state.context) return false;
       localError = "";
+      if (turn && waiting === turn) {
+        turn.requestId = typeof next?.sentRequestId === "string" ? next.sentRequestId : undefined;
+        turn.accepted = true;
+      }
+      if (name === "stop") dismissPresentation();
       if (next) render(next);
       return true;
     });
@@ -476,6 +774,10 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       const msg = err instanceof Error ? err.message : String(err);
       localError = msg.replace(/^Error invoking remote method '[^']+': Error: /, "");
       $("error").textContent = localError;
+      if (turn && waiting === turn) {
+        dismissPresentation();
+        if (turn.reopen) void expand(true).catch(() => {});
+      }
       return false;
     });
     return queue;
@@ -483,6 +785,8 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
   async function expand(value: boolean): Promise<void> {
     if (state.exitPrompt || state.permission) return;
+    optimisticCollapse = false;
+    if (waiting) waiting.reopen = false;
     const opening = value && !expanded;
     expanded = value;
     if (opening && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
@@ -499,15 +803,85 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
         { duration: 460, easing: "ease-out" }
       );
     }
-    await api.action("expand", { expanded });
+    state = { ...state, expanded: value };
     $("panel").hidden = !expanded;
-    scheduleHitRegions();
+    if (!expanded) $("panel").classList.remove("remote-voice-open");
+    paintBubble();
     const draftEl = $<HTMLTextAreaElement>("draft");
     if (expanded && !draftEl.disabled) draftEl.focus();
+    await api.action("expand", { expanded: value });
   }
 
   const draftEl = $<HTMLTextAreaElement>("draft");
-  draftEl.addEventListener("input", () => {
+  const panel = $("panel");
+  const remoteStatus = $("remote-recording-status");
+  const transcribingStatus = $("remote-transcribing-status");
+  const preview = $("remote-voice-preview");
+  let lastRemotePress = 0;
+  let activeRemotePress = 0;
+
+  window.addEventListener("aichat:remote-dialogue", (event) => {
+    const detail = (event as CustomEvent<{ action?: string }>).detail;
+    if (detail?.action === "interrupt" && !document.hidden && (narration || waiting?.streaming)) {
+      dismissPresentation();
+    }
+  });
+  window.addEventListener("aichat:remote-voice-focus", (event) => {
+    if (state.remoteDialogue?.state || !state.version || state.exitPrompt || state.permission || draftEl.disabled) return;
+    const id = (event as CustomEvent<number>).detail;
+    if (id !== undefined) {
+      if (!Number.isSafeInteger(id) || id <= lastRemotePress) return;
+      lastRemotePress = activeRemotePress = id;
+      if (narration || waiting?.streaming) dismissPresentation();
+      preview.textContent = "";
+      preview.hidden = true;
+      transcribingStatus.hidden = true;
+      remoteStatus.textContent = "语音键已按下";
+      remoteStatus.hidden = false;
+      panel.classList.add("remote-recording");
+    }
+    optimisticCollapse = false;
+    expanded = true;
+    panel.classList.add("remote-voice-open");
+    panel.hidden = false;
+    $("compact-controls").hidden = true;
+    positionLayers();
+    scheduleHitRegions();
+    draftEl.focus();
+    if (document.activeElement === draftEl) event.preventDefault();
+  });
+  window.addEventListener("aichat:remote-voice-recording", (event) => {
+    if (activeRemotePress && activeRemotePress === (event as CustomEvent<number>).detail && transcribingStatus.hidden) {
+      remoteStatus.textContent = "录音中";
+    }
+  });
+  window.addEventListener("aichat:remote-voice-preview", (event) => {
+    const detail = (event as CustomEvent<{ press: number; text: string }>).detail;
+    if (!activeRemotePress || detail?.press !== activeRemotePress || typeof detail.text !== "string") return;
+    preview.textContent = detail.text;
+    preview.hidden = !detail.text;
+    preview.scrollTop = preview.scrollHeight;
+  });
+  window.addEventListener("aichat:remote-voice-transcribing", (event) => {
+    if (!activeRemotePress || activeRemotePress !== (event as CustomEvent<number>).detail) return;
+    panel.classList.remove("remote-recording");
+    remoteStatus.hidden = true;
+    transcribingStatus.hidden = false;
+  });
+  window.addEventListener("aichat:remote-voice-end", (event) => {
+    const id = (event as CustomEvent<number>).detail;
+    if (!Number.isSafeInteger(id) || id <= 0) return;
+    lastRemotePress = Math.max(lastRemotePress, id);
+    if (id !== activeRemotePress) return;
+    activeRemotePress = 0;
+    preview.hidden = true;
+    preview.textContent = "";
+    transcribingStatus.hidden = true;
+    panel.classList.remove("remote-recording");
+    remoteStatus.hidden = true;
+    remoteStatus.textContent = "";
+  });
+  async function syncDraftEdit(): Promise<void> {
     const context = state.context;
     const revision = ++draftRevision;
     unsynced = true;
@@ -518,12 +892,38 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       return;
     }
     edits++;
-    void action("input", { text: draftEl.value }).then((ok) => {
-      if (context === state.context) {
-        edits = Math.max(0, edits - 1);
-        if (revision === draftRevision) unsynced = !ok;
-        if (!edits) {
-          render(state as unknown as Record<string, unknown>);
+    const ok = await action("input", { text: draftEl.value });
+    if (context === state.context) {
+      edits = Math.max(0, edits - 1);
+      if (revision === draftRevision) unsynced = !ok;
+      if (!edits) render(state as unknown as Record<string, unknown>);
+    }
+  }
+  draftEl.addEventListener("input", () => void syncDraftEdit());
+
+  let backPresses: Promise<void> = Promise.resolve();
+  window.addEventListener("aichat:remote-back", (event) => {
+    const context = (event as CustomEvent<{ context: string }>).detail?.context;
+    if (!context || context !== state.context || document.hidden || state.exitPrompt || state.permission) return;
+    const received = performance.now();
+    const current = () => performance.now() - received < 1000 && context === state.context &&
+      !document.hidden && !state.exitPrompt && !state.permission;
+    event.preventDefault();
+    backPresses = backPresses.then(async () => {
+      if (!current()) return;
+      if (panel.hidden) {
+        await action("hide-temporarily", {}, () => current() && panel.hidden);
+      } else if (!draftEl.disabled) {
+        if (draftEl.value !== "") {
+          draftEl.value = "";
+          await syncDraftEdit();
+        } else if (state.ready && state.draft && unsynced) {
+          // The host still owns text after a failed clear. An explicit Back
+          // can retry the empty edit before advancing to the next step.
+          await syncDraftEdit();
+        } else {
+          await action("expand", { expanded: false }, () => current() && !panel.hidden &&
+            !draftEl.disabled && draftEl.value === "");
         }
       }
     });
@@ -541,7 +941,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     if ($<HTMLButtonElement>("send").disabled) return;
     const name = state.busy ? "stop" : "send";
     const context = state.context;
-    await queue;
+    if (edits || unsynced) await queue;
     if (context !== state.context || !state.ready) return;
     if (name === "send" && (state.busy || state.richDraft || state.dictating)) return;
     if (name === "send" && unsynced) {
@@ -551,7 +951,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
           state.busy || state.richDraft || state.dictating) return;
       unsynced = false;
     }
-    void action(name);
+    if (name === "stop" || draftEl.value.trim()) void action(name);
   };
 
   $("compact-record").onclick = () =>
@@ -574,16 +974,40 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     void api.action("open");
   };
 
-  $("reply").onclick = () => {
-    if (!window.getSelection()?.toString()) void api.action("open");
-  };
+  function activateReply(): void {
+    if (window.getSelection()?.toString()) return;
+    const turn = waiting;
+    const speech = currentSpeech();
+    if (turn && speech && !["ended", "unavailable"].includes(speech.state)) {
+      if (turn.speechControlPending) return;
+      turn.speechControlPending = true;
+      const name = speech.state === "paused" ? "resume-speech" : "pause-speech";
+      void action(name, { speechRequestId: speech.requestId }, () => waiting === turn)
+        .finally(() => { turn.speechControlPending = false; });
+    } else if (narration) {
+      paused = !paused;
+      if (paused) narration.pause();
+      else narration.resume();
+      paintBubble();
+    } else if (!textExpired && shownReply?.text) {
+      void api.action("open");
+    }
+  }
 
+  $("reply").onclick = activateReply;
   $("reply").onkeydown = (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      void api.action("open");
+      if (!event.repeat) activateReply();
     }
   };
+  $("phone-error").onclick = () => { void api.action("open"); };
+  window.addEventListener("aichat:pet-hidden", dismissPresentation);
+  window.addEventListener("pagehide", dismissPresentation);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) dismissPresentation();
+    else paintBubble();
+  });
 
   $("collapse").onclick = () => {
     void expand(false);

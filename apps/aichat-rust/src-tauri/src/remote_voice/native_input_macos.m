@@ -23,14 +23,34 @@ typedef struct {
 static pthread_mutex_t lifecycle = PTHREAD_MUTEX_INITIALIZER;
 static KeepworkVoiceTap *currentTap;
 
+// A session tap ordinarily has no public keyboard-device field. Newer macOS
+// exports can recover the underlying HID sender. Unknown senders pass through.
+extern CFTypeRef CGEventCopyIOHIDEvent(CGEventRef) __attribute__((weak_import));
+extern uint64_t IOHIDEventGetSenderID(CFTypeRef) __attribute__((weak_import));
+extern bool keepwork_remote_home_sender(uint64_t sender);
+extern bool keepwork_remote_dialogue_ok_edge(bool down) __attribute__((weak_import));
+
+static bool remoteHomeEvent(CGEventRef event) {
+    if (!CGEventCopyIOHIDEvent || !IOHIDEventGetSenderID) return false;
+    CFTypeRef hid = CGEventCopyIOHIDEvent(event);
+    if (!hid) return false;
+    uint64_t sender = IOHIDEventGetSenderID(hid);
+    CFRelease(hid);
+    return sender && keepwork_remote_home_sender(sender);
+}
+
 static CGEventRef voiceKey(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *raw) {
     (void)proxy;
     KeepworkVoiceTap *tap = raw;
     if (!atomic_load_explicit(&tap->enabled, memory_order_acquire)) return event;
     // F5 (hardware keycode 96) is intentionally reserved process-wide while
     // this user-enabled ATVV session is ready. No device distinction is claimed.
-    if ((type == kCGEventKeyDown || type == kCGEventKeyUp)
-        && CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == 96) return NULL;
+    if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
+        int64_t key = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        if (key == 96 || (key == 115 && remoteHomeEvent(event))) return NULL;
+        if ((key == 36 || key == 76) && keepwork_remote_dialogue_ok_edge && remoteHomeEvent(event)
+            && keepwork_remote_dialogue_ok_edge(type == kCGEventKeyDown)) return NULL;
+    }
     return event;
 }
 
@@ -84,12 +104,24 @@ static void *tapThread(void *raw) {
     }
 }
 
+// Only the explicit Start action may pass request=true. Request one missing
+// grant per click and return while the user completes it in System Settings.
+int keepwork_voice_input_permissions(bool request) {
+    if (!AXIsProcessTrusted()) {
+        if (!request) return 1;
+        NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES};
+        if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options)) return 1;
+    }
+    if (@available(macOS 10.15, *)) {
+        if (!CGPreflightListenEventAccess() && (!request || !CGRequestListenEventAccess())) return 2;
+    }
+    return 0;
+}
+
 // 0 success, 1 Accessibility, 2 Input Monitoring, 3 already owned, 4 failure.
 int keepwork_voice_input_start(void) {
-    if (!AXIsProcessTrusted()) return 1;
-    if (@available(macOS 10.15, *)) {
-        if (!CGPreflightListenEventAccess()) return 2;
-    }
+    int permission = keepwork_voice_input_permissions(false);
+    if (permission) return permission;
     pthread_mutex_lock(&lifecycle);
     if (currentTap) { pthread_mutex_unlock(&lifecycle); return 3; }
     KeepworkVoiceTap *tap = calloc(1, sizeof(*tap));

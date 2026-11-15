@@ -77,9 +77,11 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     defaultBrainFolder: true,
     gitSetup: true,
     floatingPet: true,
+    petReplyPresentationVersion: 1,
+    petStreamingSpeechVersion: 1,
     startupSignIn: true,
     ...(launchEnabled ? { launchIntents: true as const } : {}),
-    ...(["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { browserSurfaceVersion: 1 as const } : {}),
+    ...(["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { browserSurfaceVersion: 1 as const, remoteDialogueVersion: 1 as const, remotePhoneVersion: 1 as const } : {}),
     ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
   });
 
@@ -167,6 +169,7 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     reportStartupSignIn(signedIn: boolean): Promise<boolean> {
       return invoke<boolean>("desktop_report_startup_signin", { signedIn: !!signedIn });
     },
+    closeRemoteDialogue(id: string): Promise<boolean> { return invoke("remote_voice_dialogue_closed", { id }); },
     publishPetState(state: Record<string, unknown>): Promise<boolean> {
       return invoke<boolean>("desktop_publish_pet_state", { state: state || {} });
     },

@@ -31,6 +31,7 @@ commands.allow = [
   "desktop_titlebar_action",
   "desktop_sync_theme",
   "desktop_pet_action",
+  "remote_voice_dialogue_closed",
   "updates_window_status",
   "updates_window_check",
   "updates_window_apply_mcp",

@@ -6,16 +6,26 @@ pub(super) struct AutoPolicy {
     pub suppressed: bool,
     pub blocked: bool,
     pub shutdown: bool,
+    sleeping: Option<bool>,
     revision: u64,
 }
 
 impl AutoPolicy {
     pub fn ticket(&self, enabled: bool, running: bool) -> Option<u64> {
-        (enabled && !running && !self.suppressed && !self.blocked && !self.shutdown)
+        (enabled && !running && !self.asleep() && !self.suppressed && !self.blocked && !self.shutdown)
             .then_some(self.revision)
     }
     pub fn accepts(&self, ticket: u64, enabled: bool, running: bool) -> bool {
         self.ticket(enabled, running) == Some(ticket)
+    }
+    pub fn asleep(&self) -> bool {
+        self.sleeping == Some(true)
+    }
+    pub fn power_changed(&mut self, sleeping: bool) -> bool {
+        if self.shutdown || self.sleeping == Some(sleeping) { return false; }
+        self.sleeping = Some(sleeping);
+        self.revision = self.revision.wrapping_add(1);
+        true
     }
     pub fn explicit_start(&mut self) {
         self.revision = self.revision.wrapping_add(1);

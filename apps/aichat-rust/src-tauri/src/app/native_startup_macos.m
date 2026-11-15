@@ -193,3 +193,30 @@ bool keepwork_startup_is_installed(void *rawWindow) {
     if (![NSThread isMainThread] || !rawWindow) return false;
     return KeepworkStartupFindView((__bridge NSWindow *)rawWindow) != nil;
 }
+
+// Called on the main thread with the exact Tauri-owned WKWebView.
+// Return 2 after restoring an empty window, 1 for the owner, 0 for another target, or -1 on failure.
+static int KeepworkVoiceDocumentResponder(NSView *owner, NSWindow *window) {
+    NSResponder *responder = window.firstResponder;
+    if (!responder || responder == window || (responder == window.contentView && responder != owner)) {
+        if (KeepworkStartupFindView(window)) return -1;
+        return [window makeFirstResponder:owner] ? 2 : -1;
+    }
+    Class webKit = NSClassFromString(@"WKWebView");
+    if ([responder isKindOfClass:NSView.class]) {
+        for (NSView *view = (NSView *)responder; view; view = view.superview) {
+            if (view == owner) return 1;
+            if ([view isKindOfClass:webKit] || [view isKindOfClass:NSControl.class] ||
+                [view isKindOfClass:NSText.class]) return 0;
+        }
+    }
+    return 0;
+}
+
+int keepwork_voice_prepare_document(void *rawOwner) {
+    NSView *owner = (__bridge NSView *)rawOwner;
+    NSWindow *window = owner.window;
+    if (!NSThread.isMainThread || !owner || !window) return -1;
+    if (!NSApp.active || NSApp.keyWindow != window || window.attachedSheet) return 0;
+    return KeepworkVoiceDocumentResponder(owner, window);
+}

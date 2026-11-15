@@ -107,6 +107,23 @@ int main(void) {
         WKWebView *webview = [[WKWebView alloc] initWithFrame:container.bounds configuration:configuration];
         webview.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [container addSubview:webview];
+        assert([window makeFirstResponder:nil]);
+        NSResponder *background = window.firstResponder;
+        assert(keepwork_voice_prepare_document((__bridge void *)webview) == 0);
+        assert(window.firstResponder == background); // Another app is active.
+        assert(KeepworkVoiceDocumentResponder(webview, window) == 2);
+        assert(KeepworkVoiceDocumentResponder(webview, window) == 1 && window.firstResponder == webview);
+        WKWebView *child = [[WKWebView alloc] initWithFrame:container.bounds configuration:configuration];
+        [webview addSubview:child]; // Same arrangement as an independent native browser surface.
+        assert([window makeFirstResponder:child]);
+        assert(KeepworkVoiceDocumentResponder(webview, window) == 0 && window.firstResponder == child);
+        [child removeFromSuperview];
+        NSTextField *nativeInput = [NSTextField textFieldWithString:@"native field"];
+        [container addSubview:nativeInput];
+        assert([window makeFirstResponder:nativeInput]);
+        NSResponder *editor = window.firstResponder;
+        assert(KeepworkVoiceDocumentResponder(webview, window) == 0 && window.firstResponder == editor);
+        [nativeInput removeFromSuperview];
         BOOL originalDragging = window.movableByWindowBackground;
         assert(!window.visible);
         assert(!keepwork_startup_update((__bridge void *)window, true));
