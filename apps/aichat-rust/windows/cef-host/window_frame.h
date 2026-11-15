@@ -93,6 +93,7 @@ class WindowFrame {
     pet_chat_.Create(Module(), std::move(action), std::move(edit));
   }
   PetChatPanel& pet_chat() { return pet_chat_; }
+  void SetPetArtwork(const std::wstring& name, const std::string& png) { pet_.SetArtwork(name, png); }
   void PetChatTimer(bool enabled) {
     if (!window_) return;
     if (enabled) SetTimer(window_, 18, 500, nullptr); else KillTimer(window_, 18);

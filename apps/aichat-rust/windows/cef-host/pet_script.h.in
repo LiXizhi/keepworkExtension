@@ -1,4 +1,5 @@
 #pragma once
 namespace keepwork_cef {
+inline constexpr char kPetArtworkScript[] = R"KW_ART(@KEEPWORK_PET_ARTWORK_SCRIPT@)KW_ART";
 inline constexpr char kPetBridgeScript[] = R"KW_PET(@KEEPWORK_PET_BRIDGE_SCRIPT@)KW_PET";
 }

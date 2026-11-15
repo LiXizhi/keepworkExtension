@@ -1,12 +1,37 @@
 // Installed only in the trusted main /chat document before application scripts.
 (() => {
   const native = window.__keepworkPetTransport;
+  const createArtwork = window.__keepworkCreatePetArtwork;
   delete window.__keepworkPetTransport;
+  delete window.__keepworkCreatePetArtwork;
   if (typeof native !== 'function' || window.aichatDesktop) return;
   const listeners = new Set();
   const audioListeners = new Set();
   let capture = null, audioIntent = null;
   let connected = false, latest = null, latestState = null, pendingInput = null, confirmedInput = null, disposed = false;
+  let folderRequest = null, folderSequence = 0;
+  let latestArtwork = null, sentArtwork = null;
+  const flushArtwork = () => {
+    if (connected && listeners.size && latest && !disposed && latestArtwork !== null && latestArtwork !== sentArtwork) {
+      if (native('artwork', latestArtwork) === true) sentArtwork = latestArtwork;
+    }
+  };
+  const artwork = typeof createArtwork === 'function' ? createArtwork(value => {
+    latestArtwork = JSON.stringify(value);
+    flushArtwork();
+  }) : null;
+  function pickFolder() {
+    if (disposed || !connected) return Promise.reject(Error('文件夹选择器尚未连接，请稍后重试。'));
+    if (folderRequest) return folderRequest.promise;
+    let resolve, reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    const requestId = String(++folderSequence);
+    folderRequest = { promise, resolve, reject, requestId };
+    if (native('pick-folder', requestId) !== true) {
+      folderRequest = null; reject(Error('无法打开系统文件夹选择器，请重试。'));
+    }
+    return promise;
+  }
   const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
   const emitAudio = event => {
     for (const listener of audioListeners) { try { listener(Object.freeze(event)); } catch { /* Independent subscribers. */ } }
@@ -107,13 +132,27 @@
     }
   }
   const flush = () => {
-    if (connected && listeners.size && latest && !disposed) native('state', latest);
+    if (connected && listeners.size && latest && !disposed) {
+      native('state', latest);
+      flushArtwork();
+    }
   };
   native('register', (kind, payload) => {
     if (disposed) return;
     if (kind === 'connect') {
       connected = native('connect', payload) === true;
+      sentArtwork = null;
       flush(); return;
+    }
+    if (kind === 'folder-picked' && connected && folderRequest) {
+      let result;
+      try { result = JSON.parse(payload); } catch { return; }
+      if (result?.requestId !== folderRequest.requestId || typeof result.path !== 'string' || result.path.length > 32768
+          || typeof result.error !== 'string') return;
+      const request = folderRequest; folderRequest = null;
+      if (result.error) request.reject(Error(text(result.error, 300)));
+      else request.resolve(result.path ? Object.freeze({ path: result.path }) : null);
+      return;
     }
     if (kind !== 'command' || !connected) return;
     let command;
@@ -144,7 +183,8 @@
   const bridge = Object.freeze({
     version: 1,
     capabilities: Object.freeze({ floatingPet: true, petTextChatVersion: 1, petMediaChatVersion: 1,
-      petDictationAudioVersion: 1, petVoiceAudioVersion: 1 }),
+      petDictationAudioVersion: 1, petVoiceAudioVersion: 1, nativeFolderPickerVersion: 1 }),
+    pickFolder,
     petAudio,
     onPetAudio(listener) {
       if (typeof listener !== 'function') throw TypeError('需要回调函数');
@@ -152,7 +192,7 @@
     },
     publishPetState(value) {
       if (disposed || value?.version !== 1 || !text(value.context, 160)) return Promise.reject(Error('无效宠物状态'));
-      // Project bounded conversation/media status only, never artwork, audio or keys.
+      // Keep artwork separate so its PNG cannot crowd out chat/media status.
       const state = {
         version: 1, context: text(value.context, 160),
         target: value.target === 'chat' ? 'chat' : 'persona',
@@ -172,7 +212,10 @@
           .map(m => ({ role: m.role, content: text(m.content, 4000) })),
       };
       if (latestState && latestState.context !== state.context) { pendingInput = null; confirmedInput = null; stopAudio(); }
-      latestState = state; latest = JSON.stringify(state); flush(); return Promise.resolve();
+      if (latestState?.context !== state.context) latestArtwork = sentArtwork = null;
+      latestState = state; latest = JSON.stringify(state); flush();
+      artwork?.update(value.pet, state.context);
+      return Promise.resolve();
     },
     onPetCommand(listener) {
       if (typeof listener !== 'function') throw TypeError('需要回调函数');
@@ -194,6 +237,8 @@
   Object.defineProperty(window, 'aichatDesktop', { value: bridge, enumerable: false, configurable: false, writable: false });
   window.addEventListener('pagehide', () => {
     disposed = true; latest = latestState = pendingInput = confirmedInput = null; listeners.clear();
+    folderRequest?.resolve(null); folderRequest = null;
+    artwork?.dispose(); latestArtwork = null;
     stopAudio(); audioListeners.clear();
   }, { once: true });
 })();

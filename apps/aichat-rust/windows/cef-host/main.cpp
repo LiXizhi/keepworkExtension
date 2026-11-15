@@ -1,5 +1,6 @@
 // The trusted main chat document receives a bounded pet conversation transport.
-// Microphone access requires native consent; files/terminal APIs stay unavailable.
+// Microphone access requires native consent; directory selection returns only a
+// user-chosen path. File IO and terminal APIs remain with the MCP service.
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -27,6 +28,8 @@
 #include "theme_script.h"
 #include "pet_script.h"
 #include "pet_transport.h"
+#include "folder_dialog.h"
+#include "folder_script.h"
 #include "pet_chat_state.h"
 #include "remote_voice_controller.h"
 #include "include/cef_jsdialog_handler.h"
@@ -200,7 +203,9 @@ class RendererApp final : public CefApp, public CefRenderProcessHandler {
       documents_[browser->GetIdentifier()] = document;
       context->GetGlobal()->SetValue("__keepworkPetTransport",
         CefV8Value::CreateFunction("petTextTransport", document), V8_PROPERTY_ATTRIBUTE_DONTENUM);
+      frame->ExecuteJavaScript(keepwork_cef::kPetArtworkScript, frame->GetURL(), 0);
       frame->ExecuteJavaScript(keepwork_cef::kPetBridgeScript, frame->GetURL(), 0);
+      frame->ExecuteJavaScript(keepwork_cef::kFolderPickerScript, frame->GetURL(), 0);
     }
   }
   void OnContextReleased(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>, CefRefPtr<CefV8Context> context) override {
@@ -211,7 +216,8 @@ class RendererApp final : public CefApp, public CefRenderProcessHandler {
   }
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
       CefProcessId source, CefRefPtr<CefProcessMessage> message) override {
-    if (message->GetName() != keepwork_cef::kPetConnect && message->GetName() != keepwork_cef::kPetCommand) return false;
+    if (message->GetName() != keepwork_cef::kPetConnect && message->GetName() != keepwork_cef::kPetCommand &&
+        message->GetName() != keepwork_cef::kFolderPicked) return false;
     if (source != PID_BROWSER || !keepwork_cef::PetFrame(browser, frame)) return true;
     const auto entry = documents_.find(browser->GetIdentifier());
     if (entry != documents_.end()) entry->second->Receive(frame, message);
@@ -264,8 +270,12 @@ class Client final : public CefClient,
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
       CefProcessId source_process, CefRefPtr<CefProcessMessage> message) override {
     CEF_REQUIRE_UI_THREAD();
+    if (message->GetName() == keepwork_cef::kPickFolder) {
+      if (source_process != PID_RENDERER || browser->GetIdentifier() != main_id_ || !keepwork_cef::PetFrame(browser, frame)) return true;
+      PickFolder(browser, frame, message); return true;
+    }
     if (message->GetName() == keepwork_cef::kPetConnected || message->GetName() == keepwork_cef::kPetState ||
-        message->GetName() == keepwork_cef::kPetResult) {
+        message->GetName() == keepwork_cef::kPetResult || message->GetName() == keepwork_cef::kPetArtwork) {
       if (source_process != PID_RENDERER || browser->GetIdentifier() != main_id_ || !keepwork_cef::PetFrame(browser, frame)) return true;
       ReceivePet(message); return true;
     }
@@ -517,8 +527,53 @@ class Client final : public CefClient,
   int error() const { return error_; }
 
  private:
+  void FolderPicked(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      const std::string& document, const std::string& challenge, const CefString& request,
+      const CefString& path, const CefString& error) {
+    // A native dialog can outlive navigation, renderer replacement or shutdown.
+    if (!browser->IsValid() || !frame || !frame->IsValid() || browser->GetIdentifier() != main_id_ || !keepwork_cef::PetFrame(browser, frame) ||
+        !pet_binding_.Matches(document, challenge)) return;
+    const auto value = CefDictionaryValue::Create();
+    value->SetString("requestId", request);
+    value->SetString("path", path);
+    value->SetString("error", error);
+    const auto result = CefValue::Create(); result->SetDictionary(value);
+    const auto response = CefProcessMessage::Create(keepwork_cef::kFolderPicked);
+    response->GetArgumentList()->SetString(0, document);
+    response->GetArgumentList()->SetString(1, challenge);
+    response->GetArgumentList()->SetString(2, CefWriteJSON(result, JSON_WRITER_DEFAULT));
+    frame->SendProcessMessage(PID_RENDERER, response);
+  }
+  void PickFolder(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefProcessMessage> message) {
+    const auto args = message->GetArgumentList();
+    if (args->GetSize() != 3) return;
+    for (int i = 0; i < 3; ++i)
+      if (args->GetType(i) != VTYPE_STRING || args->GetString(i).empty() || args->GetString(i).length() > 64) return;
+    const auto document = args->GetString(0).ToString(), challenge = args->GetString(1).ToString();
+    const auto request = args->GetString(2);
+    if (!pet_binding_.Matches(document, challenge)) return;
+    if (folder_pending_) {
+      FolderPicked(browser, frame, document, challenge, request, CefString(), L"文件夹选择器已打开，请先完成或取消选择。"); return;
+    }
+    folder_pending_ = true;
+    CefRefPtr<Client> self(this);
+    browser->GetHost()->RunFileDialog(FILE_DIALOG_OPEN_FOLDER, L"选择本地工作空间文件夹", CefString(), {},
+      new keepwork_cef::FolderDialogCallback([self, browser, frame, document, challenge, request](const std::vector<CefString>& paths) {
+        self->folder_pending_ = false;
+        CefString path, error;
+        if (paths.size() == 1) {
+          const auto selected = paths.front().ToWString();
+          const DWORD attributes = selected.empty() || selected.size() > 32768 ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(selected.c_str());
+          if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) path = paths.front();
+          else error = L"所选文件夹不可用，请重新选择。";
+        }
+        self->FolderPicked(browser, frame, document, challenge, request, path, error);
+      }));
+  }
+  bool folder_pending_ = false;
   void ResetPet() {
     pet_binding_.Reset(keepwork_cef::PetToken());
+    window_frame_.SetPetArtwork({}, {});
     pet_deadline_ = 0; pet_state_.ResetDocument(); UpdatePet();
   }
   void ConnectPet(CefRefPtr<CefFrame> frame) {
@@ -589,7 +644,23 @@ class Client final : public CefClient,
     if (message->GetName() == keepwork_cef::kPetState) {
       keepwork_cef::PetChatState::Snapshot snapshot;
       if (!ReadPetSnapshot(object, snapshot)) return;
+      if (snapshot.context != pet_state_.snapshot().context) window_frame_.SetPetArtwork({}, {});
       pet_state_.Publish(snapshot); pet_deadline_ = 0;
+    } else if (message->GetName() == keepwork_cef::kPetArtwork) {
+      std::wstring context, name, png;
+      if (!PetString(object, "context", 160, context) || CefString(context).ToString() != pet_state_.snapshot().context ||
+          !PetString(object, "name", 48, name) || !PetString(object, "png", 131072, png)) return;
+      std::string bytes;
+      const std::wstring prefix = L"data:image/png;base64,";
+      if (!png.empty()) {
+        if (png.compare(0, prefix.size(), prefix) != 0) { window_frame_.SetPetArtwork({}, {}); return; }
+        const auto decoded = CefBase64Decode(CefString(png.substr(prefix.size())));
+        if (!decoded || decoded->GetSize() > 98304) { window_frame_.SetPetArtwork({}, {}); return; }
+        bytes.resize(decoded->GetSize());
+        if (!bytes.empty()) decoded->GetData(bytes.data(), bytes.size(), 0);
+      }
+      window_frame_.SetPetArtwork(name, bytes);
+      return;
     } else {
       std::wstring id, error;
       if (!PetString(object, "requestId", 160, id) || !PetString(object, "error", 2000, error) ||

@@ -281,6 +281,8 @@ node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version <
 
 独立专版面向 Windows 7 SP1 x64、Windows 8 x64、Windows 8.1 x64，使用原生 C++ Launcher、CEF109 和共享源码构建的兼容版 Rust MCP，安装到 `KeepworkWin7Win8`。默认完整预览包内置同信任根签名的 CEF109 归档；薄包首次无缓存时需要联网下载。保留基础文件、搜索和普通 `run_terminal`；交互式 WinPTY 终端按运行服务实际声明的 `terminalApi` 能力提供，后端未就绪时仅终端功能降级。不提供现代 Tauri Bridge，MCP 启动失败仍可打开云聊天。
 
+`0.2.164` 修复兼容宿主「浏览本机文件夹…」的系统选择器入口：确认选择后由网页原有 MCP 流程验证路径并连接工作空间，取消或过期结果不改变工作空间。宿主声明独立的 `nativeFolderPickerVersion: 1`，`pickFolder()` 仅返回 `{ path }` 或 `null`，不声明完整 `files` 能力；文件读写仍依赖本地 MCP。已发布网页的已知控件由宿主适配，无需同步更新网页或 MCP；未知布局保留页面原有行为。Windows 7/8/8.1 的真实系统选择器交互仍待分别实测。
+
 `0.2.153` 为兼容宿主的宠物对话面板增加语音输入、通话 / 结束通话和静音；使用同一 AIChat 主页的账号、草稿与语音设置，麦克风需要用户授权。文字输入支持 Enter 发送、Shift+Enter 换行，输入法确认候选不会误发送。麦克风音频由受信任主页采集，原生窗口仅操作原有宠物协议；语音和文字能力均不要求同步升级 MCP。Windows 7/8/8.1 的真实设备、CEF 录音及通话仍待分别实测。
 
 此入口与前述历史通用 CEF 预览分开，构建和更新渠道独立于现代版。使用 [rust-release 的 Win7/Win8 流程](../../.github/skills/rust-release/references/windows7.md) 准备专版；完整支持范围、完整包/薄包区别和逐系统验收以 [Windows CEF 兼容说明](docs/windows-cef.md) 为准。现代 Windows 构建或单份 MCP smoke 不能代表三个旧系统的安装、CEF、登录和更新已验收；本轮开发未执行发布。

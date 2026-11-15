@@ -1,5 +1,20 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-15 兼容版桌宠外观（0.2.165）
+
+- 外观、聊天与语音针对性测试：指定本地独立网页的 `desktop_pet_controller.js`、`desktop_pet_audio.js` 后，`cef-pet-art.test.cjs`、`cef-pet-chat.test.cjs`、`cef-pet-audio.test.cjs` 共 34 项通过，无跳过。覆盖图集裁切、旧网页无素材、坏图与超限回退、文档 / 会话切换、迟到结果、超时取消，以及素材与普通状态分开传输。
+- `cef-menu.test.cjs` 构建并运行真实可移植 C++，包括外观值和 PNG 签名、头部、尺寸、字节上限检查。实际 `main.cpp` 连同生成脚本通过 CEF109 与现代 CEF 的 Windows x64 `clang-cl /Zs` 语法和类型检查。
+- 隔离无头 Chrome 使用真实 WebP 解码、Canvas 裁切与 PNG 编码：4×4 图集的右下绿色单元格输出为 256×256 PNG，中心像素 `[0,255,1,255]`，数据 URL 长度 5194，小于传输上限。浏览器和原生检查均未使用真实账号或云端会话。
+- `pnpm --prefix apps/aichat-rust check` 完整通过：类型检查、前端构建、Rust 主测试集 297 通过 / 3 忽略，Node 623 通过 / 18 跳过 / 0 失败。首轮受沙盒回环端口限制，允许本机监听后重跑通过。
+- `npm run check:shared`、`npm run compile:only --prefix apps/vscode-extension` 通过。Windows 原生外观菜单点击、GDI+ 显示和重启持久化仍待实机验证；本轮未生成或发布安装包。
+
+## 2026-11-15 兼容版系统文件夹选择器（0.2.164）
+
+- `KEEPWORK_CEF_BROWSER_TESTS=1 node --test apps/aichat-rust/tests/cef-folder-picker.test.cjs apps/aichat-rust/tests/cef-pet-chat.test.cjs apps/aichat-rust/tests/cef-pet-audio.test.cjs`：36 项中 34 通过、2 跳过、0 失败。Chrome 的 11 个 DOM 子用例全部通过，覆盖真实用户点击、确认、取消、失败重试、模拟 MCP 验证失败、面板关闭重开、编辑目标改变、输入变化、控件替换、文档离开及未知布局回退；未声明完整 `files` 能力。两个跳过项为需另行指定网页源码的宠物协议夹具。
+- 浏览器夹具使用与现有网页相同的控件结构和模拟路径验证处理器，验证成功后才修改工作空间，失败提示保持可见；不代表真实 MCP 服务或 Windows 系统对话框实测。
+- `pnpm --prefix apps/aichat-rust check`：类型检查、前端构建、Rust 测试（297 通过、3 忽略）及 Node 测试（623 通过、18 跳过、0 失败）通过。当前工作区四个应用版本文件均为 `0.2.165`。
+- 使用 Windows SDK 和 CEF109 SDK / 现代 CEF 头文件，对实际 `main.cpp` 及生成的嵌入脚本执行 Windows x64 `clang-cl /Zs` 语法与类型检查，均通过。未生成或发布本轮安装包；Windows 7 / 8 / 8.1 及现代 Windows 的真实系统文件夹选择器显示、父窗口归属和选择交互仍待实机验证。
+
 ## 2026-11-15 桌宠复用主窗口电话（0.2.141）
 
 - 独立 AppKit/Tauri 冒烟从桌宠模式模拟双击语音键。通过真实主页面 IPC 切换同一个 WKWebView 的显示位置，主窗口保持隐藏。结束后原页面回到原窗口，Dock 与 Home 仍可正常切换。

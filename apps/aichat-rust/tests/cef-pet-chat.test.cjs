@@ -24,10 +24,11 @@ test('CEF pet projection requires document connection and a real command subscri
   const pet = install();
   assert.equal(pet.window.__keepworkPetTransport, undefined);
   assert.equal(Object.isFrozen(pet.bridge), true);
-  assert.deepEqual(Object.keys(pet.bridge).sort(), ['capabilities', 'onPetAudio', 'onPetCommand', 'petAudio', 'petResult', 'publishPetState', 'version']);
+  assert.deepEqual(Object.keys(pet.bridge).sort(), ['capabilities', 'onPetAudio', 'onPetCommand', 'petAudio', 'petResult', 'pickFolder', 'publishPetState', 'version']);
   assert.deepEqual(JSON.parse(JSON.stringify(pet.bridge.capabilities)), {
     floatingPet: true, petTextChatVersion: 1, petMediaChatVersion: 1,
     petDictationAudioVersion: 1, petVoiceAudioVersion: 1,
+    nativeFolderPickerVersion: 1,
   });
   await pet.bridge.publishPetState(value({ pet: { imageData: 'large private image' }, voice: { secret: 'omit' }, files: 'omit' }));
   assert.deepEqual(pet.calls, []);

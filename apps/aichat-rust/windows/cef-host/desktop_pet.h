@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <objidl.h>
+#include <shellapi.h>
 #include <algorithm>
 // GDI+ headers use unqualified min/max even in NOMINMAX builds.
 namespace Gdiplus { using std::min; using std::max; }
@@ -13,10 +14,12 @@ namespace Gdiplus { using std::min; using std::max; }
 #include <memory>
 #include <string>
 #include "pet_geometry.h"
+#include "pet_artwork.h"
 
 namespace keepwork_cef {
 // A small, native top-level layered window. It has no webview, JavaScript,
-// network access, clipboard or MCP access; all actions are native user clicks.
+// network access, clipboard or MCP access. Artwork arrives as bounded PNG bytes
+// from the trusted document's sandboxed decoder, never as a native fetch URL.
 class DesktopPet {
  public:
   ~DesktopPet() { Destroy(); }
@@ -31,6 +34,9 @@ class DesktopPet {
     toggle_chat_ = std::move(toggle_chat); hidden_ = std::move(hidden);
     moved_ = std::move(moved);
     enabled_ = GetPrivateProfileIntW(L"pet", L"enabled", 1, settings_.c_str()) != 0;
+    wchar_t appearance[32]{};
+    GetPrivateProfileStringW(L"pet", L"appearance", L"follow", appearance, ARRAYSIZE(appearance), settings_.c_str());
+    appearance_ = NormalizePetAppearance(appearance);
     have_position_ = ReadInteger(L"x", x_) && ReadInteger(L"y", y_);
     Gdiplus::GdiplusStartupInput startup;
     if (Gdiplus::GdiplusStartup(&gdiplus_, &startup, nullptr) != Gdiplus::Ok) return Failed();
@@ -97,10 +103,34 @@ class DesktopPet {
     // The decoder may still read its source stream until the image is gone.
     image_.reset();
     if (stream_) { stream_->Release(); stream_ = nullptr; }
+    ClearArtwork();
     if (gdiplus_) { Gdiplus::GdiplusShutdown(gdiplus_); gdiplus_ = 0; }
     open_ = {}; quit_ = {}; toggle_chat_ = {}; hidden_ = {}; moved_ = {}; settings_.clear();
   }
   bool enabled() const { return enabled_; }
+  void SetArtwork(const std::wstring& name, const std::string& png) {
+    if (artwork_bytes_ == png && artwork_name_ == name) return;
+    ClearArtwork();
+    artwork_name_ = name.substr(0, 48);
+    if (!png.empty() && ValidPetPng(png.data(), png.size())) {
+      HGLOBAL buffer = GlobalAlloc(GMEM_MOVEABLE, png.size());
+      if (buffer) {
+        void* destination = GlobalLock(buffer);
+        if (destination) {
+          std::memcpy(destination, png.data(), png.size());
+          GlobalUnlock(buffer);
+          if (SUCCEEDED(CreateStreamOnHGlobal(buffer, TRUE, &artwork_stream_))) {
+            artwork_.reset(Gdiplus::Bitmap::FromStream(artwork_stream_));
+            if (!artwork_ || artwork_->GetLastStatus() != Gdiplus::Ok || !artwork_->GetWidth()
+                || !artwork_->GetHeight() || artwork_->GetWidth() > 256 || artwork_->GetHeight() > 256) {
+              ClearArtwork();
+            } else artwork_bytes_ = png;
+          } else GlobalFree(buffer);
+        } else GlobalFree(buffer);
+      }
+    }
+    if (visible()) Show();
+  }
   void SetEnabled(bool enabled) {
     enabled_ = enabled;
     if (!settings_.empty()) WritePrivateProfileStringW(L"pet", L"enabled", enabled ? L"1" : L"0", settings_.c_str());
@@ -127,6 +157,10 @@ class DesktopPet {
   ULONG_PTR gdiplus_ = 0;
   IStream* stream_ = nullptr;
   std::unique_ptr<Gdiplus::Bitmap> image_;
+  IStream* artwork_stream_ = nullptr;
+  std::unique_ptr<Gdiplus::Bitmap> artwork_;
+  std::string artwork_bytes_;
+  std::wstring artwork_name_, appearance_ = L"follow";
   HDC surface_ = nullptr;
   HBITMAP bitmap_ = nullptr;
   HGDIOBJ previous_bitmap_ = nullptr;
@@ -141,6 +175,16 @@ class DesktopPet {
   POINT drag_start_{}, drag_origin_{};
 
   bool Failed() { Destroy(); return false; }
+  void ClearArtwork() {
+    artwork_.reset();
+    if (artwork_stream_) { artwork_stream_->Release(); artwork_stream_ = nullptr; }
+    artwork_bytes_.clear(); artwork_name_.clear();
+  }
+  void SetAppearance(const wchar_t* value) {
+    appearance_ = NormalizePetAppearance(value);
+    if (!settings_.empty()) WritePrivateProfileStringW(L"pet", L"appearance", appearance_.c_str(), settings_.c_str());
+    if (visible()) Show();
+  }
   bool ReadInteger(const wchar_t* key, int& value) const {
     wchar_t text[40]{};
     if (!GetPrivateProfileStringW(L"pet", key, L"", text, ARRAYSIZE(text), settings_.c_str())) return false;
@@ -219,10 +263,13 @@ class DesktopPet {
       graphics.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
       graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
       graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-      // The existing sheet is 1254px; using floating source coordinates keeps
-      // its first 313.5px cell identical to modern CSS's 400% background.
-      status = graphics.DrawImage(image_.get(), Gdiplus::RectF(0, 0, static_cast<float>(pixels), static_cast<float>(pixels)),
-        0.f, 0.f, image_->GetWidth() / 4.f, image_->GetHeight() / 4.f, Gdiplus::UnitPixel);
+      const bool follow = appearance_ == L"follow" && artwork_;
+      auto image = follow ? artwork_.get() : image_.get();
+      // Published PNGs are already cropped. The bundled dragon remains a 4x4
+      // sheet, with fractional source cells matching the modern CSS default.
+      const float columns = follow ? 1.f : 4.f;
+      status = graphics.DrawImage(image, Gdiplus::RectF(0, 0, static_cast<float>(pixels), static_cast<float>(pixels)),
+        0.f, 0.f, image->GetWidth() / columns, image->GetHeight() / columns, Gdiplus::UnitPixel);
     }
     POINT position{placement.x, placement.y}, source{0, 0};
     SIZE size{pixels, pixels};
@@ -292,6 +339,19 @@ class DesktopPet {
   void Menu() {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
+    auto name = appearance_ == L"follow" && artwork_ && !artwork_name_.empty() ? artwork_name_ : L"抱抱龙";
+    // Ampersands in a pet name are text rather than menu accelerators.
+    for (size_t at = 0; (at = name.find(L'&', at)) != std::wstring::npos; at += 2) name.insert(at, 1, L'&');
+    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, name.c_str());
+    HMENU appearance = CreatePopupMenu();
+    if (appearance) {
+      AppendMenuW(appearance, MF_STRING | (appearance_ == L"follow" ? MF_CHECKED : 0), 4, L"跟随 AIChat 宠物");
+      AppendMenuW(appearance, MF_STRING | (appearance_ == L"dragon" ? MF_CHECKED : 0), 5, L"抱抱龙");
+      AppendMenuW(appearance, MF_SEPARATOR, 0, nullptr);
+      AppendMenuW(appearance, MF_STRING, 6, L"在哈奇星球更换宠物…");
+      if (!AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(appearance), L"外观")) DestroyMenu(appearance);
+      AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
     AppendMenuW(menu, MF_STRING, 1, L"打开聊天");
     AppendMenuW(menu, MF_STRING, 2, L"隐藏桌面宠物");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -304,6 +364,9 @@ class DesktopPet {
     DestroyMenu(menu);
     PostMessageW(window_, WM_NULL, 0, 0);
     if (selected == 2) SetEnabled(false);
+    else if (selected == 4 || selected == 5) SetAppearance(selected == 5 ? L"dragon" : L"follow");
+    else if (selected == 6) ShellExecuteW(window_, L"open",
+      L"https://keepwork.com/api/raw/official/apps/MagicHaqi/release/MagicHaqi_v1.html", nullptr, nullptr, SW_SHOWNORMAL);
     else {
       const auto action = selected == 1 ? open_ : selected == 3 ? quit_ : std::function<void()>{};
       if (action) action();

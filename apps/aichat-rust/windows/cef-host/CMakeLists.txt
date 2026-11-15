@@ -32,6 +32,9 @@ add_test(NAME cef-pet-chat-state COMMAND cef-pet-chat-state-test)
 add_executable(cef-pet-input-policy-test pet_input_policy_test.cpp)
 target_compile_features(cef-pet-input-policy-test PRIVATE cxx_std_17)
 add_test(NAME cef-pet-input-policy COMMAND cef-pet-input-policy-test)
+add_executable(cef-pet-artwork-test pet_artwork_test.cpp)
+target_compile_features(cef-pet-artwork-test PRIVATE cxx_std_17)
+add_test(NAME cef-pet-artwork COMMAND cef-pet-artwork-test)
 
 # Generate the same embedded compatibility script for portable byte-identity
 # tests and the Windows host. Each raw literal stays below MSVC's token limit.
@@ -107,7 +110,12 @@ string(REPLACE "export function mountDesktopTheme" "function mountDesktopTheme" 
 configure_file(theme_script.h.in theme_script.h @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pet_bridge.js")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/pet_bridge.js" KEEPWORK_PET_BRIDGE_SCRIPT)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pet_art.js")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/pet_art.js" KEEPWORK_PET_ARTWORK_SCRIPT)
 configure_file(pet_script.h.in pet_script.h @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/folder_picker.js")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/folder_picker.js" KEEPWORK_FOLDER_PICKER_SCRIPT)
+configure_file(folder_script.h.in folder_script.h @ONLY)
 if(KEEPWORK_CEF_MAJOR GREATER_EQUAL 138)
   if(NOT EXISTS "${CEF_ROOT}/Release/bootstrap.exe")
     message(FATAL_ERROR "The modern SDK must include Release/bootstrap.exe for sandboxed startup")
