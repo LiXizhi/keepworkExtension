@@ -140,6 +140,17 @@ test('legacy packaging pins the Windows 2022 host, v143 compiler and Windows SDK
   assert.match(cefConfigure, /-DCMAKE_SYSTEM_VERSION=10\.0\.22621\.0\b/);
 });
 
+test('the full legacy package requires actual native PTY acceptance instead of an early optional fallback', () => {
+  const source = workflow('aichat-rust-win7.yml');
+  const smoke = source.split('\n').filter(line => /powershell\.exe.*win7-native-smoke\.ps1/.test(line));
+  assert.equal(smoke.length, 1, 'the packaged legacy runtime retains one owned native smoke invocation');
+  assert.match(smoke[0], /-RuntimeDirectory win7-build\/release\/installer-payload\/resources\/win7-mcp\b/);
+  assert.match(smoke[0], /-RequireTerminal(?:\s|$)/,
+    'the complete pinned WinPTY package must wait for capability and execute its PTY checks');
+  assert.match(source, /if \(-not \$report\.passed -or \$report\.nativeLegacyVerified -or \$report\.nativeWin7Verified\)/,
+    'modern-runner execution must not certify native legacy OS acceptance');
+});
+
 test('legacy CEF audits required old-system binaries and records its declared optional Windows10 companion separately', () => {
   const source = workflow('aichat-rust-win7.yml');
   assert.match(source, /node apps\/aichat-rust\/scripts\/cef-remote-voice\.cjs win7-cef-build\/payload\/Release > win7-cef-static-pe\.json/);

@@ -1,0 +1,150 @@
+name: Legacy MCP owned smoke diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-run-id:
+        description: Original desktop workflow run containing the signed legacy runtime
+        required: true
+        type: string
+      source-commit:
+        description: Full original runtime source commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  observe:
+    name: Diagnostic only (modern Windows, legacy WinPTY)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: x64
+      - name: Validate original build provenance
+        id: source
+        uses: actions/github-script@v7
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+          SOURCE_COMMIT: ${{ inputs.source-commit }}
+        with:
+          script: |
+            const assert = require('node:assert/strict');
+            const fs = require('node:fs');
+            const runId = process.env.SOURCE_RUN_ID, commit = process.env.SOURCE_COMMIT;
+            assert.match(runId, /^[1-9]\d*$/); assert.match(commit, /^[a-f0-9]{40}$/);
+            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: Number(runId) });
+            assert.equal(run.repository.full_name, `${context.repo.owner}/${context.repo.repo}`);
+            assert.equal(run.head_repository?.full_name, `${context.repo.owner}/${context.repo.repo}`);
+            assert.equal(run.head_sha, commit); assert.equal(run.event, 'workflow_dispatch');
+            assert.equal(run.path, '.github/workflows/aichat-rust-windows-release.yml');
+            assert.ok(['in_progress', 'completed'].includes(run.status));
+            if (run.status === 'completed') assert.ok(['success', 'failure'].includes(run.conclusion));
+            assert.ok(Array.isArray(run.pull_requests)); assert.equal(run.pull_requests.length, 0);
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun,
+              { ...context.repo, run_id: Number(runId), per_page: 100 });
+            const legacyJobs = jobs.filter(j => j.name.startsWith('Windows 7/8 x64 compatibility edition /'));
+            assert.equal(legacyJobs.length, 1); assert.equal(legacyJobs[0].status, 'completed');
+            assert.ok(['success', 'failure'].includes(legacyJobs[0].conclusion));
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              { ...context.repo, run_id: Number(runId), per_page: 100 });
+            const candidates = artifacts.filter(a => a.name === 'aichat-rust-win7-win8-x64' && !a.expired);
+            assert.equal(candidates.length, 1);
+            assert.ok(Number.isSafeInteger(candidates[0].id) && candidates[0].id > 0);
+            assert.ok(Number.isSafeInteger(candidates[0].size_in_bytes) && candidates[0].size_in_bytes > 0);
+            core.setOutput('artifact-id', String(candidates[0].id));
+            fs.mkdirSync('.test-runtime/legacy-smoke-diagnostic', { recursive: true });
+            fs.writeFileSync('.test-runtime/legacy-smoke-diagnostic/provenance.json', JSON.stringify({
+              schemaVersion: 1, diagnosticOnly: true, acceptance: false,
+              originalBuild: { runId, commit, event: run.event, workflow: run.path, status: run.status, conclusion: run.conclusion, url: run.html_url,
+                legacyJobId: legacyJobs[0].id, legacyJobConclusion: legacyJobs[0].conclusion,
+                artifactId: candidates[0].id, artifactName: candidates[0].name, artifactSize: candidates[0].size_in_bytes },
+              harness: { commit: context.sha, workflow: context.workflow }
+            }, null, 2) + '\n');
+      - name: Download original signed artifact for diagnosis only
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.source.outputs.artifact-id }}
+          merge-multiple: true
+          path: .test-runtime/legacy-input
+          run-id: ${{ inputs.source-run-id }}
+          github-token: ${{ github.token }}
+      - name: Verify production signature and exact runtime bytes
+        id: verified
+        shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ inputs.source-commit }}
+        run: |
+          @'
+          const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
+          const legacy = require('./scripts/lib/win7-release.cjs');
+          const identity = require('./scripts/lib/rust-runtime-identity.cjs');
+          const input = path.resolve('.test-runtime/legacy-input');
+          const key = fs.readFileSync('apps/aichat-rust/keys/win7-release-public.pem');
+          const manifest = legacy.validateMcpManifest(legacy.verifyEnvelope(JSON.parse(fs.readFileSync(path.join(input, 'mcp/windows-x64.json'))), key));
+          assert.equal(manifest.commit, process.env.SOURCE_COMMIT);
+          const members = legacy.validateMcpArchive(fs.readFileSync(path.join(input, 'mcp', manifest.version, manifest.fileName)), manifest);
+          const runtime = path.join(input, 'installer-payload/resources/win7-mcp');
+          const bundled = legacy.verifyEnvelope(JSON.parse(fs.readFileSync(path.join(input, 'installer-payload/resources/win7-mcp.signed.json'))), key);
+          assert.deepEqual(bundled, manifest);
+          for (const file of manifest.files) {
+            const target = path.join(runtime, file.path), stat = fs.lstatSync(target);
+            assert.ok(stat.isFile() && !stat.isSymbolicLink());
+            assert.equal(stat.size, file.size); assert.equal(legacy.digest(fs.readFileSync(target)), file.sha256);
+          }
+          const binary = identity.validateBinary(path.join(runtime, manifest.entry), { triple: legacy.TARGET }, manifest);
+          assert.equal(binary.variant, 'win7-win8');
+          for (const file of ['bin/keepwork-mcp.exe', 'bin/winpty.dll', 'bin/winpty-agent.exe']) assert.ok(members.has(file));
+          const p = '.test-runtime/legacy-smoke-diagnostic/provenance.json';
+          const provenance = JSON.parse(fs.readFileSync(p));
+          provenance.runtime = { version: manifest.version, commit: manifest.commit, sourceHash: manifest.sourceHash,
+            binarySha256: legacy.digest(members.get(manifest.entry)), productionSignatureVerified: true };
+          provenance.harness.script = 'apps/aichat-rust/scripts/win7-native-smoke.ps1';
+          provenance.harness.sha256 = legacy.digest(fs.readFileSync(provenance.harness.script));
+          fs.writeFileSync(p, JSON.stringify(provenance, null, 2) + '\n');
+          console.log('Original signed legacy MCP identity and all payload bytes verified; diagnostic only.');
+          '@ | node
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Execute current harness against the original owned runtime
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/aichat-rust/scripts/win7-native-smoke.ps1 -RuntimeDirectory .test-runtime/legacy-input/installer-payload/resources/win7-mcp -OutputDirectory .test-runtime/legacy-smoke-diagnostic/current-harness -RequireTerminal
+          exit $LASTEXITCODE
+      - name: Validate both authentication cases and modern-host scope
+        if: always() && steps.verified.outcome == 'success'
+        shell: pwsh
+        run: |
+          @'
+          const fs = require('node:fs'), assert = require('node:assert/strict');
+          const provenance = JSON.parse(fs.readFileSync('.test-runtime/legacy-smoke-diagnostic/provenance.json'));
+          const report = JSON.parse(fs.readFileSync('.test-runtime/legacy-smoke-diagnostic/current-harness/report.json'));
+          console.log(JSON.stringify({ passed: report.passed, error: report.error,
+            cases: report.cases.map(c => ({ requireAuth: c.requireAuth, passed: c.passed, error: c.error, terminal: c.terminal, terminalHealth: c.terminalHealth })) }, null, 2));
+          assert.equal(report.artifact.commit, provenance.originalBuild.commit);
+          assert.equal(report.artifact.sha256, provenance.runtime.binarySha256);
+          assert.equal(report.requireTerminal, true); assert.equal(report.passed, true);
+          assert.equal(report.nativeLegacyVerified, false); assert.equal(report.nativeWin7Verified, false);
+          assert.equal(report.cases.length, 2);
+          assert.deepEqual(report.cases.map(c => c.requireAuth).sort(), [false, true]);
+          for (const c of report.cases) {
+            assert.equal(c.passed, true); assert.equal(c.requireTerminal, true);
+            assert.equal(c.terminal.ptyVerified, true); assert.equal(c.ownedProcessReaped, true);
+            assert.equal(c.isolatedProfileRemoved, true);
+          }
+          assert.equal(provenance.diagnosticOnly, true); assert.equal(provenance.acceptance, false);
+          '@ | node
+          exit $LASTEXITCODE
+      - name: Preserve diagnostic reports only (never release inputs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-legacy-owned-smoke
+          path: .test-runtime/legacy-smoke-diagnostic/
+          if-no-files-found: warn
+          retention-days: 14

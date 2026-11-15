@@ -140,7 +140,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run the owned native MCP smoke on this modern Windows runner
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/aichat-rust/scripts/win7-native-smoke.ps1 -RuntimeDirectory win7-build/release/installer-payload/resources/win7-mcp -OutputDirectory win7-build/release/native-mcp-modern-runner
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File apps/aichat-rust/scripts/win7-native-smoke.ps1 -RuntimeDirectory win7-build/release/installer-payload/resources/win7-mcp -OutputDirectory win7-build/release/native-mcp-modern-runner -RequireTerminal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $report = Get-Content win7-build/release/native-mcp-modern-runner/report.json -Raw | ConvertFrom-Json
           if (-not $report.passed -or $report.nativeLegacyVerified -or $report.nativeWin7Verified) {

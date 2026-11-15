@@ -151,10 +151,10 @@ function Invoke-Owned($Child, [string]$Base, [string]$Workspace, $Expected, [boo
 }
 
 function Wait-PtyOutput($Child, [string]$Base, [string]$Workspace, $Expected, [bool]$Auth,
-    [string]$Route, [string]$Token, [string]$Marker) {
+    [string]$Route, [string]$Token, [string]$Marker, [long]$Cursor = 0) {
   $deadline = [DateTime]::UtcNow.AddSeconds(15)
   while ([DateTime]::UtcNow -lt $deadline) {
-    $reply = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($Route + '/output?cursor=0') 'GET' $null $Token
+    $reply = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($Route + '/output?cursor=' + $Cursor) 'GET' $null $Token
     Assert-Condition ($reply.Status -eq 200 -and $null -ne $reply.Json) 'PTY output request failed'
     if ([string]$reply.Json['output'] -and ([string]$reply.Json['output']).Contains($Marker)) { return $reply.Json }
     Start-Sleep -Milliseconds 50
@@ -225,11 +225,26 @@ function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bo
     Assert-Condition ([long]$unicodeOutput['cursor'] -eq ([string]$unicodeOutput['output']).Length) 'Unicode terminal replay changed cursor units'
     $reader.Close(); $reader = $null; $response.Close(); $response = $null
 
-    $null = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('Start-Sleep -Seconds 30' + [char]13) } $Token
+    # A computed marker proves the long command actually started. A write
+    # acknowledgement or echoed command cannot establish that boundary.
+    $longCommand = 'function prompt { ''WIN7_PTY_'' + ''READY> '' }; $p = ''WIN7_PTY_''; Write-Output ($p + ''SLEEPING''); Start-Sleep -Seconds 30' + [char]13
+    $started = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = [string]$longCommand } $Token
+    Assert-Condition ($started.Status -eq 202) 'PTY rejected the long command'
+    $sleeping = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_SLEEPING'
+    Assert-Condition (-not ([string]$sleeping['output']).Contains('WIN7_PTY_READY> ')) 'PTY long command finished with its first output'
+    $beforeInterrupt = [long]$sleeping['cursor']
     Start-Sleep -Milliseconds 200
+    $pending = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/output?cursor=' + $beforeInterrupt) 'GET' $null $Token
+    Assert-Condition ($pending.Status -eq 200 -and $null -ne $pending.Json -and $pending.Json.ContainsKey('closed') -and
+      $pending.Json['closed'] -is [bool] -and $pending.Json['closed'] -eq $false -and
+      -not ([string]$pending.Json['output']).Contains('WIN7_PTY_READY> ')) 'PTY long command was not running before Ctrl+C'
     $interrupted = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/interrupt') 'POST' @{} $Token
     Assert-Condition ($interrupted.Status -eq 200) 'PTY Ctrl+C was not accepted'
-    $null = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('$p = ''WIN7_PTY_''; Write-Output ($p + ''AFTER_INTERRUPT'')' + [char]13) } $Token
+    # Cancellation is asynchronous and can flush pending input. Wait for a
+    # newly produced prompt before submitting the following command once.
+    $null = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_READY> ' $beforeInterrupt
+    $continued = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('$p = ''WIN7_PTY_''; Write-Output ($p + ''AFTER_INTERRUPT'')' + [char]13) } $Token
+    Assert-Condition ($continued.Status -eq 202) 'PTY rejected input after Ctrl+C recovery'
     $null = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_AFTER_INTERRUPT'
     $otherClose = Invoke-Owned $Child $Base $Workspace $Expected $Auth $sessionRoute 'DELETE' $null $Token @{ Origin = 'http://localhost:31338' }
     Assert-Condition ($otherClose.Status -eq 404) 'A different terminal owner could close this session'
