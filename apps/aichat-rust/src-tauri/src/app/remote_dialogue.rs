@@ -10,7 +10,7 @@ pub(super) fn surface(app: &AppHandle, allow_background: bool) -> Option<Surface
     let main = app.get_webview_window("main")?;
     verify_main_sender(&main, &core).ok()?;
     let pet = app.get_webview_window("pet").filter(|pet| {
-        super::pet_host::pet_is_active(&main, pet).unwrap_or(false)
+        super::pet_host::pet_is_active(pet).unwrap_or(false)
             && verify_pet_sender(pet, &core).is_ok()
     });
     let presentation = if pet.is_some() {

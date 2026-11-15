@@ -23,7 +23,7 @@ const snapshot = (extra = {}) => ({
   ...extra,
 });
 
-async function renderer(initial = snapshot(), { speech } = {}) {
+async function renderer(initial = snapshot(), { speech, readiness = () => "" } = {}) {
   const elements = new Map();
   const documentListeners = new Map();
   const windowListeners = new Map();
@@ -82,7 +82,7 @@ async function renderer(initial = snapshot(), { speech } = {}) {
         const classes = new Set();
         elements.set(id, {
           id, style: {}, dataset: {}, children: [], value: "", textContent: "", disabled: false,
-          hidden: ["remote-recording-status", "remote-transcribing-status", "remote-voice-preview"].includes(id) || (surfaceIds.includes(id) && id !== "pet"),
+          hidden: ["remote-voice-indicator", "remote-voice-preview"].includes(id) || (surfaceIds.includes(id) && id !== "pet"),
           rect: { left: 0, top: 0, width: 0, height: 0, ...defaultRects[id] },
           scrollTop: 0, scrollHeight: 100, clientHeight: 100,
           classList: {
@@ -127,6 +127,7 @@ async function renderer(initial = snapshot(), { speech } = {}) {
     subscribe(callback) { publish = callback; },
     async action(name, args = {}) {
       if (name === "state") return current;
+      if (name === "remote-voice-readiness") return { readiness: readiness() };
       if (name === "hit-regions") { regionCalls.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
       if (name === "pointer-hold") { pointerHolds.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
       calls.push({ name, args: JSON.parse(JSON.stringify(args)) });
@@ -280,6 +281,68 @@ const finalPetReply = (text, extra = {}) => ({
   draft: "", expanded: false, busy: false,
   reply: { requestId: "pet-turn-1", thinking: false, text, speechText: text, options: [], ...extra },
 });
+
+test("opening the pet composer keeps a restored conversation reply out of the bubble", async () => {
+  const speech = speechBrowser();
+  const reply = { text: "An answer from before this pet session." };
+  const pet = await renderer(petTurn({ expanded: false, draft: "", reply }), { speech });
+  pet.publish({ expanded: true, reply });
+  assert.equal(pet.element("panel").hidden, false);
+  assert.equal(pet.element("bubble").hidden, true);
+  assert.deepEqual(speech.utterances, []);
+  assert.equal(pet.calls.some(call => call.name === "send"), false);
+});
+
+test("dismissing a sent reply keeps its untagged history copy quiet after closing the draft", async () => {
+  const pet = await renderer(petTurn());
+  await beginPetTurn(pet);
+  pet.publish(finalPetReply("The previous answer", { speechText: "" }));
+  assert.equal(pet.element("reply").hidden, false);
+  pet.publish({ expanded: true });
+  assert.equal(pet.element("bubble").hidden, true);
+  pet.publish({ expanded: false, reply: null });
+  pet.publish({ reply: { text: "The previous answer", options: [], immediate: true } });
+  assert.equal(pet.element("bubble").hidden, true);
+  pet.publish({ reply: { text: "A fresh incoming answer" } });
+  assert.equal(pet.element("reply").textContent, "A fresh incoming answer");
+  assert.equal(pet.element("bubble").hidden, false);
+});
+
+for (const mode of ["typing", "remote dictation"]) {
+  test(`a restored reply during ${mode} stays hidden until the new pet send gets an answer`, async () => {
+    const speech = speechBrowser();
+    const pet = await renderer(petTurn({ draft: "", reply: null }), { speech });
+    if (mode === "typing") {
+      pet.input("My new question");
+      await settle();
+    } else {
+      assert.equal(remoteVoiceFocus(pet, 51), true);
+      pet.windowEvent("aichat:remote-voice-recording", { detail: 51 });
+      pet.windowEvent("aichat:remote-voice-preview", { detail: { press: 51, text: "My new" } });
+    }
+
+    // Main chat finishes hydrating history after the user has started composing.
+    pet.publish({ reply: { text: "Unrelated old answer" } });
+    assert.equal(pet.element("panel").hidden, false);
+    assert.equal(pet.element("bubble").hidden, true);
+    assert.deepEqual(speech.utterances, []);
+    assert.equal(pet.calls.some(call => call.name === "send"), false);
+
+    if (mode === "remote dictation") {
+      assert.equal(pet.element("remote-voice-preview").textContent, "My new");
+      pet.windowEvent("aichat:remote-voice-end", { detail: 51 });
+      pet.input("My new question");
+      await settle();
+    }
+    assert.equal(pet.element("draft").value, "My new question");
+    await beginPetTurn(pet);
+    assert.equal(pet.element("thinking").hidden, false);
+    pet.publish(finalPetReply("An answer to my new question."));
+    assert.equal(pet.element("bubble").hidden, false);
+    assert.equal(pet.element("reply").textContent, "An answer to my new question.");
+    assert.equal(pet.calls.filter(call => call.name === "send").length, 1);
+  });
+}
 
 test("pet send collapses and starts waiting before its command acknowledgement", async () => {
   const pet = await renderer(petTurn({ reply: { text: "Previous reply" } }));
@@ -624,8 +687,8 @@ test("ready pet voice buttons forward the current persona or session context", a
     const pet = await renderer(snapshot({ context, target, ready: true, canCall: true, attention: "" }));
     assert.equal(pet.element("dictation").disabled, false);
     assert.equal(pet.element("call").disabled, false);
-    assert.equal(pet.element("dictation").textContent, "语音输入");
-    assert.equal(pet.element("call").textContent, "通话");
+    assert.equal(pet.element("dictation-label").textContent, "语音输入");
+    assert.equal(pet.element("call-label").textContent, "通话");
     pet.element("dictation").click();
     await settle();
     pet.element("call").click();
@@ -655,7 +718,7 @@ test("recovering pet readiness enables voice without starting capture automatica
 
 test("dictation excludes calls and rich drafts while remaining stoppable", async () => {
   const pet = await renderer(snapshot({ ready: true, canCall: true, dictating: true, attention: "" }));
-  assert.equal(pet.element("dictation").textContent, "停止输入");
+  assert.equal(pet.element("dictation-label").textContent, "停止输入");
   assert.equal(pet.element("dictation").disabled, false);
   assert.equal(pet.element("call").disabled, true);
   pet.element("call").click();
@@ -681,7 +744,7 @@ test("missing call capability permits dictation and still allows an active call 
     pet.publish({ voice: { active: true, muted: false, state: "listening" } });
     assert.equal(pet.element("dictation").disabled, true);
     assert.equal(pet.element("call").disabled, false);
-    assert.equal(pet.element("call").textContent, "结束通话");
+    assert.equal(pet.element("call-label").textContent, "结束通话");
     assert.equal(pet.element("mute").hidden, false);
     pet.element("dictation").click();
     pet.element("mute").click();
@@ -999,6 +1062,84 @@ function remoteVoiceFocus(pet, detail) {
   return accepted;
 }
 
+function remoteEdit(pet, press, action, text = "", context = "persona:alice") {
+  let accepted = false;
+  pet.windowEvent("aichat:remote-voice-edit", { detail: { press, context, action, text },
+    preventDefault() { accepted = true; } });
+  return accepted;
+}
+
+test("physical remote OK sends only the ready pet draft and leaves another app's focus alone", async () => {
+  const ok = (pet, context = "persona:alice") => pet.windowEvent("aichat:remote-ok", { detail: { context } });
+  const pet = await renderer(snapshot({ ready: true, expanded: false, draft: "ready" }));
+  ok(pet, "old-context");
+  await settle();
+  assert.deepEqual(pet.calls, []);
+  ok(pet);
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["send"]);
+
+  for (const state of [{ draft: "" }, { busy: true }, { ready: false }, { dictating: true },
+                       { phoneState: "listening" }, { remoteDialogue: { state: "listening" } }]) {
+    const blocked = await renderer(snapshot({ ready: true, draft: "pending", ...state }));
+    ok(blocked);
+    await settle();
+    assert.deepEqual(blocked.calls, []);
+  }
+  const recording = await renderer(snapshot({ ready: true, draft: "before" }));
+  assert.equal(remoteVoiceFocus(recording, 17), true);
+  ok(recording);
+  await settle();
+  assert.deepEqual(recording.calls, []);
+});
+
+test("a visible background pet applies dictation to its draft selection and handles clear and submit", async () => {
+  const pet = await renderer(snapshot({ ready: true, draft: "one two three" }));
+  const draft = pet.element("draft");
+  draft.setRangeText = function (text, start, end, mode) {
+    assert.equal(mode, "end");
+    this.value = this.value.slice(0, start) + text + this.value.slice(end);
+    this.selectionStart = this.selectionEnd = start + text.length;
+  };
+  assert.equal(remoteVoiceFocus(pet, 11), true);
+  pet.element("target").focus();
+  draft.selectionStart = 4;
+  draft.selectionEnd = 7;
+  assert.equal(remoteEdit(pet, 11, "insert", "二"), true);
+  await settle();
+  assert.equal(draft.value, "one 二 three");
+  assert.deepEqual([draft.selectionStart, draft.selectionEnd], [5,5]);
+  assert.equal(pet.focusedId(), "target");
+  assert.deepEqual(pet.calls.at(-1), { name: "input", args: { context: "persona:alice", text: "one 二 three" } });
+  assert.equal(remoteEdit(pet, 11, "clear"), true);
+  await settle();
+  assert.equal(draft.value, "");
+  assert.equal(remoteEdit(pet, 11, "submit"), false);
+  draft.selectionStart = draft.selectionEnd = 0;
+  assert.equal(remoteEdit(pet, 11, "insert", "ready"), true);
+  await settle();
+  assert.equal(remoteEdit(pet, 11, "submit"), true);
+  await settle();
+  assert.deepEqual(pet.calls.slice(-2).map(call => call.name), ["input", "send"]);
+  assert.equal(pet.calls.at(-2).args.text, "ready");
+});
+
+test("stale, hidden, or wrong-context remote edits preserve an existing pet draft", async () => {
+  const pet = await renderer(snapshot({ ready: true, draft: "survives" }));
+  assert.equal(remoteVoiceFocus(pet, 21), true);
+  assert.equal(remoteVoiceFocus(pet, 22), true);
+  for (const [press, context] of [[21, "persona:alice"], [22, "persona:bob"]]) {
+    assert.equal(remoteEdit(pet, press, "clear", "", context), false);
+  }
+  pet.setHidden(true);
+  assert.equal(remoteEdit(pet, 22, "clear"), false);
+  pet.setHidden(false);
+  pet.windowEvent("aichat:remote-voice-end", { detail: 22 });
+  assert.equal(remoteEdit(pet, 22, "submit"), false);
+  assert.equal(pet.element("draft").value, "survives");
+  assert.deepEqual(pet.calls, []);
+});
+
 const remoteDialogueId = "97f4a4c8-63a0-4607-9bcd-142aeef952b4";
 function physicalDialogue(pet, action, id = remoteDialogueId) {
   const detail = { action, id };
@@ -1177,17 +1318,17 @@ test("remote PTT opens and focuses the editable pet draft without changing its t
 test("PTT shows the red recording state immediately and clears it synchronously on release", async () => {
   const pet = await renderer(snapshot({ expanded: false, ready: false, draft: "已有的文字" }));
   const panel = pet.element("panel");
-  const status = pet.element("remote-recording-status");
+  const status = pet.element("remote-voice-indicator");
   const draft = pet.element("draft");
   assert.equal(panel.classList.contains("remote-recording"), false);
   assert.equal(status.hidden, true);
   assert.equal(remoteVoiceFocus(pet, 17), true);
   assert.equal(panel.classList.contains("remote-recording"), true);
   assert.equal(status.hidden, false);
-  assert.match(status.textContent, /语音键已按下/);
+  assert.match(pet.element("remote-voice-label").textContent, /正在准备麦克风/);
   pet.windowEvent("aichat:remote-voice-recording", { detail: 17 });
   assert.equal(status.hidden, false);
-  assert.match(status.textContent, /录音中/);
+  assert.match(pet.element("remote-voice-label").textContent, /录音中/);
 
   pet.input("已有的文字加上未同步编辑");
   draft.selectionStart = 2;
@@ -1209,18 +1350,93 @@ test("PTT shows the red recording state immediately and clears it synchronously 
   assert.deepEqual(pet.calls, []);
 });
 
+test("the visible pet shows remote setup, preserves an empty-press notice, and isolates the next press", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let phase = "connecting";
+  let reads = 0;
+  const pet = await renderer(snapshot({ expanded: false, draft: "已有草稿" }), {
+    readiness: () => { reads++; return phase; },
+  });
+  assert.equal(reads, 0);
+  pet.publish({ expanded: true });
+  await settle();
+  const device = pet.element("remote-voice-indicator");
+  assert.equal(device.dataset.icon, "link");
+  assert.match(pet.element("remote-voice-label").textContent, /连接遥控器/);
+  const originalFocus = pet.focusedId();
+  phase = "ready";
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(device.hidden, false);
+  assert.equal(device.dataset.icon, "ready");
+  assert.match(pet.element("remote-voice-label").textContent, /遥控器已就绪/);
+  pet.advanceClock(3200);
+  t.mock.timers.tick(3200);
+  await settle();
+  assert.equal(device.hidden, true);
+  assert.equal(pet.focusedId(), originalFocus);
+  assert.equal(remoteVoiceFocus(pet, 1), true);
+  assert.equal(device.dataset.icon, "prepare");
+  assert.equal(pet.element("panel").classList.contains("remote-voice-station"), true);
+  pet.windowEvent("aichat:remote-voice-no-audio", { detail: 1 });
+  pet.windowEvent("aichat:remote-voice-end", { detail: 1 });
+  assert.equal(device.dataset.icon, "retry");
+  assert.match(pet.element("remote-voice-label").textContent, /这次未能录入语音/);
+  assert.equal(device.hidden, false);
+  assert.equal(remoteVoiceFocus(pet, 2), true);
+  assert.equal(device.dataset.icon, "prepare");
+  pet.windowEvent("aichat:remote-voice-no-audio", { detail: 1 });
+  t.mock.timers.tick(3000);
+  await settle();
+  assert.equal(device.hidden, false);
+  assert.equal(device.dataset.icon, "prepare");
+  pet.windowEvent("aichat:remote-voice-recording", { detail: 2 });
+  assert.equal(device.dataset.icon, "record");
+  assert.equal(pet.element("draft").value, "已有草稿");
+  pet.setHidden(true);
+  const beforeHidden = reads;
+  t.mock.timers.tick(3000);
+  await settle();
+  assert.equal(reads, beforeHidden);
+  assert.deepEqual(pet.calls, []);
+});
+
+test("live voice switches the target to its persona or session icon, keeping the target metadata accessible", async () => {
+  for (const kind of ["persona", "session"]) {
+    const pet = await renderer(snapshot({
+      expanded: true, ready: true, target: kind, title: "测试会话", folder: "/work/项目",
+      skill: "写作", draft: "保留草稿",
+    }));
+    const target = pet.element("target");
+    const hint = target.title;
+    assert.match(hint, /测试会话/);
+    assert.match(hint, /项目/);
+    assert.equal(target.dataset.kind, kind);
+    assert.equal(remoteVoiceFocus(pet, 3), true);
+    assert.equal(target.title, "");
+    assert.equal(target["aria-description"], hint);
+    assert.equal(pet.element("panel").classList.contains("remote-voice-station"), true);
+    pet.publish({ title: "新标题" });
+    assert.equal(target.title, "");
+    assert.match(target["aria-description"], /新标题/);
+    assert.equal(pet.element("draft").value, "保留草稿");
+    pet.windowEvent("aichat:remote-voice-end", { detail: 3 });
+    assert.match(target.title, /新标题/);
+    assert.equal(pet.element("panel").classList.contains("remote-voice-station"), false);
+  }
+});
+
 test("only the released press shows recognition dots and leaves the draft and focus intact", async () => {
   const pet = await renderer(snapshot({ expanded: false, draft: "已有草稿" }));
-  const dots = pet.element("remote-transcribing-status");
-  const recording = pet.element("remote-recording-status");
+  const icon = pet.element("remote-voice-indicator");
   const panel = pet.element("panel");
   const draft = pet.element("draft");
   const phase = (name, detail) => pet.windowEvent("aichat:remote-voice-" + name, { detail });
-  assert.equal(dots.hidden, true);
+  assert.equal(icon.hidden, true);
   assert.equal(remoteVoiceFocus(pet, 18), true);
   phase("recording", 18);
   phase("transcribing", 17);
-  assert.equal(dots.hidden, true);
+  assert.equal(icon.dataset.icon, "record");
   assert.equal(panel.classList.contains("remote-recording"), true);
 
   pet.input("已有草稿继续编辑");
@@ -1229,31 +1445,29 @@ test("only the released press shows recognition dots and leaves the draft and fo
   pet.element("target").focus();
   phase("transcribing", 18);
   phase("recording", 18); // A late notification must not restore the red recording cue.
-  assert.equal(recording.hidden, true);
   assert.equal(panel.classList.contains("remote-recording"), false);
-  assert.equal(dots.hidden, false);
+  assert.equal(icon.dataset.icon, "transcribe");
   phase("end", 17);
-  assert.equal(dots.hidden, false);
+  assert.equal(icon.dataset.icon, "transcribe");
   assert.equal(pet.focusedId(), "target");
   assert.equal(draft.value, "已有草稿继续编辑");
   assert.deepEqual([draft.selectionStart, draft.selectionEnd], [1, 3]);
   phase("end", 18);
   phase("transcribing", 18);
-  assert.equal(dots.hidden, true);
+  assert.equal(icon.hidden, true);
   assert.deepEqual(pet.calls, []);
 
   remoteVoiceFocus(pet, 19);
   phase("transcribing", 19);
   remoteVoiceFocus(pet, 20);
   phase("end", 19);
-  assert.equal(dots.hidden, true);
-  assert.equal(recording.hidden, false);
+  assert.equal(icon.dataset.icon, "prepare");
   assert.equal(panel.classList.contains("remote-recording"), true);
 });
 
 test("late PTT releases cannot clear a newer press and a focus-only event does not start recording", async () => {
   const pet = await renderer(snapshot({ expanded: false }));
-  const status = pet.element("remote-recording-status");
+  const status = pet.element("remote-voice-indicator");
   assert.equal(remoteVoiceFocus(pet), true);
   assert.equal(status.hidden, true);
   assert.equal(remoteVoiceFocus(pet, 21), true);
@@ -1262,11 +1476,11 @@ test("late PTT releases cannot clear a newer press and a focus-only event does n
   pet.windowEvent("aichat:remote-voice-end", { detail: 21 });
   pet.windowEvent("aichat:remote-voice-recording", { detail: 21 });
   assert.equal(remoteVoiceFocus(pet, 21), false);
-  assert.match(status.textContent, /语音键已按下/);
+  assert.match(pet.element("remote-voice-label").textContent, /正在准备麦克风/);
   assert.equal(status.hidden, false);
   assert.equal(pet.element("panel").classList.contains("remote-recording"), true);
   pet.windowEvent("aichat:remote-voice-recording", { detail: 22 });
-  assert.match(status.textContent, /录音中/);
+  assert.match(pet.element("remote-voice-label").textContent, /录音中/);
   pet.windowEvent("aichat:remote-voice-end", { detail: 22 });
   pet.windowEvent("aichat:remote-voice-recording", { detail: 22 });
   assert.equal(remoteVoiceFocus(pet, 22), false);
@@ -1289,7 +1503,7 @@ test("remote PTT declines before pet initialization and in modal or read-only st
     assert.equal(remoteVoiceFocus(pet, 8), false);
     pet.windowEvent("aichat:remote-voice-recording", { detail: 8 });
     assert.equal(pet.element("panel").classList.contains("remote-recording"), false);
-    assert.equal(pet.element("remote-recording-status").hidden, true);
+    assert.equal(pet.element("remote-voice-indicator").hidden, true);
     assert.equal(pet.focusedId(), focus);
     assert.equal(pet.element("panel").hidden, true);
     assert.deepEqual(pet.calls, []);
@@ -1481,7 +1695,7 @@ for (const [label, button, ctrlKey] of [["secondary click", 2, false], ["Control
     assert.deepEqual(pet.captures, []);
     assert.equal(pet.bodyHasClass("dragging"), false);
     assert.equal(pet.element("draft").value, "保留的草稿");
-    assert.equal(pet.element("dictation").textContent, "停止输入");
+    assert.equal(pet.element("dictation-label").textContent, "停止输入");
   });
 }
 

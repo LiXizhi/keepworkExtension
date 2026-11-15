@@ -1,6 +1,7 @@
 // Nonactivating recording and transcription feedback for the current dictation target.
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import "chromium_ax_macos.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -21,29 +22,11 @@ static void requestChromiumTree(AXUIElementRef app, pid_t pid, uint64_t press) {
     lastPid = pid;
     NSString *key = [NSString stringWithFormat:@"%d/%f", pid, front.launchDate.timeIntervalSinceReferenceDate];
     if ([requested objectForKey:key]) return;
-    NSString *bundle = front.bundleIdentifier;
-    NSSet *browsers = [NSSet setWithArray:@[@"com.google.Chrome", @"com.google.Chrome.beta", @"com.google.Chrome.dev",
-        @"com.google.Chrome.canary", @"org.chromium.Chromium", @"com.microsoft.edgemac", @"com.brave.Browser",
-        @"com.vivaldi.Vivaldi", @"company.thebrowser.Browser"]];
-    NSURL *framework = [front.bundleURL URLByAppendingPathComponent:@"Contents/Frameworks/Electron Framework.framework"];
-    BOOL electron = [NSFileManager.defaultManager fileExistsAtPath:framework.path];
-    if (!electron && (!bundle || ![browsers containsObject:bundle])) return;
-    NSArray *flags = electron ? @[@"AXManualAccessibility", @"AXEnhancedUserInterface"] : @[@"AXEnhancedUserInterface"];
-    for (NSString *flag in flags) {
-        CFStringRef attribute = (__bridge CFStringRef)flag;
-        CFTypeRef current = NULL;
-        AXError status = AXUIElementCopyAttributeValue(app, attribute, &current);
-        bool disabled = status == kAXErrorSuccess && current && CFEqual(current, kCFBooleanFalse);
-        if (current) CFRelease(current);
-        Boolean writable = false;
-        if (!disabled || AXUIElementIsAttributeSettable(app, attribute, &writable) != kAXErrorSuccess || !writable) continue;
-        if (atomic_load(&queryPress) != press || NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != pid) return;
+    if (enableChromiumTree(app, chromiumHost(front), ^bool {
+        return atomic_load(&queryPress) == press && NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == pid;
+    })) {
         if (!requested) { requested = [NSCache new]; requested.countLimit = 64; }
         [requested setObject:@YES forKey:key];
-        // Some Chrome versions expose the tree even though the setter reports kAXErrorNotImplemented.
-        // Probe the real focused field on the next refresh and never infer success from the return code.
-        AXUIElementSetAttributeValue(app, attribute, kCFBooleanTrue);
-        return;
     }
 }
 
@@ -131,6 +114,48 @@ static CGRect voiceEditableFrame(pid_t pid, uint64_t press) {
 }
 @end
 
+typedef NS_ENUM(NSInteger, VoiceIconPhase) { VoicePreparing, VoiceRecording, VoiceRetry };
+
+@interface KeepworkVoiceIcon : NSView
+@property VoiceIconPhase phase;
+@end
+@implementation KeepworkVoiceIcon
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    BOOL reduced = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+    double t = reduced ? 0 : NSProcessInfo.processInfo.systemUptime;
+    NSPoint center = NSMakePoint(NSMidX(self.bounds), NSMidY(self.bounds));
+    [NSColor.whiteColor setFill];
+    [NSColor.whiteColor setStroke];
+    if (self.phase == VoiceRecording) {
+        for (int i = 0; i < 5; i++) {
+            CGFloat height = 5 + (2 - abs(i - 2)) * 3 + 3 * cos(t * 8 - i * 1.2);
+            NSRect bar = NSMakeRect(center.x - 9 + 4 * i, center.y - height / 2, 2.5, height);
+            [[NSBezierPath bezierPathWithRoundedRect:bar xRadius:1.25 yRadius:1.25] fill];
+        }
+        return;
+    }
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    path.lineWidth = 2;
+    path.lineCapStyle = NSLineCapStyleRound;
+    if (self.phase == VoiceRetry) {
+        // A return arrow rocks briefly while the retry cue is visible.
+        NSAffineTransform *pose = [NSAffineTransform transform];
+        [pose translateXBy:center.x yBy:center.y];
+        [pose rotateByDegrees:reduced ? 0 : 9 * sin(t * 5)];
+        [pose concat];
+        [path appendBezierPathWithArcWithCenter:NSZeroPoint radius:6.5 startAngle:145 endAngle:435];
+        [path moveToPoint:NSMakePoint(2, 10)];
+        [path lineToPoint:NSMakePoint(-1, 6.5)];
+        [path lineToPoint:NSMakePoint(3, 3.5)];
+    } else {
+        CGFloat angle = reduced ? 35 : fmod(-t * 280, 360);
+        [path appendBezierPathWithArcWithCenter:center radius:7 startAngle:angle endAngle:angle + 267];
+    }
+    [path stroke];
+}
+@end
+
 @interface KeepworkVoiceOutlinePanel : NSPanel
 @end
 @implementation KeepworkVoiceOutlinePanel
@@ -176,8 +201,10 @@ static NSRect voiceWaitingFrame(NSRect field, NSRect screen, NSPoint pointer) {
 static KeepworkVoiceOutlinePanel *voicePanel;
 static KeepworkVoiceOutlinePanel *previewPanel;
 static NSTextField *previewLabel;
+static KeepworkVoiceIcon *previewIcon;
+static VoiceIconPhase iconPhase;
 static NSString *previewText;
-static NSTimer *voiceTimer, *dotsTimer;
+static NSTimer *voiceTimer, *animationTimer;
 static uint64_t latestPress, activePress;
 static bool lookupPending, transcribing;
 static CGRect currentTarget;
@@ -186,7 +213,7 @@ static NSTimeInterval pressedAt;
 
 // Separate from the outline and dots so live captions never cover the insertion point.
 static void placeVoicePreview(NSRect field, NSScreen *screen, NSPoint pointer) {
-    if (!screen || !previewText.length) {
+    if (!screen || (transcribing && !previewText.length)) {
         [previewPanel orderOut:nil];
         return;
     }
@@ -208,6 +235,10 @@ static void placeVoicePreview(NSRect field, NSScreen *screen, NSPoint pointer) {
         background.layer.backgroundColor = [NSColor colorWithWhite:0.16 alpha:0.94].CGColor;
         background.layer.cornerRadius = 8;
         previewPanel.contentView = background;
+        previewIcon = [[KeepworkVoiceIcon alloc] initWithFrame:NSMakeRect(5, 4, 22, 22)];
+        [previewIcon setAccessibilityElement:YES];
+        [previewIcon setAccessibilityRole:NSAccessibilityImageRole];
+        [background addSubview:previewIcon];
         previewLabel = [NSTextField labelWithString:@""];
         previewLabel.font = [NSFont systemFontOfSize:14];
         previewLabel.textColor = NSColor.whiteColor;
@@ -215,9 +246,18 @@ static void placeVoicePreview(NSRect field, NSScreen *screen, NSPoint pointer) {
         previewLabel.maximumNumberOfLines = 1;
         [background addSubview:previewLabel];
     }
-    if (![previewLabel.stringValue isEqualToString:previewText]) previewLabel.stringValue = previewText;
+    NSString *text = previewText ?: @"";
+    if (![previewLabel.stringValue isEqualToString:text]) previewLabel.stringValue = text;
+    previewIcon.hidden = transcribing;
+    if (previewIcon.phase != iconPhase || !previewIcon.accessibilityLabel) {
+        previewIcon.phase = iconPhase;
+        previewIcon.accessibilityLabel = iconPhase == VoiceRetry ? @"Hold to retry" :
+            iconPhase == VoiceRecording ? @"Recording" : @"Preparing microphone";
+        [previewIcon setNeedsDisplay:YES];
+    }
+    CGFloat textX = transcribing ? 10 : 32;
     NSRect area = screen.visibleFrame;
-    CGFloat width = MIN(NSWidth(area), MIN(440, MAX(68, ceil(previewLabel.intrinsicContentSize.width) + 24)));
+    CGFloat width = text.length ? MIN(NSWidth(area), MIN(440, ceil(previewLabel.intrinsicContentSize.width) + textX + 10)) : 32;
     CGFloat height = 30;
     BOOL compact = voiceCompactField(field, area);
     CGFloat x = compact ? NSMinX(field) + 8 : pointer.x + 16;
@@ -227,7 +267,7 @@ static void placeVoicePreview(NSRect field, NSScreen *screen, NSPoint pointer) {
     NSRect rect = NSMakeRect(MAX(NSMinX(area), MIN(x, NSMaxX(area) - width)),
         MAX(NSMinY(area), MIN(y, NSMaxY(area) - height)), width, height);
     if (!NSEqualRects(previewPanel.frame, rect)) [previewPanel setFrame:rect display:NO];
-    previewLabel.frame = NSMakeRect(10, 5, width - 20, 20);
+    previewLabel.frame = NSMakeRect(textX, 5, MAX(0, width - textX - 10), 20);
     if (!previewPanel.visible) [previewPanel orderFrontRegardless];
 }
 
@@ -237,7 +277,7 @@ static void showVoiceFrame(CGRect target, pid_t pid) {
     for (NSScreen *screen in screens) [bounds addObject:[NSValue valueWithRect:screen.frame]];
     NSRect frame = voiceScreenFrame(target, NSMaxY(screens.firstObject.frame), bounds);
     currentTarget = target;
-    if ((transcribing || previewText.length) && screens.count) {
+    if (screens.count) {
         NSPoint pointer = NSEvent.mouseLocation;
         NSScreen *anchor = nil, *pointerScreen = nil;
         for (NSScreen *screen in screens) {
@@ -311,13 +351,14 @@ static void clearVoiceOutline(void) {
     atomic_store(&queryPress, 0);
     [voiceTimer invalidate];
     voiceTimer = nil;
-    [dotsTimer invalidate];
-    dotsTimer = nil;
+    [animationTimer invalidate];
+    animationTimer = nil;
     [voicePanel orderOut:nil];
     voicePanel = nil;
     [previewPanel orderOut:nil];
     previewPanel = nil;
     previewLabel = nil;
+    previewIcon = nil;
     previewText = nil;
     displayedPid = 0;
     lookupPending = false;
@@ -330,9 +371,18 @@ void keepwork_voice_highlight_start(uint64_t press) {
         if (!press || press <= latestPress) return;
         clearVoiceOutline();
         latestPress = activePress = press;
+        iconPhase = VoicePreparing;
         atomic_store(&queryPress, press);
         pressedAt = NSProcessInfo.processInfo.systemUptime;
         refreshVoiceOutline(press);
+        // Animate on the GUI clock even when an Accessibility lookup is pending.
+        animationTimer = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *timer) {
+            (void)timer;
+            if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) return;
+            if (transcribing) [voicePanel.contentView setNeedsDisplay:YES];
+            else [previewIcon setNeedsDisplay:YES];
+        }];
+        [NSRunLoop.mainRunLoop addTimer:animationTimer forMode:NSRunLoopCommonModes];
         voiceTimer = [NSTimer timerWithTimeInterval:0.12 repeats:YES block:^(NSTimer *timer) {
             (void)timer;
             refreshVoiceOutline(press);
@@ -341,16 +391,24 @@ void keepwork_voice_highlight_start(uint64_t press) {
     });
 }
 
+static void setVoiceIcon(uint64_t press, VoiceIconPhase phase) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!press || activePress != press || transcribing || iconPhase == VoiceRetry) return;
+        iconPhase = phase;
+        if (phase == VoiceRetry) previewText = nil;
+        pid_t pid = NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+        showVoiceFrame(displayedPid == pid ? currentTarget : CGRectNull, pid);
+    });
+}
+
+void keepwork_voice_highlight_recording(uint64_t press) { setVoiceIcon(press, VoiceRecording); }
+void keepwork_voice_highlight_retry(uint64_t press) { setVoiceIcon(press, VoiceRetry); }
+
 void keepwork_voice_highlight_preview(uint64_t press, const uint8_t *bytes, size_t length) {
     NSString *text = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!press || press != activePress) return;
+        if (!press || press != activePress || iconPhase == VoiceRetry) return;
         previewText = text;
-        if (!text.length) {
-            previewLabel.stringValue = @"";
-            [previewPanel orderOut:nil];
-            return;
-        }
         pid_t pid = NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
         showVoiceFrame(displayedPid == pid ? currentTarget : CGRectNull, pid);
     });
@@ -358,17 +416,11 @@ void keepwork_voice_highlight_preview(uint64_t press, const uint8_t *bytes, size
 
 void keepwork_voice_highlight_transcribing(uint64_t press) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!press || press != activePress || transcribing) return;
+        if (!press || press != activePress || transcribing || iconPhase == VoiceRetry) return;
         transcribing = true;
         pressedAt = NSProcessInfo.processInfo.systemUptime;
         pid_t frontPid = NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
         showVoiceFrame(voicePanel.visible && displayedPid == frontPid ? currentTarget : CGRectNull, frontPid);
-        // AX queries can take longer than a frame; keep the dots moving on the GUI clock.
-        dotsTimer = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *timer) {
-            (void)timer;
-            if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) [voicePanel.contentView setNeedsDisplay:YES];
-        }];
-        [NSRunLoop.mainRunLoop addTimer:dotsTimer forMode:NSRunLoopCommonModes];
         refreshVoiceOutline(press);
     });
 }

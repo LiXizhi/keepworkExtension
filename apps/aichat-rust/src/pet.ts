@@ -357,13 +357,21 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     positionLayers();
   }
 
+  // History snapshots can omit requestId and speechText for the same displayed answer.
+  // Use visible content for replay detection; a pending send still matches its requestId.
+  function replySignature(reply?: PetReply | null): string {
+    if (!reply) return "";
+    const options = (reply.options || []).map(option => [option.icon || "", option.text || ""]);
+    return JSON.stringify([reply.text || "", !!reply.thinking, options, reply.immediate !== false]);
+  }
+
   function beginTurn(): PendingTurn {
     const turn: PendingTurn = {
       correlated: state.petReplyPresentationVersion === 1,
       context: state.context,
       streaming: state.petReplyPresentationVersion === 1 && state.petStreamingSpeechVersion === 1,
       earlySpeech: new Map(),
-      baseline: JSON.stringify(state.reply || null),
+      baseline: replySignature(state.reply),
       initialError: state.error,
       reopen: expanded,
       accepted: false,
@@ -432,9 +440,9 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     return Math.max(3000, Math.min(15000, Array.from(text).length * 120));
   }
 
-  function updatePresentation(): void {
+  function updatePresentation(restored: boolean): void {
     const reply = state.reply || null;
-    const signature = JSON.stringify(reply);
+    const signature = replySignature(reply);
     const turn = waiting;
     if (document.hidden || state.exitPrompt || state.permission || state.phoneState || state.remoteDialogue?.state ||
         (turn?.streaming && state.petStreamingSpeechVersion !== 1) ||
@@ -476,11 +484,23 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
           }
         }
       }
-    } else if (signature !== previousReply) {
-      // An unrelated incoming message still exposes its current quick replies.
-      // Repeated drag/visibility snapshots must not revive an earlier result.
-      const freshInbound = reply && !reply.requestId && !reply.thinking && !state.busy && !recentReplies.has(signature);
-      if (!reply?.requestId && (!pinnedReply || freshInbound)) showReply(reply, false);
+    } else {
+      // An idle snapshot carries the last assistant message from the conversation.
+      // Opening a draft (including a remote paste) is not a new assistant turn.
+      const hasDraft = !!state.draft || unsynced || !!state.dictating || !!activeRemotePress;
+      if (restored || expanded || hasDraft) {
+        const choices = !hasDraft && !reply?.requestId && reply?.options?.length;
+        if (restored || signature !== previousReply || shownReply?.text || shownReply?.thinking ||
+            (!choices && shownReply)) {
+          showReply(choices ? { options: reply.options, immediate: reply.immediate } : null, false);
+        }
+      } else if (signature !== previousReply && !reply?.requestId) {
+        if (!reply || reply.thinking) {
+          if (!pinnedReply) showReply(reply, false);
+        } else if (!state.busy && !recentReplies.has(signature)) {
+          showReply(reply, false);
+        }
+      }
     }
     if (reply && !reply.thinking && !state.busy && !recentReplies.has(signature)) {
       recentReplies.add(signature);
@@ -505,7 +525,9 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const openingExit = !!next.exitPrompt && !state.exitPrompt;
     const closingExit = !next.exitPrompt && !!state.exitPrompt;
     const draftEl = $<HTMLTextAreaElement>("draft");
+    const restored = !state.version || next.context !== state.context || (!!next.ready && !state.ready);
     if (next.context !== state.context) {
+      if (activeRemotePress) finishRemotePress();
       showReply(null, false);
       pinnedReply = false;
       previousReply = "";
@@ -541,9 +563,11 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
         ? folderName || "第二大脑"
         : `技能：${state.skill || "无"} · 文件夹：${folderName || "未绑定"}`;
     const targetBtn = $<HTMLButtonElement>("target");
-    targetBtn.title = `${$("target-title").textContent}\n${$("target-detail").textContent}${
+    targetBtn.dataset.kind = state.target === "persona" ? "persona" : "session";
+    targetBtn.dataset.hint = `${$("target-title").textContent}\n${$("target-detail").textContent}${
       state.folder ? `\n${state.folder}` : ""
     }\n点击切换到${state.target === "persona" ? "聊天会话" : "我的分身"}`;
+    targetBtn.setAttribute("aria-description", targetBtn.dataset.hint);
     targetBtn.disabled =
       !state.canSwitchTarget || !!state.dictating || !!state.voice?.active || !!edits || unsynced;
     $("badge").hidden = !!state.phoneState || !!state.remoteDialogue?.state ||
@@ -551,24 +575,30 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
     if (!edits && !unsynced) draftEl.value = state.draft || "";
     draftEl.disabled = !!state.richDraft || !!state.dictating;
+    draftEl.classList.toggle("dictating", !!state.dictating);
 
     const sendBtn = $<HTMLButtonElement>("send");
-    sendBtn.textContent = state.busy ? "停止" : "发送";
+    sendBtn.classList.toggle("alternate-action", !!state.busy);
+    $("send-label").textContent = state.busy ? "停止" : "发送";
     sendBtn.disabled = !state.ready || (!state.busy && (!!state.richDraft || !!state.dictating));
 
     const dictationBtn = $<HTMLButtonElement>("dictation");
-    dictationBtn.textContent = state.dictating ? "停止输入" : "语音输入";
+    dictationBtn.classList.toggle("alternate-action", !!state.dictating);
+    $("dictation-label").textContent = state.dictating ? "停止输入" : "语音输入";
     dictationBtn.disabled = !state.ready || !!state.richDraft || !!state.voice?.active;
 
     const callBtn = $<HTMLButtonElement>("call");
-    callBtn.textContent = state.voice?.active ? "结束通话" : "通话";
-    callBtn.title =
+    callBtn.classList.toggle("alternate-action", !!state.voice?.active);
+    $("call-label").textContent = state.voice?.active ? "结束通话" : "通话";
+    callBtn.dataset.hint =
       state.canCall || state.voice?.active ? "实时语音对话" : "请在 AIChat 中选择实时语音模型";
+    paintStationHints();
     callBtn.disabled = !state.ready || (!state.canCall && !state.voice?.active) || !!state.dictating;
 
     const muteBtn = $<HTMLButtonElement>("mute");
     muteBtn.hidden = !state.voice?.active;
-    muteBtn.textContent = state.voice?.muted ? "取消静音" : "静音";
+    muteBtn.classList.toggle("alternate-action", !!state.voice?.muted);
+    $("mute-label").textContent = state.voice?.muted ? "取消静音" : "静音";
 
     const voiceLabelMap: Record<string, string> = {
       starting: "连接中",
@@ -593,7 +623,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
     $("error").textContent = localError || state.phoneError || state.error || "";
 
-    updatePresentation();
+    updatePresentation(restored);
     const reply = shownReply;
     const signature = JSON.stringify([state.context, reply]);
     if (signature !== renderedMessages) {
@@ -711,6 +741,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     compactStatus.hidden = !compactStatus.textContent || expanded || !!exit || !!permission ||
       !!state.phoneState || !!state.remoteDialogue?.state || !state.compactVoice;
 
+    syncReadiness();
     adoptNativeDrag(next);
     if (next.dragging === false && pointer?.tracking && !staleDrag &&
         (typeof next.dragId === "number" ? next.dragId === pointer.dragId : pointer.acknowledged)) {
@@ -773,6 +804,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     if (waiting) waiting.reopen = false;
     const opening = value && !expanded;
     expanded = value;
+    if (opening && shownReply) dismissPresentation();
     if (opening && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
       jelly?.cancel();
       const amount = Math.min(0.12, 14 / (state.petPixels || 112));
@@ -793,16 +825,100 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     paintBubble();
     const draftEl = $<HTMLTextAreaElement>("draft");
     if (expanded && !draftEl.disabled) draftEl.focus();
+    syncReadiness();
     await api.action("expand", { expanded: value });
   }
 
   const draftEl = $<HTMLTextAreaElement>("draft");
   const panel = $("panel");
-  const remoteStatus = $("remote-recording-status");
-  const transcribingStatus = $("remote-transcribing-status");
+  const indicator = $("remote-voice-indicator");
+  const indicatorLabel = $("remote-voice-label");
   const preview = $("remote-voice-preview");
   let lastRemotePress = 0;
   let activeRemotePress = 0;
+  let pressPhase = "";
+  const deviceCues: Record<string, [string, string]> = {
+    "waiting-paired": ["link", "正在等待遥控器唤醒…"],
+    scanning: ["link", "正在查找遥控器…"],
+    connecting: ["link", "正在连接遥控器…"],
+    reconnecting: ["link", "正在重新连接遥控器…"],
+    "preparing-microphone": ["prepare", "正在准备麦克风…"],
+    "needs-permission": ["permission", "请在遥控器设置中授权蓝牙。"],
+  };
+  const voiceCues: Record<string, [string, string]> = {
+    ...deviceCues,
+    ready: ["ready", "遥控器已就绪，可以按住语音键说话。"],
+    recording: ["record", "录音中"],
+    transcribing: ["transcribe", "正在识别语音"],
+    retry: ["retry", "这次未能录入语音，请重新按住语音键。"],
+  };
+  let readiness = "";
+  let lastConnectionPhase = "";
+  let readyNoticeUntil = 0;
+  let noAudioPress = 0;
+  let readinessTimer = 0;
+  let readingReadiness = false;
+
+  function paintStationHints(): void {
+    const showHints = !panel.classList.contains("remote-voice-station");
+    for (const id of ["target", "call", "collapse", "open"]) {
+      const button = $(id);
+      button.title = showHints ? button.dataset.hint || "" : "";
+    }
+  }
+  // The static chrome buttons use their original tooltips outside voice input.
+  for (const id of ["collapse", "open"]) $(id).dataset.hint = $(id).title;
+
+  function paintVoiceIndicator(): void {
+    const phase = noAudioPress ? "retry" : activeRemotePress ? pressPhase : readiness;
+    const cue = voiceCues[phase];
+    indicator.hidden = !cue;
+    panel.classList.toggle("remote-voice-station", !!cue);
+    paintStationHints();
+    indicator.dataset.icon = cue?.[0] || "";
+    const label = cue?.[1] || "";
+    if (indicatorLabel.textContent !== label) indicatorLabel.textContent = label;
+  }
+  // The settings window owns device IDs and configuration. The pet asks only
+  // for the phase, and only while its composer is on screen.
+  function syncReadiness(): void {
+    if (document.hidden || panel.hidden || state.exitPrompt || state.permission) {
+      window.clearTimeout(readinessTimer);
+      readinessTimer = 0;
+      readiness = "";
+      lastConnectionPhase = "";
+      readyNoticeUntil = 0;
+      paintVoiceIndicator();
+      return;
+    }
+    if (readingReadiness || readinessTimer) return;
+    readingReadiness = true;
+    void api.action("remote-voice-readiness").then(result => {
+      const phase = typeof result?.readiness === "string" ? result.readiness : "";
+      if (phase === "ready" && deviceCues[lastConnectionPhase] && !activeRemotePress) {
+        readyNoticeUntil = performance.now() + 3000;
+      } else if (phase !== "ready") {
+        readyNoticeUntil = 0;
+      }
+      lastConnectionPhase = phase;
+      readiness = phase === "ready" && performance.now() < readyNoticeUntil
+        ? "ready"
+        : Object.prototype.hasOwnProperty.call(deviceCues, phase) ? phase : "";
+    }).catch(() => { readiness = ""; }).finally(() => {
+      readingReadiness = false;
+      if (document.hidden || panel.hidden || state.exitPrompt || state.permission) return;
+      paintVoiceIndicator();
+      readinessTimer = window.setTimeout(() => {
+        readinessTimer = 0;
+        syncReadiness();
+      }, 1000);
+    });
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && activeRemotePress) finishRemotePress();
+    syncReadiness();
+  });
+
 
   window.addEventListener("aichat:remote-dialogue", (event) => {
     const detail = (event as CustomEvent<{ action?: string }>).detail;
@@ -816,14 +932,16 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     if (id !== undefined) {
       if (!Number.isSafeInteger(id) || id <= lastRemotePress) return;
       lastRemotePress = activeRemotePress = id;
-      if (narration || waiting?.streaming) dismissPresentation();
       preview.textContent = "";
       preview.hidden = true;
-      transcribingStatus.hidden = true;
-      remoteStatus.textContent = "语音键已按下";
-      remoteStatus.hidden = false;
+      pressPhase = "preparing-microphone";
+      noAudioPress = 0;
+      readyNoticeUntil = 0;
+      readiness = "";
+      paintVoiceIndicator();
       panel.classList.add("remote-recording");
     }
+    if (shownReply || waiting) dismissPresentation();
     optimisticCollapse = false;
     expanded = true;
     panel.classList.add("remote-voice-open");
@@ -834,9 +952,28 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     draftEl.focus();
     if (document.activeElement === draftEl) event.preventDefault();
   });
+  window.addEventListener("aichat:remote-voice-edit", (event) => {
+    const detail = (event as CustomEvent<{ press: number; context: string; action: string; text: string }>).detail;
+    if (!activeRemotePress || detail?.press !== activeRemotePress || detail.context !== state.context ||
+        document.hidden || panel.hidden || draftEl.disabled || state.permission || state.exitPrompt ||
+        state.remoteDialogue?.state || state.richDraft || state.dictating) return;
+    if (detail.action === "submit") {
+      const send = $<HTMLButtonElement>("send");
+      if (send.disabled || state.busy || !draftEl.value.trim()) return;
+      send.click();
+    } else if (detail.action === "clear" || (detail.action === "insert" && typeof detail.text === "string")) {
+      if (detail.action === "clear") draftEl.value = "";
+      else draftEl.setRangeText(detail.text, draftEl.selectionStart, draftEl.selectionEnd, "end");
+      void syncDraftEdit();
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
   window.addEventListener("aichat:remote-voice-recording", (event) => {
-    if (activeRemotePress && activeRemotePress === (event as CustomEvent<number>).detail && transcribingStatus.hidden) {
-      remoteStatus.textContent = "录音中";
+    if (activeRemotePress && activeRemotePress === (event as CustomEvent<number>).detail && pressPhase === "preparing-microphone") {
+      pressPhase = "recording";
+      paintVoiceIndicator();
     }
   });
   window.addEventListener("aichat:remote-voice-preview", (event) => {
@@ -844,30 +981,43 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     if (!activeRemotePress || detail?.press !== activeRemotePress || typeof detail.text !== "string") return;
     preview.textContent = detail.text;
     preview.hidden = !detail.text;
-    preview.scrollTop = preview.scrollHeight;
+    preview.scrollLeft = preview.scrollWidth;
   });
   window.addEventListener("aichat:remote-voice-transcribing", (event) => {
     if (!activeRemotePress || activeRemotePress !== (event as CustomEvent<number>).detail) return;
     panel.classList.remove("remote-recording");
-    remoteStatus.hidden = true;
-    transcribingStatus.hidden = false;
+    pressPhase = "transcribing";
+    paintVoiceIndicator();
+  });
+  window.addEventListener("aichat:remote-voice-no-audio", (event) => {
+    const id = (event as CustomEvent<number>).detail;
+    if (!activeRemotePress || id !== activeRemotePress) return;
+    noAudioPress = id;
+    paintVoiceIndicator();
+    window.setTimeout(() => {
+      if (noAudioPress !== id) return;
+      noAudioPress = 0;
+      paintVoiceIndicator();
+    }, 3000);
   });
   window.addEventListener("aichat:remote-voice-end", (event) => {
     const id = (event as CustomEvent<number>).detail;
     if (!Number.isSafeInteger(id) || id <= 0) return;
     lastRemotePress = Math.max(lastRemotePress, id);
-    if (id !== activeRemotePress) return;
+    if (id === activeRemotePress) finishRemotePress();
+  });
+  function finishRemotePress(): void {
     activeRemotePress = 0;
+    pressPhase = "";
+    paintVoiceIndicator();
     preview.hidden = true;
     preview.textContent = "";
-    transcribingStatus.hidden = true;
     panel.classList.remove("remote-recording");
-    remoteStatus.hidden = true;
-    remoteStatus.textContent = "";
-  });
+  }
   async function syncDraftEdit(): Promise<void> {
     const context = state.context;
     const revision = ++draftRevision;
+    if (shownReply || waiting) dismissPresentation();
     unsynced = true;
     // Older AIChat pages reject input while offline. Keep these edits local
     // until the user edits again online or explicitly sends the draft.
@@ -884,6 +1034,15 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
   }
   draftEl.addEventListener("input", () => void syncDraftEdit());
+
+  window.addEventListener("aichat:remote-ok", (event) => {
+    const context = (event as CustomEvent<{ context?: string }>).detail?.context;
+    if (!context || context !== state.context || document.hidden || state.permission || state.exitPrompt ||
+        activeRemotePress || state.remoteDialogue?.state || state.voice?.active || state.phoneState ||
+        draftEl.disabled || state.busy || !draftEl.value.trim()) return;
+    const send = $<HTMLButtonElement>("send");
+    if (!send.disabled) send.click();
+  });
 
   let backPresses: Promise<void> = Promise.resolve();
   window.addEventListener("aichat:remote-back", (event) => {

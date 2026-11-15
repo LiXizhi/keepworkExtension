@@ -108,7 +108,10 @@ int main(void) {
             return 0;
         }
         keepwork_voice_highlight_start(100);
-        assert(until(^BOOL { return voicePanel.visible; }));
+        assert(until(^BOOL { return voicePanel.visible && previewPanel.visible && previewIcon.phase == VoicePreparing; }));
+        assert(previewLabel.stringValue.length == 0 && !previewIcon.hidden);
+        keepwork_voice_highlight_recording(100);
+        assert(until(^BOOL { return previewIcon.phase == VoiceRecording && !previewIcon.hidden; }));
         assert(voicePanel.ignoresMouseEvents && !voicePanel.canBecomeKeyWindow && !voicePanel.canBecomeMainWindow);
         assert(!voicePanel.keyWindow && (voicePanel.styleMask & NSWindowStyleMaskNonactivatingPanel));
         assert(!NSApp.active && !NSApp.keyWindow);
@@ -128,7 +131,7 @@ int main(void) {
         emitFixturePreview(100, @"第一句话。第二句话。");
         assert(until(^BOOL { return previewPanel.visible && [previewLabel.stringValue isEqual:@"第一句话。第二句话。"]; }));
         emitFixturePreview(100, @"");
-        assert(until(^BOOL { return !previewPanel.visible; }));
+        assert(until(^BOOL { return previewPanel.visible && previewLabel.stringValue.length == 0 && !previewIcon.hidden; }));
         emitFixturePreview(100, @"收尾句。");
         assert(until(^BOOL { return previewPanel.visible; }));
         keepwork_voice_highlight_transcribing(99);
@@ -159,9 +162,20 @@ int main(void) {
         keepwork_voice_highlight_transcribing(100);
         keepwork_voice_highlight_end(100);
         assert(until(^BOOL { return activePress == 101 && !transcribing && voicePanel.visible && NSWidth(voicePanel.frame) == 160; }));
-        assert(!previewPanel.visible);
+        assert(previewPanel.visible && previewIcon.phase == VoicePreparing && previewLabel.stringValue.length == 0);
+        keepwork_voice_highlight_recording(101);
         emitFixturePreview(101, @"新录音");
         assert(until(^BOOL { return previewPanel.visible && [previewLabel.stringValue isEqual:@"新录音"]; }));
+        keepwork_voice_highlight_retry(101);
+        assert(until(^BOOL { return previewIcon.phase == VoiceRetry && previewLabel.stringValue.length == 0; }));
+        emitFixturePreview(101, @"late partial");
+        keepwork_voice_highlight_recording(101);
+        keepwork_voice_highlight_transcribing(101);
+        // A barrier on the GUI queue verifies all stale updates have run before checking.
+        __block BOOL drained = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{ drained = YES; });
+        assert(until(^BOOL { return drained; }));
+        assert(!transcribing && previewIcon.phase == VoiceRetry && previewLabel.stringValue.length == 0);
         keepwork_voice_highlight_end(101);
         emitFixturePreview(101, @"结束后的文字");
         keepwork_voice_highlight_transcribing(101);
@@ -173,12 +187,12 @@ int main(void) {
         keepwork_voice_highlight_start(102);
         assert(until(^BOOL { return atomic_load(&lookupEntered); }));
         keepwork_voice_highlight_transcribing(102);
-        assert(until(^BOOL { return voicePanel.visible && NSWidth(voicePanel.frame) == 44 && dotsTimer.valid; }));
+        assert(until(^BOOL { return voicePanel.visible && NSWidth(voicePanel.frame) == 44 && animationTimer.valid; }));
         assert(lookupPending); // Even the first blocked AX lookup cannot delay the waiting overlay.
         atomic_store(&holdLookup, false);
         assert(until(^BOOL { return !lookupPending && CGRectIsNull(currentTarget) && voicePanel.visible; }));
         keepwork_voice_highlight_end(102);
-        assert(until(^BOOL { return !voicePanel && !dotsTimer && !voiceTimer; }));
+        assert(until(^BOOL { return !voicePanel && !animationTimer && !voiceTimer; }));
         puts("AppKit current-field outline passed");
     }
 }

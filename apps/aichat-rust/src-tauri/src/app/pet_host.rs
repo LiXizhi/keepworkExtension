@@ -303,17 +303,14 @@ fn start_pet_pointer_tracker(app: &AppHandle, window: &WebviewWindow, pet: &Arc<
     });
 }
 
-fn remote_voice_pet_mode(main_visible: bool, main_minimized: bool, pet_visible: bool, pet_minimized: bool) -> bool {
-    (!main_visible || main_minimized) && pet_visible && !pet_minimized
-}
-
-pub(super) fn pet_is_active(main: &WebviewWindow, pet: &WebviewWindow) -> tauri::Result<bool> {
-    Ok(remote_voice_pet_mode(
-        main.is_visible()?,
-        main.is_minimized()?,
-        pet.is_visible()?,
-        pet.is_minimized()?,
-    ))
+pub(super) fn pet_is_active(pet: &WebviewWindow) -> tauri::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" { fn keepwork_pet_is_presented(window: *mut std::ffi::c_void) -> bool; }
+        Ok(unsafe { keepwork_pet_is_presented(pet.ns_window()?) })
+    }
+    #[cfg(not(target_os = "macos"))]
+    { Ok(pet.is_visible()? && !pet.is_minimized()?) }
 }
 
 fn pet_back_context_matches(snapshot: &Value, context: &Value) -> bool {
@@ -326,23 +323,45 @@ fn pet_back_context_matches(snapshot: &Value, context: &Value) -> bool {
 /// Route a physical Back to the actual pet editor (which may have an unsynced
 /// local draft). Once routed, never repeat it as a system-wide delete.
 pub(super) fn route_remote_back(app: &AppHandle) -> Result<bool, String> {
+    route_pet_button(app, "aichat:remote-back")
+}
+
+fn route_pet_button(app: &AppHandle, event: &'static str) -> Result<bool, String> {
     let core = app.state::<Arc<AppCore>>();
-    if core.pet_temporarily_hidden.load(Ordering::Relaxed) {
-        return Ok(true);
-    }
     let Some(pet) = app.get_webview_window("pet") else { return Ok(false) };
-    let main = app.get_webview_window("main").ok_or("主窗口不可用")?;
-    if !pet_is_active(&main, &pet).map_err(|e| e.to_string())? {
+    if !pet_is_active(&pet).map_err(|e| e.to_string())? {
         return Ok(false);
     }
-    verify_pet_sender(&pet, &core)?;
+    let Some(url) = super::sender::loaded_page_url(&pet)? else { return Ok(true); };
+    crate::security::assert_sender(pet.label(), "pet", true, url.as_str(), core.current_dev_url().as_deref())?;
     let snapshot = core.pet.snapshot();
     if snapshot["permission"].is_null() && snapshot["exitPrompt"].is_null() {
         let detail = json!({"context": snapshot["context"]});
-        pet.eval(format!("window.dispatchEvent(new CustomEvent('aichat:remote-back', {{detail:{detail},cancelable:true}}))"))
+        let page = json!(url.as_str());
+        pet.eval(format!("if (window === window.top && location.href === {page}) window.dispatchEvent(new CustomEvent('{event}', {{detail:{detail},cancelable:true}}))"))
             .map_err(|e| e.to_string())?;
     }
     Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn watch_pet_ok(window: &WebviewWindow) {
+    static HOST: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+    extern "C" fn deliver(device_epoch: u64) {
+        if crate::remote_voice::dialogue::pet_ok_current(device_epoch) {
+            if let Some(app) = HOST.get() {
+                let _ = route_pet_button(app, "aichat:remote-ok");
+            }
+        }
+    }
+    let _ = HOST.get_or_init(|| window.app_handle().clone());
+    let pet = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        if let Ok(native) = pet.ns_window() {
+            extern "C" { fn keepwork_pet_watch_ok(window: *mut std::ffi::c_void, action: extern "C" fn(u64)); }
+            unsafe { keepwork_pet_watch_ok(native, deliver); }
+        }
+    });
 }
 
 /// The physical remote requests focus once, at the start of the utterance.
@@ -353,57 +372,78 @@ pub(super) fn focus_pet_for_remote_voice(
     static NEXT_PRESS: AtomicU64 = AtomicU64::new(1);
     const UNAVAILABLE: &str = "无法聚焦桌宠输入框，请打开桌宠聊天后重新录音。";
     let Some(pet) = app.get_webview_window("pet") else { return Ok(None); };
-    let main = app.get_webview_window("main").ok_or(UNAVAILABLE)?;
-    if !pet_is_active(&main, &pet).map_err(|_| UNAVAILABLE)? {
+    if !pet_is_active(&pet).map_err(|_| UNAVAILABLE)? {
         return Ok(None);
     }
 
     let core = app.state::<Arc<AppCore>>();
-    verify_pet_sender(&pet, &core).map_err(|_| UNAVAILABLE)?;
-    let snap = core.pet.snapshot();
-    if !snap["exitPrompt"].is_null() || !snap["permission"].is_null()
-        || snap["richDraft"] == true || snap["dictating"] == true {
-        return Err("桌宠输入框当前不可编辑，请先完成当前操作再录音。".into());
-    }
-    pet.set_focus().map_err(|_| UNAVAILABLE)?;
-    app.get_webview("pet").ok_or(UNAVAILABLE)?.set_focus().map_err(|_| UNAVAILABLE)?;
-    let expanded = core.pet.set_expanded(true);
-    pet.emit_to("pet", "aichat-desktop:pet-state", &expanded).map_err(|_| UNAVAILABLE)?;
-    // The response only acknowledges focus. Audio and transcript never enter
-    // this event; the existing native paste handles the eventual result.
-    let (reply, focused) = tokio::sync::oneshot::channel();
-    let reply = std::sync::Mutex::new(Some(reply));
-    let press = NEXT_PRESS.fetch_add(1, Ordering::Relaxed);
-    cancel_pet_speech(app, &core);
-    let pet_url = pet.url().map_err(|_| UNAVAILABLE)?;
-    let local_preview = pet_url.path() == "/pet.html" && match (pet_url.scheme(), pet_url.host_str()) {
+    let pet_url = super::sender::loaded_page_url(&pet).ok().flatten().ok_or(UNAVAILABLE)?;
+    let local_pet_page = pet_url.path() == "/pet.html" && match (pet_url.scheme(), pet_url.host_str()) {
         ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost")) => true,
         ("http", Some("127.0.0.1")) => cfg!(debug_assertions) && pet_url.port() == Some(1430),
         _ => false,
     };
     let preview_url = json!(pet_url.as_str());
+    if !local_pet_page { return Err(UNAVAILABLE.into()); }
+    crate::security::assert_sender(pet.label(), "pet", true, pet_url.as_str(), core.current_dev_url().as_deref()).map_err(|_| UNAVAILABLE)?;
+    let snap = core.pet.snapshot();
+    if !snap["exitPrompt"].is_null() || !snap["permission"].is_null()
+        || snap["richDraft"] == true || snap["dictating"] == true {
+        return Err("桌宠输入框当前不可编辑，请先完成当前操作再录音。".into());
+    }
+    // The full-screen overlay can focus its DOM editor without activating AIChat.
+    #[cfg(target_os = "macos")]
+    let activate_window = core.pet_home_overlay.lock().unwrap().is_none();
+    #[cfg(not(target_os = "macos"))]
+    let activate_window = true;
+    if activate_window {
+        pet.set_focus().map_err(|_| UNAVAILABLE)?;
+        app.get_webview("pet").ok_or(UNAVAILABLE)?.set_focus().map_err(|_| UNAVAILABLE)?;
+    }
+    let expanded = core.pet.set_expanded(true);
+    pet.emit_to("pet", "aichat-desktop:pet-state", &expanded).map_err(|_| UNAVAILABLE)?;
+    let (reply, focused) = tokio::sync::oneshot::channel();
+    let reply = std::sync::Mutex::new(Some(reply));
+    let press = NEXT_PRESS.fetch_add(1, Ordering::Relaxed);
+    cancel_pet_speech(app, &core);
     pet.eval_with_callback(
-        format!("(!window.dispatchEvent(new CustomEvent('aichat:remote-voice-focus', {{detail:{press}, cancelable:true}}))) && document.hasFocus()"),
+        format!("window === window.top && location.href === {preview_url} && !window.dispatchEvent(new CustomEvent('aichat:remote-voice-focus', {{detail:{press}, cancelable:true}}))"),
         move |result| {
             if let Some(reply) = reply.lock().unwrap().take() {
                 let _ = reply.send(result == "true");
             }
         },
     ).map_err(|_| UNAVAILABLE)?;
+    let target = pet.clone();
+    let target_url = preview_url.clone();
+    let context = snap["context"].clone();
     Ok(Some(RecordingFeedback {
         focus: Some(focused),
+        pet_delivery: Some(Box::new(move |action, text| {
+            if !pet_is_active(&target).map_err(|_| UNAVAILABLE)? {
+                return Err(UNAVAILABLE.into());
+            }
+            let detail = json!({"press": press, "context": context, "action": action, "text": text});
+            let (ack, result) = tokio::sync::oneshot::channel();
+            let ack = std::sync::Mutex::new(Some(ack));
+            target.eval_with_callback(format!(
+                "window === window.top && location.href === {target_url} && !window.dispatchEvent(new CustomEvent('aichat:remote-voice-edit', {{detail:{detail}, cancelable:true}}))"
+            ), move |value| {
+                if let Some(ack) = ack.lock().unwrap().take() { let _ = ack.send(value == "true"); }
+            }).map_err(|_| UNAVAILABLE)?;
+            Ok(result)
+        })),
         notify: Box::new(move |phase| {
             let event = match phase {
                 RecordingPhase::Preview(text) => {
                     // Only the original local pet page can receive the ephemeral caption.
-                    if local_preview {
-                        let detail = json!({"press": press, "text": crate::remote_voice::preview_tail(&text)});
-                        let _ = pet.eval(format!("if (window === window.top && location.href === {preview_url}) window.dispatchEvent(new CustomEvent('aichat:remote-voice-preview', {{detail:{detail}}}));"));
-                    }
+                    let detail = json!({"press": press, "text": crate::remote_voice::preview_tail(&text)});
+                    let _ = pet.eval(format!("if (window === window.top && location.href === {preview_url}) window.dispatchEvent(new CustomEvent('aichat:remote-voice-preview', {{detail:{detail}}}));"));
                     return;
                 }
                 RecordingPhase::Recording => "aichat:remote-voice-recording",
                 RecordingPhase::Transcribing => "aichat:remote-voice-transcribing",
+                RecordingPhase::NoAudio => "aichat:remote-voice-no-audio",
                 RecordingPhase::End => "aichat:remote-voice-end",
             };
             let _ = pet.eval(format!("window.dispatchEvent(new CustomEvent('{event}', {{detail:{press}}}))"));
@@ -412,12 +452,13 @@ pub(super) fn focus_pet_for_remote_voice(
 }
 
 pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
-    if show_now {
-        core.pet_temporarily_hidden.store(false, Ordering::Relaxed);
-    }
     if let Some(existing) = app.get_webview_window("pet") {
         if show_now {
+            #[cfg(target_os = "macos")]
+            super::pet_home_overlay::finish(&existing, core);
             let _ = existing.show();
+            #[cfg(target_os = "macos")]
+            watch_pet_ok(&existing);
             super::remote_phone_view::sync(app);
             sync_pet_pointer(&existing, &core.pet, app);
         }
@@ -473,6 +514,8 @@ pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
             }
         });
         super::remote_phone_view::sync(app);
+        #[cfg(target_os = "macos")]
+        watch_pet_ok(&builder);
         start_pet_pointer_tracker(app, &builder, &core.pet);
         broadcast_pet_state(app, core);
     }
@@ -687,7 +730,11 @@ fn cancel_pet_speech(app: &AppHandle, core: &AppCore) {
 
 pub(super) fn dismiss_pet_view(window: &WebviewWindow) -> tauri::Result<()> {
     window.hide()?;
+    #[cfg(target_os = "macos")]
+    watch_pet_ok(window);
     let app = window.app_handle();
+    #[cfg(target_os = "macos")]
+    super::pet_home_overlay::finish(window, &app.state::<Arc<AppCore>>());
     super::remote_phone_view::sync(app);
     cancel_pet_speech(app, &app.state::<Arc<AppCore>>());
     let _ = window.eval("window.dispatchEvent(new Event('aichat:pet-hidden'))");
@@ -696,7 +743,6 @@ pub(super) fn dismiss_pet_view(window: &WebviewWindow) -> tauri::Result<()> {
 
 pub(super) fn hide_pet_window(app: &AppHandle, core: &AppCore) {
     core.update_settings(|settings| settings.pet_visible = false);
-    core.pet_temporarily_hidden.store(false, Ordering::Relaxed);
     if let Some(window) = app.get_webview_window("pet") {
         let _ = dismiss_pet_view(&window);
     }
@@ -709,22 +755,20 @@ pub(super) fn temporarily_hide_pet(
     core: &AppCore,
     context: &Value,
 ) -> Result<(), String> {
-    let main = app.get_webview_window("main").ok_or("主窗口不可用")?;
     let window = app.get_webview_window("pet").ok_or("桌宠窗口不可用")?;
     let pet = core.pet.snapshot();
-    if !pet_is_active(&main, &window).map_err(|e| e.to_string())?
+    if !pet_is_active(&window).map_err(|e| e.to_string())?
         || !pet_back_context_matches(&pet, context)
         || pet["expanded"] != false
     {
         return Err("桌宠状态已改变。".into());
     }
     dismiss_pet_view(&window).map_err(|e| e.to_string())?;
-    core.pet_temporarily_hidden.store(true, Ordering::Relaxed);
     finish_pet_hide(app, core);
     Ok(())
 }
 
-fn finish_pet_hide(app: &AppHandle, core: &AppCore) {
+pub(super) fn finish_pet_hide(app: &AppHandle, core: &AppCore) {
     stop_pet_audio(app, core, None, "宠物已隐藏", false);
     core.pet.cancel_exit_prompt();
     broadcast_to_main(
@@ -799,6 +843,7 @@ pub(super) async fn desktop_pet_action(
     verify_pet_sender(&window, &state)?;
     match name.as_str() {
         "state" => Ok(state.pet.snapshot()),
+        "remote-voice-readiness" => Ok(json!({"readiness": state.remote_voice.pet_readiness()})),
         "menu" => {
             let menu = pet_menu::build(&app, &state.pet.preferences(), &state.pet.snapshot())
                 .map_err(|error| error.to_string())?;
@@ -933,17 +978,6 @@ pub(super) async fn desktop_pet_action(
 #[cfg(test)]
 mod pet_drag_host_tests {
     use serde_json::json;
-
-    #[test]
-    fn only_a_visible_pet_with_the_main_chat_put_away_claims_remote_voice() {
-        for (main_visible, minimized, expected) in [
-            (false, false, true), (true, true, true), (true, false, false),
-        ] {
-            assert_eq!(super::remote_voice_pet_mode(main_visible, minimized, true, false), expected);
-            assert!(!super::remote_voice_pet_mode(main_visible, minimized, false, false));
-            assert!(!super::remote_voice_pet_mode(main_visible, minimized, true, true));
-        }
-    }
 
     #[test]
     fn legacy_microphone_starts_prepare_the_owner_on_all_platforms() {

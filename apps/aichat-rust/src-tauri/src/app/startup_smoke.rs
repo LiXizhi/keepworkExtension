@@ -249,7 +249,8 @@ fn core(profile: &Path, fixture: &Fixture) -> Result<Arc<AppCore>, String> {
         zoom: Mutex::new(1.0),
         signed_in: AtomicBool::new(false),
         quitting: AtomicBool::new(false),
-        pet_temporarily_hidden: AtomicBool::new(false),
+        #[cfg(target_os = "macos")]
+        pet_home_overlay: Mutex::new(None),
         replacing_instance: AtomicBool::new(false),
         channels: Mutex::new(crate::tray_channels::channel_states(&Value::Null)),
         lock: Mutex::new(None),
@@ -468,6 +469,9 @@ fn check_temporary_pet_hide(app: &AppHandle, core: &AppCore) -> Result<(), Strin
     let pet = app.get_webview_window("pet").ok_or("Missing pet")?;
     let context = core.pet.snapshot()["context"].clone();
 
+    if !pet_host::route_remote_back(app)? {
+        return Err("A visible pet did not consume Back".into());
+    }
     core.pet.set_expanded(true);
     if pet_host::temporarily_hide_pet(app, core, &context).is_ok() {
         return Err("An expanded pet accepted temporary hide".into());
@@ -480,8 +484,8 @@ fn check_temporary_pet_hide(app: &AppHandle, core: &AppCore) -> Result<(), Strin
     }
 
     pet_host::temporarily_hide_pet(app, core, &context)?;
-    if !pet_host::route_remote_back(app)? {
-        return Err("Back on the temporarily hidden pet fell through to native clear".into());
+    if pet_host::route_remote_back(app)? {
+        return Err("A temporarily hidden pet consumed Back".into());
     }
     if pet.is_visible().map_err(|e| e.to_string())?
         || main.is_visible().map_err(|e| e.to_string())?
@@ -692,7 +696,6 @@ async fn dock_reopen(app: &AppHandle, fixture: &FixtureState) -> Result<(), Stri
                 if !main.is_visible().map_err(|e| e.to_string())?
                     || main.is_minimized().map_err(|e| e.to_string())?
                     || pet.is_visible().map_err(|e| e.to_string())?
-                    || core.pet_temporarily_hidden.load(Ordering::Relaxed)
                     || core.settings().pet_visible != pet_enabled
                     || core.page_connection.lock().unwrap().presentation() != Presentation::Main
                     || !unsafe { keepwork_startup_smoke_main_intact(native) }
@@ -711,7 +714,87 @@ async fn dock_reopen(app: &AppHandle, fixture: &FixtureState) -> Result<(), Stri
     Ok(())
 }
 
-async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), String> {
+async fn check_focused_composer_back(app: &AppHandle) -> Result<(), String> {
+    let main = app.get_webview_window("main").ok_or("Missing main window")?;
+    let evaluate = |script: &'static str| {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let reply = Mutex::new(Some(reply));
+        let scheduled = main.eval_with_callback(script, move |value| {
+            if let Some(reply) = reply.lock().unwrap().take() { let _ = reply.send(value == "true"); }
+        });
+        async move {
+            scheduled.map_err(|e| e.to_string())?;
+            tokio::time::timeout(Duration::from_secs(2), result).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+        }
+    };
+    if !evaluate(r#"(() => {
+        const editor = document.createElement('div');
+        editor.id = 'chatInput'; editor.contentEditable = 'true'; document.body.append(editor);
+        editor.focus();
+        editor.addEventListener('input', () => editor.dataset.model = editor.textContent);
+        return document.execCommand('insertText', false, 'voice fixture') && editor.dataset.model === 'voice fixture';
+    })()"#).await? { return Err("Could not type into the isolated main composer".into()); }
+    if !super::remote_voice_host::clear_main_composer(app, Instant::now(), || true)?
+        || !evaluate("document.activeElement.id === 'chatInput' && document.activeElement.dataset.model === ''").await?
+    {
+        return Err("Main Back did not clear the keyboard-focused draft".into());
+    }
+    println!("{}", json!({"case":"main-composer-back-without-click"}));
+    Ok(())
+}
+
+// Opt-in foreground scenario. Only this isolated application is activated and zoomed.
+async fn zoomed_home(app: &AppHandle, fixture: &FixtureState) -> Result<(), String> {
+    let entries = fixture.entries.load(Ordering::Relaxed);
+    remote_ui(app, |app, _| {
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        main.maximize().map_err(|e| e.to_string())?;
+        main.set_focus().map_err(|e| e.to_string())
+    }).await?;
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        if ui(app, |app, _| {
+            let main = app.get_webview_window("main").ok_or("Missing main window")?;
+            Ok(main.is_focused().map_err(|e| e.to_string())? && main.is_maximized().map_err(|e| e.to_string())?)
+        }).await? { break; }
+        if Instant::now() >= until { return Err("The isolated zoomed main could not take focus".into()); }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    check_focused_composer_back(app).await?;
+    for enabled in [false, true, false] {
+        for press in 1..=2 {
+            remote_ui(app, move |app, core| {
+                core.update_settings(|s| s.pet_visible = enabled);
+                main_window::toggle_remote_home(app);
+                Ok(())
+            }).await?;
+            // Read state in a later window turn, after any queued native minimize/hide.
+            remote_ui(app, move |app, core| {
+                let main = app.get_webview_window("main").ok_or("Missing main window")?;
+                let pet = app.get_webview_window("pet");
+                let visible = pet.map(|w| w.is_visible()).transpose().map_err(|e| e.to_string())?.unwrap_or(false);
+                let overlay = core.pet_home_overlay.lock().unwrap().is_some();
+                let expected = enabled && press == 1;
+                if visible != expected || overlay != expected || pet_host::route_remote_back(app)? != expected ||
+                    !main.is_visible().map_err(|e| e.to_string())? || main.is_minimized().map_err(|e| e.to_string())? ||
+                    !main.is_maximized().map_err(|e| e.to_string())? ||
+                    core.settings().pet_visible != enabled ||
+                    core.page_connection.lock().unwrap().presentation() != Presentation::Main ||
+                    !unsafe { keepwork_startup_smoke_main_intact(main.ns_window().map_err(|e| e.to_string())?) }
+                {
+                    return Err(format!("Zoomed main changed on Home: enabled={enabled}, press={press}, pet={visible}, overlay={overlay}"));
+                }
+                Ok(())
+            }).await?;
+        }
+        println!("{}", json!({"case":"zoomed-main-home-overlay","petEnabled":enabled,"consecutiveHomePresses":2}));
+    }
+    if fixture.entries.load(Ordering::Relaxed) != entries { return Err("Home reloaded the retained main document".into()); }
+    println!("startup-smoke: OK (real zoomed Tauri main, remote Home dispatch)");
+    Ok(())
+}
+
+async fn exercise(app: AppHandle, fixture: Arc<FixtureState>, home_overlay: bool) -> Result<(), String> {
     wait_count(&fixture.statuses, 1, "private status IPC").await?;
     wait_count(&fixture.retries, 1, "coalesced private retry IPC").await?;
     wait_view(
@@ -762,6 +845,8 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
     }
     wait_view(&app, "first-screen-marker-awaits-css", Phase::Connecting, false, None, 2).await?;
     wait_view(&app, "foreground-ready", Phase::Ready, true, Some(false), 8).await?;
+
+    if home_overlay { return zoomed_home(&app, &fixture).await; }
 
     reload(&app, &fixture, false).await?;
     wait_view(
@@ -926,8 +1011,9 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
         // Allow production pet window creation to use only this private fixture.
         let mut context = tauri::generate_context!(test = true);
         context.config_mut().build.dev_url = Some(fixture.origin.parse().unwrap());
+        let home_overlay = std::env::args().any(|arg| arg == "--home-overlay");
         let app = tauri::Builder::default()
-            .activate_ignoring_other_apps(false)
+            .activate_ignoring_other_apps(home_overlay)
             .enable_macos_default_menu(false)
             .manage(core)
             .invoke_handler(tauri::generate_handler![
@@ -939,8 +1025,8 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
             ])
             .setup(move |app| {
                 let handle = app.handle().clone();
-                handle.set_activation_policy(tauri::ActivationPolicy::Accessory)?;
-                if !unsafe { keepwork_startup_smoke_passive_application() } {
+                handle.set_activation_policy(if home_overlay { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory })?;
+                if !home_overlay && !unsafe { keepwork_startup_smoke_passive_application() } {
                     return Err("Cannot suppress activation for isolated smoke".into());
                 }
                 let page_core = setup_core.clone();
@@ -970,7 +1056,7 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                     })
                     .build()?;
                 main_window::observe_main_minimize(&main)?;
-                main.set_focusable(false)?;
+                main.set_focusable(home_overlay)?;
                 main.set_ignore_cursor_events(true)?;
                 let native = main.ns_window()?;
                 if !unsafe { keepwork_startup_smoke_capture_main(native) } {
@@ -1012,7 +1098,7 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                 main_window::sync_window_presentation(&handle, false);
                 let test_app = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let code = match exercise(test_app.clone(), state).await {
+                    let code = match exercise(test_app.clone(), state, home_overlay).await {
                         Ok(()) => 0,
                         Err(error) => {
                             eprintln!("startup-smoke: FAILED: {error}");

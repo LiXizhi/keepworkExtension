@@ -38,7 +38,15 @@ async fn remote_dialogue_buttons_and_late_start_acknowledgments_stay_with_their_
         ("pet", "interrupt", "")
     );
     assert!(!dialogue.active());
+    #[cfg(target_os = "macos")]
+    assert!(!keepwork_remote_dialogue_ok_edge(true), "a hidden pet leaves this press with the OS");
     dialogue.enter();
+    #[cfg(target_os = "macos")]
+    {
+        assert!(!keepwork_remote_dialogue_ok_edge(true), "held native Return cannot become a new dialogue press");
+        assert!(!keepwork_remote_dialogue_ok_edge(false));
+        assert!(!take_ok());
+    }
     let (label, action, first, _, late) = received.recv().await.unwrap();
     assert_eq!((label, action.as_str()), ("pet", "enter"));
     assert!(uuid::Uuid::parse_str(&first).is_ok());

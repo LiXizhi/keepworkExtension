@@ -8,27 +8,46 @@ use tokio::sync::oneshot;
 // CG keyboard events are accepted only after their sender is identified as the
 // selected RC003. Keep both edges of a consumed OK out of the foreground app.
 static CONTROLS: AtomicBool = AtomicBool::new(false);
-static OK_HELD: AtomicBool = AtomicBool::new(false);
+// Remember the recipient of the first down through repeats and key-up, including
+// native passthrough if a pet or dialogue appears while Return is held.
+static OK_EDGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(target_os = "macos")]
+static DEVICE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static OK_PRESSED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub extern "C" fn keepwork_remote_dialogue_ok_edge(down: bool) -> bool {
+    const NATIVE: u8 = 1;
+    const CONSUMED: u8 = 2;
     if !down {
-        return OK_HELD.swap(false, Ordering::AcqRel);
+        return OK_EDGE.swap(0, Ordering::AcqRel) == CONSUMED;
     }
-    if OK_HELD.load(Ordering::Acquire) {
-        return true;
+    match OK_EDGE.load(Ordering::Acquire) {
+        NATIVE => return false,
+        CONSUMED => return true,
+        _ => {}
     }
-    if !CONTROLS.load(Ordering::Acquire) {
-        return false;
-    }
-    OK_HELD.store(true, Ordering::Release);
-    OK_PRESSED.store(true, Ordering::Release);
-    true
+    let consumed = if CONTROLS.load(Ordering::Acquire) {
+        OK_PRESSED.store(true, Ordering::Release);
+        true
+    } else {
+        extern "C" { fn keepwork_pet_queue_ok(device_epoch: u64) -> bool; }
+        unsafe { keepwork_pet_queue_ok(DEVICE_EPOCH.load(Ordering::Acquire)) }
+    };
+    OK_EDGE.store(if consumed { CONSUMED } else { NATIVE }, Ordering::Release);
+    consumed
+}
+#[cfg(target_os = "macos")]
+pub(crate) fn pet_ok_current(device_epoch: u64) -> bool {
+    extern "C" { fn keepwork_voice_input_modifiers() -> bool; }
+    DEVICE_EPOCH.load(Ordering::Acquire) == device_epoch && !CONTROLS.load(Ordering::Acquire)
+        && !unsafe { keepwork_voice_input_modifiers() }
 }
 pub(super) fn release_device() {
-    OK_HELD.store(false, Ordering::Release);
+    #[cfg(target_os = "macos")]
+    DEVICE_EPOCH.fetch_add(1, Ordering::AcqRel);
+    OK_EDGE.store(0, Ordering::Release);
     OK_PRESSED.store(false, Ordering::Release);
 }
 pub(super) fn take_ok() -> bool {

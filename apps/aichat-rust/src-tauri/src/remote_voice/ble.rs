@@ -16,6 +16,10 @@ use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
+#[path = "ble_startup.rs"]
+mod startup;
+use startup::{NotificationInbox, TimedNotification};
+
 pub(super) const BLUETOOTH_OFF: &str = "没有已开启的 BLE 蓝牙适配器，请开启系统蓝牙后重试。";
 pub(super) const NO_ADAPTER: &str = "没有可用的 BLE 蓝牙适配器，请开启蓝牙后重试。";
 
@@ -332,7 +336,8 @@ struct Recognition {
     work: RecognitionWork,
     audio: Option<tokio::sync::mpsc::Sender<Vec<i16>>>,
     feedback: Option<std::sync::Arc<RecordingFeedback>>,
-    recording: bool,
+    stream_started: bool,
+    received_audio: bool,
     released: bool,
     interrupted: Option<String>,
     result: Option<Result<String, RecognitionError>>,
@@ -363,21 +368,25 @@ impl Recognition {
             });
             recognize_for_focus(focus, stream, move |pcm| transcribe(pcm, preview)).await
         };
-        Self { work: Box::pin(work), audio: Some(audio), feedback, recording: false,
+        Self { work: Box::pin(work), audio: Some(audio), feedback, stream_started: false, received_audio: false,
             released: false, interrupted: None, result: None }
     }
-    fn recording(&mut self) {
-        self.recording = true;
-        if let Some(owner) = &self.feedback { (owner.notify)(RecordingPhase::Recording); }
-    }
-    fn enqueue(&mut self, pcm: Vec<i16>) {
-        if pcm.is_empty() || self.result.is_some() { return; }
+    // Report recording only after actual decoded PCM arrives. A stream-start
+    // notification by itself is possible even when a waking mic sends no audio.
+    fn enqueue(&mut self, pcm: Vec<i16>) -> bool {
+        if pcm.is_empty() || self.result.is_some() { return false; }
+        let first = !self.received_audio;
+        if first {
+            self.received_audio = true;
+            if let Some(owner) = &self.feedback { (owner.notify)(RecordingPhase::Recording); }
+        }
         if let Some(audio) = &self.audio {
             if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = audio.try_send(pcm) {
                 self.interrupted = Some("语音处理积压超过限制。".into());
                 self.audio.take();
             }
         }
+        first
     }
     fn release(&mut self) {
         if let Some(owner) = &self.feedback { (owner.notify)(RecordingPhase::Transcribing); }
@@ -498,7 +507,7 @@ async fn connection(
     let device_id = peripheral.id();
     let chars = peripheral.characteristics();
     let find = |id| {
-        chars.iter().find(|c| c.uuid == id).cloned().ok_or_else(|| {
+        chars.iter().find(|c| c.service_uuid == SERVICE && c.uuid == id).cloned().ok_or_else(|| {
             let known = LAST_VALIDATED.lock().unwrap().as_ref() == Some(&device_id);
             missing_atvv(chars.is_empty(), known)
         })
@@ -506,33 +515,42 @@ async fn connection(
     let tx = find(TX)?;
     let control = find(CONTROL)?;
     let audio = find(AUDIO)?;
-    let mut notifications = operation(cancel, peripheral.notifications(), 5).await?;
-    operation(cancel, peripheral.subscribe(&control), 5).await?;
-    operation(cancel, peripheral.subscribe(&audio), 5).await?;
-    write(peripheral, &tx, GET_CAPS, cancel).await?;
-    let caps = async {
-        while let Some(notification) = notifications.next().await {
-            if notification.uuid == CONTROL && notification.value.first() == Some(&0x0b) {
-                return Caps::parse(&notification.value).map_err(|message| Failure {
-                    message,
-                    retry: false,
-                });
-            }
-        }
-        Err(Failure::temporary("遥控器在协商语音能力时断开。"))
+    let stream = operation(cancel, peripheral.notifications(), 5).await?;
+    let mut notifications = NotificationInbox::new(stream);
+    let setup = async {
+        // Register both channels without waiting for the first subscription's
+        // acknowledgement. The reader is already listening to both.
+        tokio::try_join!(
+            operation(cancel, peripheral.subscribe(&control), 5),
+            operation(cancel, peripheral.subscribe(&audio), 5),
+        )?;
+        write(peripheral, &tx, GET_CAPS, cancel).await
     };
+    let mut startup_target = None;
     let mut stop = cancel.clone();
-    let caps = tokio::select! {
+    let negotiation = tokio::select! {
         biased;
-        _=cancelled(&mut stop)=>return Ok(()),
-        result=timeout(Duration::from_secs(5),caps)=>result.map_err(|_|Failure::temporary("ATVV 能力协商超时，请唤醒遥控器后重试。"))??,
+        _ = cancelled(&mut stop) => return Ok(()),
+        result = startup::negotiate(&mut notifications, setup, || {
+            service.update(generation, "preparing-microphone", "", None);
+            if !service.dialogue.active() {
+                startup_target = Some(service.prepare_recording_focus(generation));
+            }
+        }) => result,
+    };
+    let (caps, mut backlog) = match negotiation {
+        Ok(ready) => ready,
+        Err(error) => {
+            if let Some(Ok(Some(owner))) = &startup_target { (owner.notify)(RecordingPhase::NoAudio); }
+            return Err(error);
+        }
     };
     *LAST_VALIDATED.lock().unwrap() = Some(device_id);
-    service.arm(generation).map_err(|message| Failure {
-        message,
-        retry: false,
-    })?;
-    service.update(generation, "ready", "", None);
+    if let Err(message) = service.arm(generation) {
+        if let Some(Ok(Some(owner))) = &startup_target { (owner.notify)(RecordingPhase::NoAudio); }
+        return Err(Failure::permanent(&message));
+    }
+    if startup_target.is_none() { service.update(generation, "ready", "", None); }
     let mut ptt = Ptt::new(caps);
     let mut gesture = RecordGesture::default();
     let mut recognition: Option<Recognition> = None;
@@ -540,10 +558,14 @@ async fn connection(
     let mut heartbeat = tokio::time::interval(Duration::from_millis(50));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut health_ticks = 0;
+    let mut cleared_at = None;
     loop {
         service.dispatch_home(generation);
         if super::dialogue::take_ok() { service.dialogue.exit("ok"); }
         if service.poll_clear(generation) {
+            cleared_at = Some(Instant::now());
+            startup_target.take();
+            gesture = RecordGesture::default();
             cancel_utterance(&mut ptt, &mut recognition);
             service.clear(generation);
         }
@@ -570,6 +592,9 @@ async fn connection(
             },
             _=heartbeat.tick()=>{
                 if service.poll_clear(generation) {
+                    cleared_at = Some(Instant::now());
+                    startup_target.take();
+                    gesture = RecordGesture::default();
                     cancel_utterance(&mut ptt,&mut recognition);
                     service.clear(generation);
                 }
@@ -582,6 +607,9 @@ async fn connection(
                         job.audio.take();
                         service.update(generation, "recording-limit", message, None);
                     } else {
+                        if let Some(owner) = recognition.as_ref().and_then(|job| job.feedback.as_ref()) {
+                            (owner.notify)(RecordingPhase::NoAudio);
+                        }
                         let close=ptt.abort(); write(peripheral,&tx,&close,cancel).await?;
                         return Err(Failure::temporary("遥控器未开始传输音频，正在重新连接语音通道；请松开语音键后重试。"));
                     }
@@ -589,11 +617,17 @@ async fn connection(
                 health_ticks+=1;
                 if health_ticks%20==0 && !operation(cancel,peripheral.is_connected(),3).await? { return Err(Failure::temporary("遥控器连接已断开。")); }
             },
-            notification=notifications.next()=>{
-                let Some(notification)=notification else { return Err(Failure::temporary("遥控器音频连接已结束。")); };
+            received = async {
+                if let Some(item) = backlog.pop() { Ok(item) } else { notifications.next().await }
+            } => {
+                let TimedNotification { packet: notification, at } = received?;
                 let actions=if notification.uuid==CONTROL {
                     if !service.current(generation) { return Ok(()); }
-                    handle_record_control(&notification.value, Instant::now(), &service.dialogue, &mut gesture, &mut ptt, &mut recognition)
+                    if cleared_at.is_some_and(|cutoff| at <= cutoff) {
+                        ptt.discard_buffered_control(&notification.value)
+                    } else {
+                        handle_record_control(&notification.value, at, &service.dialogue, &mut gesture, &mut ptt, &mut recognition)
+                    }
                 } else if notification.uuid==AUDIO { ptt.audio(&notification.value).map(|_|vec![]) } else { Ok(vec![]) };
                 let actions=match actions {
                     Ok(actions)=>actions,
@@ -622,7 +656,9 @@ async fn connection(
                     }
                 };
                 while let Some(pcm) = ptt.take_chunk() {
-                    if let Some(job) = &mut recognition { job.enqueue(pcm); }
+                    if recognition.as_mut().is_some_and(|job| job.enqueue(pcm)) {
+                        service.update(generation, "recording", "", None);
+                    }
                 }
                 if notification.uuid == CONTROL && matches!(notification.value.first(), Some(0x00 | 0x13)) {
                     // An interrupted capture discarded its tail until this physical release.
@@ -634,11 +670,21 @@ async fn connection(
                 }
                 for action in actions {
                     match action {
-                        Action::AcknowledgePress(data) => write(peripheral, &tx, &data, cancel).await?,
+                        Action::AcknowledgePress(data) => {
+                            notifications.drain_available(&mut backlog)?;
+                            if !backlog.mic_open_obsolete() { write(peripheral, &tx, &data, cancel).await?; }
+                        }
                         Action::OpenMic(data)=>{
                             // MIC_OPEN is the earliest accepted key-down indication. Signal the pet
                             // before waiting for its GATT response or the first audio packet.
-                            let mut job = Recognition::start(service.prepare_recording_focus(generation), cancel.clone(), speech.clone());
+                            service.update(generation, "preparing-microphone", "", None);
+                            let target = startup_target.take().unwrap_or_else(|| service.prepare_recording_focus(generation));
+                            let mut job = Recognition::start(target, cancel.clone(), speech.clone());
+                            notifications.drain_available(&mut backlog)?;
+                            if backlog.mic_open_obsolete() {
+                                recognition = Some(job);
+                                continue;
+                            }
                             // Poll both immediately. The WebSocket handshake must not delay MIC_OPEN,
                             // and the GATT write acknowledgement must not delay the handshake.
                             let mic = write(peripheral, &tx, &data, cancel);
@@ -654,14 +700,22 @@ async fn connection(
                         }
                         Action::State(state)=>{
                             if state == "recording" {
-                                if recognition.as_ref().is_some_and(|job| job.recording) {
+                                if recognition.as_ref().is_some_and(|job| job.stream_started) {
                                     // ATVV ignores duplicate stream IDs. A new ID supersedes all earlier work.
                                     recognition = None;
                                 }
                                 let job = recognition.get_or_insert_with(|| Recognition::start(
-                                    service.prepare_recording_focus(generation), cancel.clone(), speech.clone()));
-                                job.recording();
+                                    startup_target.take().unwrap_or_else(|| service.prepare_recording_focus(generation)),
+                                    cancel.clone(), speech.clone()));
+                                job.stream_started = true;
+                                service.update(generation, "preparing-microphone", "", None);
+                                continue;
                             } else if state != "busy" {
+                                if state == "no-audio" {
+                                    if let Some(owner) = recognition.as_ref().and_then(|job| job.feedback.as_ref()) {
+                                        (owner.notify)(RecordingPhase::NoAudio);
+                                    }
+                                }
                                 recognition = None;
                             }
                             service.update(generation,state,"",None);
@@ -688,7 +742,8 @@ async fn connection(
                 Ok(text) | Err(RecognitionError::Partial(text, _)) => !text.is_empty(),
                 _ => false,
             };
-            if pending_text {
+            let owner = job.feedback.as_deref();
+            if pending_text && !owner.is_some_and(|target| target.pet_delivery.is_some()) {
                 let ready = tokio::select! {
                     biased;
                     _=cancelled(&mut stop)=>return Ok(()),
@@ -697,15 +752,18 @@ async fn connection(
                 if let Err(blocked) = ready { result = Err(blocked); }
             }
             if service.poll_clear(generation) {
+                cleared_at = Some(Instant::now());
+                startup_target.take();
+                gesture = RecordGesture::default();
                 cancel_utterance(&mut ptt, &mut recognition);
                 service.clear(generation);
                 continue;
             }
             match result {
                 Ok(text) if text.is_empty() => service.update(generation, "ready", "", None),
-                Ok(text) => service.deliver(generation, &text),
+                Ok(text) => { service.deliver_recognition(generation, owner, &text, true).await; }
                 Err(RecognitionError::Partial(text, error)) => {
-                    if text.is_empty() || service.deliver_literal(generation, &text) {
+                    if text.is_empty() || service.deliver_recognition(generation, owner, &text, false).await {
                         service.update(generation, "cloud-error", &format!("部分语音未能识别。{error}"), None);
                     }
                 }
@@ -715,6 +773,10 @@ async fn connection(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ble_startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 #[path = "ble_gesture_tests.rs"]
@@ -735,9 +797,10 @@ mod tests {
         use std::sync::Mutex;
         let events = Arc::new(Mutex::new(Vec::new()));
         let ui = events.clone();
-        let target = RecordingFeedback { focus: None, notify: Box::new(move |phase| {
+        let target = RecordingFeedback { pet_delivery: None, focus: None, notify: Box::new(move |phase| {
             ui.lock().unwrap().push(match phase {
                 RecordingPhase::Recording => "record".into(),
+                RecordingPhase::NoAudio => "no-audio".into(),
                 RecordingPhase::Preview(text) => text,
                 RecordingPhase::Transcribing => "waiting".into(),
                 RecordingPhase::End => "end".into(),
@@ -758,7 +821,8 @@ mod tests {
         }));
         assert!(futures_util::poll!(&mut job.work).is_pending());
         assert!(connected.load(std::sync::atomic::Ordering::Relaxed));
-        job.recording();
+        job.stream_started = true;
+        assert!(events.lock().unwrap().is_empty(), "a stream start alone contains no audio");
         let mut ptt = Ptt::new(Caps { version: 0x100, frame_size: 1 });
         ptt.control(&[4,0,2,1]).unwrap();
         for i in 0..800 {

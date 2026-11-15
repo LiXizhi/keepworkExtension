@@ -32,7 +32,7 @@ test('begin-input is an explicit local settings action without a remote keyboard
   assert.doesNotMatch(bridge, /remote_voice_begin_input/);
 });
 
-test('Home and Back are independent remote controls and OK retains native Enter', () => {
+test('Home and Back are independent controls and the HID reader never synthesizes Enter', () => {
   const source = read('src-tauri/src/remote_voice/buttons.rs');
   const mac = read('src-tauri/src/remote_voice/buttons_macos.m');
   const windows = read('src-tauri/src/remote_voice/home_windows.rs');

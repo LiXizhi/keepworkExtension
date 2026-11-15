@@ -181,6 +181,8 @@ class RemoteVoiceController {
     const auto state = snapshot->GetString("state").ToString();
     std::wstring status = L"状态：";
     if (state == "waiting-paired") status += L"等待系统已配对的小米遥控器";
+    else if (state == "preparing-microphone") status += L"正在准备麦克风，请保持按住语音键";
+    else if (state == "no-audio") status += L"未收到音频，请重新按住语音键";
     else if (state == "scanning" || state == "connecting") status += L"正在连接遥控器";
     else if (state == "ready") status += L"就绪，按住语音键说话，松手后识别";
     else if (state == "recording") status += L"录音中，松开语音键结束";
@@ -195,7 +197,7 @@ class RemoteVoiceController {
     if (!error.empty()) status += L"\r\n" + error.substr(0, 500);
     { std::lock_guard<std::mutex> lock(mutex_);
       status_ = status; available_ = true; running_ = snapshot->GetBool("running");
-      begin_ready_ = running_ && state != "stopping" && state != "scanning" && state != "connecting" && state != "reconnecting";
+      begin_ready_ = running_ && state != "stopping" && state != "scanning" && state != "connecting" && state != "preparing-microphone" && state != "reconnecting";
       auto_paused_ = snapshot->GetBool("autoPaused");
       if (const auto config = snapshot->GetDictionary("config")) {
         auto_start_ = config->GetBool("autoStart"); device_ = config->GetString("device").ToWString();
