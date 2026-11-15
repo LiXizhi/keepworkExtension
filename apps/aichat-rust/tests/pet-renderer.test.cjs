@@ -29,12 +29,11 @@ async function renderer(initial = snapshot(), { speech } = {}) {
   const windowListeners = new Map();
   const frames = new Map();
   const resizeObservers = [];
-  const surfaceIds = ["pet", "panel", "bubble", "compact-controls", "exit-bubble", "permission-bubble"];
+  const surfaceIds = ["pet", "panel", "bubble", "exit-bubble", "permission-bubble"];
   const defaultRects = {
     pet: { left: 800, top: 650, width: 112, height: 128 },
     panel: { left: 560, top: 430, width: 348, height: 190 },
     bubble: { left: 550, top: 200, width: 348, height: 100 },
-    "compact-controls": { left: 780, top: 620, width: 100, height: 40 },
     "exit-bubble": { left: 550, top: 300, width: 348, height: 220 },
     "permission-bubble": { left: 500, top: 250, width: 348, height: 210 },
   };
@@ -1033,7 +1032,6 @@ test("the pet displays the main phone phase without claiming audio or opening th
       pet.publish({ ...status, reply: { text: "Call transcript." }, attention: "Speaking", compactVoice: true });
       assert.equal(pet.element("panel").hidden, true);
       assert.equal(pet.element("bubble").hidden, true);
-      assert.equal(pet.element("compact-controls").hidden, true);
       assert.equal(icon.hidden, false);
       assert.equal(icon.dataset.state, state);
       assert.equal(pet.element("badge").hidden, true);
@@ -1084,12 +1082,28 @@ test("phone start errors offer to open the desktop while the pet is collapsed", 
   assert.equal(pet.element("bubble").hidden, true);
 });
 
-test("existing pet persona calls retain their voice controls and phone status", async () => {
+test("a collapsed pet has no recording or call toolbar even when both features are available", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "../pet.html"), "utf8");
+  assert.doesNotMatch(html, /id="compact-(?:controls|record|call)"/);
   const pet = await renderer(petTurn({ expanded: false, compactVoice: true, canCall: true,
-    voice: { active: true, state: "listening" } }));
+    classroomRecording: { enabled: false, phase: "idle" } }));
+  const status = pet.element("compact-status");
+  assert.equal(status.hidden, true);
+  assert.deepEqual(surfaceIds(pet), []);
+  pet.publish({ classroomRecording: { enabled: true, phase: "recording" } });
+  assert.equal(status.hidden, false);
+  assert.equal(status.textContent, "录音中");
+  pet.publish({ classroomRecording: null, voice: { active: true, state: "listening" } });
+  await pet.flushLayout();
+  assert.deepEqual(surfaceIds(pet), []);
   assert.equal(pet.element("dialogue-icon").hidden, false);
-  assert.equal(pet.element("compact-controls").hidden, false);
-  assert.equal(pet.element("compact-call")["aria-pressed"], "true");
+  pet.publish({ expanded: true });
+  assert.equal(status.hidden, true);
+  assert.equal(pet.element("panel").hidden, false);
+  assert.equal(pet.element("call").disabled, false);
+  pet.element("call").click();
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["call"]);
   pet.publish({ voice: { active: false } });
   assert.equal(pet.element("dialogue-icon").hidden, true);
 });
@@ -1309,7 +1323,7 @@ test("hit regions follow the visible UI surfaces and exclude transparent stack g
   const pet = await renderer();
   const transitions = [
     [{ expanded: false, reply: { text: "回复内容" } }, ["bubble"]],
-    [{ reply: null, compactVoice: true }, ["compact-controls"]],
+    [{ reply: null, compactVoice: true }, []],
     [{ exitPrompt: { id: "exit-1", personas: [] } }, ["exit-bubble"]],
     [{ permission: { id: "permission-1", client: "QA" } }, ["permission-bubble"]],
     [{ exitPrompt: null, permission: null, expanded: true }, ["panel"]],

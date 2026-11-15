@@ -192,7 +192,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let hitRegionsSignature = "";
   let jelly: Animation | undefined;
   const artStyle: Record<string, string> = {};
-  const hitSurfaceIds = ["pet", "panel", "bubble", "compact-controls", "exit-bubble", "permission-bubble"];
+  const hitSurfaceIds = ["pet", "panel", "bubble", "exit-bubble", "permission-bubble"];
   const hitSurfaceSelector = hitSurfaceIds.map((id) => `#${id}`).join(", ");
 
   function scheduleHitRegions(): void {
@@ -689,26 +689,6 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
     const rec = state.classroomRecording;
     const active = !!state.voice?.active;
-    $("compact-controls").hidden = expanded || !!exit || !!permission || !!state.phoneState || !!state.remoteDialogue?.state || !state.compactVoice;
-    const compactRecordBtn = $<HTMLButtonElement>("compact-record");
-    compactRecordBtn.hidden = !rec;
-    compactRecordBtn.textContent = rec?.enabled ? "停止录音" : "开始录音";
-    compactRecordBtn.setAttribute("aria-pressed", String(!!rec?.enabled));
-    compactRecordBtn.disabled =
-      !state.ready ||
-      !!state.dictating ||
-      (!rec?.enabled && active) ||
-      ["starting", "stopping"].includes(rec?.phase || "");
-
-    const compactCallBtn = $<HTMLButtonElement>("compact-call");
-    compactCallBtn.textContent = active ? "停止语音" : "开始语音";
-    compactCallBtn.setAttribute("aria-pressed", String(active));
-    compactCallBtn.disabled =
-      !state.ready ||
-      !!state.dictating ||
-      (!active && !state.canCall) ||
-      ["starting", "stopping"].includes(state.voice?.state || "");
-
     const compactVoiceStateMap: Record<string, string> = {
       starting: "语音连接中",
       stopping: "正在结束语音",
@@ -719,13 +699,17 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       starting: "录音连接中",
       stopping: "正在停止录音",
     };
-    $("compact-status").textContent =
+    const compactStatus = $("compact-status");
+    compactStatus.textContent =
       localError ||
       state.error ||
       rec?.error ||
       (active
         ? compactVoiceStateMap[state.voice?.state || ""] || (state.voice?.muted ? "语音已静音" : "语音中")
         : recPhaseMap[rec?.phase || ""] || "");
+
+    compactStatus.hidden = !compactStatus.textContent || expanded || !!exit || !!permission ||
+      !!state.phoneState || !!state.remoteDialogue?.state || !state.compactVoice;
 
     adoptNativeDrag(next);
     if (next.dragging === false && pointer?.tracking && !staleDrag &&
@@ -844,7 +828,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     expanded = true;
     panel.classList.add("remote-voice-open");
     panel.hidden = false;
-    $("compact-controls").hidden = true;
+    $("compact-status").hidden = true;
     positionLayers();
     scheduleHitRegions();
     draftEl.focus();
@@ -953,11 +937,6 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
     if (name === "stop" || draftEl.value.trim()) void action(name);
   };
-
-  $("compact-record").onclick = () =>
-    void action(state.classroomRecording?.enabled ? "record-stop" : "record-start");
-  $("compact-call").onclick = () =>
-    void action(state.voice?.active ? "voice-stop" : "voice-start");
 
   for (const name of ["dictation", "call", "mute"]) {
     $(name).onclick = () => {
