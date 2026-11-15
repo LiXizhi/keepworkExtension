@@ -30,5 +30,6 @@ test('CEF native menu, theme and pet regressions run against production C++ stat
   assert.match(output, /Test\s+#\d+:\s+cef-pet-geometry\s/);
   assert.match(output, /Test\s+#\d+:\s+cef-popup-layout\s/);
   assert.match(output, /Test\s+#\d+:\s+cef-pet-chat-state\s/);
+  assert.match(output, /Test\s+#\d+:\s+cef-pet-input-policy\s/);
   assert.match(output, /100% tests passed/);
 });

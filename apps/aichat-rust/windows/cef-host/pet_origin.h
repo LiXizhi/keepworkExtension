@@ -6,6 +6,13 @@ inline bool TrustedPetFrame(const Url& url, bool popup, bool main) {
   return !popup && main && Https(url) && url.host == "keepwork.com" &&
     (url.path == "/chat" || url.path == "/chat/");
 }
+// This scope permits only the microphone. Camera/display capture, popup and
+// subframe requests never inherit the trusted chat document's consent.
+inline bool TrustedMicrophoneRequest(const Url& requesting, const Url& frame,
+                                     bool popup, bool main, unsigned permissions) {
+  return permissions == 1 && TrustedPetFrame(frame, popup, main) &&
+    Https(requesting) && requesting.host == "keepwork.com";
+}
 // Browser-owned navigation challenge plus renderer-owned document identity.
 // A delayed connect/state from an earlier navigation cannot rebind the panel.
 class PetDocumentBinding {

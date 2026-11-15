@@ -1,5 +1,5 @@
-// The main chat document receives a text-only pet projection transport.
-// Files, terminal, media and other native APIs remain unavailable to renderers.
+// The trusted main chat document receives a bounded pet conversation transport.
+// Microphone access requires native consent; files/terminal APIs stay unavailable.
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -28,6 +28,9 @@
 #include "pet_script.h"
 #include "pet_transport.h"
 #include "pet_chat_state.h"
+#include "remote_voice_controller.h"
+#include "include/cef_jsdialog_handler.h"
+#include "maintenance_controller.h"
 #include "include/cef_v8.h"
 #include "include/cef_process_message.h"
 #if CEF_VERSION_MAJOR == 109
@@ -48,6 +51,7 @@ struct Options {
   std::wstring ready_event;
   std::wstring launcher;
   bool background = false;
+  bool maintenance = false;
 };
 
 void Error(const wchar_t* message) {
@@ -65,6 +69,7 @@ bool ReadOptions(Options& options) {
       options.background = true;
       continue;
     }
+    if (arg == L"--maintenance") { options.maintenance = true; continue; }
     const auto read = [&](const std::wstring& name, std::wstring& value) {
       if (arg.compare(0, name.size() + 1, name + L"=") == 0) {
         value = arg.substr(name.size() + 1);
@@ -225,6 +230,7 @@ class Client final : public CefClient,
                      public CefPermissionHandler,
                      public CefKeyboardHandler,
                      public CefContextMenuHandler,
+                     public CefJSDialogHandler,
                      public CefLoadHandler {
  public:
   explicit Client(Options options) : options_(std::move(options)) {}
@@ -236,7 +242,22 @@ class Client final : public CefClient,
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
+  CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+
+  bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser, const CefString& message,
+      bool is_reload, CefRefPtr<CefJSDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (browser->GetIdentifier() != main_id_ || is_reload || !maintenance_.awaiting_close()) return false;
+    auto detail = message.ToWString();
+    if (detail.size() > 4096) detail.resize(4096);
+    const auto text = L"网页有未完成的操作。仍要退出并安装更新吗？\n\n" + detail;
+    const bool leave = MessageBoxW(window_frame_.window(), text.c_str(), L"Keepwork 更新",
+      MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) == IDYES;
+    if (!leave) maintenance_.CancelInstall();
+    callback->Continue(leave, CefString());
+    return true;
+  }
 
   keepwork_cef::WindowFrame& window_frame() { return window_frame_; }
 
@@ -265,7 +286,9 @@ class Client final : public CefClient,
     browsers_.push_back(browser);
     if (browser->IsPopup()) return;
     main_id_ = browser->GetIdentifier();
+    remote_voice_.Initialize(options_.profile);
     window_frame_.EnableServiceLauncher(!options_.launcher.empty());
+    window_frame_.EnableMaintenance(options_.maintenance && !options_.launcher.empty());
     window_frame_.Attach(browser->GetHost()->GetWindowHandle(),
       [browser] { return browser->GetHost()->TryCloseBrowser(); },
       [browser] { browser->GetHost()->SetFocus(true); },
@@ -273,7 +296,12 @@ class Client final : public CefClient,
       [this, browser](keepwork_cef::WindowCommand command) { RunCommand(browser, command); }, options_.background, options_.profile);
     window_frame_.SetupPetChat([this](keepwork_cef::PetChatAction action) { PetAction(action); },
       [this](std::wstring text) { pet_state_.Edit(text); UpdatePet(); }, [this] { PetTick(); },
-      [this] { if (pet_state_.CancelUnsubmittedInput()) UpdatePet(); });
+      [this] { if (pet_state_.CancelUnsubmittedInput()) UpdatePet(); }, [this] { StopPetCapture(); });
+    if (options_.maintenance && !options_.launcher.empty()) {
+      maintenance_.Start(window_frame_.window(), options_.launcher, [this] { window_frame_.Quit(); },
+        [this](const std::wstring& message) { window_frame_.NotifyUpdate(message); });
+      window_frame_.SetupMaintenance([this] { maintenance_.Tick(); });
+    }
     UpdatePet();
   }
 
@@ -384,6 +412,9 @@ class Client final : public CefClient,
           return candidate->GetIdentifier() == closing_id;
         }), browsers_.end());
     if (closing_id == main_id_) {
+      remote_voice_.Shutdown();
+      maintenance_.AcknowledgeClosed();
+      maintenance_.Stop();
       ResetPet();
       // Parent teardown follows CEF's TryCloseBrowser protocol. Release any
       // remaining callbacks only when CEF finishes the browser close.
@@ -417,7 +448,22 @@ class Client final : public CefClient,
   bool OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser,
       CefRefPtr<CefFrame> frame, const CefString& origin, uint32_t permissions,
       CefRefPtr<CefMediaAccessCallback> callback) override {
-    callback->Cancel();
+    CEF_REQUIRE_UI_THREAD();
+    static_assert(CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE == 1);
+    if (browser->GetIdentifier() != main_id_ || !frame ||
+        !keepwork_cef::TrustedMicrophoneRequest(Parse(origin), Parse(frame->GetURL()), browser->IsPopup(), frame->IsMain(), permissions)) {
+      callback->Cancel(); return true;
+    }
+    const auto document = pet_binding_.document();
+    const auto owner = pet_state_.snapshot().context;
+    const HWND parent = window_frame_.pet_chat().visible() ? window_frame_.pet_chat().window() : window_frame_.window();
+    const bool allow = MessageBoxW(parent,
+      L"允许 https://keepwork.com 使用麦克风进行语音输入或通话吗？\n\n音频将按 AIChat 当前语音设置发送给语音服务。仅允许本次请求，可通过停止输入或结束通话关闭麦克风。",
+      L"Keepwork · 麦克风权限", MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) == IDYES;
+    // The native prompt may pump navigation/account events. Revalidate before granting.
+    if (allow && document == pet_binding_.document() && owner == pet_state_.snapshot().context &&
+        keepwork_cef::PetFrame(browser, frame)) callback->Continue(permissions);
+    else callback->Cancel();
     return true;
   }
 
@@ -496,6 +542,17 @@ class Client final : public CefClient,
         !PetString(object, "draft", 32000, state.draft) || !PetString(object, "reply", 8000, state.reply) ||
         !PetString(object, "attention", 2000, state.attention) || !PetString(object, "error", 2000, state.error)) return false;
     state.context = CefString(context).ToString(); state.target = CefString(target).ToString();
+    // Optional media fields preserve old webpage text/default contracts.
+    if (object->GetType("canDictate") == VTYPE_BOOL) state.can_dictate = object->GetBool("canDictate");
+    if (object->GetType("canCall") == VTYPE_BOOL) state.can_call = object->GetBool("canCall");
+    if (object->GetType("petDictationAudioVersion") == VTYPE_INT && object->GetInt("petDictationAudioVersion") == 1) state.dictation_audio = 1;
+    if (object->GetType("petVoiceAudioVersion") == VTYPE_INT && object->GetInt("petVoiceAudioVersion") == 1) state.voice_audio = 1;
+    if (object->GetType("voice") == VTYPE_DICTIONARY) {
+      const auto voice = object->GetDictionary("voice");
+      state.calling = voice->GetType("active") == VTYPE_BOOL && voice->GetBool("active");
+      state.muted = voice->GetType("muted") == VTYPE_BOOL && voice->GetBool("muted");
+      PetString(voice, "state", 40, state.voice_state);
+    }
     const char* keys[]{"ready", "busy", "richDraft", "dictating", "canSwitchTarget"};
     bool* values[]{&state.ready, &state.busy, &state.rich_draft, &state.dictating, &state.can_switch};
     for (int i = 0; i < 5; ++i) {
@@ -553,6 +610,19 @@ class Client final : public CefClient,
     object->SetInt("version", 1); object->SetString("context", command.context);
     object->SetString("requestId", command.id); object->SetString("action", command.action);
     if (command.action == "input") object->SetString("text", command.text);
+    const auto& state = pet_state_.snapshot();
+    const bool media_start = (command.action == "dictation" && !state.dictating) || (command.action == "call" && !state.calling);
+    const bool pet_audio = media_start && ((command.action == "dictation" && state.dictation_audio == 1) ||
+      (command.action == "call" && state.target == "persona" && state.voice_audio == 1));
+    if (pet_audio) {
+      const auto intent = CefDictionaryValue::Create();
+      intent->SetInt("version", 1); intent->SetString("id", keepwork_cef::PetToken());
+      object->SetDictionary("petAudio", intent);
+    } else if (media_start) {
+      // Legacy pages and ordinary chat calls retain their existing page-owned
+      // microphone path; make permission/playback interactions visible.
+      window_frame_.Show();
+    }
     const auto json = CefValue::Create(); json->SetDictionary(object);
     const auto message = CefProcessMessage::Create(keepwork_cef::kPetCommand);
     message->GetArgumentList()->SetString(0, pet_binding_.document());
@@ -563,14 +633,19 @@ class Client final : public CefClient,
   void PetAction(keepwork_cef::PetChatAction action) {
     using Action = keepwork_cef::PetChatAction;
     if (action == Action::OpenMain) { window_frame_.Show(); return; }
-    if (action == Action::Collapse) { window_frame_.pet_chat().Hide(); return; }
+    if (action == Action::Collapse) { StopPetCapture(); window_frame_.pet_chat().Hide(); return; }
     if (action == Action::AcknowledgeUnknown) pet_state_.AcknowledgeUnknown();
     else {
-      const std::string name = action == Action::Send ? "send" : action == Action::Stop ? "stop" : "toggle-target";
+      const std::string name = action == Action::Send ? "send" : action == Action::Stop ? "stop" :
+        action == Action::Dictation ? "dictation" : action == Action::Call ? "call" : action == Action::Mute ? "mute" : "toggle-target";
       const auto command = pet_state_.Begin(name, keepwork_cef::PetToken(), GetTickCount64());
       if (command) SendPet(*command);
     }
     UpdatePet();
+  }
+  void StopPetCapture() {
+    // Host lifecycle notification only. Never toggle/replay a page mutation.
+    SendPet({"capture-stop", keepwork_cef::PetToken(), pet_state_.snapshot().context, {}});
   }
   void PetTick() {
     pet_state_.Timeout(GetTickCount64());
@@ -586,6 +661,8 @@ class Client final : public CefClient,
       view.transcript += L"助手：" + state.reply;
     view.ready = state.ready; view.busy = state.busy;
     view.rich_draft = state.rich_draft; view.dictating = state.dictating;
+    view.can_dictate = state.can_dictate; view.can_call = state.can_call;
+    view.calling = state.calling; view.muted = state.muted;
     view.can_switch = state.can_switch; view.pending = pet_state_.pending(); view.uncertain = pet_state_.unknown();
     view.unsynced = pet_state_.dirty() && pet_state_.draft() != state.draft;
     view.error = pet_state_.error();
@@ -593,14 +670,23 @@ class Client final : public CefClient,
     if (state.context.empty()) view.status = pet_deadline_ ? L"正在连接 AIChat…" : L"网页尚未提供宠物对话，请打开 AIChat 登录或刷新后重试。";
     else if (!state.attention.empty()) view.status = state.attention;
     else if (state.rich_draft) view.status = L"请打开 AIChat 处理附件或工具内容。";
-    else if (state.dictating) view.status = L"语音输入中，请在 AIChat 中操作。";
+    else if (state.dictating) view.status = L"语音输入中…";
+    else if (state.calling) {
+      if (state.muted) view.status = L"通话中 · 已静音";
+      else if (state.voice_state == L"starting" || state.voice_state == L"connecting") view.status = L"正在连接通话…";
+      else if (state.voice_state == L"listening") view.status = L"通话中 · 正在聆听…";
+      else if (state.voice_state == L"thinking") view.status = L"通话中 · 正在思考…";
+      else if (state.voice_state == L"speaking") view.status = L"通话中 · 正在说话…";
+      else if (state.voice_state == L"stopping") view.status = L"正在结束通话…";
+      else view.status = L"通话中…";
+    }
     else if (pet_state_.pending()) view.status = L"正在确认操作…";
     else if (state.busy) view.status = L"正在回复…";
     else if (view.unsynced) view.status = state.draft.empty()
       ? L"有未同步的草稿，发送或清空后再切换目标。"
       : L"有未同步的草稿，请先发送或恢复为主窗口草稿后再切换。";
     else if (!state.ready) view.status = L"当前目标尚未就绪，可切换目标或打开 AIChat。";
-    else view.status = L"输入文字后点击发送；Enter 换行。";
+    else view.status.clear();
     window_frame_.pet_chat().Update(view);
     const auto owner = pet_binding_.document() + "|" + state.context;
     const bool owner_changed = owner != pet_panel_owner_;
@@ -640,6 +726,13 @@ class Client final : public CefClient,
           MessageBoxW(window_frame_.window(), L"无法启动本地服务。请从安装目录重新打开 Keepwork，或在本地 MCP 面板检查服务。",
             kTitle, MB_OK | MB_ICONWARNING);
         break;
+      case Command::restart_mcp:
+        if (options_.maintenance && !options_.launcher.empty()) maintenance_.Restart();
+        break;
+      case Command::check_updates:
+        if (options_.maintenance && !options_.launcher.empty()) maintenance_.Check();
+        break;
+      case Command::remote_voice: remote_voice_.Open(window_frame_.window(), [this] { window_frame_.Show(); }); break;
       case Command::about: {
         const auto text = std::wstring(L"Keepwork\nWindows 兼容客户端 ") + keepwork_cef::kHostVersion
           + L"\nChromium / CEF " CEF_VERSION;
@@ -649,7 +742,9 @@ class Client final : public CefClient,
   }
   Options options_;
   keepwork_cef::WindowFrame window_frame_;
+  keepwork_cef::MaintenanceController maintenance_;
   keepwork_cef::PetChatState pet_state_;
+  keepwork_cef::RemoteVoiceController remote_voice_;
   keepwork_cef::PetDocumentBinding pet_binding_;
   std::string pet_panel_owner_;
   uint64_t pet_deadline_ = 0;

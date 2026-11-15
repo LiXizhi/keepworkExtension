@@ -29,6 +29,9 @@ add_test(NAME cef-popup-layout COMMAND cef-popup-layout-test)
 add_executable(cef-pet-chat-state-test pet_chat_state_test.cpp)
 target_compile_features(cef-pet-chat-state-test PRIVATE cxx_std_17)
 add_test(NAME cef-pet-chat-state COMMAND cef-pet-chat-state-test)
+add_executable(cef-pet-input-policy-test pet_input_policy_test.cpp)
+target_compile_features(cef-pet-input-policy-test PRIVATE cxx_std_17)
+add_test(NAME cef-pet-input-policy COMMAND cef-pet-input-policy-test)
 if(KEEPWORK_POLICY_TESTS_ONLY)
   return()
 endif()
@@ -135,6 +138,35 @@ target_link_libraries(${CEF_TARGET} PRIVATE libcef_lib libcef_dll_wrapper ${CEF_
 target_compile_options(${CEF_TARGET} PRIVATE /utf-8)
 target_compile_definitions(${CEF_TARGET} PRIVATE UNICODE _UNICODE NOMINMAX)
 target_include_directories(${CEF_TARGET} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+
+# Private native dictation companion. It reuses the Tauri client's ATVV/ASR
+# implementation without linking Tauri or requiring a WebView2 installation.
+# The CEF controller never launches it on Windows 7/8 (WinRT BLE is unavailable).
+if(PROJECT_ARCH STREQUAL "x86_64")
+  set(KEEPWORK_VOICE_TARGET x86_64-pc-windows-msvc)
+elseif(PROJECT_ARCH STREQUAL "arm64")
+  set(KEEPWORK_VOICE_TARGET aarch64-pc-windows-msvc)
+else()
+  set(KEEPWORK_VOICE_TARGET i686-pc-windows-msvc)
+endif()
+find_program(KEEPWORK_CARGO cargo REQUIRED)
+set(KEEPWORK_VOICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../remote-voice")
+set(KEEPWORK_VOICE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/remote-voice-target/${KEEPWORK_VOICE_TARGET}/release/keepwork-remote-voice.exe")
+file(GLOB KEEPWORK_VOICE_SHARED CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../src-tauri/src/remote_voice/*.rs")
+add_custom_command(OUTPUT "${KEEPWORK_VOICE_OUTPUT}"
+  COMMAND ${CMAKE_COMMAND} -E env "RUSTFLAGS=$ENV{RUSTFLAGS} -C target-feature=+crt-static"
+    "${KEEPWORK_CARGO}" build --manifest-path "${KEEPWORK_VOICE_ROOT}/Cargo.toml"
+    --target "${KEEPWORK_VOICE_TARGET}" --release --locked
+    --target-dir "${CMAKE_CURRENT_BINARY_DIR}/remote-voice-target"
+  DEPENDS "${KEEPWORK_VOICE_ROOT}/Cargo.toml" "${KEEPWORK_VOICE_ROOT}/Cargo.lock"
+    "${KEEPWORK_VOICE_ROOT}/src/main.rs" "${CMAKE_CURRENT_SOURCE_DIR}/../../src-tauri/src/remote_voice.rs"
+    ${KEEPWORK_VOICE_SHARED}
+  VERBATIM)
+add_custom_target(keepwork-remote-voice-build DEPENDS "${KEEPWORK_VOICE_OUTPUT}")
+add_dependencies(${CEF_TARGET} keepwork-remote-voice-build)
+add_custom_command(TARGET ${CEF_TARGET} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KEEPWORK_VOICE_OUTPUT}" "${CEF_TARGET_OUT_DIR}/keepwork-remote-voice.exe"
+  VERBATIM)
 
 COPY_FILES("${CEF_TARGET}" "${CEF_BINARY_FILES}" "${CEF_BINARY_DIR}" "${CEF_TARGET_OUT_DIR}")
 COPY_FILES("${CEF_TARGET}" "${CEF_RESOURCE_FILES}" "${CEF_RESOURCE_DIR}" "${CEF_TARGET_OUT_DIR}")

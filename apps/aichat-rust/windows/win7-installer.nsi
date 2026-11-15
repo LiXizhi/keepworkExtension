@@ -8,12 +8,15 @@ InstallDirRegKey HKCU "Software\Keepwork\Win7Win8" "InstallDir"
 !include "LogicLib.nsh"
 !include "WinVer.nsh"
 !include "x64.nsh"
+!include "FileFunc.nsh"
 !define MUI_ABORTWARNING
 !define MUI_ICON "..\src-tauri\icons\icon.ico"
 !define MUI_UNICON "..\src-tauri\icons\icon.ico"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_RUN "$INSTDIR\Keepwork.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "启动 Keepwork"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -26,8 +29,17 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "Keepwork"
 VIAddVersionKey "FileDescription" "Keepwork Windows 7 SP1 / 8 / 8.1 x64 compatibility edition"
 Var IdleRetries
+Var UpdateMode
 
 Function .onInit
+  StrCpy $UpdateMode 0
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${IfNot} ${Errors}
+    StrCpy $UpdateMode 1
+    SetSilent silent
+  ${EndIf}
   ${IfNot} ${AtLeastWin7}
     MessageBox MB_ICONSTOP "此版本需要 Windows 7 SP1 / Windows 8 / Windows 8.1 x64 或更新的系统。"
     Abort
@@ -44,6 +56,12 @@ Function .onInit
   ${If} ${IsNativeARM64}
     MessageBox MB_ICONSTOP "此安装包适用于 x64，不适用于 ARM64。"
     Abort
+  ${EndIf}
+FunctionEnd
+
+Function .onInstSuccess
+  ${If} $UpdateMode == 1
+    Exec '"$INSTDIR\Keepwork.exe"'
   ${EndIf}
 FunctionEnd
 

@@ -1,6 +1,7 @@
 #include "native.hpp"
 #include "common/archive.hpp"
 #include "release-key.hpp"
+#include "common/client_update_key.hpp"
 #ifndef KEEPWORK_WIN7_EDITION
 #include <wrl.h>
 #include <WebView2.h>
@@ -194,7 +195,7 @@ std::string sha256_file(const fs::path& path) {
   while (file) { file.read(buffer.data(), buffer.size()); if (file.gcount()) hash.add(buffer.data(), static_cast<ULONG>(file.gcount())); }
   check(file.eof(), "Cannot read runtime file"); auto digest = hash.finish(); return hex(digest.data(), digest.size());
 }
-std::string verify_envelope(const std::string& envelope) {
+static std::string verify_release_signature(const std::string& envelope, const unsigned char* public_key, std::size_t public_key_size) {
   check(envelope.size() <= 2 * 1024 * 1024, "Signed manifest too large");
   auto json = nlohmann::json::parse(envelope);
   check(json.at("algorithm") == "rsa-sha256", "Unknown release signature algorithm");
@@ -202,12 +203,18 @@ std::string verify_envelope(const std::string& envelope) {
   auto raw_signature = json.at("signature").get<std::string>(); check(raw_signature.size() == 512, "Invalid RSA-2048 signature size");
   auto signature = unhex(raw_signature);
   Algorithm rsa(BCRYPT_RSA_ALGORITHM); BCRYPT_KEY_HANDLE key = nullptr;
-  nt(BCryptImportKeyPair(rsa.handle, nullptr, BCRYPT_RSAPUBLIC_BLOB, &key, const_cast<PUCHAR>(release_public_key), sizeof(release_public_key), 0));
+  nt(BCryptImportKeyPair(rsa.handle, nullptr, BCRYPT_RSAPUBLIC_BLOB, &key, const_cast<PUCHAR>(public_key), static_cast<ULONG>(public_key_size), 0));
   struct KeyCleanup { BCRYPT_KEY_HANDLE key; ~KeyCleanup() { BCryptDestroyKey(key); } } cleanup{key};
   Hasher hash; hash.add(payload.data(), static_cast<ULONG>(payload.size())); auto digest = hash.finish();
   BCRYPT_PKCS1_PADDING_INFO padding{BCRYPT_SHA256_ALGORITHM};
   check(BCryptVerifySignature(key, &padding, digest.data(), static_cast<ULONG>(digest.size()), signature.data(), static_cast<ULONG>(signature.size()), BCRYPT_PAD_PKCS1) >= 0, "CEF release signature is invalid");
   return payload;
+}
+std::string verify_envelope(const std::string& envelope) {
+  return verify_release_signature(envelope, release_public_key, sizeof(release_public_key));
+}
+std::string verify_client_update_envelope(const std::string& envelope) {
+  return verify_release_signature(envelope, client_update_public_key, sizeof(client_update_public_key));
 }
 std::string fetch_manifest(const std::string& url, const Progress& progress) {
   std::string body; fetch(url, 2 * 1024 * 1024, [&](const char* b, DWORD n) { body.append(b, n); }, progress); return body;
@@ -238,14 +245,19 @@ void allow_sandbox_read(const fs::path& path) {
   Local acl{updated};
   check(SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, updated, nullptr) == ERROR_SUCCESS, "Cannot apply sandbox runtime ACL");
 }
-bool launch_cef(const fs::path& directory, const fs::path& profile, bool background, const Progress& progress, bool service_launcher) {
+bool launch_cef(const fs::path& directory, const fs::path& profile, bool background, const Progress& progress, bool service_launcher, bool maintenance) {
   plain_path(directory); plain_path(profile); fs::create_directories(profile);
   std::array<unsigned char, 16> random{}; nt(BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG));
   auto name = L"Local\\Keepwork.Cef.Ready." + wide(hex(random.data(), random.size()));
   Handle ready(CreateEventW(nullptr, TRUE, FALSE, name.c_str())); check(ready.value != nullptr, "Cannot create startup event");
   auto exe = directory / L"keepwork-cef.exe";
   auto args = quote(exe.wstring()) + L" --profile " + quote(profile.wstring()) + L" --ready-event " + quote(name) + (background ? L" --background" : L"");
-  if (service_launcher) args += L" --launcher " + quote((executable_dir() / L"Keepwork.exe").wstring());
+  if (service_launcher || maintenance) args += L" --launcher " + quote((executable_dir() / L"Keepwork.exe").wstring());
+#ifdef KEEPWORK_WIN7_EDITION
+  if (maintenance) args += L" --maintenance";
+#else
+  (void)maintenance;
+#endif
   STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION child{};
   check(CreateProcessW(exe.c_str(), args.data(), nullptr, nullptr, FALSE, 0, nullptr, directory.c_str(), &startup, &child), "Cannot launch CEF host (check Windows version and package architecture)");
   Handle process(child.hProcess), thread(child.hThread);

@@ -63,6 +63,23 @@ void mcp_health_contracts() {
   expect(legacy.pid == 0 && legacy.version.empty() && legacy.variant.empty(), "Missing identity remains unknown");
   expect(legacy.terminal_api.empty() && legacy.terminal_status.empty() && legacy.terminal_reason.empty(),
     "A legacy peer may omit every additive terminal field");
+  expect(legacy.engine.empty() && legacy.host_kind.empty() && legacy.commit.empty(),
+    "Missing optional restart identity keeps a legacy peer usable without granting stop authority");
+  auto restart_identity = base;
+  restart_identity["runtimeEngine"] = "rust";
+  restart_identity["hostKind"] = "win7-win8-desktop";
+  restart_identity["runtimeCommit"] = std::string(40, 'a');
+  const auto restart_peer = keepwork::parse_mcp_health(restart_identity.dump());
+  expect(restart_peer.keepwork && restart_peer.engine == "rust" && restart_peer.host_kind == "win7-win8-desktop"
+      && restart_peer.commit == std::string(40, 'a') && !restart_peer.owned,
+    "Restart metadata can describe an old edition peer but HTTP cannot assert native process ownership");
+  for (const auto& value : {json(nullptr), json(false), json(1), json::array(), json::object(), json(std::string(65, 'a'))}) {
+    auto peer = base;
+    peer["runtimeEngine"] = peer["hostKind"] = peer["runtimeCommit"] = value;
+    const auto parsed = keepwork::parse_mcp_health(peer.dump());
+    expect(parsed.keepwork && parsed.engine.empty() && parsed.host_kind.empty() && parsed.commit.empty(),
+      "Malformed or excessive optional restart identity cannot block ordinary connection or establish ownership");
+  }
   expect(keepwork::mcp_service_status(legacy).find("未声明") != std::string::npos,
     "The service result explains missing capability without declaring a newer version required");
   auto terminal = base;
@@ -188,10 +205,18 @@ void paths() {
 void contracts() {
   const auto legacy = keepwork::validate_manifest(manifest().dump(), "legacy", "x64", win7);
   expect(!legacy.service_launcher, "Older signed hosts receive no unknown launcher argument");
+  expect(!legacy.maintenance, "Older signed hosts do not enable new restart or updater launcher actions");
   for (const auto& value : {json(nullptr), json(false), json(true), json("1"), json(2), json(1)}) {
     auto capable = manifest(); capable["serviceLauncher"] = value;
     expect(keepwork::validate_manifest(capable.dump(), "legacy", "x64", win7).service_launcher ==
       (value.is_number_integer() && value == 1), "Only the supported optional service launcher contract is enabled");
+  }
+  for (const auto& value : {json(nullptr), json(false), json(true), json("1"), json(2), json(1.0), json(1)}) {
+    auto capable = manifest(); capable["maintenance"] = value;
+    const auto parsed = keepwork::validate_manifest(capable.dump(), "legacy", "x64", win7);
+    expect(parsed.maintenance == (value.is_number_integer() && value == 1),
+      "Only the supported signed maintenance contract enables new native launcher arguments");
+    expect(!parsed.service_launcher, "Maintenance and service-only capability fields remain independently optional");
   }
   expect(legacy.files.size() == 5 && legacy.chromium_major == 109 && legacy.size == 100, "Decode legacy manifest");
   auto modern = manifest("modern", "arm64");

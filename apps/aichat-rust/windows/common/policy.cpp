@@ -89,6 +89,8 @@ Manifest validate_manifest(const std::string& payload, const std::string& channe
   // ordinary browser startup available without sending an unknown argument.
   m.service_launcher = j.contains("serviceLauncher") && j["serviceLauncher"].is_number_integer()
     && j["serviceLauncher"] == 1;
+  m.maintenance = j.contains("maintenance") && j["maintenance"].is_number_integer()
+    && j["maintenance"] == 1;
   m.version = j.at("version").get<std::string>();
   m.cef_version = j.at("cefVersion").get<std::string>();
   require(std::regex_match(m.version, std::regex("[0-9]+\\.[0-9]+\\.[0-9]+")), "Invalid host version");

@@ -25,6 +25,12 @@ class WindowFrame {
   ~WindowFrame() { Destroy(); }
   HWND window() const { return window_; }
   void EnableServiceLauncher(bool enabled) { service_launcher_ = enabled; }
+  void EnableMaintenance(bool enabled) { maintenance_ = enabled; }
+  void SetupMaintenance(std::function<void()> tick) {
+    maintenance_tick_ = std::move(tick);
+    if (window_ && maintenance_tick_) SetTimer(window_, 19, 1000, nullptr);
+  }
+  void NotifyUpdate(const std::wstring& message) { tray_.Notify(message); }
   bool Create() {
     if (!refresh_glyph_.Initialize()) return false;
     WNDCLASSW type{};
@@ -54,7 +60,8 @@ class WindowFrame {
     SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(LoadIconW(Module(), MAKEINTRESOURCEW(101))));
     Resize();
     pet_.Create(Module(), profile, [this] { Show(); }, [this] { Quit(); },
-      [this] { TogglePetChat(); }, [this] { pet_chat_.Hide(); });
+      [this] { TogglePetChat(); }, [this] { HidePetChat(); },
+      [this](RECT anchor) { pet_chat_.Follow(anchor); });
     lifecycle_.SetTrayAvailable(tray_.Add(window_, LoadIconW(Module(), MAKEINTRESOURCEW(101))));
     const bool visible = lifecycle_.Start(background);
     ShowWindow(window_, visible ? SW_SHOWNORMAL : SW_HIDE);
@@ -78,9 +85,11 @@ class WindowFrame {
   }
   void BrowserClosing() { pet_chat_.Hide(); pet_.Hide(); lifecycle_.BrowserClosing(); }
   void SetupPetChat(std::function<void(PetChatAction)> action,
-      std::function<void(std::wstring)> edit, std::function<void()> tick, std::function<void()> open_main) {
+      std::function<void(std::wstring)> edit, std::function<void()> tick, std::function<void()> open_main,
+      std::function<void()> hide = {}) {
     pet_tick_ = std::move(tick);
     pet_open_main_ = std::move(open_main);
+    pet_hide_ = std::move(hide);
     pet_chat_.Create(Module(), std::move(action), std::move(edit));
   }
   PetChatPanel& pet_chat() { return pet_chat_; }
@@ -95,8 +104,10 @@ class WindowFrame {
   }
   void Destroy() {
     ClearHover();
+    if (window_) KillTimer(window_, 19);
+    maintenance_tick_ = {};
     if (tooltip_) { DestroyWindow(tooltip_); tooltip_ = nullptr; }
-    PetChatTimer(false); pet_tick_ = {}; pet_open_main_ = {}; pet_chat_.Destroy();
+    PetChatTimer(false); pet_tick_ = {}; pet_open_main_ = {}; pet_hide_ = {}; pet_chat_.Destroy();
     pet_.Destroy(); tray_.Remove(); lifecycle_.Destroy();
     close_ = {}; focus_ = {}; move_ = {}; command_ = {}; content_ = nullptr;
     if (window_) DestroyWindow(window_);
@@ -119,7 +130,7 @@ class WindowFrame {
       ThemedPopup menu(theme_, Dpi(), Font());
       if (!menu.valid()) break;
       active_popup_ = &menu;
-      PopulateMenu(menu, index, service_launcher_);
+      PopulateMenu(menu, index, service_launcher_, maintenance_);
       if (!menu.valid()) { active_popup_ = nullptr; break; }
       PaintMenuHeadings();
       const auto layout = Layout();
@@ -142,7 +153,7 @@ class WindowFrame {
     if (selected && command) command(static_cast<WindowCommand>(selected));
   }
  private:
-  static void PopulateMenu(ThemedPopup& menu, int index, bool service_launcher) {
+  static void PopulateMenu(ThemedPopup& menu, int index, bool service_launcher, bool maintenance) {
     using Command = WindowCommand;
     const auto item = [&menu](Command command, const wchar_t* label) {
       menu.Item(static_cast<unsigned>(command), label);
@@ -158,6 +169,8 @@ class WindowFrame {
       item(Command::undo, L"撤销\tCtrl+Z"); item(Command::redo, L"重做\tCtrl+Y"); separator();
       item(Command::cut, L"剪切\tCtrl+X"); item(Command::copy, L"复制\tCtrl+C");
       item(Command::paste, L"粘贴\tCtrl+V"); item(Command::select_all, L"全选\tCtrl+A");
+      separator();
+      item(Command::remote_voice, L"遥控器语音输入…");
     } else if (index == 2) {
       item(Command::zoom_in, L"放大\tCtrl++"); item(Command::zoom_out, L"缩小\tCtrl+-");
       item(Command::zoom_reset, L"实际大小\tCtrl+0"); separator();
@@ -165,6 +178,11 @@ class WindowFrame {
     } else {
       item(Command::dashboard, L"本地 MCP 面板");
       if (service_launcher) item(Command::start_mcp, L"启动本地服务");
+      if (maintenance) {
+        item(Command::restart_mcp, L"重启本地 MCP");
+        separator();
+        item(Command::check_updates, L"检查更新…");
+      }
       separator();
       item(Command::about, L"关于 Keepwork");
     }
@@ -239,12 +257,15 @@ class WindowFrame {
   mutable HFONT title_font_ = nullptr;
   bool fullscreen_ = false;
   bool service_launcher_ = false;
+  bool maintenance_ = false;
   TrayIcon tray_;
   TrayLifecycle lifecycle_;
   DesktopPet pet_;
   PetChatPanel pet_chat_;
   std::function<void()> pet_tick_;
+  std::function<void()> maintenance_tick_;
   std::function<void()> pet_open_main_;
+  std::function<void()> pet_hide_;
   ChromeTheme theme_;
   RefreshGlyph refresh_glyph_;
   WINDOWPLACEMENT placement_{};
@@ -307,8 +328,12 @@ class WindowFrame {
       L"Keepwork", MB_OK | MB_ICONWARNING);
   }
   void TogglePetChat() {
-    if (pet_chat_.visible()) pet_chat_.Hide();
-    else pet_chat_.Show(pet_.bounds());
+    if (pet_chat_.visible()) HidePetChat();
+    else { pet_chat_.Show(pet_.bounds()); pet_.Raise(); }
+  }
+  void HidePetChat() {
+    if (pet_hide_) pet_hide_();
+    pet_chat_.Hide();
   }
   void CloseBrowser() {
     const auto close = close_;
@@ -320,9 +345,14 @@ class WindowFrame {
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, 1, L"打开聊天");
     AppendMenuW(menu, MF_STRING | (pet_.enabled() ? MF_CHECKED : MF_UNCHECKED), 5, L"显示桌面宠物");
+    AppendMenuW(menu, MF_STRING, 9, L"遥控器语音输入…");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, 2, L"打开本地 MCP 面板");
     if (service_launcher_) AppendMenuW(menu, MF_STRING, 6, L"启动本地服务");
+    if (maintenance_) {
+      AppendMenuW(menu, MF_STRING, 7, L"重启本地 MCP");
+      AppendMenuW(menu, MF_STRING, 8, L"检查更新…");
+    }
     AppendMenuW(menu, MF_STRING, 3, L"关于 Keepwork");
     const auto version = std::wstring(L"版本 ") + kHostVersion;
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, version.c_str());
@@ -344,7 +374,9 @@ class WindowFrame {
     } else if (selected && command_) {
       const auto command = command_;
       if (selected == 3) Show();
-      command(selected == 2 ? WindowCommand::dashboard : selected == 6 ? WindowCommand::start_mcp : WindowCommand::about);
+      command(selected == 2 ? WindowCommand::dashboard : selected == 6 ? WindowCommand::start_mcp
+        : selected == 7 ? WindowCommand::restart_mcp : selected == 8 ? WindowCommand::check_updates
+        : selected == 9 ? WindowCommand::remote_voice : WindowCommand::about);
     }
   }
   static HMODULE Module() {
@@ -497,6 +529,7 @@ class WindowFrame {
     switch (message) {
       case WM_TIMER:
         if (w == 18) { if (self->pet_tick_) self->pet_tick_(); return 0; }
+        if (w == 19) { const auto tick = self->maintenance_tick_; if (tick) tick(); return 0; }
         break;
       case TrayIcon::message: {
         const auto event = self->tray_.Event(w, l);
@@ -504,6 +537,8 @@ class WindowFrame {
           self->Show();
         else if (event == WM_CONTEXTMENU || event == WM_RBUTTONUP)
           self->ShowTrayMenu(self->tray_.Anchor(w));
+        else if (event == NIN_BALLOONUSERCLICK && self->maintenance_ && self->command_)
+          self->command_(WindowCommand::check_updates);
         return 0;
       }
       case WM_NCCALCSIZE: return 0;  // Keep native sizing/snap styles without the system frame.

@@ -1,5 +1,30 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-15：兼容版本地完整测试包（0.2.154）
+
+本地实际打包发现 `remote_voice_controller.h` 的 `RtlGetVersion` 函数指针转换在 CEF 默认 `/W4 /WX` 构建中触发错误；改用仓库既有的地址尺寸断言与 `memcpy` 动态装载方式，保留版本查询失败禁用、Win10 1703（15063）门槛及旧系统不导入现代 BLE API 的边界。四处桌面版本同步为 **0.2.154**，未抑制该警告的完整 CEF / 遥控器组件及原生 Launcher 构建通过。
+
+完整本地预览安装包位于 `.tmp/win7-win8-0.2.154/Keepwork_Win7_Win8_0.2.154_x64-setup.exe`，大小 **123,457,863 字节**，SHA-256 为 `c632dc315552be7a309dadc85cc81d283a421d9cd7ee0e8b9244a36c699a08f0`。包内置 CEF109 与源码指纹、提交均匹配当前树的 Win7/Win8 Rust MCP **0.2.69**（含固定 WinPTY）；使用隔离预览 RSA 清单签名，没有 Authenticode 代码签名，未上传或发布。
+
+独立验证恢复全部 **14 个 NSIS 安装载荷文件**，CRC 及原样字节通过；内置 **76 个 CEF 成员**逐项匹配签名清单，当前语音 Bridge 和按钮文案确实进入新宿主。CEF 必需 **8 个 PE**、Launcher/MCP/WinPTY **4 个 PE**通过 Win7 导入检查，遥控器单独记录为 Win10 可选组件；**123 项源码指纹**匹配。语音及打包定向测试 **57 通过 / 1 Windows 平台跳过 / 0 失败**，TypeScript 与可移植原生菜单 / 权限 / 输入策略测试通过；Windows HWND 面板和窗口夹具完成实际 CMake 交叉编译与链接，尚未运行。完整记录在产物 `build-scope.json` 与 `verification/qa-independent-package.json`。
+
+构建机为 macOS，未执行 Windows 安装器、麦克风、通话、蓝牙或旧系统 UI 实测；报告保留 `installerExecuted: false`、`nativeLegacyVerified: false` 和 `cefUiVerified: false`，编译及验包通过不代表真机功能已验收。
+
+## 2026-11-15：CEF 宠物语音与回车发送（0.2.153）
+
+兼容宿主补齐语音输入、通话 / 结束通话、静音与状态投影；沿用主网页账号、草稿、ASR 与通话服务。新版页面通过当前文档 / 会话绑定的 `petAudio` 采集意图使用主页麦克风；旧页面保留主窗口语音路径。未同步草稿先确认输入，切换上下文或收起宠物后停止本次采集，迟到结果不进入新会话。仅可信主 `/chat` Frame 的单独麦克风请求可经原生显式同意，摄像头、屏幕、子 Frame 和弹窗继续拒绝。Enter 发送一次，生成中 Enter 停止，Shift+Enter 换行；IME 确认和重复键不额外发送。
+
+CEF 的遥控器组件直接复用原版 ATVV、云端 ASR、配对、自动开启、当前焦点输入及发送 / 清除口令模块，独立于网页和 MCP。原生设置仅通过父进程继承管道通信。该 BLE 实现只在 Windows 10 1703（15063）及以上 / Windows 11 启动，Windows 7/8/8.1 明确显示不支持，不将普通麦克风输入等同于遥控器能力。
+
+实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **268 通过 / 3 忽略 / 0 失败**，Node **556 通过 / 17 环境跳过 / 0 失败**。日志 `/private/tmp/keepwork-153-final-check-verified.log`。首次沙箱内执行受 loopback `EPERM` 等环境限制，解除测试所需限制后重跑通过。
+- 设置 `AICHAT_WEB_PET_CONTROLLER`、`AICHAT_WEB_PET_AUDIO` 指向本地独立 AIChat 生产模块后运行 `cef-pet-chat.test.cjs`、`cef-pet-audio.test.cjs`、`cef-menu.test.cjs`：**20/20 通过**。覆盖旧字段缺失、当前控制器与真实音频协议、草稿屏障、权限、PCM 重采样 / 序号 / 背压、音频暂停、取消 / 迟到回调、导航与 Enter 策略；麦克风与云服务为隔离夹具。
+- Windows x64 CEF109 的生产 `main.cpp` 与真实 HWND `pet_chat_panel_test.cpp` 使用 Windows SDK 交叉编译通过；遥控器 companion 完成 Windows x64 release PE 构建 / 链接。companion 私有管道命令与 EOF / 长度边界的本机 Rust 测试 **2/2 通过**。
+- 遥控器打包、签名清单、Win7 PE 边界及 redist 定向测试 **20 通过 / 1 Windows 平台跳过 / 0 失败**。只有固定声明的遥控器组件单独记录 Windows 10 1703 最低系统；兼容主程序及其他必需二进制继续执行完整 Win7 静态和延迟导入校验。
+
+四处桌面版本同步为 **0.2.153**。真实 Windows CEF 麦克风、隐藏页面通话播放、IME 候选交互及 RC001 / RC003 蓝牙与跨应用输入仍待真机验证；不将交叉编译或假麦克风结果记为硬件验收，未发布安装包。
+
 ## 2026-11-13：Windows 原生浏览器 v1（0.2.117，Windows 实机待验收）
 
 本轮桌面版本 `0.2.117` 已同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 与 `src-tauri/tauri.conf.json`，补齐正常 Windows Tauri / WebView2 路径的基础 `browserSurfaceVersion: 1`。跨平台完整检查、网页宿主契约及隔离 Windows API 类型检查的实际结果如下；尚无 Windows 实机验证，不宣称其原生绘制、输入或安装包已验收，也未发布网页或桌面安装包。

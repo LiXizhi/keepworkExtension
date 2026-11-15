@@ -8,6 +8,7 @@ struct McpHealth {
   bool responded = false, keepwork = false, owned = false;
   std::uint32_t pid = 0;
   std::string version, variant, terminal_api, terminal_status, terminal_reason;
+  std::string engine, host_kind, commit;
 };
 inline McpHealth parse_mcp_health(const std::string& body) {
   McpHealth result;
@@ -35,6 +36,9 @@ inline McpHealth parse_mcp_health(const std::string& body) {
     result.terminal_api = optional_text("terminalApi", 64);
     result.terminal_status = optional_text("terminalStatus", 64);
     result.terminal_reason = optional_text("terminalReason", 2048);
+    result.engine = optional_text("runtimeEngine", 64);
+    result.host_kind = optional_text("hostKind", 64);
+    result.commit = optional_text("runtimeCommit", 64);
   } catch (...) { result.keepwork = false; }
   return result;
 }

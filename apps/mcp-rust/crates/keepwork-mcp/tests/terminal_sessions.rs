@@ -95,10 +95,20 @@ async fn wait_output(f: &Fixture, route: &str, marker: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contracts() {
-    assert!(
-        keepwork_mcp::terminal::supported(),
-        "native test requires the complete pinned PTY backend beside its executable"
-    );
+    // Legacy readiness starts asynchronously. Missing assets still fail this
+    // native test, while a cold agent has time for bounded startup retries.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !keepwork_mcp::terminal::health().ready {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "native test requires a ready, complete pinned PTY backend: {:?}",
+            keepwork_mcp::terminal::health()
+        )
+    });
     let f = Fixture::new();
     for (owner, auth, expected) in [
         ("https://evil.example", true, StatusCode::FORBIDDEN),

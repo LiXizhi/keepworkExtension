@@ -22,12 +22,14 @@ class DesktopPet {
   ~DesktopPet() { Destroy(); }
   bool Create(HMODULE module, const std::wstring& profile,
               std::function<void()> open, std::function<void()> quit,
-              std::function<void()> toggle_chat = {}, std::function<void()> hidden = {}) {
+              std::function<void()> toggle_chat = {}, std::function<void()> hidden = {},
+              std::function<void(RECT)> moved = {}) {
     Destroy();
     module_ = module;
     settings_ = profile + L"\\pet-settings.ini";
     open_ = std::move(open); quit_ = std::move(quit);
     toggle_chat_ = std::move(toggle_chat); hidden_ = std::move(hidden);
+    moved_ = std::move(moved);
     enabled_ = GetPrivateProfileIntW(L"pet", L"enabled", 1, settings_.c_str()) != 0;
     have_position_ = ReadInteger(L"x", x_) && ReadInteger(L"y", y_);
     Gdiplus::GdiplusStartupInput startup;
@@ -79,8 +81,7 @@ class DesktopPet {
     if (!Paint(placement)) return false;
     have_position_ = true;
     ShowWindow(window_, SW_SHOWNOACTIVATE);
-    SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
-      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    Raise();
     return IsWindowVisible(window_) != FALSE;
   }
   void Hide() {
@@ -97,7 +98,7 @@ class DesktopPet {
     image_.reset();
     if (stream_) { stream_->Release(); stream_ = nullptr; }
     if (gdiplus_) { Gdiplus::GdiplusShutdown(gdiplus_); gdiplus_ = 0; }
-    open_ = {}; quit_ = {}; toggle_chat_ = {}; hidden_ = {}; settings_.clear();
+    open_ = {}; quit_ = {}; toggle_chat_ = {}; hidden_ = {}; moved_ = {}; settings_.clear();
   }
   bool enabled() const { return enabled_; }
   void SetEnabled(bool enabled) {
@@ -106,6 +107,11 @@ class DesktopPet {
     if (!enabled) Hide();
   }
   bool visible() const { return window_ && IsWindowVisible(window_) != FALSE; }
+  // Keep the drag handle reachable when a work-area-clamped chat overlaps it.
+  void Raise() const {
+    if (visible()) SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
+      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
   HWND window() const { return window_; }
   RECT bounds() const {
     RECT rect{};
@@ -130,6 +136,7 @@ class DesktopPet {
   bool enabled_ = true, have_position_ = false, painting_ = false, pending_click_ = false;
   std::wstring settings_;
   std::function<void()> open_, quit_, toggle_chat_, hidden_;
+  std::function<void(RECT)> moved_;
   PetDragState drag_;
   POINT drag_start_{}, drag_origin_{};
 
@@ -225,6 +232,9 @@ class DesktopPet {
     if (screen) ReleaseDC(nullptr, screen);
     if (ok) { x_ = placement.x; y_ = placement.y; }
     painting_ = false;
+    const auto moved = moved_;
+    if (ok && moved) moved(bounds());
+    if (ok) Raise();
     return ok;
   }
   void MovePet(POINT cursor) {

@@ -251,6 +251,84 @@ static void TextAndRetentionBounds() {
   Check(state.isolated_drafts().back().context == "retention-39", "bounded retention keeps most recent isolated owner");
 }
 
+static void MediaGatesAndDraftBarrier() {
+  {
+    PetChatState state; auto web = Ready(); state.Publish(web);
+    Check(state.Begin("dictation", "legacy-dictation", 1).has_value(),
+      "old snapshots retain ordinary dictation without claiming call capability");
+    state.Result("legacy-dictation", true, L"", "unused", 2);
+    Check(!state.Begin("call", "legacy-call", 3) && !state.Begin("mute", "legacy-mute", 4),
+      "absent optional call support neither starts nor mutes a nonexistent call");
+    web.can_dictate = false; state.Publish(web);
+    Check(!state.Begin("dictation", "unavailable-dictation", 5), "explicitly unavailable dictation stays bounded to its feature");
+    state.Edit(L"plain text still works");
+    Check(state.Begin("send", "ordinary-input", 6).has_value(), "unavailable media does not disable ordinary chat");
+  }
+  for (const std::string action : {"dictation", "call"}) {
+    PetChatState state; auto web = Ready(); web.can_call = true; web.draft = L"old page draft"; state.Publish(web);
+    state.Edit(L"visible native draft");
+    const auto input = state.Begin(action, "media-input", 10);
+    Check(input && input->action == "input" && input->text == L"visible native draft",
+      "starting media synchronizes the actual visible draft before microphone intent");
+    Check(!state.Begin(action, "overlapping-media", 11), "an in-flight sync cannot start a second capture");
+    web.draft = input->text; state.Publish(web);
+    const auto media = state.Result("media-input", true, L"", "media-action", 12);
+    Check(media && media->action == action && media->context == web.context && media->text.empty(),
+      "matching input acknowledgement advances once to the requested media action without sending text");
+    Check(!state.dirty() && !state.accepted(), "media acceptance never fabricates text send acceptance");
+    Check(!state.Result("media-input", true, L"", "duplicate-media", 13), "duplicate input acknowledgement cannot start capture twice");
+    state.Result("media-action", true, L"", "unused", 14);
+    Check(state.draft() == L"visible native draft" && !state.accepted(), "media result preserves the authoritative draft");
+
+    Check(state.Begin(action, "uncertain-media", 20).has_value(), "fresh explicit media intent is dispatchable");
+    Check(state.Timeout(15020) && !state.pending() && !state.error().empty(), "media timeout reports uncertainty without retrying");
+    Check(!state.Result("uncertain-media", true, L"", "never-replay", 15021), "late media acknowledgement cannot replay capture");
+    state.Publish(web);
+    Check(!state.pending() && !state.Begin(action, "uncertain-media", 15022),
+      "later snapshots cannot revive a consumed media request identity");
+
+    PetChatState downgrade; auto available = Ready(); available.can_call = true; downgrade.Publish(available);
+    downgrade.Edit(L"preserve on downgrade");
+    Check(downgrade.Begin(action, "downgrade-input", 1).has_value(), "stage media input before feature downgrade");
+    available.draft = downgrade.draft(); available.can_call = false; available.can_dictate = false; downgrade.Publish(available);
+    Check(!downgrade.Result("downgrade-input", true, L"", "must-not-capture", 2) && !downgrade.pending() &&
+        downgrade.draft() == L"preserve on downgrade", "capabilities are rechecked after sync before capture");
+
+    PetChatState changed; auto owner = Ready(); owner.can_call = true; changed.Publish(owner); changed.Edit(L"old owner private draft");
+    changed.Begin(action, "old-owner-input", 1);
+    changed.Publish(Ready("new-owner"));
+    Check(!changed.Result("old-owner-input", true, L"", "wrong-owner-media", 2) && !changed.pending() &&
+        changed.draft().empty(), "owner changes invalidate a pending media intent without migrating private drafts");
+
+    PetChatState cancelled; auto page = Ready(); page.can_call = true; cancelled.Publish(page); cancelled.Edit(L"inspect in main window");
+    cancelled.Begin(action, "cancel-media-input", 1);
+    Check(cancelled.CancelUnsubmittedInput() && !cancelled.pending(), "opening the main window cancels a still unsubmitted media intent");
+    Check(!cancelled.Result("cancel-media-input", true, L"", "must-not-start-after-open", 2) &&
+        cancelled.draft() == L"inspect in main window", "late input confirmation after opening the main window cannot start capture");
+
+    PetChatState edited; auto stable = Ready(); stable.can_call = true; edited.Publish(stable); edited.Edit(L"initial");
+    edited.Begin(action, "media-edit-input", 1); edited.Edit(L"newer local edit"); stable.draft = L"initial"; edited.Publish(stable);
+    Check(!edited.Result("media-edit-input", true, L"", "must-not-start-edited", 2) && edited.dirty() &&
+        edited.draft() == L"newer local edit", "editing during sync cannot start media using a stale composer");
+  }
+  {
+    PetChatState state; auto web = Ready(); web.can_call = true; web.calling = true; state.Publish(web);
+    Check(!state.Begin("dictation", "during-call", 1) && !state.Begin("toggle-target", "switch-call", 2),
+      "active calls exclude dictation and context switching");
+    Check(state.Begin("mute", "mute-call", 3).has_value(), "active calls can be muted");
+    state.Result("mute-call", true, L"", "unused", 4);
+    web.can_call = false; state.Publish(web);
+    Check(state.Begin("call", "end-call-after-downgrade", 5).has_value(), "active calls remain stoppable after capability downgrade");
+    state.Result("end-call-after-downgrade", true, L"", "unused", 6);
+    web.calling = false; web.dictating = true; web.can_dictate = false; state.Publish(web);
+    Check(state.Begin("dictation", "end-dictation-after-downgrade", 7).has_value(),
+      "active dictation remains stoppable after capability downgrade");
+    state.Result("end-dictation-after-downgrade", true, L"", "unused", 8);
+    Check(!state.Begin("call", "call-during-dictation", 9) && !state.Begin("toggle-target", "switch-dictation", 10),
+      "active dictation excludes calls and context switching");
+  }
+}
+
 static void TrustedOriginAndDocumentBinding() {
   using namespace keepwork_cef;
   Url url{"https", "keepwork.com", "", "/chat", "arbitrary=%ff&token=x", false};
@@ -269,6 +347,26 @@ static void TrustedOriginAndDocumentBinding() {
   denied = url; denied.port = "8443"; Check(!TrustedPetFrame(denied, false, true), "nondefault port is excluded");
   denied = url; denied.credentials = true; Check(!TrustedPetFrame(denied, false, true), "userinfo URL is excluded");
   Check(!TrustedPetFrame(url, true, true) && !TrustedPetFrame(url, false, false), "popups and iframes are excluded");
+  auto requesting = url; requesting.path = "/"; requesting.query.clear();
+  Check(TrustedMicrophoneRequest(requesting, url, false, true, 1),
+    "only a trusted top-level chat can request microphone consent");
+  for (unsigned permissions : {0u, 2u, 3u, 4u, 8u, 0xffffffffu})
+    Check(!TrustedMicrophoneRequest(requesting, url, false, true, permissions),
+      "empty, camera, screen and mixed permission masks cannot gain microphone access");
+  Check(!TrustedMicrophoneRequest(requesting, url, true, true, 1) &&
+      !TrustedMicrophoneRequest(requesting, url, false, false, 1), "media requests cannot cross popup or subframe boundaries");
+  for (const auto host : {"evil.test", "other.keepwork.com", "keepwork.com.evil.test", "keepwork.com."}) {
+    auto origin = requesting; origin.host = host;
+    Check(!TrustedMicrophoneRequest(origin, url, false, true, 1), "requesting origin cannot borrow the main page's authority");
+  }
+  auto origin = requesting; origin.scheme = "http";
+  Check(!TrustedMicrophoneRequest(origin, url, false, true, 1), "insecure requesting origins are denied");
+  origin = requesting; origin.port = "8443";
+  Check(!TrustedMicrophoneRequest(origin, url, false, true, 1), "nondefault requesting ports are denied");
+  origin = requesting; origin.credentials = true;
+  Check(!TrustedMicrophoneRequest(origin, url, false, true, 1), "userinfo origins are denied");
+  auto unrelated = url; unrelated.path = "/sso";
+  Check(!TrustedMicrophoneRequest(requesting, unrelated, false, true, 1), "a trusted origin still requires the exact chat frame path");
   PetDocumentBinding binding;
   Check(!binding.Connect("doc-a", "") && !binding.Matches("doc-a", ""), "empty challenge cannot establish identity");
   binding.Reset("challenge-a");
@@ -293,6 +391,7 @@ int main() {
   ReadinessAndComposerGuards();
   DocumentAndAccountIsolation();
   TextAndRetentionBounds();
+  MediaGatesAndDraftBarrier();
   TrustedOriginAndDocumentBinding();
   std::cout << "Pet chat state checks passed\n";
 }

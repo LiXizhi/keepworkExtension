@@ -6,7 +6,7 @@ use super::readiness::{Failure, Readiness, Work};
 use sha2::{Digest, Sha256};
 use std::ffi::{c_void, OsStr, OsString};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::FromRawHandle;
@@ -265,16 +265,16 @@ impl Controller {
 
     fn work(&self, work: Work) -> Result<(), Failure> {
         let api = api().map_err(|error| {
-            eprintln!("keepwork-mcp: terminal backend load failed: {error}");
+            let _ = writeln!(std::io::stderr(), "keepwork-mcp: terminal backend load failed: {error}");
             Failure::Permanent("Bundled terminal backend could not be loaded or verified. Reinstall the complete compatibility runtime and restart the local service.")
         })?;
         let _agent = api.verified_agent().map_err(|error| {
-            eprintln!("keepwork-mcp: terminal backend integrity check failed: {error}");
+            let _ = writeln!(std::io::stderr(), "keepwork-mcp: terminal backend integrity check failed: {error}");
             Failure::Permanent("Bundled terminal agent is missing, modified or unavailable. Reinstall the complete compatibility runtime and restart the local service.")
         })?;
         if work == Work::Probe {
             api.probe().map_err(|error| {
-                eprintln!("keepwork-mcp: terminal readiness probe failed: {error}");
+                let _ = writeln!(std::io::stderr(), "keepwork-mcp: terminal readiness probe failed: {error}");
                 Failure::Transient("Terminal backend initialization failed. It will retry automatically; check Windows security software if this continues.")
             })?;
         }

@@ -12,6 +12,7 @@ struct Manifest {
   std::uint64_t size, unpacked_size;
   std::vector<FileRecord> files;
   bool service_launcher = false;
+  bool maintenance = false;
 };
 // Empty means use the existing WebView2 desktop. Unknown/unsupported OS fails.
 std::string select_channel(WindowsVersion os, bool webview_ready);

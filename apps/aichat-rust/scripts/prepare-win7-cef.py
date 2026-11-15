@@ -137,7 +137,7 @@ def audit(payload):
     node = shutil.which("node")
     if not node:
         raise RuntimeError("Node is required on the build host for the shared Windows 7 PE audit")
-    subprocess.run([node, str(ROOT / "scripts/lib/windows7-pe.cjs"), str(payload)],
+    subprocess.run([node, str(Path(__file__).with_name("cef-remote-voice.cjs")), str(payload)],
                    check=True, capture_output=True, timeout=60)
 
 
@@ -172,6 +172,8 @@ def prepare(payload, cache):
         raise
     lock = {"schemaVersion": 1, **SOURCE, "arch": "x64", "osVersion": [6, 3], "subsystemVersion": [6, 0],
             "authenticodeVerifiedOnThisBuildHost": signature_verified, "staticPeAuditPassed": True,
+            "staticPeAuditScope": "required-windows7-binaries",
+            "optionalWindows10Components": [host["remoteVoice"]] if "remoteVoice" in host else [],
             "nativeWin7Verified": False, "nativeWin8Verified": False, "nativeWin81Verified": False}
     (payload / "D3DCOMPILER-REDIST-NOTICE.txt").write_text(NOTICE, encoding="utf-8")
     (payload / "d3dcompiler-redist-lock.json").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")

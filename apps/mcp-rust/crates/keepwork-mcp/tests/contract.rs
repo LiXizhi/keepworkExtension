@@ -99,7 +99,9 @@ async fn health_reports_identity_and_only_served_capabilities() {
         assert!(!reason.contains(state.root.to_str().unwrap()));
         assert!(!reason.contains(&state.token));
     }
-    if keepwork_mcp::terminal::supported() {
+    // Judge this response's snapshot: native readiness may change between
+    // requests, so a second global capability query would make the test race.
+    if value["terminalStatus"] == "ready" {
         assert_eq!(value["terminalApi"], "pty-session-v1");
     } else {
         assert!(value.get("terminalApi").is_none());

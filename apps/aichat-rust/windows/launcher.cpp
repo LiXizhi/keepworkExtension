@@ -2,6 +2,7 @@
 #include "common/archive.hpp"
 #ifdef KEEPWORK_WIN7_EDITION
 #include "win7_native.hpp"
+#include "client_updates.hpp"
 #endif
 #include <commctrl.h>
 #include <shellapi.h>
@@ -17,10 +18,12 @@ using namespace keepwork;
 namespace {
 constexpr UINT update_message = WM_APP + 1, done_message = WM_APP + 2;
 std::atomic<bool> cancelled{false};
+std::atomic<bool> maintenance_committed{false};
 std::mutex text_mutex;
 std::wstring status_text, error_text, warning_text, service_result;
 unsigned progress_percent = 0;
-HWND label = nullptr, bar = nullptr;
+int operation_exit_code = 0;
+HWND label = nullptr, bar = nullptr, progress_window = nullptr;
 std::string read_file(const fs::path& file, std::uint64_t limit = 2 * 1024 * 1024) {
   plain_path(file);
   if (!fs::is_regular_file(file) || fs::file_size(file) > limit) throw std::runtime_error("Invalid cached release manifest");
@@ -41,7 +44,10 @@ void atomic_write(const fs::path& file, const std::string& value) {
 }
 struct Options { bool force_cef = false, update = false, background = false, start_mcp = false;
 #ifdef KEEPWORK_WIN7_EDITION
-  bool update_mcp = false, update_client = false;
+  bool update_mcp = false, update_client = false, restart_mcp = false, check_updates = false, install_update = false;
+  DWORD wait_pid = 0;
+  std::wstring ready_event, cancel_event, closed_event;
+  std::string expected_update;
 #endif
 };
 Options options() {
@@ -58,19 +64,75 @@ Options options() {
 #ifdef KEEPWORK_WIN7_EDITION
     else if (arg == L"--update-mcp") result.update_mcp = true;
     else if (arg == L"--update-client") result.update_client = true;
+    else if (arg == L"--restart-mcp") result.restart_mcp = true;
+    else if (arg == L"--check-updates") result.check_updates = true;
+    else if (arg == L"--install-update") result.install_update = true;
+    else if (arg == L"--wait-pid" || arg == L"--ready-event" || arg == L"--cancel-event" || arg == L"--closed-event" || arg == L"--expected-update") {
+      if (++i >= count) throw std::runtime_error("Missing compatibility maintenance option value");
+      const std::wstring value(args[i]);
+      if (arg == L"--wait-pid") {
+        if (value.empty() || value.size() > 10 || value.find_first_not_of(L"0123456789") != std::wstring::npos)
+          throw std::runtime_error("Invalid update parent PID");
+        const auto pid = std::stoull(value);
+        if (!pid || pid > MAXDWORD) throw std::runtime_error("Invalid update parent PID");
+        result.wait_pid = static_cast<DWORD>(pid);
+      } else if (arg == L"--ready-event") result.ready_event = value;
+      else if (arg == L"--cancel-event") result.cancel_event = value;
+      else if (arg == L"--closed-event") result.closed_event = value;
+      else result.expected_update = utf8(value);
+    }
 #endif
-    else throw std::runtime_error("Unknown launcher option. Supported: --cef, --update-cef, --background, --start-mcp");
+    else throw std::runtime_error("Unknown launcher option");
   }
+#ifdef KEEPWORK_WIN7_EDITION
+  const unsigned actions = unsigned(result.start_mcp) + unsigned(result.restart_mcp) + unsigned(result.check_updates)
+    + unsigned(result.install_update) + unsigned(result.update_client) + unsigned(result.update_mcp) + unsigned(result.update);
+  if (actions > 1 || (result.install_update && (!result.wait_pid || result.ready_event.empty() || result.cancel_event.empty() || result.closed_event.empty()
+      || !is_sha256(result.expected_update))) || (!result.install_update && (result.wait_pid || !result.ready_event.empty()
+      || !result.cancel_event.empty() || !result.closed_event.empty() || !result.expected_update.empty()))) throw std::runtime_error("Invalid maintenance action options");
+#endif
   return result;
 }
 void run(const Options& opts, const Progress& progress) {
   auto os = windows_version();
-  if (!opts.start_mcp && cef_running()) throw std::runtime_error("Keepwork is already open; use the existing window or close it before switching runtimes");
+  bool maintenance = opts.start_mcp;
+#ifdef KEEPWORK_WIN7_EDITION
+  maintenance = maintenance || opts.restart_mcp || opts.check_updates || opts.install_update || opts.update_client;
+#endif
+  if (!maintenance && cef_running()) throw std::runtime_error("Keepwork is already open; use the existing window or close it before switching runtimes");
   auto cache = local_data() / L"Keepwork" / L"BrowserRuntimes";
   plain_path(cache); fs::create_directories(cache);
   // Serialize probe, download and promotion across concurrent launches.
   Handle lock(CreateFileW((cache / L"launcher.lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
   if (lock.value == INVALID_HANDLE_VALUE) throw std::runtime_error("Another Keepwork launcher is running; retry when it finishes");
+#ifdef KEEPWORK_WIN7_EDITION
+  if (opts.restart_mcp) {
+    const bool restarted = restart_win7_mcp(progress, [] {
+      if (cancelled) return false;
+      const bool confirmed = MessageBoxW(progress_window, L"重启本地 MCP？\n\n正在运行的本地任务和终端会中断，聊天窗口保持打开。",
+        L"Keepwork 本地服务", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
+      if (confirmed) {
+        maintenance_committed = true;
+        EnableWindow(GetDlgItem(progress_window, IDCANCEL), FALSE);
+      }
+      return confirmed;
+    });
+    if (restarted) service_result = wide(mcp_service_status(probe_mcp_health()));
+    return;
+  }
+  if (opts.check_updates || opts.update_client) {
+    const auto snapshot = check_win7_client_update(progress);
+    operation_exit_code = snapshot.value("ready", false) ? 10 : 0;
+    if (opts.update_client) service_result = snapshot.value("ready", false)
+      ? L"Keepwork 更新已下载。请在聊天窗口的“检查更新…”中选择“退出并更新”。"
+      : L"当前已是最新版本。";
+    return;
+  }
+  if (opts.install_update) {
+    install_win7_client_update(opts.wait_pid, opts.ready_event, opts.cancel_event, opts.closed_event, opts.expected_update, progress);
+    return;
+  }
+#endif
   // Explicit native user action only. Keep the current browser and every
   // existing daemon alive; the existing service startup paths attach safely.
   if (opts.start_mcp) {
@@ -84,7 +146,6 @@ void run(const Options& opts, const Progress& progress) {
   }
   auto channel = select_channel(os, false);
 #ifdef KEEPWORK_WIN7_EDITION
-  if (opts.update_client) { update_win7_client(progress); return; }
   // This edition only accepts packages whose minimum is Win7 SP1. It also
   // runs on newer Windows for validation without selecting modern CEF/Tauri.
   channel = "legacy";
@@ -119,7 +180,7 @@ void run(const Options& opts, const Progress& progress) {
     verify_package(dir, m, hash);
     if (channel == "modern") allow_sandbox_read(dir);
     auto profile = local_data() / L"Keepwork" / L"CefProfiles" / (channel + "-" + std::to_string(m.chromium_major));
-    return launch_cef(dir, profile, opts.background, progress, m.service_launcher);
+    return launch_cef(dir, profile, opts.background, progress, m.service_launcher, m.maintenance);
   };
   std::string previous;
   if (fs::exists(active)) {
@@ -195,8 +256,8 @@ void run(const Options& opts, const Progress& progress) {
   }
 }
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
-  if (message == WM_COMMAND && LOWORD(w) == IDCANCEL) { cancelled = true; EnableWindow(GetDlgItem(window, IDCANCEL), FALSE); return 0; }
-  if (message == WM_CLOSE) { cancelled = true; return 0; }
+  if (message == WM_COMMAND && LOWORD(w) == IDCANCEL) { if (!maintenance_committed) cancelled = true; EnableWindow(GetDlgItem(window, IDCANCEL), FALSE); return 0; }
+  if (message == WM_CLOSE) { if (!maintenance_committed) cancelled = true; return 0; }
   if (message == update_message) {
     std::lock_guard<std::mutex> lock(text_mutex);
     SetWindowTextW(label, status_text.c_str()); SendMessageW(bar, PBM_SETPOS, progress_percent, 0); return 0;
@@ -225,6 +286,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   RegisterClassW(&cls);
   HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, cls.lpszClassName, L"Keepwork", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 500, 190, nullptr, nullptr, instance, nullptr);
   if (!window) return 2;
+  progress_window = window;
   label = CreateWindowW(L"STATIC", L"正在检查运行环境…", WS_CHILD | WS_VISIBLE, 24, 22, 450, 36, window, nullptr, instance, nullptr);
   bar = CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 24, 64, 450, 20, window, nullptr, instance, nullptr);
   CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 390, 103, 84, 28, window, reinterpret_cast<HMENU>(IDCANCEL), instance, nullptr);
@@ -232,7 +294,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::thread worker([&] {
     try {
       run(opts, [&](const std::wstring& text, std::uint64_t done, std::uint64_t total) {
-        if (cancelled) throw std::runtime_error("Download cancelled");
+        if (cancelled && !maintenance_committed) throw std::runtime_error("Download cancelled");
         { std::lock_guard<std::mutex> lock(text_mutex); status_text = text; progress_percent = total ? static_cast<unsigned>(done * 100 / total) : 0; }
         PostMessageW(window, update_message, 0, 0);
       });
@@ -241,7 +303,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   });
   MSG message{}; while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
   worker.join();
-  if (opts.start_mcp) {
+#ifdef KEEPWORK_WIN7_EDITION
+  if (opts.check_updates) return cancelled ? 2 : !error_text.empty() ? 2 : operation_exit_code;
+  if (opts.install_update) {
+    if (!error_text.empty()) {
+      // If the chat is alive it observes this helper and presents the retained
+      // state. After chat exit the helper must surface an installation failure.
+      Handle parent(OpenProcess(SYNCHRONIZE, FALSE, opts.wait_pid));
+      if (!parent.value || WaitForSingleObject(parent.value, 0) == WAIT_OBJECT_0)
+        MessageBoxW(nullptr, (L"更新尚未安装，已下载的更新已保留。\n\n" + error_text).c_str(), L"Keepwork 更新", MB_OK | MB_ICONWARNING);
+      return 2;
+    }
+    return cancelled ? 2 : 0;
+  }
+#endif
+  if (opts.start_mcp
+#ifdef KEEPWORK_WIN7_EDITION
+      || opts.restart_mcp || opts.update_client
+#endif
+      ) {
     if (!error_text.empty()) {
       MessageBoxW(nullptr, (L"无法启动本地服务。\n\n" + error_text).c_str(), L"Keepwork 本地服务", MB_OK | MB_ICONERROR);
       return 2;

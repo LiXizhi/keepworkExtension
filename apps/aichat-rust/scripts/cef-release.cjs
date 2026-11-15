@@ -67,6 +67,10 @@ function validateManifest(m) {
     while (parts.length) { assert.ok(!names.has(parts.join('/')), 'File/directory collision'); parts.pop(); }
   }
   for (const name of ['keepwork-cef.exe', 'libcef.dll', 'icudtl.dat', 'resources.pak', 'locales/en-us.pak']) assert.ok(names.has(name), 'Missing ' + name);
+  if (m.remoteVoice !== undefined) {
+    require('./cef-remote-voice.cjs').validateRemoteVoice(m.remoteVoice);
+    assert.ok(names.has(m.remoteVoice.entry), 'Missing native remote voice component');
+  }
   if (m.chromiumMajor >= 138) assert.ok(names.has('keepwork-cef.dll'), 'Missing sandbox bootstrap application DLL');
   assert.equal(total, m.unpackedSize);
   return m;
@@ -125,6 +129,8 @@ function packageCef({ directory, output, privateKey, minWindows }) {
   assert.ok(files.some(file => file.path === 'CEF-LICENSE.txt'), 'CEF license is required');
   const manifest = { schemaVersion: 1, product: 'keepwork-aichat-cef', hostProtocol: 1, channel, arch: host.arch, version: host.hostVersion,
     ...(host.serviceLauncher === 1 ? { serviceLauncher: 1 } : {}),
+    ...(host.maintenance === 1 ? { maintenance: 1 } : {}),
+    ...(host.remoteVoice !== undefined ? { remoteVoice: require('./cef-remote-voice.cjs').validateRemoteVoice(host.remoteVoice) } : {}),
     cefVersion: host.cefVersion, chromiumMajor: host.cefMajor, minWindows: minWindows || (channel === 'legacy' ? [6, 1, 7601] : [10, 0, 19045]),
     entry: 'keepwork-cef.exe', files, unpackedSize: files.reduce((n, f) => n + f.size, 0), size: 1, sha256: '0'.repeat(64) };
   validateManifest(manifest); publicKey(privateKey);

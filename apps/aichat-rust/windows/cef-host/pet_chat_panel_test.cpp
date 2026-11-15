@@ -27,6 +27,32 @@ static void Click(keepwork_cef::PetChatPanel& panel, int control) {
     reinterpret_cast<LPARAM>(GetDlgItem(panel.window(), control)));
 }
 
+struct KeyboardState {
+  BYTE saved[256]{};
+  bool valid = GetKeyboardState(saved) != FALSE;
+  ~KeyboardState() { if (valid) SetKeyboardState(saved); }
+  void Shift(bool down) {
+    BYTE state[256]{};
+    Check(GetKeyboardState(state) != FALSE, "fixture can read its thread keyboard state");
+    state[VK_SHIFT] = down ? 0x80 : 0;
+    Check(SetKeyboardState(state) != FALSE, "fixture can set its thread modifier without injecting system keys");
+  }
+};
+
+static void Enter(HWND draft, bool repeat = false) {
+  SendMessageW(draft, WM_KEYDOWN, VK_RETURN, repeat ? static_cast<LPARAM>(1ULL << 30) : 0);
+  SendMessageW(draft, WM_CHAR, L'\r', 0);
+  SendMessageW(draft, WM_KEYUP, VK_RETURN, 0);
+}
+
+static bool IsAbove(HWND upper, HWND lower) {
+  for (HWND current = GetTopWindow(nullptr); current; current = GetWindow(current, GW_HWNDNEXT)) {
+    if (current == upper) return true;
+    if (current == lower) return false;
+  }
+  return false;
+}
+
 static void NativeTests() {
   using namespace keepwork_cef;
   FixtureCleanup cleanup;
@@ -49,14 +75,57 @@ static void NativeTests() {
   RECT anchor{10, 10, 122, 122};
   panel.Show(anchor);
   Check(panel.visible() && GetFocus() == draft, "only explicit Show activates the text input");
+  Check((GetWindowLongPtrW(window, GWL_STYLE) & (WS_CAPTION | WS_THICKFRAME | WS_SYSMENU)) == 0,
+    "the chat uses a compact frameless pet panel instead of a system dialog title bar");
+  Check((GetWindowLongPtrW(draft, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) == 0 &&
+      (GetWindowLongPtrW(GetDlgItem(window, PetChatPanel::transcript_id), GWL_EXSTYLE) & WS_EX_CLIENTEDGE) == 0,
+    "the draft and reply avoid recessed system dialog borders");
+  HRGN panel_region = CreateRectRgn(0, 0, 0, 0);
+  Check(panel_region && GetWindowRgn(window, panel_region) != ERROR && !PtInRegion(panel_region, 0, 0),
+    "the native pet panel clips its outer corners to the rounded card shape");
+  DeleteObject(panel_region);
+  SendMessageW(draft, EM_SETSEL, 1, 3);
+  SetFocus(GetDlgItem(window, PetChatPanel::open_id));
+  const HWND follow_focus = GetFocus();
+  const auto follow_edits = edits.size();
+  panel.Follow({30, 40, 142, 152});
+  DWORD follow_start = 0, follow_end = 0;
+  SendMessageW(draft, EM_GETSEL, reinterpret_cast<WPARAM>(&follow_start), reinterpret_cast<LPARAM>(&follow_end));
+  Check(GetFocus() == follow_focus && panel.Draft() == L"第一行\n第二行" && follow_start == 1 && follow_end == 3 &&
+      edits.size() == follow_edits && GetDlgItem(window, PetChatPanel::draft_id) == draft,
+    "following its pet preserves keyboard focus, selection, editor identity and local draft without publishing edits");
+  panel.Hide();
+  panel.Follow({60, 80, 172, 192});
+  Check(!panel.visible(), "moving a collapsed chat cannot reopen or activate it");
+  panel.Show(anchor);
   const auto preserved = panel.Draft();
   view.transcript += L"\n助手：流式追加"; view.busy = true;
   panel.Update(view);
   Check(GetFocus() == draft && GetDlgItem(window, PetChatPanel::draft_id) == draft && panel.Draft() == preserved,
     "streaming snapshots preserve EDIT identity, keyboard focus and local text");
-  SendMessageW(draft, WM_KEYDOWN, VK_RETURN, 0);
-  SendMessageW(draft, WM_CHAR, L'\r', 0);
-  Check(actions.empty(), "Enter inserts text instead of invoking Send");
+  Enter(draft);
+  Check(actions.size() == 1 && actions.back() == PetChatAction::Stop && panel.Draft() == preserved,
+    "busy Enter stops the existing reply once and consumes its translated carriage return");
+  Enter(draft, true);
+  Check(actions.size() == 1 && panel.Draft() == preserved, "held Enter cannot repeat Stop or append a newline");
+  actions.clear();
+  view.busy = false; panel.Update(view); panel.SetDraft(L"回车发送");
+  Enter(draft);
+  Check(actions.size() == 1 && actions.back() == PetChatAction::Send && panel.Draft() == L"回车发送",
+    "idle Enter sends once without adding its translated carriage return to the submitted draft");
+  Enter(draft, true);
+  Check(actions.size() == 1 && panel.Draft() == L"回车发送", "held Enter cannot repeat Send or append a newline");
+  {
+    KeyboardState keyboard;
+    keyboard.Shift(true);
+    SendMessageW(draft, EM_SETSEL, -1, -1);
+    Enter(draft);
+    Check(actions.size() == 1 && panel.Draft() == L"回车发送\n", "Shift+Enter retains native multiline editing without sending");
+  }
+  panel.SetDraft(L"　 \t");
+  Enter(draft);
+  Check(actions.size() == 1, "blank Enter cannot send");
+  actions.clear();
 
   // These messages exercise the native composition guard, not an installed
   // language-specific IME or its candidate UI.
@@ -66,9 +135,10 @@ static void NativeTests() {
   SendMessageW(draft, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"输入"));
   const auto composing = panel.Draft();
   view.transcript += L"\n后台状态变化";
+  panel.Follow({40, 60, 152, 172});
   panel.Update(view); panel.SetDraft(L"旧快照不应覆盖输入法");
   Check(panel.Draft() == composing && edits.empty() && GetFocus() == draft,
-    "composition survives streaming snapshots and stale canonical draft updates");
+    "composition survives pet movement, streaming snapshots and stale canonical draft updates");
   SendMessageW(draft, WM_KEYDOWN, VK_RETURN, 0);
   Check(actions.empty(), "candidate confirmation cannot dispatch Send");
   SendMessageW(draft, WM_IME_ENDCOMPOSITION, 0, 0);
@@ -110,6 +180,7 @@ static void NativeTests() {
   view.rich_draft = false; view.uncertain = true; panel.Update(view);
   const auto before_unknown = actions.size();
   Click(panel, PetChatPanel::send_id);
+  Enter(draft);
   Check(actions.size() == before_unknown && IsWindowVisible(GetDlgItem(window, PetChatPanel::acknowledge_id)),
     "unknown delivery blocks replay and exposes explicit acknowledgement");
   Click(panel, PetChatPanel::acknowledge_id);
@@ -131,11 +202,19 @@ static void NativeTests() {
   Check(DeleteFileW(profile) && CreateDirectoryW(profile, nullptr), "isolated pet settings directory creates");
   cleanup.profile = profile;
   DesktopPet pet;
-  int opened = 0, toggled = 0, hidden = 0;
-  Check(pet.Create(instance, profile, [&] { ++opened; }, [] {}, [&] { ++toggled; }, [&] { ++hidden; }),
+  int opened = 0, toggled = 0, hidden = 0, moved = 0;
+  RECT moved_bounds{};
+  Check(pet.Create(instance, profile, [&] { ++opened; }, [] {}, [&] { ++toggled; }, [&] { ++hidden; panel.Hide(); },
+    [&](RECT rect) { ++moved; moved_bounds = rect; panel.Follow(rect); }),
     "pet loads its embedded resource for click classification");
   Check(pet.Show(), "isolated native pet becomes visible");
   const auto bounds = pet.bounds();
+  Check(moved > 0 && EqualRect(&moved_bounds, &bounds), "the movement callback reports the painted pet's actual screen bounds");
+  panel.Show(bounds);
+  const HWND raised_focus = GetFocus();
+  pet.Raise();
+  Check(IsAbove(pet.window(), window) && raised_focus == draft && GetFocus() == raised_focus,
+    "raising the pet keeps it above a potentially overlapping chat without taking the editor's focus");
   Check(SetCursorPos(bounds.left + 20, bounds.top + 20), "test can position its cursor on the isolated pet");
   const HWND pet_window = pet.window();
   SendMessageW(pet_window, WM_LBUTTONDOWN, MK_LBUTTON, 0);
@@ -147,9 +226,27 @@ static void NativeTests() {
   SendMessageW(pet_window, WM_LBUTTONDBLCLK, MK_LBUTTON, 0);
   SendMessageW(pet_window, WM_TIMER, 2, 0);
   Check(toggled == 1 && opened == 1, "double-click cancels the pending single action and opens the main window once");
+  RECT chat_before_drag{}; GetWindowRect(window, &chat_before_drag);
+  const auto before_drag_callbacks = moved;
+  const auto drag_draft = panel.Draft();
+  const auto drag_edits = edits.size();
+  SendMessageW(draft, EM_SETSEL, 1, 3);
+  SetFocus(draft);
   SendMessageW(pet_window, WM_LBUTTONDOWN, MK_LBUTTON, 0);
   Check(SetCursorPos(bounds.left + 26, bounds.top + 20), "test can move beyond the drag threshold");
   SendMessageW(pet_window, WM_MOUSEMOVE, MK_LBUTTON, 0);
+  RECT chat_during_drag{}; GetWindowRect(window, &chat_during_drag);
+  const auto pet_during_drag = pet.bounds();
+  DWORD drag_start = 0, drag_end = 0;
+  SendMessageW(draft, EM_GETSEL, reinterpret_cast<WPARAM>(&drag_start), reinterpret_cast<LPARAM>(&drag_end));
+  Check(moved > before_drag_callbacks && EqualRect(&moved_bounds, &pet_during_drag) &&
+      pet_during_drag.left == bounds.left + 6 && chat_during_drag.left == chat_before_drag.left + 6 &&
+      chat_during_drag.top == chat_before_drag.top && panel.visible(),
+    "the expanded chat follows the pet while the mouse is still held, before release");
+  Check(GetFocus() == draft && panel.Draft() == drag_draft && edits.size() == drag_edits &&
+      drag_start == 1 && drag_end == 3 && GetDlgItem(window, PetChatPanel::draft_id) == draft,
+    "real pet dragging never steals focus, replaces the editor or mutates its draft and selection");
+  Check(IsAbove(pet_window, window), "the pet remains above the chat during a drag so an overlapping panel cannot cover it");
   SendMessageW(pet_window, WM_LBUTTONUP, 0, 0);
   SendMessageW(pet_window, WM_TIMER, 2, 0);
   Check(toggled == 1 && opened == 1, "dragging cannot leave a delayed chat or main-window action");
@@ -157,7 +254,8 @@ static void NativeTests() {
   SendMessageW(pet_window, WM_LBUTTONUP, 0, 0);
   pet.Hide();
   SendMessageW(pet_window, WM_TIMER, 2, 0);
-  Check(toggled == 1 && hidden > 0, "hiding cancels pending clicks and notifies the panel owner");
+  Check(toggled == 1 && hidden > 0 && !panel.visible(), "hiding cancels pending clicks and collapses the pet's chat");
+  Check(pet.Show() && !panel.visible(), "showing or repositioning the pet leaves a collapsed chat hidden");
   pet.Destroy();
   panel.Destroy(); panel.Destroy();
   Check(!IsWindow(window), "panel teardown releases native windows and is idempotent");

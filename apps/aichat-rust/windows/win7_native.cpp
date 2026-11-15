@@ -1,9 +1,11 @@
 #include "win7_native.hpp"
 #include "common/archive.hpp"
 #include "common/win7_policy.hpp"
+#include "common/mcp_restart_policy.hpp"
 #include <shellapi.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <memory>
 #include <regex>
 #include <stdexcept>
 #include <tuple>
@@ -92,13 +94,13 @@ Candidate download_candidate(const fs::path& root, const Progress& progress) {
   auto value = candidate(envelope, destination);
   return value;
 }
-void run_candidate(const Candidate& selected, const fs::path& root, const Progress& progress) {
+McpHealth run_candidate(const Candidate& selected, const fs::path& root, const Progress& progress) {
   verify_runtime(selected);
   const auto current = launch_mcp_process(selected.directory, selected.manifest.version,
     "win7-win8", L"win7-win8-desktop", edition_data(), progress);
   // An existing peer is usable without matching our packaged runtime identity.
   // Promote only after confirming this edition's own candidate.
-  if (!current.owned) return;
+  if (!current.owned) return current;
   if (fs::exists(root / L"active.json")) {
     const auto previous = read(root / L"active.json");
     if (previous != selected.envelope) atomic_write(root / L"previous.json", previous);
@@ -106,18 +108,9 @@ void run_candidate(const Candidate& selected, const fs::path& root, const Progre
   atomic_write(root / L"active.json", selected.envelope);
   if (fs::exists(root / L"pending.json") && read(root / L"pending.json") == selected.envelope)
     fs::remove(root / L"pending.json");
+  return current;
 }
-}
-void win7_startup_warning(const std::string& message) {
-  mcp_startup_warning(edition_data(), message);
-}
-void start_win7_mcp(bool update, const Progress& progress) {
-  auto root = edition_data() / L"McpRuntimes";
-  plain_path(root); fs::create_directories(root / L"versions");
-  // The launcher lock also serializes signed runtime promotion and downloads.
-  auto existing = probe_mcp_health();
-  if (existing.keepwork && !update) return;
-  require(!existing.responded || existing.keepwork, "Port 8089 is occupied by another service; it was left untouched");
+Candidate select_cached_candidate(const fs::path& root) {
   auto selected = cache_bundle(root);
   std::string failed_digest;
   if (fs::exists(root / L"failed.json")) {
@@ -135,6 +128,20 @@ void start_win7_mcp(bool update, const Progress& progress) {
       if (selected.manifest.sha256 == failed_digest || version(cached.manifest.version) > version(selected.manifest.version)) selected = std::move(cached);
     } catch (const std::exception& error) { win7_startup_warning(error.what()); }
   }
+  return selected;
+}
+}
+void win7_startup_warning(const std::string& message) {
+  mcp_startup_warning(edition_data(), message);
+}
+void start_win7_mcp(bool update, const Progress& progress) {
+  auto root = edition_data() / L"McpRuntimes";
+  plain_path(root); fs::create_directories(root / L"versions");
+  // The launcher lock also serializes signed runtime promotion and downloads.
+  auto existing = probe_mcp_health();
+  if (existing.keepwork && !update) return;
+  require(!existing.responded || existing.keepwork, "Port 8089 is occupied by another service; it was left untouched");
+  auto selected = select_cached_candidate(root);
   if (update) {
     auto remote = download_candidate(root, progress);
     require(version(remote.manifest.version) >= version(selected.manifest.version), "Refusing Win7 MCP downgrade");
@@ -167,6 +174,62 @@ void start_win7_mcp(bool update, const Progress& progress) {
     }
     throw;
   }
+}
+bool restart_win7_mcp(const Progress& progress, const std::function<bool()>& confirm) {
+  const auto root = edition_data() / L"McpRuntimes";
+  const auto bundle = executable_dir() / L"resources" / L"win7-mcp";
+  std::unique_ptr<Candidate> selected, fallback;
+  const auto prepare = [&] {
+    progress(L"正在校验本地 MCP 重启候选…", 0, 0);
+    plain_path(root); fs::create_directories(root / L"versions");
+    selected = std::make_unique<Candidate>(select_cached_candidate(root));
+    // Verify a rollback candidate before interrupting any running work. An old
+    // preview signed by another key may be stopped based on OS ownership, but
+    // it can never be executed without this launcher's trusted signature.
+    for (const auto* name : {L"active.json", L"previous.json"}) {
+      if (!fs::exists(root / name)) continue;
+      try {
+        const auto envelope = read(root / name);
+        const auto metadata = validate_win7_mcp_manifest(verify_envelope(envelope), windows_version());
+        if (metadata.sha256 != selected->manifest.sha256) {
+          auto value = candidate(envelope, root / L"versions" / metadata.sha256);
+          fallback = std::make_unique<Candidate>(std::move(value));
+          break;
+        }
+      } catch (const std::exception&) { /* An untrusted rollback is never executed. */ }
+    }
+  };
+  const auto start = [&] {
+    try {
+      const auto current = run_candidate(*selected, root, progress);
+      require(current.owned, "另一个进程已启动本地服务；当前服务已保留，未强制替换。");
+    } catch (const std::exception& error) {
+      const std::string failure = error.what();
+      // Do not roll back over any service that appeared during the restart.
+      if (fallback && !probe_mcp_health().responded) {
+        std::string restored_version;
+        try {
+          const auto restored = run_candidate(*fallback, root, progress);
+          if (restored.owned) restored_version = restored.version;
+        } catch (const std::exception& rollback_error) {
+          win7_startup_warning(std::string("MCP restart and rollback failed: ") + rollback_error.what());
+        }
+        if (!restored_version.empty()) {
+          win7_startup_warning("MCP restart candidate failed; the previously verified runtime was restored: " + failure);
+          throw std::runtime_error("新版 MCP 启动失败，已恢复此前验证过的服务版本 " + restored_version + "。 " + failure);
+        }
+      }
+      throw std::runtime_error("MCP 重启失败，缓存与用户数据已保留。 " + failure);
+    }
+  };
+  const auto validate_running = [&](const McpHealth& running) {
+    require(restart_candidate_not_older(running.version, selected->manifest.version),
+      "当前运行的 MCP 比可验证的重启候选更新，已保留当前服务；请使用包含相同或更新 MCP 的安装包重启。");
+    // A fallback may restore the pre-restart version, but never silently run an
+    // older version than the user was using before this explicit restart.
+    if (fallback && !restart_candidate_not_older(running.version, fallback->manifest.version)) fallback.reset();
+  };
+  return restart_managed_mcp(root / L"versions", bundle, progress, prepare, validate_running, confirm, start);
 }
 void update_win7_client(const Progress& progress) {
   auto payload = verify_envelope(fetch_manifest(std::string(win7_client_base) + "windows-x64/latest-client.json", progress));

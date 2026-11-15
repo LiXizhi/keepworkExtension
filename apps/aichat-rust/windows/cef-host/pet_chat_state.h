@@ -16,6 +16,9 @@ class PetChatState {
     std::string context, target;
     std::wstring title, draft, reply, attention, error, messages;
     bool ready = false, busy = false, rich_draft = false, dictating = false, can_switch = false;
+    bool can_dictate = true, can_call = false, calling = false, muted = false;
+    int dictation_audio = 0, voice_audio = 0;
+    std::wstring voice_state;
   };
   struct Command { std::string action, id, context; std::wstring text; };
   struct IsolatedDraft {
@@ -106,7 +109,8 @@ class PetChatState {
 
   std::optional<Command> Begin(const std::string& action, const std::string& id, std::uint64_t now) {
     if (pending_) { local_error_ = L"上一项操作尚未确认，请稍候。"; return {}; }
-    if (action != "input" && action != "send" && action != "stop" && action != "toggle-target") {
+    if (action != "input" && action != "send" && action != "stop" && action != "toggle-target" &&
+        action != "dictation" && action != "call" && action != "mute") {
       local_error_ = L"不支持此宠物操作。"; return {};
     }
     if (!FreshId(id)) { local_error_ = L"请求标识无效或已使用。"; return {}; }
@@ -116,11 +120,18 @@ class PetChatState {
       if (dirty_ && draft_ != snapshot_.draft) {
         local_error_ = L"有未同步草稿，请先发送或恢复主窗口草稿后再切换目标。"; return {};
       }
-      if (!snapshot_.can_switch || snapshot_.dictating) { local_error_ = L"当前无法切换目标，请打开 AIChat。"; return {}; }
+      if (!snapshot_.can_switch || snapshot_.dictating || snapshot_.calling) { local_error_ = L"当前无法切换目标，请先结束语音。"; return {}; }
     } else if (!snapshot_.ready) {
       local_error_ = L"当前目标尚未就绪，草稿已保留，请打开 AIChat。"; return {};
     }
     if ((action == "input" || action == "send") && !Writable()) return {};
+    if (action == "dictation" && !snapshot_.dictating && (snapshot_.calling || snapshot_.rich_draft || !snapshot_.can_dictate)) {
+      local_error_ = L"当前无法语音输入，请先结束通话或打开 AIChat。"; return {};
+    }
+    if (action == "call" && (snapshot_.dictating || (!snapshot_.can_call && !snapshot_.calling))) {
+      local_error_ = L"请先结束语音输入，并在 AIChat 中选择实时语音模型。"; return {};
+    }
+    if (action == "mute" && !snapshot_.calling) { local_error_ = L"当前没有通话。"; return {}; }
     if (action == "send") {
       if (snapshot_.busy) { local_error_ = L"正在回复，请先停止当前回复。"; return {}; }
       if (!HasContent(draft_)) { local_error_ = L"请输入消息后再发送。"; return {}; }
@@ -131,6 +142,11 @@ class PetChatState {
     local_error_.clear();
     if (action == "input" || action == "send") accepted_ = false;
     // Every explicit Send first establishes the actual page composer value.
+    const bool media_start = (action == "dictation" && !snapshot_.dictating) || (action == "call" && !snapshot_.calling);
+    if (media_start && dirty_ && draft_ != snapshot_.draft) {
+      if (!Writable()) return {};
+      return Start("input", id, now, false, action);
+    }
     return Start(action == "send" ? "input" : action, id, now, action == "send");
   }
 
@@ -151,19 +167,20 @@ class PetChatState {
     if (completed.command.action == "input") {
       const bool unchanged = revision_ == completed.revision && draft_ == completed.text;
       if (unchanged) dirty_ = false;
-      if (!completed.send_after_input) return {};
+      if (!completed.send_after_input && completed.after_input.empty()) return {};
       if (!unchanged) { local_error_ = L"草稿已更改，尚未发送，请再次确认。"; return {}; }
       if (snapshot_.draft != completed.text) {
         dirty_ = true;
         local_error_ = L"网页草稿已改变，尚未发送；宠物草稿已保留，请打开 AIChat 核查。";
         return {};
       }
-      if (!snapshot_.ready || snapshot_.busy || !Writable()) {
+      if (!snapshot_.ready || (completed.send_after_input && snapshot_.busy) || !Writable()) {
         dirty_ = true;
         if (local_error_.empty()) local_error_ = L"网页状态已改变，尚未发送，请打开 AIChat。";
         return {};
       }
       if (!FreshId(next_id)) { dirty_ = true; local_error_ = L"后续请求标识无效，尚未发送。"; return {}; }
+      if (!completed.after_input.empty()) return Begin(completed.after_input, next_id, now);
       return Start("send", next_id, now, false);
     }
     if (completed.command.action == "send") {
@@ -176,10 +193,10 @@ class PetChatState {
   }
 
   bool CancelUnsubmittedInput() {
-    if (!pending_ || pending_->command.action != "input" || !pending_->send_after_input) return false;
+    if (!pending_ || pending_->command.action != "input" || (!pending_->send_after_input && pending_->after_input.empty())) return false;
     pending_.reset();
     dirty_ = true;
-    local_error_ = L"已打开主窗口，尚未发送；宠物草稿已保留。";
+    local_error_ = L"已打开主窗口，待执行操作已取消；宠物草稿已保留。";
     return true;
   }
 
@@ -214,6 +231,7 @@ class PetChatState {
     std::uint64_t started, document, revision;
     std::wstring text;
     bool send_after_input;
+    std::string after_input;
   };
   Snapshot snapshot_;
   std::wstring draft_, local_error_, accepted_text_, unknown_text_;
@@ -289,10 +307,10 @@ class PetChatState {
     }
   }
   std::optional<Command> Start(const std::string& action, const std::string& id,
-                               std::uint64_t now, bool send_after_input) {
+                               std::uint64_t now, bool send_after_input, const std::string& after_input = {}) {
     Command command{action, id, snapshot_.context, action == "input" ? draft_ : std::wstring{}};
     RememberId(id);
-    pending_ = Pending{command, now, document_, revision_, draft_, send_after_input};
+    pending_ = Pending{command, now, document_, revision_, draft_, send_after_input, after_input};
     return command;
   }
   void Isolate() {

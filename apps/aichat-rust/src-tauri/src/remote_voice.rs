@@ -1,12 +1,19 @@
 //! Native ATVV dictation. Audio and text stay out of the renderer/MCP bridge
 //! and are never persisted. Only completed PTT audio goes to Keepwork ASR.
+#[path = "remote_voice/asr.rs"]
 mod asr;
+#[path = "remote_voice/atvv.rs"]
 mod atvv;
+#[path = "remote_voice/auto_start.rs"]
 mod auto_start;
+#[path = "remote_voice/buttons.rs"]
 mod buttons;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+#[path = "remote_voice/ble.rs"]
 mod ble;
+#[path = "remote_voice/native_input.rs"]
 mod native_input;
+#[path = "remote_voice/paired.rs"]
 mod paired;
 
 use crate::files::atomic_json_write;

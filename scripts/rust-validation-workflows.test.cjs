@@ -130,6 +130,14 @@ test('legacy packaging pins the Windows 2022 host, v143 compiler and Windows SDK
   assert.match(cefConfigure, /-DCMAKE_SYSTEM_VERSION=10\.0\.22621\.0\b/);
 });
 
+test('legacy CEF audits required old-system binaries and records its declared optional Windows10 companion separately', () => {
+  const source = workflow('aichat-rust-win7.yml');
+  assert.match(source, /node apps\/aichat-rust\/scripts\/cef-remote-voice\.cjs win7-cef-build\/payload\/Release > win7-cef-static-pe\.json/);
+  assert.doesNotMatch(source, /node scripts\/lib\/windows7-pe\.cjs win7-cef-build\/payload/);
+  assert.match(source, /Copy-Item win7-cef-static-pe\.json win7-build\/release\/cef-static-pe-report\.json/);
+  assert.match(source, /node --test [^\n]*apps\/aichat-rust\/tests\/cef-remote-voice\.test\.cjs/);
+});
+
 test('launcher-only diagnosis audits actual executable bytes and retains failed-build evidence without publishing', () => {
   const source = workflow('win7-redist-diagnostic.yml');
   const launcher = jobBody(source, 'launcher');

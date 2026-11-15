@@ -5,6 +5,25 @@
 namespace keepwork_cef {
 struct PetWorkArea { int left, top, right, bottom; };
 struct PetPlacement { int x, y, pixels; };
+struct PetChatPlacement { int x, y, width, height; };
+
+// Screen coordinates may be negative or span monitors. Keep all intermediate
+// arithmetic wide, including tiny or unavailable work-area fallbacks.
+inline PetChatPlacement PlacePetChat(const PetWorkArea& anchor, int width, int height,
+                                     int gap, const PetWorkArea& area) {
+  using I = std::int64_t;
+  const I available_width = I(area.right) - area.left;
+  const I available_height = I(area.bottom) - area.top;
+  if (available_width <= 0 || available_height <= 0) return {area.left, area.top, 1, 1};
+  const I w = std::clamp<I>(width, 1, available_width);
+  const I h = std::clamp<I>(height, 1, available_height);
+  const I spacing = std::max(0, gap);
+  const I above = I(anchor.top) - spacing - h;
+  const I top = above >= area.top ? above : I(anchor.bottom) + spacing;
+  return {static_cast<int>(std::clamp<I>(I(anchor.right) - w, area.left, I(area.right) - w)),
+    static_cast<int>(std::clamp<I>(top, area.top, I(area.bottom) - h)),
+    static_cast<int>(w), static_cast<int>(h)};
+}
 
 inline int PetPixels(int dpi) {
   if (dpi <= 0) dpi = 96;
