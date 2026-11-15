@@ -65,7 +65,11 @@ async fn send(
 }
 fn marker_command(name: &str) -> String {
     if cfg!(windows) {
-        format!("$p = 'KW_PTY_'; Write-Output ($p + '{name}')\r")
+        // This fixture verifies shell execution and PTY transport. Native ARM
+        // CI still stalls on Write-Output; that separate observed cmdlet issue
+        // and full CLI live checks remain unresolved. Keep computed output so
+        // input echo cannot satisfy it.
+        format!("$p = 'KW_PTY_'; [Console]::Out.WriteLine($p + '{name}')\r")
     } else {
         format!("printf '%s%s\\n' KW_PTY_ {name}\r")
     }
@@ -307,7 +311,7 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
     assert_eq!(replay["reset"], false);
 
     let unicode = if cfg!(windows) {
-        "Write-Output ([string][char]0x4e2d + [char]0x6587 + [char]0xd83d + [char]0xde00)\r"
+        "[Console]::Out.WriteLine([string][char]0x4e2d + [char]0x6587 + [char]0xd83d + [char]0xde00)\r"
     } else {
         "printf '\\344\\270\\255\\346\\226\\207\\360\\237\\230\\200\\n'\r"
     };
@@ -337,7 +341,9 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
     .unwrap();
 
     let sleeping = if cfg!(windows) {
-        "function prompt { 'KW_PTY_' + 'READY> ' }; $p = 'KW_PTY_'; Write-Output ($p + 'SLEEPING'); Start-Sleep -Seconds 30\r"
+        // Check cancellation between short .NET waits in the PowerShell
+        // language loop, without relying on Utility's Start-Sleep loading.
+        "function prompt { 'KW_PTY_' + 'READY> ' }; $p = 'KW_PTY_'; [Console]::Out.WriteLine($p + 'SLEEPING'); for ($i = 0; $i -lt 300; $i++) { [System.Threading.Thread]::Sleep(100) }\r"
     } else {
         "PS1='KW_PTY_''READY> '; printf '%s%s\\n' KW_PTY_ SLEEPING; sleep 30\r"
     };
@@ -353,7 +359,33 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
     // A write acknowledgement does not prove that the shell has started the
     // long command. Its computed output cannot be satisfied by input echo.
     let sleeping_output = wait_output(&f, &route, "KW_PTY_SLEEPING").await;
+    assert!(
+        !sleeping_output["output"]
+            .as_str()
+            .unwrap()
+            .contains("KW_PTY_READY> "),
+        "the long operation must not finish with its first output: {sleeping_output}"
+    );
     let before_interrupt = sleeping_output["cursor"].as_u64().unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, still_running) = send(
+        &f,
+        "GET",
+        &format!("{route}/output?cursor={before_interrupt}"),
+        json!({}),
+        OWNER,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(still_running["closed"], false);
+    assert!(
+        !still_running["output"]
+            .as_str()
+            .unwrap()
+            .contains("KW_PTY_READY> "),
+        "the long operation must still be running before interrupt: {still_running}"
+    );
     assert_eq!(
         send(
             &f,
