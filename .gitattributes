@@ -3,3 +3,5 @@
 /src/core/vendor/aichat-runtime/manifest.json text eol=lf
 # Preserve upstream WinPTY bytes covered by pinned SHA-256 values.
 /apps/mcp-rust/vendor/winpty-0.4.3/** -text
+# Keep the pinned upstream Popover script, license and provenance unchanged.
+/apps/aichat-rust/windows/cef-host/vendor/** -text

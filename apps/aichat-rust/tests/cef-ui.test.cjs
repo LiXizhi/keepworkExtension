@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 
 const host = path.resolve(__dirname, '../windows/cef-host');
 const read = name => fs.readFileSync(path.join(host, name), 'utf8');
@@ -19,6 +20,37 @@ test('vendored Popover implementation retains its pinned upstream identity and B
   assert.match(read('vendor/LICENSE.txt'), /Redistribution and use in source and binary forms/);
   assert.match(read('CMakeLists.txt'), /popover-polyfill-LICENSE\.txt/,
     'binary CEF distribution must retain third-party attribution');
+});
+
+test('Windows autocrlf checkout preserves the pinned Popover bytes with an unprotected negative control', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-popover-checkout-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const relative = 'apps/aichat-rust/windows/cef-host/vendor';
+  const attributes = fs.readFileSync(path.resolve(__dirname, '../../../.gitattributes'));
+  const expectedHash = JSON.parse(read('vendor/provenance.json')).scriptSha256;
+  for (const protectedBytes of [true, false]) {
+    const repository = path.join(temporary, protectedBytes ? 'protected' : 'control');
+    fs.mkdirSync(repository);
+    fs.writeFileSync(path.join(repository, '.gitattributes'), protectedBytes ? attributes : '# no upstream byte protection\n');
+    fs.cpSync(path.join(host, 'vendor'), path.join(repository, relative), { recursive: true });
+    const git = args => execFileSync('git', ['-c', 'core.autocrlf=true', '-c', 'core.safecrlf=false', ...args],
+      { cwd: repository, stdio: ['ignore', 'pipe', 'pipe'] });
+    git(['init', '--quiet']);
+    git(['add', '--', '.gitattributes', relative]);
+    fs.rmSync(path.join(repository, relative), { recursive: true });
+    git(['checkout-index', '--all', '--force']);
+    const checkedOut = path.join(repository, relative);
+    const script = fs.readFileSync(path.join(checkedOut, 'popover.iife.min.js'));
+    const digest = crypto.createHash('sha256').update(script).digest('hex');
+    if (protectedBytes) {
+      assert.equal(digest, expectedHash);
+      for (const name of fs.readdirSync(path.join(host, 'vendor')))
+        assert.deepEqual(fs.readFileSync(path.join(checkedOut, name)), fs.readFileSync(path.join(host, 'vendor', name)), name);
+    } else {
+      assert.ok(script.includes(Buffer.from('\r\n')));
+      assert.notEqual(digest, expectedHash, 'the pinned integrity gate must reject rewritten bytes');
+    }
+  }
 });
 
 test('Windows bootstrap and legacy CEF embed a real multiresolution Keepwork icon', () => {
