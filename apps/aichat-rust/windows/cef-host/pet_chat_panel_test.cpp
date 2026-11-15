@@ -2,10 +2,11 @@
 #include "pet_chat_panel.h"
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
-static void Check(bool value, const char* label) {
+static void Check(bool value, const std::string& label) {
   if (!value) throw std::runtime_error(label);
 }
 
@@ -40,9 +41,35 @@ struct KeyboardState {
 };
 
 static void Enter(HWND draft, bool repeat = false) {
-  SendMessageW(draft, WM_KEYDOWN, VK_RETURN, repeat ? static_cast<LPARAM>(1ULL << 30) : 0);
-  SendMessageW(draft, WM_CHAR, L'\r', 0);
-  SendMessageW(draft, WM_KEYUP, VK_RETURN, 0);
+  const LPARAM base = 1 | (static_cast<LPARAM>(MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC)) << 16);
+  const LPARAM pressed = base | (repeat ? static_cast<LPARAM>(1ULL << 30) : 0);
+  SendMessageW(draft, WM_KEYDOWN, VK_RETURN, pressed);
+  SendMessageW(draft, WM_CHAR, L'\r', pressed);
+  SendMessageW(draft, WM_KEYUP, VK_RETURN, base | static_cast<LPARAM>((1ULL << 30) | (1ULL << 31)));
+}
+
+static void SelectDraftEnd(HWND draft) {
+  const auto length = static_cast<DWORD>(GetWindowTextLengthW(draft));
+  SendMessageW(draft, EM_SETSEL, length, length);
+  DWORD start = 0, end = 0;
+  SendMessageW(draft, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+  Check(start == length && end == length, "fixture caret is explicitly at the end of the native draft");
+}
+
+static std::string InputDiagnostic(HWND draft, size_t actions) {
+  DWORD start = 0, end = 0;
+  SendMessageW(draft, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+  wchar_t raw[128]{};
+  const int count = GetWindowTextW(draft, raw, ARRAYSIZE(raw));
+  std::ostringstream out;
+  out << "; actions=" << actions << "; selection=" << start << ',' << end
+      << "; shift=" << ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
+      << "; leftShift=" << ((GetKeyState(VK_LSHIFT) & 0x8000) != 0)
+      << "; rightShift=" << ((GetKeyState(VK_RSHIFT) & 0x8000) != 0)
+      << "; control=" << ((GetKeyState(VK_CONTROL) & 0x8000) != 0)
+      << "; alt=" << ((GetKeyState(VK_MENU) & 0x8000) != 0) << "; raw UTF-16=" << std::hex;
+  for (int index = 0; index < count; ++index) out << static_cast<unsigned>(raw[index]) << ',';
+  return out.str();
 }
 
 static bool IsAbove(HWND upper, HWND lower) {
@@ -118,9 +145,23 @@ static void NativeTests() {
   {
     KeyboardState keyboard;
     keyboard.Shift(true);
-    SendMessageW(draft, EM_SETSEL, -1, -1);
+    Check((GetKeyState(VK_SHIFT) & 0x8000) != 0, "fixture Shift modifier is visible to the native EDIT thread");
+    // EM_SETSEL(-1, -1) only deselects the preserved 1..3 range above; it does
+    // not mean "move to end". Establish the native caret precondition first.
+    SelectDraftEnd(draft);
+    const auto before_multiline_edits = edits.size();
     Enter(draft);
-    Check(actions.size() == 1 && panel.Draft() == L"回车发送\n", "Shift+Enter retains native multiline editing without sending");
+    Check(actions.size() == 1 && panel.Draft() == L"回车发送\n",
+      "Shift+Enter retains native multiline editing without sending" + InputDiagnostic(draft, actions.size()));
+    keyboard.Shift(false);
+    SendMessageW(draft, WM_CHAR, L'续', 1);
+    Check(actions.size() == 1 && panel.Draft() == L"回车发送\n续" &&
+        edits.size() == before_multiline_edits + 2 && edits.back() == panel.Draft(),
+      "native multiline edits publish the actual local draft without sending" + InputDiagnostic(draft, actions.size()));
+    actions.clear();
+    Enter(draft);
+    Check(actions.size() == 1 && actions.back() == PetChatAction::Send && panel.Draft() == L"回车发送\n续",
+      "Enter submits the edited multiline draft once without appending another newline" + InputDiagnostic(draft, actions.size()));
   }
   panel.SetDraft(L"　 \t");
   Enter(draft);
@@ -131,7 +172,7 @@ static void NativeTests() {
   // language-specific IME or its candidate UI.
   view.busy = false; panel.Update(view); panel.SetDraft(L"组合"); edits.clear();
   SendMessageW(draft, WM_IME_STARTCOMPOSITION, 0, 0);
-  SendMessageW(draft, EM_SETSEL, -1, -1);
+  SelectDraftEnd(draft);
   SendMessageW(draft, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"输入"));
   const auto composing = panel.Draft();
   view.transcript += L"\n后台状态变化";
@@ -146,7 +187,7 @@ static void NativeTests() {
   panel.SetDraft(L"准备发送");
   Check(edits.size() == 1, "later programmatic SetDraft still emits no user edit callback");
   SendMessageW(draft, WM_IME_STARTCOMPOSITION, 0, 0);
-  SendMessageW(draft, EM_SETSEL, -1, -1);
+  SelectDraftEnd(draft);
   SendMessageW(draft, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"旧会话组合"));
   const auto owner_edit_count = edits.size();
   panel.SetDraft(L"新会话草稿", true);

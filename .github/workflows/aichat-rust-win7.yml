@@ -136,7 +136,7 @@ jobs:
           $env:KEEPWORK_WIN7_MODERN_D3D_DLL = Join-Path $sdk 'Release/d3dcompiler_47.dll'
           $env:KEEPWORK_CEF_VERIFY_EXE = (Resolve-Path win7-build/bootstrap-build/Release/keepwork_native_verify.exe).Path
           $env:KEEPWORK_CEF_TEST_PRIVATE_KEY = Join-Path $env:WIN7_SIGNING_KEY_DIR 'private.pem'
-          node --test scripts/win7-pe.test.cjs scripts/win7-runtime-contract.test.cjs scripts/win7-publication.test.cjs scripts/rust-local-release.test.cjs scripts/rust-validation-workflows.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/package-win7-runtime.test.cjs apps/aichat-rust/tests/win7-package.test.cjs apps/aichat-rust/tests/win7-cef.test.cjs apps/aichat-rust/tests/cef-sdk.test.cjs apps/aichat-rust/tests/cef-package.test.cjs apps/aichat-rust/tests/cef-installer.test.cjs apps/aichat-rust/tests/cef-remote-voice.test.cjs
+          node --test --test-concurrency=1 scripts/win7-pe.test.cjs scripts/win7-runtime-contract.test.cjs scripts/win7-publication.test.cjs scripts/rust-local-release.test.cjs scripts/rust-validation-workflows.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/package-win7-runtime.test.cjs apps/aichat-rust/tests/win7-package.test.cjs apps/aichat-rust/tests/win7-cef.test.cjs apps/aichat-rust/tests/cef-sdk.test.cjs apps/aichat-rust/tests/cef-package.test.cjs apps/aichat-rust/tests/cef-installer.test.cjs apps/aichat-rust/tests/cef-remote-voice.test.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run the owned native MCP smoke on this modern Windows runner
         run: |

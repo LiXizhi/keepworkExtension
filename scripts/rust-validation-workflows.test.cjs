@@ -61,6 +61,16 @@ test('PRs validate both Rust products without entering installer or publication 
   }
 });
 
+test('native CI serializes Node test files while preserving suites and explicit in-test races', () => {
+  for (const [name, expected] of [['mcp-rust.yml', 2], ['rust-desktop-validation.yml', 1], ['aichat-rust-win7.yml', 1]]) {
+    const commands = workflow(name).split('\n').filter(line => /\bnode --test\b/.test(line));
+    assert.equal(commands.length, expected, `${name} retains every Node suite entry`);
+    for (const command of commands) assert.match(command, /node --test --test-concurrency=1\b/);
+  }
+  assert.match(workflow('mcp-rust.yml'), /--test-reporter=tap scripts\/contract\/\*\.test\.cjs/);
+  assert.match(workflow('rust-desktop-validation.yml'), /--test-reporter=tap apps\/aichat-rust\/tests\/\*\.test\.cjs scripts\/rust-local-release\.test\.cjs/);
+});
+
 test('release and PR builds share real host Windows tests instead of inheriting macOS skips', () => {
   const validation = workflow('rust-desktop-validation.yml');
   assert.match(validation, /workflow_call:/);
