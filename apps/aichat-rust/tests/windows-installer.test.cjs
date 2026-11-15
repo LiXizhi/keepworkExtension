@@ -51,6 +51,22 @@ test('maintenance uninstall stops the old installation before its legacy uninsta
     'stop both desktop names and MCP from the old installation, even if the new destination differs');
 });
 
+test('modern installer embeds the Keepwork icon in setup, uninstaller and installed-app entry', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(tauriRoot, 'tauri.windows.conf.json'), 'utf8'));
+  const nsis = config.bundle.windows.nsis;
+  for (const key of ['installerIcon', 'uninstallerIcon']) {
+    assert.equal(nsis[key], 'icons/icon.ico', `${key} must use the product icon`);
+  }
+  const ico = fs.readFileSync(path.join(tauriRoot, nsis.installerIcon));
+  assert.equal(ico.readUInt16LE(2), 1, 'product icon must be an ICO file');
+  assert.ok(ico.readUInt16LE(4) >= 4, 'product icon must carry the Explorer and titlebar sizes');
+  const source = fs.readFileSync(template, 'utf8');
+  assert.match(source, /!define MUI_ICON "\$\{INSTALLERICON\}"/,
+    'the setup window and setup.exe icon must come from installerIcon');
+  assert.match(source, /!define MUI_UNICON "\$\{UNINSTALLERICON\}"/,
+    'Uninstall.exe must carry the same product icon');
+});
+
 test('Windows install and uninstall stop the desktop supervisor before cleaning MCP', () => {
   const config = JSON.parse(fs.readFileSync(path.join(tauriRoot, 'tauri.windows.conf.json'), 'utf8'));
   assert.equal(config.bundle.windows.nsis.installerHooks, 'windows/installer-hooks.nsh');

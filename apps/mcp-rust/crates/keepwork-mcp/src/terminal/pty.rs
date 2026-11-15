@@ -1,7 +1,7 @@
 //! PTY-backed terminal sessions (mirrors `src/core/terminalSessions.ts`).
 //!
 //! Same routes, owner rules, cursor replay and output cap as the Node daemon;
-//! `portable-pty` replaces `node-pty`.
+//! Native adapters use portable-pty on current systems and WinPTY on Win7/8.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use super::native::{spawn_shell, ChildControl, PtyControl, PtySize};
 
 use super::{assert_allowed_command, GLOBAL_TERMINAL_CAP, OUTPUT_CHAR_CAP};
 use crate::http::json_response;
@@ -40,9 +40,9 @@ struct TerminalSession {
     id: String,
     owner: String,
     cwd: String,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    master: Mutex<Box<dyn PtyControl>>,
     writer: Mutex<Box<dyn Write + Send>>,
-    child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    child: Mutex<Box<dyn ChildControl>>,
     output: Mutex<String>,
     base_cursor: AtomicU64,
     closed: AtomicBool,
@@ -70,52 +70,36 @@ impl TerminalSession {
         if text.is_empty() {
             return;
         }
-        let (event, base) = {
+        let mut listeners = self.listeners.lock().expect("terminal listeners");
+        let event = {
             let mut output = self.output.lock().expect("terminal output");
             output.push_str(text);
             // Cursors count UTF-16 code units, exactly like `string.length` in
             // the Node daemon, so emoji advance by two in both engines.
-            let units = utf16_len(&output);
-            if units > OUTPUT_CHAR_CAP {
-                let overflow = units - OUTPUT_CHAR_CAP;
-                let cut = char_index_at_utf16(&output, overflow);
-                output.drain(..cut);
-                let _ = self
-                    .base_cursor
-                    .fetch_add(overflow as u64, Ordering::SeqCst);
+            let removed = trim_output(&mut output);
+            let base =
+                self.base_cursor.fetch_add(removed as u64, Ordering::SeqCst) as usize + removed;
+            TerminalOutputEvent {
+                cursor: base + utf16_len(&output),
+                reset: false,
+                output: text.to_string(),
+                closed: self.closed.load(Ordering::SeqCst),
             }
-            (
-                TerminalOutputEvent {
-                    cursor: 0,
-                    reset: false,
-                    output: text.to_string(),
-                    closed: self.closed.load(Ordering::SeqCst),
-                },
-                self.base_cursor.load(Ordering::SeqCst),
-            )
         };
-        let units = utf16_len(&self.output.lock().expect("terminal output"));
-        let event = TerminalOutputEvent {
-            cursor: base as usize + units,
-            ..event
-        };
-        let listeners = self.listeners.lock().expect("terminal listeners");
-        for listener in listeners.iter() {
-            let _ = listener.send(event.clone());
-        }
+        listeners.retain(|listener| listener.send(event.clone()).is_ok());
     }
 
     fn output_since(&self, cursor: usize) -> Value {
         self.touched_at.store(now_millis(), Ordering::SeqCst);
-        let base = self.base_cursor.load(Ordering::SeqCst) as usize;
         let output = self.output.lock().expect("terminal output");
+        let base = self.base_cursor.load(Ordering::SeqCst) as usize;
         let reset = cursor < base;
         let start = if reset {
             0
         } else {
-            char_index_at_utf16(&output, cursor.saturating_sub(base))
+            byte_index_at_utf16(&output, cursor.saturating_sub(base))
         };
-        let text: String = output.chars().skip(start).collect();
+        let text = output[start..].to_string();
         let mut body = self.snapshot();
         if let Value::Object(fields) = &mut body {
             fields.insert("cursor".into(), json!(base + utf16_len(&output)));
@@ -135,17 +119,25 @@ fn utf16_len(value: &str) -> usize {
     value.encode_utf16().count()
 }
 
-/// Converts a UTF-16 offset into a UTF-8 char index, clamping to a char
+/// Converts a UTF-16 offset into a UTF-8 byte index, clamping to a char
 /// boundary the way a browser client would when it replays from a cursor.
-fn char_index_at_utf16(value: &str, offset: usize) -> usize {
+fn byte_index_at_utf16(value: &str, offset: usize) -> usize {
     let mut units = 0usize;
-    for (index, ch) in value.chars().enumerate() {
+    for (index, ch) in value.char_indices() {
         if units >= offset {
             return index;
         }
         units += ch.len_utf16();
     }
-    value.chars().count()
+    value.len()
+}
+
+fn trim_output(output: &mut String) -> usize {
+    let overflow = utf16_len(output).saturating_sub(OUTPUT_CHAR_CAP);
+    let cut = byte_index_at_utf16(output, overflow);
+    let removed = utf16_len(&output[..cut]);
+    output.drain(..cut);
+    removed
 }
 
 fn now_millis() -> i64 {
@@ -197,7 +189,9 @@ fn shell_spec() -> (String, Vec<String>) {
     (shell, Vec::new())
 }
 
-const POWERSHELL_UTF8_INIT: &str = "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); $PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; $PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8'";
+// New-Object also works in Windows 7's inbox PowerShell 2.0. The ::new syntax
+// and PSDefaultParameterValues were introduced in later PowerShell versions.
+const POWERSHELL_UTF8_INIT: &str = "$utf8 = New-Object System.Text.UTF8Encoding; [Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8; if ($PSDefaultParameterValues) { $PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; $PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8' }";
 
 fn base64_utf16le(text: &str) -> String {
     let mut bytes = Vec::with_capacity(text.len() * 2);
@@ -216,14 +210,40 @@ impl TerminalManager {
         cols_raw: Option<f64>,
         rows_raw: Option<f64>,
     ) -> Result<Value, String> {
-        let count = self.sessions.lock().expect("terminals").len();
-        if count >= GLOBAL_TERMINAL_CAP {
+        // Hold the reservation until insertion; concurrent HTTP creates must
+        // not each pass the same pre-spawn count and exceed the global cap.
+        let mut sessions = self.sessions.lock().expect("terminals");
+        if sessions.len() >= GLOBAL_TERMINAL_CAP {
             return Err(format!(
                 "terminal session limit reached ({GLOBAL_TERMINAL_CAP})"
             ));
         }
+        let raw_cwd = cwd.unwrap_or(".").trim();
+        let absolute = crate::paths::is_abs_disk_path(raw_cwd);
+        if !absolute
+            && raw_cwd
+                .replace('\\', "/")
+                .split('/')
+                .any(|part| part == "..")
+        {
+            return Err("Path escapes workspace root".into());
+        }
         let resolved_cwd = crate::paths::resolve_workdir(&root.to_string_lossy(), cwd)
             .map_err(|error| error.message)?;
+        if !absolute {
+            // A missing leaf cannot be canonicalized. Verify the closest
+            // existing ancestor before creating it so a symlink/junction
+            // followed by a missing child cannot escape the workspace.
+            let base = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+            let ancestor = resolved_cwd
+                .ancestors()
+                .find(|path| path.exists())
+                .ok_or("terminal working directory has no existing ancestor")?;
+            let ancestor = std::fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+            if !ancestor.starts_with(&base) {
+                return Err("Path escapes workspace root".into());
+            }
+        }
         let cwd_text = resolved_cwd.to_string_lossy().into_owned();
         if !resolved_cwd.exists() {
             std::fs::create_dir_all(&resolved_cwd).map_err(|error| error.to_string())?;
@@ -231,43 +251,17 @@ impl TerminalManager {
         let cols = clamp_dimension(cols_raw, DEFAULT_COLS, MIN_COLS, MAX_COLS);
         let rows = clamp_dimension(rows_raw, DEFAULT_ROWS, MIN_ROWS, MAX_ROWS);
         let (shell, args) = shell_spec();
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|error| error.to_string())?;
-        let mut command = CommandBuilder::new(shell);
-        for arg in &args {
-            command.arg(arg);
-        }
-        command.cwd(&resolved_cwd);
-        command.env("TERM", "xterm-256color");
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|error| error.to_string())?;
-        drop(pair.slave);
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|error| error.to_string())?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| error.to_string())?;
+        let opened = spawn_shell(&shell, &args, &resolved_cwd, PtySize { rows, cols })?;
+        let mut reader = opened.reader;
 
         let now = now_millis();
         let session = Arc::new(TerminalSession {
             id: uuid::Uuid::new_v4().to_string(),
             owner: owner.to_string(),
             cwd: cwd_text,
-            master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
-            child: Mutex::new(child),
+            master: Mutex::new(opened.master),
+            writer: Mutex::new(opened.writer),
+            child: Mutex::new(opened.child),
             output: Mutex::new(String::new()),
             base_cursor: AtomicU64::new(0),
             closed: AtomicBool::new(false),
@@ -278,27 +272,30 @@ impl TerminalManager {
             listeners: Mutex::new(Vec::new()),
         });
         let snapshot = session.snapshot();
-        self.sessions
-            .lock()
-            .expect("terminals")
-            .insert(session.id.clone(), Arc::clone(&session));
+        sessions.insert(session.id.clone(), Arc::clone(&session));
+        drop(sessions);
 
         let reader_session = Arc::clone(&session);
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
+            let mut decoder = encoding_rs::UTF_8.new_decoder_without_bom_handling();
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
-                        let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                        let mut text = String::with_capacity(read * 3 + 4);
+                        let _ = decoder.decode_to_string(&buffer[..read], &mut text, false);
                         reader_session.append(&text);
                     }
                     Err(_) => break,
                 }
             }
+            let mut final_text = String::with_capacity(4);
+            let _ = decoder.decode_to_string(&[], &mut final_text, true);
+            reader_session.append(&final_text);
             if !reader_session.closed.swap(true, Ordering::SeqCst) {
-                let exit_note = "\r\n[terminal exited 0]\r\n".to_string();
-                reader_session.append(&exit_note);
+                // EOF alone does not provide an exit status. Never claim 0.
+                reader_session.append("\r\n[terminal closed]\r\n");
             }
         });
 
@@ -358,8 +355,6 @@ impl TerminalManager {
             .resize(PtySize {
                 rows: next_rows,
                 cols: next_cols,
-                pixel_width: 0,
-                pixel_height: 0,
             })
             .map_err(|error| error.to_string())?;
         session.cols.store(next_cols as u64, Ordering::SeqCst);
@@ -381,6 +376,7 @@ impl TerminalManager {
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<TerminalOutputEvent>, String> {
         let session = self.get(id, owner)?;
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut listeners = session.listeners.lock().expect("terminal listeners");
         let initial = session.output_since(cursor);
         let event = TerminalOutputEvent {
             cursor: initial["cursor"].as_u64().unwrap_or(0) as usize,
@@ -390,11 +386,8 @@ impl TerminalManager {
         };
         // Replay first, then live output, through one ordered channel.
         let _ = sender.send(event);
-        session
-            .listeners
-            .lock()
-            .expect("terminal listeners")
-            .push(sender);
+        listeners.retain(|listener| !listener.is_closed());
+        listeners.push(sender);
         Ok(receiver)
     }
 
@@ -461,6 +454,7 @@ fn terminal_error_status(message: &str) -> u16 {
         "does not exist",
         "not a directory",
         "limit reached",
+        "escapes workspace",
     ] {
         if lower.contains(needle) {
             return 400;
@@ -519,6 +513,17 @@ pub async fn route(
     headers: &HeaderMap,
 ) -> Option<Response> {
     let method = req.method().clone();
+    if (path == "/terminal/sessions" || path.starts_with("/terminal/sessions/"))
+        && !super::supported()
+    {
+        return Some(json_response(
+            StatusCode::NOT_IMPLEMENTED,
+            &json!({
+                "ok": false, "code": "UNSUPPORTED_FEATURE", "feature": "pty-session-v1",
+                "error": "Interactive terminal backend is unavailable. Reinstall the complete compatibility runtime and restart it. Ordinary MCP operations remain available.",
+            }),
+        ));
+    }
     if path == "/terminal/sessions" && method == Method::POST {
         let owner = terminal_owner(headers);
         let body = json_body(req).await;
@@ -663,8 +668,16 @@ mod tests {
         assert_eq!(utf16_len("abc"), 3);
         assert_eq!(utf16_len("你好"), 2);
         assert_eq!(utf16_len("a😀"), 3);
-        assert_eq!(char_index_at_utf16("a😀b", 1), 1);
-        assert_eq!(char_index_at_utf16("a😀b", 3), 2);
+        assert_eq!(byte_index_at_utf16("a😀b", 1), 1);
+        assert_eq!(byte_index_at_utf16("a😀b", 3), 5);
+    }
+
+    #[test]
+    fn unicode_output_cap_preserves_boundaries_and_actual_utf16_cursor() {
+        let mut text = format!("😀{}", "中".repeat(OUTPUT_CHAR_CAP - 1));
+        assert_eq!(trim_output(&mut text), 2);
+        assert_eq!(text, "中".repeat(OUTPUT_CHAR_CAP - 1));
+        assert_eq!(byte_index_at_utf16("中文😀abc", 4), "中文😀".len());
     }
 
     #[test]

@@ -2,13 +2,13 @@
 
 默认 `/rust-release` / `all` 和仅兼容版的 `win7-win8`（兼容别名 `win7`）都必须读取本流程。`all` 将本流程与现代桌面、现代独立 MCP 一并完成；`win7-win8` 仅执行专版构建和渠道发布，发布后仍按主 Skill 合并推送 `main`。`modern` 和 `mcp-server` 不包含专版。按当次请求区分开发、本地打包、远端构建和发布；仅要求修改 Skill、流程或实现时，不触发实际构建、推送或发布。
 
-能力、安全边界和产品支持范围统一以 [Windows CEF 兼容说明](../../../../apps/aichat-rust/docs/windows-cef.md) 为准。目标为 Windows 7 SP1 x64、Windows 8 x64、Windows 8.1 x64；首版是 C++ Launcher + CEF109 + Win7/Win8 专用 Rust MCP，不包含现代 Tauri EXE，也不提供交互式 PTY。完整验收前只能称兼容预览，不能因 Windows 编译成功或一台旧系统通过就宣布三个系统均已验收。
+能力、安全边界和产品支持范围统一以 [Windows CEF 兼容说明](../../../../apps/aichat-rust/docs/windows-cef.md) 为准。目标为 Windows 7 SP1 x64、Windows 8 x64、Windows 8.1 x64；使用 C++ Launcher + CEF109 + Win7/Win8 专用 Rust MCP，不包含现代 Tauri EXE。初始兼容 MCP 未提供交互式 PTY；从 MCP `0.2.67` 起完整包内置 WinPTY，通过已有 HTTP 终端协议提供真实交互。完整验收前只能称兼容预览，不能因 Windows 编译成功或一台旧系统通过就宣布三个系统均已验收。
 
 ## 产物与渠道
 
 | 产物 | 入口 / 标识 | 发行范围 |
 | --- | --- | --- |
-| Win7/Win8 Rust MCP 构建 | `apps/mcp-rust/scripts/build-win7.cjs` | 共享 Rust 源码，Win7/Win8 专用二进制；基础文件、搜索和 `run_terminal` |
+| Win7/Win8 Rust MCP 构建 | `apps/mcp-rust/scripts/build-win7.cjs` | 共享 Rust 源码，Win7/Win8 专用二进制；基础文件、搜索、`run_terminal`，以及依实际后端能力提供的 WinPTY 交互终端 |
 | Win7/Win8 Rust MCP 归档 | `apps/mcp-rust/scripts/package-win7-runtime.cjs` | `windows-x64`，`variant: "win7-win8"`，最低系统 Win7 SP1 |
 | Win7/Win8 构建入口 | `apps/aichat-rust/scripts/build-win7.cjs` | 编译旧系统 C++ 启动器，并调用专版打包器；固定 legacy CEF109，尝试启动/附着 MCP |
 | Win7/Win8 安装包 | `apps/aichat-rust/scripts/package-win7.cjs` | 组装 Launcher + 兼容版 MCP；拒绝现代 Tauri EXE |
@@ -41,6 +41,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Win7 MCP build failed' }
 ```
 
 不使用 `rustup target add` 假设已有此目标的预编译标准库，也不通过 `RUSTFLAGS --cfg` 冒充 Win7 target。实际编译或 PE 导入检查失败就保留日志，不退回普通 Windows 二进制。
+
+从 MCP `0.2.67` 起，构建 / 打包脚本一并校验和暂存仓库固定的 WinPTY `0.4.3` x64 依赖；完整归档必须包含同目录的 `bin/keepwork-mcp.exe`、`bin/winpty.dll`、`bin/winpty-agent.exe`，以及 `licenses/winpty/` 下的许可证与来源记录。保持固定上游原始文件与摘要，不从系统 PATH 或任意 DLL 下载站补齐，不省略 agent，也不把普通现代 ConPTY 包混入专版。运行时核验依赖、加载 DLL 并完成后端就绪探测后，才通过 `/health` 和能力通知广告 `terminalApi: "pty-session-v1"`；首次探测创建并释放 WinPTY 后端，不启动用户 shell 或执行命令，归档版本或清单不能代替运行时能力检测。依赖缺失、损坏、加载或就绪失败时终端路由返回 HTTP `501` / `UNSUPPORTED_FEATURE`，普通 MCP 仍可使用。
+
+新客户端附着旧 `0.2.66` 兼容 daemon 时，终端灰显属于预期降级；仅更新安装目录不表示已有进程已切换后端。遵守原有 daemon 归属和更新激活规则，不结束其他产品进程，也不以新端口绕过单实例。客户端和 MCP 独立升版，已有客户端继续消费同一 HTTP 终端协议；断流或降级不自动重放输入。终端相对 `cwd` 继续限制在工作区内，拒绝 `..` 与存在祖先的链接逃逸，canonicalize 失败不能放行；已存在绝对 / `~` 目录的允许语义保持。本轮完成目标交叉构建，真实 Win7/Win8/Win8.1 上的 WinPTY 执行仍待分别验收。
+
+升级后的人工激活路径：先完成所有相关客户端任务，在「本地 MCP 面板」核对当前服务并主动确认 `Stop service`，明确接受已连接客户端断开及该 daemon 中运行工作结束；服务停止后，点击原生帮助或托盘的「启动本地服务」，再打开网页「＋」菜单重新探测终端能力。该入口使用宿主启动时传入的绝对专版 `Keepwork.exe` 路径及固定 `--start-mcp` 参数，在同一个启动器锁内只启动 / 附着服务，允许 CEF 主窗口保持打开，不刷新网页或清理草稿。没有有效启动器参数时隐藏入口。已有 Keepwork peer 继续附着，其他端口占用保持明确错误，不自动停止任何服务、不抢端口、不增加网页 API。`--update-mcp` 仍仅暂存更新，不等同于服务重启；其他产品拥有的服务应由用户在其相应管理入口处理。
 
 CEF SDK 使用 `fetch-cef-sdk.py` 的 `legacy` / `x64` 选择或经过校验的锁文件，保持 CEF109 与匹配宿主、沙箱库、资源及 locale 成套。正式信任根必须由发布方准备；临时预览密钥只可用于隔离验证。私钥不进入产物、源码或日志。现有 CEF 构建、清单签名和验证命令见产品说明，不在这里复制另一份。
 
@@ -150,7 +156,7 @@ gh workflow run aichat-rust-windows-release.yml --ref <source-ref> -f edition=al
 powershell.exe -NoProfile -File C:/validation/win7-native-smoke.ps1 -RuntimeDirectory "$env:LOCALAPPDATA\Programs\KeepworkWin7Win8\resources\win7-mcp" -OutputDirectory C:/validation/mcp-smoke
 ```
 
-脚本在随机且非 `8089` 的隔离端口运行 `requireAuth=false` / `true` 两组，核对包身份、基础工具及 PTY unsupported，保留真实 OS 和 `scope: "mcp-native-basic-smoke"` 的回执。`nativeLegacyVerified` 只有在实际 WMI 识别到上述旧系统的 x64 workstation 且两组通过时才为真，它只覆盖报告中的 `system.osFamily`；现代 Windows 跑过仍不能标为旧系统已验收。保留三个系统的独立报告，不能编辑一个 JSON 将结果推广到其他系统。该 smoke 不启动或验证 CEF/UI，`cefUiVerified` 仍为 false，不能代替下表完整验收。
+脚本在随机且非 `8089` 的隔离端口运行 `requireAuth=false` / `true` 两组，核对包身份和基础工具，并应按实际 `terminalApi` 分支验证可用终端或有界 unsupported；不能继续对完整 `0.2.67` 包固定断言 PTY 不可用。保留真实 OS 和 `scope: "mcp-native-basic-smoke"` 的回执，终端实际覆盖范围另行记录；基础 smoke 不等同于中文、交互输入、resize、Ctrl+C 及清理全部通过。`nativeLegacyVerified` 只有在实际 WMI 识别到上述旧系统的 x64 workstation 且两组通过时才为真，它只覆盖报告中的 `system.osFamily`；现代 Windows 跑过仍不能标为旧系统已验收。保留三个系统的独立报告，不能编辑一个 JSON 将结果推广到其他系统。该 smoke 不启动或验证 CEF/UI，`cefUiVerified` 仍为 false，不能代替下表完整验收。
 
 每个目标系统至少覆盖：
 
@@ -161,7 +167,9 @@ powershell.exe -NoProfile -File C:/validation/win7-native-smoke.ps1 -RuntimeDire
 | 首次 HTTPS 下载与登录 | 证书校验开启，legacy 清单验签和包摘要正确；聊天页可用并在重启后保持登录；OAuth 是否通过按实际账号回执记录 |
 | 本机 MCP 正常 | `/health` 显示真实 Rust 二进制身份及 Win7/Win8 标记；网页可经 loopback 连接；基础文件、目录、搜索、`grep_files` 和经确认的 `run_terminal` 可用 |
 | 系统常用目录与 PowerShell 2 | Win7 默认 PowerShell 2 环境可发现实际存在的 Desktop/Documents/Downloads/Pictures/Music/Videos；重定向和本地化路径正确，位置查询不创建目录，单位置失败不影响 Home/盘符及其他浏览；不要求用户升级 PowerShell |
-| PTY 不可用 | `/health` 和能力通知不含 `terminalApi`；直接请求 `/terminal/*` 得到有界 unsupported；daemon 与普通聊天/文件请求继续工作 |
+| 完整 MCP `0.2.67` 的 WinPTY | 后端摘要、DLL 加载及不执行命令的就绪探测通过，`/health` 及能力通知含 `terminalApi: "pty-session-v1"`；旧 / 新客户端能创建真实交互 shell，验证中文与空格路径、连续输入输出、游标续流、resize、Ctrl+C、关闭、子进程及 30 分钟空闲清理；不同 owner 隔离，关闭终端不结束共享 daemon |
+| 旧服务或 PTY 依赖不可用 | 旧 `0.2.66`、缺失 / 损坏依赖或 DLL 加载失败时，不含 `terminalApi`，终端入口灰显；直接请求终端路由得到 HTTP `501` / 有界 unsupported，daemon 与普通聊天 / 文件 / `run_terminal` 继续工作；恢复后以运行服务重新协商能力，不重放旧输入 |
+| 升级后手动启用新服务 | 旧 daemon 不因安装或启动自动结束；用户完成工作并在面板确认停止后，「启动本地服务」启动已验证候选，原聊天窗口及草稿保持，再次打开「＋」菜单可重新协商能力；已有 peer、未知占用、缺少启动器参数和并发启动均不杀进程、不产生第二个 listener |
 | MCP 缺失、崩溃或端口被占用 | 云聊天窗口仍打开，网页显示本地功能不可用；不结束未知进程或其他产品拥有的 daemon，不另启第二个监听 |
 | Origin、认证和路径 | 非允许 Origin、错误认证、路径穿越/符号链接逃逸按既有契约拒绝；相对工作区和允许的绝对路径保留历史语义 |
 | 缓存与更新失败 | 中断、错误签名/摘要、错误架构、普通 Windows 包或现代 CEF 不激活；保留已验证缓存及用户数据，不重放结果不明的写操作 |

@@ -238,13 +238,14 @@ void allow_sandbox_read(const fs::path& path) {
   Local acl{updated};
   check(SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, updated, nullptr) == ERROR_SUCCESS, "Cannot apply sandbox runtime ACL");
 }
-bool launch_cef(const fs::path& directory, const fs::path& profile, bool background, const Progress& progress) {
+bool launch_cef(const fs::path& directory, const fs::path& profile, bool background, const Progress& progress, bool service_launcher) {
   plain_path(directory); plain_path(profile); fs::create_directories(profile);
   std::array<unsigned char, 16> random{}; nt(BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG));
   auto name = L"Local\\Keepwork.Cef.Ready." + wide(hex(random.data(), random.size()));
   Handle ready(CreateEventW(nullptr, TRUE, FALSE, name.c_str())); check(ready.value != nullptr, "Cannot create startup event");
   auto exe = directory / L"keepwork-cef.exe";
   auto args = quote(exe.wstring()) + L" --profile " + quote(profile.wstring()) + L" --ready-event " + quote(name) + (background ? L" --background" : L"");
+  if (service_launcher) args += L" --launcher " + quote((executable_dir() / L"Keepwork.exe").wstring());
   STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION child{};
   check(CreateProcessW(exe.c_str(), args.data(), nullptr, nullptr, FALSE, 0, nullptr, directory.c_str(), &startup, &child), "Cannot launch CEF host (check Windows version and package architecture)");
   Handle process(child.hProcess), thread(child.hThread);

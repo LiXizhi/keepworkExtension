@@ -35,6 +35,11 @@ function main(args = process.argv.slice(2)) {
     const binary = path.join(targetDir, config.target, 'release', 'keepwork-mcp.exe');
     if (!fs.statSync(binary).isFile()) throw new Error('Win7 build did not produce keepwork-mcp.exe');
     require('../../../scripts/lib/windows7-pe.cjs').auditPe(fs.readFileSync(binary), { arch: 'x64' });
+    // Runtime resolves only the verified WinPTY files next to its executable.
+    const assets = require('./winpty-assets.cjs').readAssets();
+    for (const [name, bytes] of assets) {
+      if (name.startsWith('bin/')) fs.writeFileSync(path.join(path.dirname(binary), path.basename(name)), bytes);
+    }
     process.stdout.write(binary + '\n');
   }
 }

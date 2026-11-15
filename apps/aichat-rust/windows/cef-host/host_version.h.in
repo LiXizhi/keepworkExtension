@@ -1,0 +1,4 @@
+#pragma once
+namespace keepwork_cef {
+inline constexpr wchar_t kHostVersion[] = L"@KEEPWORK_HOST_VERSION@";
+}

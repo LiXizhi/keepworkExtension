@@ -9,6 +9,8 @@ InstallDirRegKey HKCU "Software\Keepwork\Win7Win8" "InstallDir"
 !include "WinVer.nsh"
 !include "x64.nsh"
 !define MUI_ABORTWARNING
+!define MUI_ICON "..\src-tauri\icons\icon.ico"
+!define MUI_UNICON "..\src-tauri\icons\icon.ico"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -70,12 +72,14 @@ Section "Keepwork Windows 7 and 8"
   File /r "${PAYLOAD}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\Keepwork Windows 7 and 8"
-  CreateShortcut "$SMPROGRAMS\Keepwork Windows 7 and 8\Keepwork.lnk" "$INSTDIR\Keepwork.exe"
-  CreateShortcut "$SMPROGRAMS\Keepwork Windows 7 and 8\检查客户端更新.lnk" "$INSTDIR\Keepwork.exe" "--update-client"
-  CreateShortcut "$SMPROGRAMS\Keepwork Windows 7 and 8\准备本地服务更新.lnk" "$INSTDIR\Keepwork.exe" "--update-mcp"
+  CreateShortcut "$SMPROGRAMS\Keepwork Windows 7 and 8\Keepwork.lnk" "$INSTDIR\Keepwork.exe" "" "$INSTDIR\Keepwork.exe" 0
+  CreateShortcut "$DESKTOP\Keepwork Windows 7 and 8.lnk" "$INSTDIR\Keepwork.exe" "" "$INSTDIR\Keepwork.exe" 0
+  CreateShortcut "$SMPROGRAMS\Keepwork Windows 7 and 8\检查客户端更新.lnk" "$INSTDIR\Keepwork.exe" "--update-client" "$INSTDIR\Keepwork.exe" 0
+  CreateShortcut "$SMPROGRAMS\Keepwork Windows 7 and 8\准备本地服务更新.lnk" "$INSTDIR\Keepwork.exe" "--update-mcp" "$INSTDIR\Keepwork.exe" 0
   WriteRegStr HKCU "Software\Keepwork\Win7Win8" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkWin7Win8" "DisplayName" "Keepwork Windows 7 / 8 专版"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkWin7Win8" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkWin7Win8" "DisplayIcon" '"$INSTDIR\Keepwork.exe",0'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkWin7Win8" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkWin7Win8" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
@@ -90,6 +94,7 @@ Section "Uninstall"
     Abort
   ${EndIf}
   Delete "$SMPROGRAMS\Keepwork Windows 7 and 8\Keepwork.lnk"
+  Delete "$DESKTOP\Keepwork Windows 7 and 8.lnk"
   Delete "$SMPROGRAMS\Keepwork Windows 7 and 8\检查客户端更新.lnk"
   Delete "$SMPROGRAMS\Keepwork Windows 7 and 8\准备本地服务更新.lnk"
   RMDir "$SMPROGRAMS\Keepwork Windows 7 and 8"

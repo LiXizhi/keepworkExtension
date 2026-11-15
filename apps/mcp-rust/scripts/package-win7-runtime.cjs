@@ -38,13 +38,14 @@ function packageWin7Runtime({ binary, output, expected }) {
     fs.mkdirSync(path.join(temporary, 'bin'));
     fs.writeFileSync(path.join(temporary, entry), binaryBytes);
     fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(temporary, 'LICENSE'));
+    const terminalFiles = require('./winpty-assets.cjs').stageAssets(temporary);
     const runtime = { ...shared, entry, args: ['--port', '8089'], env: {},
       health: { url: 'http://127.0.0.1:8089/health', match: {
         name: 'keepwork-mcp', runtimeEngine: 'rust', runtimeVariant: config.variant,
       } } };
     fs.writeFileSync(path.join(temporary, 'runtime.json'), JSON.stringify(runtime, null, 2) + '\n');
     audit.auditDirectory(temporary, { arch: 'x64' });
-    const files = ['LICENSE', entry, 'runtime.json'].map(name => {
+    const files = ['LICENSE', entry, ...terminalFiles, 'runtime.json'].map(name => {
       const bytes = fs.readFileSync(path.join(temporary, name));
       return { path: name, size: bytes.length, sha256: digest(bytes) };
     });

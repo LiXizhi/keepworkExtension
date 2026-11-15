@@ -1,6 +1,5 @@
-// This host deliberately exposes no native JavaScript bridge. Website features
-// use normal browser capabilities; desktop files, PTY, pet and MCP supervision
-// remain unavailable until their independent compatibility implementations land.
+// The main chat document receives a text-only pet projection transport.
+// Files, terminal, media and other native APIs remain unavailable to renderers.
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -16,6 +15,7 @@
 #include "include/cef_command_line.h"
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_download_handler.h"
+#include "include/cef_keyboard_handler.h"
 #include "include/cef_parser.h"
 #include "include/cef_permission_handler.h"
 #include "include/cef_sandbox_win.h"
@@ -23,6 +23,16 @@
 #include "include/wrapper/cef_helpers.h"
 
 #include "navigation_policy.h"
+#include "window_frame.h"
+#include "theme_script.h"
+#include "pet_script.h"
+#include "pet_transport.h"
+#include "pet_chat_state.h"
+#include "include/cef_v8.h"
+#include "include/cef_process_message.h"
+#if CEF_VERSION_MAJOR == 109
+#include "compatibility_script.h"
+#endif
 
 #if !defined(CEF_USE_SANDBOX) && !defined(CEF_USE_BOOTSTRAP)
 #error The Keepwork CEF host requires the Chromium process sandbox.
@@ -31,11 +41,12 @@
 namespace {
 
 constexpr char kEntry[] = "https://keepwork.com/chat";
-constexpr wchar_t kTitle[] = L"Keepwork — 兼容模式";
+constexpr wchar_t kTitle[] = L"Keepwork";
 
 struct Options {
   std::wstring profile;
   std::wstring ready_event;
+  std::wstring launcher;
   bool background = false;
 };
 
@@ -66,7 +77,7 @@ bool ReadOptions(Options& options) {
       }
       return false;
     };
-    if (read(L"--profile", options.profile) ||
+    if (read(L"--profile", options.profile) || read(L"--launcher", options.launcher) ||
         read(L"--ready-event", options.ready_event)) continue;
     // The official M138+ bootstrap may add its module-selection argument.
     if (arg.compare(0, 9, L"--module=") == 0) continue;
@@ -89,6 +100,18 @@ bool ReadOptions(Options& options) {
       static_cast<DWORD>(normalized.size()), normalized.data(), nullptr);
   if (!length || length >= normalized.size()) return false;
   options.profile.assign(normalized.data(), length);
+  if (!options.launcher.empty()) {
+    const auto& launcher = options.launcher;
+    if (launcher.size() < 4 || launcher[1] != L':' || (launcher[2] != L'\\' && launcher[2] != L'/') ||
+        !((launcher[0] >= L'A' && launcher[0] <= L'Z') || (launcher[0] >= L'a' && launcher[0] <= L'z'))) return false;
+    const DWORD size = GetFullPathNameW(launcher.c_str(), static_cast<DWORD>(normalized.size()), normalized.data(), nullptr);
+    if (!size || size >= normalized.size()) return false;
+    options.launcher.assign(normalized.data(), size);
+    const auto leaf = options.launcher.find_last_of(L"\\/");
+    if (leaf == std::wstring::npos || _wcsicmp(options.launcher.c_str() + leaf + 1, L"Keepwork.exe") != 0) return false;
+    const DWORD attributes = GetFileAttributesW(options.launcher.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || attributes & FILE_ATTRIBUTE_DIRECTORY) return false;
+  }
   const int result = SHCreateDirectoryExW(nullptr, options.profile.c_str(), nullptr);
   return result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS || result == ERROR_FILE_EXISTS;
 }
@@ -117,12 +140,90 @@ bool SignalReady(const std::wstring& name) {
   return result;
 }
 
+constexpr char kThemeMessage[] = "keepwork.cef.chrome-theme.v1";
+class ThemeReporter final : public CefV8Handler {
+ public:
+  bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>& retval, CefString&) override {
+    CEF_REQUIRE_RENDERER_THREAD();
+    retval = CefV8Value::CreateBool(false);
+    if (arguments.size() != 3) return true;
+    const auto context = CefV8Context::GetCurrentContext();
+    if (!context) return true;
+    const auto browser = context->GetBrowser();
+    const auto frame = context->GetFrame();
+    if (!browser || !frame || !keepwork_cef::TrustedThemeFrame(Parse(frame->GetURL()), browser->IsPopup(), frame->IsMain())) return true;
+    std::string colors[3];
+    for (int i = 0; i < 3; ++i) {
+      if (!arguments[i]->IsString()) return true;
+      const auto color = arguments[i]->GetStringValue();
+      if (color.length() != 7) return true;
+      colors[i] = color.ToString();
+    }
+    keepwork_cef::ChromeTheme theme;
+    if (!keepwork_cef::ChromeTheme::Parse(colors[0], colors[1], colors[2], theme)) return true;
+    const auto message = CefProcessMessage::Create(kThemeMessage);
+    for (int i = 0; i < 3; ++i) message->GetArgumentList()->SetString(i, colors[i]);
+    frame->SendProcessMessage(PID_BROWSER, message);
+    retval = CefV8Value::CreateBool(true);
+    return true;
+  }
+ private:
+  IMPLEMENT_REFCOUNTING(ThemeReporter);
+};
+
+// Polyfills, theme observer and the restricted pet adapter precede page scripts.
+class RendererApp final : public CefApp, public CefRenderProcessHandler {
+ public:
+  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
+  void OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                        CefRefPtr<CefV8Context> context) override {
+    CEF_REQUIRE_RENDERER_THREAD();
+    if (browser->IsPopup() || !frame->IsMain()) return;
+    const auto url = Parse(frame->GetURL());
+    if (!keepwork_cef::Https(url) || url.host != "keepwork.com") return;
+#if CEF_VERSION_MAJOR == 109
+    frame->ExecuteJavaScript(keepwork_cef::kPopoverScript, frame->GetURL(), 0);
+#endif
+    context->GetGlobal()->SetValue("__keepworkChromeColors",
+      CefV8Value::CreateFunction("reportChromeColors", new ThemeReporter), V8_PROPERTY_ATTRIBUTE_DONTENUM);
+    frame->ExecuteJavaScript(keepwork_cef::kChromeThemeScript, frame->GetURL(), 0);
+    if (keepwork_cef::PetFrame(browser, frame)) {
+      const auto previous = documents_.find(browser->GetIdentifier());
+      if (previous != documents_.end()) previous->second->Dispose();
+      auto document = CefRefPtr<keepwork_cef::PetRenderDocument>(new keepwork_cef::PetRenderDocument(context));
+      documents_[browser->GetIdentifier()] = document;
+      context->GetGlobal()->SetValue("__keepworkPetTransport",
+        CefV8Value::CreateFunction("petTextTransport", document), V8_PROPERTY_ATTRIBUTE_DONTENUM);
+      frame->ExecuteJavaScript(keepwork_cef::kPetBridgeScript, frame->GetURL(), 0);
+    }
+  }
+  void OnContextReleased(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame>, CefRefPtr<CefV8Context> context) override {
+    const auto entry = documents_.find(browser->GetIdentifier());
+    if (entry != documents_.end() && entry->second->Same(context)) {
+      entry->second->Dispose(); documents_.erase(entry);
+    }
+  }
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefProcessId source, CefRefPtr<CefProcessMessage> message) override {
+    if (message->GetName() != keepwork_cef::kPetConnect && message->GetName() != keepwork_cef::kPetCommand) return false;
+    if (source != PID_BROWSER || !keepwork_cef::PetFrame(browser, frame)) return true;
+    const auto entry = documents_.find(browser->GetIdentifier());
+    if (entry != documents_.end()) entry->second->Receive(frame, message);
+    return true;
+  }
+ private:
+  std::map<int, CefRefPtr<keepwork_cef::PetRenderDocument>> documents_;
+  IMPLEMENT_REFCOUNTING(RendererApp);
+};
+
 class Client final : public CefClient,
                      public CefLifeSpanHandler,
                      public CefRequestHandler,
                      public CefDisplayHandler,
                      public CefDownloadHandler,
                      public CefPermissionHandler,
+                     public CefKeyboardHandler,
                      public CefContextMenuHandler,
                      public CefLoadHandler {
  public:
@@ -133,18 +234,75 @@ class Client final : public CefClient,
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+
+  keepwork_cef::WindowFrame& window_frame() { return window_frame_; }
+
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefProcessId source_process, CefRefPtr<CefProcessMessage> message) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (message->GetName() == keepwork_cef::kPetConnected || message->GetName() == keepwork_cef::kPetState ||
+        message->GetName() == keepwork_cef::kPetResult) {
+      if (source_process != PID_RENDERER || browser->GetIdentifier() != main_id_ || !keepwork_cef::PetFrame(browser, frame)) return true;
+      ReceivePet(message); return true;
+    }
+    if (message->GetName() != kThemeMessage) return false;
+    if (source_process != PID_RENDERER || browser->GetIdentifier() != main_id_ || !frame ||
+        !keepwork_cef::TrustedThemeFrame(Parse(frame->GetURL()), browser->IsPopup(), frame->IsMain())) return true;
+    const auto values = message->GetArgumentList();
+    if (values->GetSize() != 3) return true;
+    for (int i = 0; i < 3; ++i) if (values->GetType(i) != VTYPE_STRING || values->GetString(i).length() != 7) return true;
+    keepwork_cef::ChromeTheme theme;
+    if (keepwork_cef::ChromeTheme::Parse(values->GetString(0).ToString(), values->GetString(1).ToString(), values->GetString(2).ToString(), theme))
+      window_frame_.SetTheme(theme);
+    return true;
+  }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     browsers_.push_back(browser);
     if (browser->IsPopup()) return;
     main_id_ = browser->GetIdentifier();
-    const HWND window = browser->GetHost()->GetWindowHandle();
-    SetWindowTextW(window, kTitle);
-    // This host has no tray/pet. A background launch must remain discoverable.
-    ShowWindow(window, options_.background ? SW_SHOWMINIMIZED : SW_SHOWNORMAL);
+    window_frame_.EnableServiceLauncher(!options_.launcher.empty());
+    window_frame_.Attach(browser->GetHost()->GetWindowHandle(),
+      [browser] { return browser->GetHost()->TryCloseBrowser(); },
+      [browser] { browser->GetHost()->SetFocus(true); },
+      [browser] { browser->GetHost()->NotifyMoveOrResizeStarted(); },
+      [this, browser](keepwork_cef::WindowCommand command) { RunCommand(browser, command); }, options_.background, options_.profile);
+    window_frame_.SetupPetChat([this](keepwork_cef::PetChatAction action) { PetAction(action); },
+      [this](std::wstring text) { pet_state_.Edit(text); UpdatePet(); }, [this] { PetTick(); },
+      [this] { if (pet_state_.CancelUnsubmittedInput()) UpdatePet(); });
+    UpdatePet();
+  }
+
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
+                     CefEventHandle os_event, bool* is_keyboard_shortcut) override {
+    if (browser->IsPopup() || event.type != KEYEVENT_RAWKEYDOWN) return false;
+    const bool control = (event.modifiers & EVENTFLAG_CONTROL_DOWN) != 0;
+    const bool shift = (event.modifiers & EVENTFLAG_SHIFT_DOWN) != 0;
+    const bool alt = (event.modifiers & EVENTFLAG_ALT_DOWN) != 0;
+    const int key = event.windows_key_code;
+    if (alt && !control) {
+      const int menu = key == 'F' ? 0 : key == 'E' ? 1 : key == 'V' ? 2 : key == 'H' ? 3 : -1;
+      if (menu >= 0) { window_frame_.ShowMenu(menu); return true; }
+    }
+    if (!alt && !control && key == VK_F10) { window_frame_.ShowMenu(0); return true; }
+    using Command = keepwork_cef::WindowCommand;
+    if (!alt && (key == VK_F5 || (control && key == 'R'))) {
+      RunCommand(browser, ((control && key == VK_F5) || shift) ? Command::reload_no_cache : Command::reload); return true;
+    }
+    if (!alt && key == VK_F11) { RunCommand(browser, Command::fullscreen); return true; }
+    if (control && !alt) {
+      if (key == VK_OEM_PLUS || key == VK_ADD) RunCommand(browser, Command::zoom_in);
+      else if (key == VK_OEM_MINUS || key == VK_SUBTRACT) RunCommand(browser, Command::zoom_out);
+      else if (key == '0' || key == VK_NUMPAD0) RunCommand(browser, Command::zoom_reset);
+      else if (key == 'Q') RunCommand(browser, Command::quit);
+      else return false;
+      return true;
+    }
+    return false;
   }
 
   bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
@@ -164,7 +322,7 @@ class Client final : public CefClient,
                      bool* no_javascript_access) override {
     CEF_REQUIRE_UI_THREAD();
     // Real login windows retain window.opener and use this same request context.
-    // No renderer, including popups, receives privileged native JS functions.
+    // Popups never receive the pet adapter or other native JS functions.
     if (keepwork_cef::LoginPopup(Parse(target_url)) ||
         target_url == "about:blank" || target_url.empty()) {
       *no_javascript_access = false;
@@ -181,18 +339,41 @@ class Client final : public CefClient,
     const CefString url = request->GetURL();
     if (url == "about:blank" &&
         (startup_pending_ || browser->IsPopup() || !frame->IsMain())) return false;
-    if (keepwork_cef::Navigation(Parse(url), browser->IsPopup(), frame->IsMain())) return false;
+    if (keepwork_cef::Navigation(Parse(url), browser->IsPopup(), frame->IsMain())) {
+      if (browser->GetIdentifier() == main_id_ && frame->IsMain()) ResetPet();
+      return false;
+    }
     if (frame->IsMain() && user_gesture && !is_redirect) OpenExternal(url);
     return true;
   }
 
   void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
     CEF_REQUIRE_UI_THREAD();
-    // Page-controlled titles must not hide the compatibility-mode distinction.
+    // Keep the main title stable; only separate login popups use page titles.
     const auto caption = browser->IsPopup()
         ? L"Keepwork — " + title.ToWString().substr(0, 120)
         : std::wstring(kTitle);
-    SetWindowTextW(browser->GetHost()->GetWindowHandle(), caption.c_str());
+    SetWindowTextW(browser->IsPopup() ? browser->GetHost()->GetWindowHandle()
+      : window_frame_.window(), caption.c_str());
+  }
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString&) override {
+    if (browser->GetIdentifier() != main_id_ || !frame->IsMain()) return;
+    if (!keepwork_cef::PetFrame(browser, frame)) ResetPet();
+    else if (!browser->IsLoading() && pet_binding_.document().empty()) ConnectPet(frame);
+  }
+  void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser, TerminationStatus
+#if CEF_VERSION_MAJOR >= 138
+      , int, const CefString&
+#endif
+      ) override {
+    if (browser->GetIdentifier() == main_id_) ResetPet();
+  }
+
+  bool DoClose(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!browser->IsPopup()) window_frame_.BrowserClosing();
+    // CEF now posts WM_CLOSE to the native owner; beforeunload has accepted.
+    return false;
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -203,6 +384,10 @@ class Client final : public CefClient,
           return candidate->GetIdentifier() == closing_id;
         }), browsers_.end());
     if (closing_id == main_id_) {
+      ResetPet();
+      // Parent teardown follows CEF's TryCloseBrowser protocol. Release any
+      // remaining callbacks only when CEF finishes the browser close.
+      window_frame_.Destroy();
       const auto popups = browsers_;
       for (const auto& popup : popups) popup->GetHost()->CloseBrowser(true);
     }
@@ -252,6 +437,7 @@ class Client final : public CefClient,
   void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                  int http_status_code) override {
     CEF_REQUIRE_UI_THREAD();
+    if (browser->GetIdentifier() == main_id_ && keepwork_cef::PetFrame(browser, frame)) ConnectPet(frame);
     if (!startup_pending_ || browser->IsPopup() || !frame->IsMain() ||
         frame->GetURL() != "about:blank") return;
     // A local page verifies the renderer/sandbox without depending on the
@@ -285,7 +471,188 @@ class Client final : public CefClient,
   int error() const { return error_; }
 
  private:
+  void ResetPet() {
+    pet_binding_.Reset(keepwork_cef::PetToken());
+    pet_deadline_ = 0; pet_state_.ResetDocument(); UpdatePet();
+  }
+  void ConnectPet(CefRefPtr<CefFrame> frame) {
+    if (!keepwork_cef::PetFrame(frame->GetBrowser(), frame)) return;
+    if (pet_binding_.challenge().empty()) pet_binding_.Reset(keepwork_cef::PetToken());
+    if (pet_binding_.challenge().empty()) return;
+    const auto message = CefProcessMessage::Create(keepwork_cef::kPetConnect);
+    message->GetArgumentList()->SetString(0, pet_binding_.challenge());
+    frame->SendProcessMessage(PID_RENDERER, message);
+    pet_deadline_ = GetTickCount64() + 15000; UpdatePet();
+  }
+  static bool PetString(CefRefPtr<CefDictionaryValue> object, const char* key, size_t limit, std::wstring& value) {
+    if (!object->HasKey(key) || object->GetType(key) != VTYPE_STRING || object->GetString(key).length() > limit) return false;
+    value = object->GetString(key).ToWString(); return true;
+  }
+  static bool ReadPetSnapshot(CefRefPtr<CefDictionaryValue> object, keepwork_cef::PetChatState::Snapshot& state) {
+    if (!object->HasKey("version") || object->GetType("version") != VTYPE_INT || object->GetInt("version") != 1) return false;
+    std::wstring context, target;
+    if (!PetString(object, "context", 160, context) || context.empty() || !PetString(object, "target", 16, target) ||
+        (target != L"persona" && target != L"chat") || !PetString(object, "title", 160, state.title) ||
+        !PetString(object, "draft", 32000, state.draft) || !PetString(object, "reply", 8000, state.reply) ||
+        !PetString(object, "attention", 2000, state.attention) || !PetString(object, "error", 2000, state.error)) return false;
+    state.context = CefString(context).ToString(); state.target = CefString(target).ToString();
+    const char* keys[]{"ready", "busy", "richDraft", "dictating", "canSwitchTarget"};
+    bool* values[]{&state.ready, &state.busy, &state.rich_draft, &state.dictating, &state.can_switch};
+    for (int i = 0; i < 5; ++i) {
+      if (!object->HasKey(keys[i]) || object->GetType(keys[i]) != VTYPE_BOOL) return false;
+      *values[i] = object->GetBool(keys[i]);
+    }
+    if (!object->HasKey("messages") || object->GetType("messages") != VTYPE_LIST) return false;
+    const auto messages = object->GetList("messages");
+    if (messages->GetSize() > 8) return false;
+    for (size_t i = 0; i < messages->GetSize(); ++i) {
+      if (messages->GetType(i) != VTYPE_DICTIONARY) return false;
+      const auto row = messages->GetDictionary(i);
+      std::wstring role, content;
+      if (!PetString(row, "role", 16, role) || (role != L"user" && role != L"assistant") ||
+          !PetString(row, "content", 4000, content)) return false;
+      state.messages += (role == L"user" ? L"你：" : L"助手：") + content + L"\r\n\r\n";
+    }
+    return true;
+  }
+  void ReceivePet(CefRefPtr<CefProcessMessage> message) {
+    const auto args = message->GetArgumentList();
+    const bool connected = message->GetName() == keepwork_cef::kPetConnected;
+    if (args->GetSize() != (connected ? 2 : 3) || args->GetType(0) != VTYPE_STRING || args->GetType(1) != VTYPE_STRING ||
+        args->GetString(0).empty() || args->GetString(0).length() > 64 || pet_binding_.challenge().empty() || args->GetString(1) != pet_binding_.challenge()) return;
+    const auto document = args->GetString(0).ToString();
+    if (connected) {
+      pet_binding_.Connect(document, args->GetString(1).ToString());
+      return;
+    }
+    if (!pet_binding_.Matches(document, args->GetString(1).ToString()) || args->GetType(2) != VTYPE_STRING || args->GetString(2).length() > 196608) return;
+    const auto json = CefParseJSON(args->GetString(2), JSON_PARSER_RFC);
+    if (!json || json->GetType() != VTYPE_DICTIONARY) return;
+    const auto object = json->GetDictionary();
+    if (message->GetName() == keepwork_cef::kPetState) {
+      keepwork_cef::PetChatState::Snapshot snapshot;
+      if (!ReadPetSnapshot(object, snapshot)) return;
+      pet_state_.Publish(snapshot); pet_deadline_ = 0;
+    } else {
+      std::wstring id, error;
+      if (!PetString(object, "requestId", 160, id) || !PetString(object, "error", 2000, error) ||
+          !object->HasKey("ok") || object->GetType("ok") != VTYPE_BOOL) return;
+      const auto next = pet_state_.Result(CefString(id).ToString(), object->GetBool("ok"), error,
+        keepwork_cef::PetToken(), GetTickCount64());
+      if (next) SendPet(*next);
+    }
+    UpdatePet();
+  }
+  void SendPet(const keepwork_cef::PetChatState::Command& command) {
+    if (pet_binding_.document().empty() || pet_binding_.challenge().empty()) return;
+    const auto found = std::find_if(browsers_.begin(), browsers_.end(), [this](const auto& b) { return b->GetIdentifier() == main_id_; });
+    if (found == browsers_.end()) return;
+    const auto frame = (*found)->GetMainFrame();
+    if (!keepwork_cef::PetFrame(*found, frame)) return;
+    const auto object = CefDictionaryValue::Create();
+    object->SetInt("version", 1); object->SetString("context", command.context);
+    object->SetString("requestId", command.id); object->SetString("action", command.action);
+    if (command.action == "input") object->SetString("text", command.text);
+    const auto json = CefValue::Create(); json->SetDictionary(object);
+    const auto message = CefProcessMessage::Create(keepwork_cef::kPetCommand);
+    message->GetArgumentList()->SetString(0, pet_binding_.document());
+    message->GetArgumentList()->SetString(1, pet_binding_.challenge());
+    message->GetArgumentList()->SetString(2, CefWriteJSON(json, JSON_WRITER_DEFAULT));
+    frame->SendProcessMessage(PID_RENDERER, message);
+  }
+  void PetAction(keepwork_cef::PetChatAction action) {
+    using Action = keepwork_cef::PetChatAction;
+    if (action == Action::OpenMain) { window_frame_.Show(); return; }
+    if (action == Action::Collapse) { window_frame_.pet_chat().Hide(); return; }
+    if (action == Action::AcknowledgeUnknown) pet_state_.AcknowledgeUnknown();
+    else {
+      const std::string name = action == Action::Send ? "send" : action == Action::Stop ? "stop" : "toggle-target";
+      const auto command = pet_state_.Begin(name, keepwork_cef::PetToken(), GetTickCount64());
+      if (command) SendPet(*command);
+    }
+    UpdatePet();
+  }
+  void PetTick() {
+    pet_state_.Timeout(GetTickCount64());
+    if (pet_deadline_ && GetTickCount64() >= pet_deadline_) pet_deadline_ = 0;
+    UpdatePet();
+  }
+  void UpdatePet() {
+    const auto& state = pet_state_.snapshot();
+    keepwork_cef::PetChatView view;
+    view.title = (state.target == "chat" ? L"当前会话 · " : L"我的分身 · ") + state.title;
+    view.transcript = state.messages;
+    if (!state.reply.empty() && view.transcript.find(state.reply) == std::wstring::npos)
+      view.transcript += L"助手：" + state.reply;
+    view.ready = state.ready; view.busy = state.busy;
+    view.rich_draft = state.rich_draft; view.dictating = state.dictating;
+    view.can_switch = state.can_switch; view.pending = pet_state_.pending(); view.uncertain = pet_state_.unknown();
+    view.unsynced = pet_state_.dirty() && pet_state_.draft() != state.draft;
+    view.error = pet_state_.error();
+    if (view.error.empty()) view.error = state.error;
+    if (state.context.empty()) view.status = pet_deadline_ ? L"正在连接 AIChat…" : L"网页尚未提供宠物对话，请打开 AIChat 登录或刷新后重试。";
+    else if (!state.attention.empty()) view.status = state.attention;
+    else if (state.rich_draft) view.status = L"请打开 AIChat 处理附件或工具内容。";
+    else if (state.dictating) view.status = L"语音输入中，请在 AIChat 中操作。";
+    else if (pet_state_.pending()) view.status = L"正在确认操作…";
+    else if (state.busy) view.status = L"正在回复…";
+    else if (view.unsynced) view.status = state.draft.empty()
+      ? L"有未同步的草稿，发送或清空后再切换目标。"
+      : L"有未同步的草稿，请先发送或恢复为主窗口草稿后再切换。";
+    else if (!state.ready) view.status = L"当前目标尚未就绪，可切换目标或打开 AIChat。";
+    else view.status = L"输入文字后点击发送；Enter 换行。";
+    window_frame_.pet_chat().Update(view);
+    const auto owner = pet_binding_.document() + "|" + state.context;
+    const bool owner_changed = owner != pet_panel_owner_;
+    pet_panel_owner_ = owner;
+    if (owner_changed || window_frame_.pet_chat().Draft() != pet_state_.draft())
+      window_frame_.pet_chat().SetDraft(pet_state_.draft(), owner_changed);
+    window_frame_.PetChatTimer(pet_state_.pending() || pet_deadline_ != 0);
+  }
+  void RunCommand(CefRefPtr<CefBrowser> browser, keepwork_cef::WindowCommand command) {
+    CEF_REQUIRE_UI_THREAD();
+    using Command = keepwork_cef::WindowCommand;
+    auto frame = browser->GetFocusedFrame();
+    if (!frame) frame = browser->GetMainFrame();
+    switch (command) {
+      case Command::reload: browser->Reload(); break;
+      case Command::reload_no_cache: browser->ReloadIgnoreCache(); break;
+      case Command::open_browser: OpenExternal(browser->GetMainFrame()->GetURL()); break;
+      case Command::open_entry: OpenExternal(kEntry); break;
+      case Command::close: SendMessageW(window_frame_.window(), WM_CLOSE, 0, 0); break;
+      case Command::quit: window_frame_.Quit(); break;
+      case Command::undo: frame->Undo(); break;
+      case Command::redo: frame->Redo(); break;
+      case Command::cut: frame->Cut(); break;
+      case Command::copy: frame->Copy(); break;
+      case Command::paste: frame->Paste(); break;
+      case Command::select_all: frame->SelectAll(); break;
+      case Command::zoom_in: browser->GetHost()->SetZoomLevel(std::min(5.0, browser->GetHost()->GetZoomLevel() + 0.5)); break;
+      case Command::zoom_out: browser->GetHost()->SetZoomLevel(std::max(-5.0, browser->GetHost()->GetZoomLevel() - 0.5)); break;
+      case Command::zoom_reset: browser->GetHost()->SetZoomLevel(0); break;
+      case Command::fullscreen: window_frame_.ToggleFullscreen(); break;
+      case Command::dashboard: OpenExternal("http://127.0.0.1:8089/dashboard"); break;
+      case Command::start_mcp:
+        // This path came from the signed host's native launcher invocation,
+        // never from page messages. Only this fixed, non-stopping action runs.
+        if (!options_.launcher.empty() && reinterpret_cast<INT_PTR>(ShellExecuteW(window_frame_.window(),
+            L"open", options_.launcher.c_str(), L"--start-mcp", nullptr, SW_SHOWNORMAL)) <= 32)
+          MessageBoxW(window_frame_.window(), L"无法启动本地服务。请从安装目录重新打开 Keepwork，或在本地 MCP 面板检查服务。",
+            kTitle, MB_OK | MB_ICONWARNING);
+        break;
+      case Command::about: {
+        const auto text = std::wstring(L"Keepwork\nWindows 兼容客户端 ") + keepwork_cef::kHostVersion
+          + L"\nChromium / CEF " CEF_VERSION;
+        MessageBoxW(window_frame_.window(), text.c_str(), kTitle, MB_OK | MB_ICONINFORMATION); break;
+      }
+    }
+  }
   Options options_;
+  keepwork_cef::WindowFrame window_frame_;
+  keepwork_cef::PetChatState pet_state_;
+  keepwork_cef::PetDocumentBinding pet_binding_;
+  std::string pet_panel_owner_;
+  uint64_t pet_deadline_ = 0;
   std::vector<CefRefPtr<CefBrowser>> browsers_;
   int main_id_ = -1;
   int error_ = 0;
@@ -300,14 +667,23 @@ class App final : public CefApp, public CefBrowserProcessHandler {
 
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
+    auto& frame = client_->window_frame();
+    if (!frame.Create()) {
+      error_ = 22;
+      Error(L"Keepwork 窗口创建失败。请重新打开 Keepwork。");
+      CefQuitMessageLoop();
+      return;
+    }
+    const auto bounds = frame.ContentBounds();
     CefWindowInfo window;
-    window.SetAsPopup(nullptr, kTitle);
-    window.bounds = CefRect(80, 80, 1360, 900);
+    window.SetAsChild(frame.window(), CefRect(bounds.left, bounds.top,
+      bounds.right - bounds.left, bounds.bottom - bounds.top));
 #if CEF_VERSION_MAJOR >= 138
     window.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 #endif
     CefBrowserSettings settings;
     if (!CefBrowserHost::CreateBrowser(window, client_, "about:blank", settings, nullptr, nullptr)) {
+      frame.Destroy();
       error_ = 22;
       Error(L"兼容浏览器窗口创建失败。请重新打开 Keepwork。");
       CefQuitMessageLoop();
@@ -329,12 +705,13 @@ int RunHost(HINSTANCE instance, void* sandbox_info) {
   }
   CefMainArgs args(instance);
   // Renderer/GPU processes must return here, before any profile, lock or UI work.
-  const int child_result = CefExecuteProcess(args, nullptr, sandbox_info);
+  CefRefPtr<RendererApp> renderer_app(new RendererApp);
+  const int child_result = CefExecuteProcess(args, renderer_app, sandbox_info);
   if (child_result >= 0) return child_result;
 
   Options options;
   if (!ReadOptions(options)) {
-    Error(L"兼容模式启动参数无效。请通过 Keepwork 启动器打开。");
+    Error(L"启动参数无效。请通过 Keepwork 启动器打开。");
     return 2;
   }
   // Shared with the outer launcher and every CEF major/profile. Upgrading the

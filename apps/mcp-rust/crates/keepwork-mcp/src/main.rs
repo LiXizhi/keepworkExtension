@@ -115,6 +115,7 @@ async fn run(args: cli::Args) -> i32 {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             mcp::prune_idle(&prune_state);
+            prune_state.terminals.prune();
         }
     });
 

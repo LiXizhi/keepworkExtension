@@ -1,5 +1,6 @@
 #include "policy.hpp"
 #include "archive.hpp"
+#include "mcp_health.hpp"
 #include <nlohmann/json.hpp>
 #include <miniz.h>
 #include <chrono>
@@ -55,6 +56,116 @@ void selection() {
                         WindowsVersion{6, 1, 7600}, WindowsVersion{6, 4, 1}, WindowsVersion{9, 0, 1}})
     rejects([&] { keepwork::select_channel(os, true); }, "unsupported OS even with WebView2");
 }
+void mcp_health_contracts() {
+  const json base{{"name", "keepwork-mcp"}, {"ok", true}};
+  const auto legacy = keepwork::parse_mcp_health(base.dump());
+  expect(legacy.responded && legacy.keepwork, "Existing MCP needs no optional identity metadata");
+  expect(legacy.pid == 0 && legacy.version.empty() && legacy.variant.empty(), "Missing identity remains unknown");
+  expect(legacy.terminal_api.empty() && legacy.terminal_status.empty() && legacy.terminal_reason.empty(),
+    "A legacy peer may omit every additive terminal field");
+  expect(keepwork::mcp_service_status(legacy).find("未声明") != std::string::npos,
+    "The service result explains missing capability without declaring a newer version required");
+  auto terminal = base;
+  terminal["terminalApi"] = "pty-session-v1";
+  terminal["terminalStatus"] = "future-status";
+  expect(keepwork::mcp_service_status(keepwork::parse_mcp_health(terminal.dump())).find("已就绪") != std::string::npos,
+    "A recognized capability works even if an additive status is unknown");
+  terminal["terminalApi"] = "future-pty";
+  terminal["terminalStatus"] = "ready";
+  expect(keepwork::mcp_service_status(keepwork::parse_mcp_health(terminal.dump())).find("未声明") != std::string::npos,
+    "A ready status alone cannot invent support for an unknown terminal contract");
+  terminal.erase("terminalApi");
+  terminal["terminalStatus"] = "initializing";
+  expect(keepwork::mcp_service_status(keepwork::parse_mcp_health(terminal.dump())).find("正在准备") != std::string::npos,
+    "Cold startup is distinct from missing capability");
+  terminal["terminalStatus"] = "unavailable";
+  terminal["terminalReason"] = "Agent initialization timed out\nRetry will follow";
+  const auto unavailable = keepwork::parse_mcp_health(terminal.dump());
+  expect(unavailable.keepwork && unavailable.terminal_reason == "Agent initialization timed out Retry will follow",
+    "Backend diagnostics are plain bounded text without control characters");
+  expect(keepwork::mcp_service_status(unavailable).find("Agent initialization timed out") != std::string::npos,
+    "The explicit service action shows the actual unavailable reason");
+  terminal["terminalReason"] = std::string(2049, 'x');
+  expect(keepwork::parse_mcp_health(terminal.dump()).terminal_reason.empty(),
+    "Oversized diagnostics are discarded without splitting UTF-8 or rejecting the service");
+  for (const auto& value : {json(nullptr), json(false), json(1), json::array(), json::object()}) {
+    auto peer = base;
+    peer["terminalApi"] = peer["terminalStatus"] = peer["terminalReason"] = value;
+    const auto parsed = keepwork::parse_mcp_health(peer.dump());
+    expect(parsed.keepwork && parsed.terminal_api.empty() && parsed.terminal_status.empty() && parsed.terminal_reason.empty(),
+      "Malformed additive terminal fields do not reject an otherwise usable peer");
+  }
+  auto current = base;
+  current["pid"] = 123;
+  current["runtimeVersion"] = "0.2.61";
+  current["runtimeVariant"] = "win7-win8";
+  current["futureCapability"] = {{"enabled", true}};
+  current["owned"] = true;
+  const auto known = keepwork::parse_mcp_health(current.dump());
+  expect(known.keepwork && known.pid == 123 && known.version == "0.2.61" && known.variant == "win7-win8",
+    "Decode current MCP identity and accept additive fields");
+  expect(!known.owned, "HTTP fields can never establish ownership of a spawned child");
+  for (const auto& value : {json(nullptr), json(false), json(1), json::array(), json::object()}) {
+    auto peer = base;
+    peer["runtimeVersion"] = peer["runtimeVariant"] = value;
+    const auto parsed = keepwork::parse_mcp_health(peer.dump());
+    expect(parsed.keepwork && parsed.version.empty() && parsed.variant.empty(),
+      "Malformed optional identity must not make a usable peer unavailable");
+  }
+  for (const auto& version : {"0.1.0", "99.100.101", "unknown", ""}) {
+    auto peer = base; peer["runtimeVersion"] = version; peer["runtimeVariant"] = "future-runtime";
+    const auto parsed = keepwork::parse_mcp_health(peer.dump());
+    expect(parsed.keepwork && parsed.version == version && parsed.variant == "future-runtime",
+      "Peer versions and variants do not gate shared capabilities");
+  }
+  for (const auto& pid : {json(nullptr), json(false), json("123"), json(-1), json(1.5),
+      json(0), json(std::uint64_t{UINT32_MAX} + 1), json::array(), json::object()}) {
+    auto peer = base; peer["pid"] = pid;
+    const auto parsed = keepwork::parse_mcp_health(peer.dump());
+    expect(parsed.keepwork && parsed.pid == 0, "Malformed optional PID remains unknown without blocking attachment");
+  }
+  auto largest_pid = base; largest_pid["pid"] = std::uint64_t{UINT32_MAX};
+  expect(keepwork::parse_mcp_health(largest_pid.dump()).pid == UINT32_MAX, "Retain full-width Windows process IDs");
+  for (const auto& name : {json(nullptr), json(1), json(true), json("other-service"), json("KEEPWORK-MCP")}) {
+    auto foreign = base; foreign["name"] = name;
+    const auto parsed = keepwork::parse_mcp_health(foreign.dump());
+    expect(parsed.responded && !parsed.keepwork, "Wrong or malformed service identity must not be attached");
+  }
+  for (const auto& ok : {json(nullptr), json(0), json("true"), json(false), json::array(), json::object()}) {
+    auto unhealthy = base; unhealthy["ok"] = ok;
+    expect(!keepwork::parse_mcp_health(unhealthy.dump()).keepwork, "Require the actual boolean health success field");
+  }
+  for (const auto* missing : {"name", "ok"}) {
+    auto absent = base; absent.erase(missing);
+    expect(!keepwork::parse_mcp_health(absent.dump()).keepwork, "Missing required health field is unavailable");
+  }
+  for (const auto* body : {"", "{", "null", "true", "[]", "<html>foreign service</html>"}) {
+    const auto parsed = keepwork::parse_mcp_health(body);
+    expect(parsed.responded && !parsed.keepwork, "Malformed health response is an occupied foreign endpoint");
+  }
+}
+void cached_host_versions() {
+  const auto host = [](const std::string& version, const std::string& channel = "legacy", const std::string& arch = "x64") {
+    auto value = manifest(channel, arch); value["version"] = version;
+    return keepwork::validate_manifest(value.dump(), channel, arch, channel == "legacy" ? win7 : win10);
+  };
+  const auto cached = host("0.2.99");
+  expect(keepwork::newer_cef_host(host("0.2.100"), cached), "Promote newer bundled host using numeric patch ordering");
+  expect(!keepwork::newer_cef_host(host("0.2.98"), cached), "Never downgrade a cached host to the bundled version");
+  expect(!keepwork::newer_cef_host(host("0.2.99"), cached), "An equal bundle does not replace the active host");
+  expect(keepwork::newer_cef_host(host("0.10.0"), cached), "Compare numeric minor versions");
+  expect(keepwork::newer_cef_host(host("1.0.0"), cached), "Compare major version before minor or patch");
+  expect(!keepwork::newer_cef_host(host("0.9.999"), host("1.0.0")), "A large patch cannot bypass a lower major version");
+  expect(!keepwork::newer_cef_host(host("00.002.099"), cached), "Leading zeroes do not create a false upgrade");
+  expect(keepwork::newer_cef_host(host("0.2.000100"), cached), "Leading zeroes preserve numeric version comparison");
+  expect(keepwork::newer_cef_host(host("123456789012345678901234567890.0.0"), host("99999999999999999999999999999.0.0")),
+    "Long signed version components compare without integer truncation");
+  expect(!keepwork::newer_cef_host(host("9.0.0", "modern"), cached), "A modern host cannot replace a legacy cache");
+  expect(!keepwork::newer_cef_host(host("9.0.0"), host("0.2.99", "modern")), "A legacy host cannot replace a modern cache");
+  expect(!keepwork::newer_cef_host(host("9.0.0", "legacy", "x86"), cached), "A newer host cannot replace another architecture");
+  expect(!keepwork::newer_cef_host(host("9.0.0", "modern", "arm64"), host("0.2.99", "modern")),
+    "Modern ARM64 and x64 caches remain independent");
+}
 void paths() {
   for (const auto& path : {"keepwork-cef.exe", "locales/en-US.pak", "swiftshader/vk_swiftshader.dll", "LICENSE.txt", "a..b/file", "com10.txt"})
     expect(keepwork::zip_path(path, false) == path, std::string("Valid runtime path: ") + path);
@@ -76,6 +187,12 @@ void paths() {
 }
 void contracts() {
   const auto legacy = keepwork::validate_manifest(manifest().dump(), "legacy", "x64", win7);
+  expect(!legacy.service_launcher, "Older signed hosts receive no unknown launcher argument");
+  for (const auto& value : {json(nullptr), json(false), json(true), json("1"), json(2), json(1)}) {
+    auto capable = manifest(); capable["serviceLauncher"] = value;
+    expect(keepwork::validate_manifest(capable.dump(), "legacy", "x64", win7).service_launcher ==
+      (value.is_number_integer() && value == 1), "Only the supported optional service launcher contract is enabled");
+  }
   expect(legacy.files.size() == 5 && legacy.chromium_major == 109 && legacy.size == 100, "Decode legacy manifest");
   auto modern = manifest("modern", "arm64");
   expect(keepwork::validate_manifest(modern.dump(), "modern", "arm64", win10).chromium_major == 143, "Decode modern ARM64 manifest");
@@ -221,7 +338,7 @@ void archives() {
 }
 int main() {
   try {
-    selection(); paths(); contracts(); archives();
+    selection(); mcp_health_contracts(); cached_host_versions(); paths(); contracts(); archives();
     std::cout << "CEF policy: " << assertions << " assertions passed\n";
     return 0;
   } catch (const std::exception& error) {

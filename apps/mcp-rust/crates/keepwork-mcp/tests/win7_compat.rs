@@ -1,6 +1,7 @@
 //! Exercise the legacy wire contract on the host without pretending it is a
-//! Windows 7/8 runtime test. The actual target excludes the native PTY dependency.
-#![cfg(any(target_vendor = "win7", feature = "win7-compat"))]
+//! Windows 7/8 runtime test. Non-Windows compatibility fixtures intentionally
+//! have no native WinPTY backend; genuine Windows sessions have their own test.
+#![cfg(all(not(windows), any(target_vendor = "win7", feature = "win7-compat")))]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

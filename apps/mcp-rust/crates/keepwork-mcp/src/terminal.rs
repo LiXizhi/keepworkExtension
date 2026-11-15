@@ -1,22 +1,31 @@
 //! Terminal policy shared by model-operated commands and optional user PTYs.
 //!
-//! The Windows 7/8 edition has no ConPTY backend. Excluding it at compile time also
-//! prevents its Windows-10-only entry points from entering the legacy binary.
+//! The Windows 7/8 edition uses the bundled WinPTY agent, never ConPTY. A missing
+//! or modified backend remains an optional-feature failure, not a daemon failure.
 
 pub const TERMINAL_API: &str = "pty-session-v1";
 pub const GLOBAL_TERMINAL_CAP: usize = 4;
 pub const OUTPUT_CHAR_CAP: usize = 24_000;
 
-pub const fn supported() -> bool {
-    !cfg!(any(target_vendor = "win7", feature = "win7-compat"))
+pub fn supported() -> bool {
+    #[cfg(all(windows, any(target_vendor = "win7", feature = "win7-compat")))]
+    return winpty::available();
+    #[cfg(not(all(windows, any(target_vendor = "win7", feature = "win7-compat"))))]
+    return !cfg!(any(target_vendor = "win7", feature = "win7-compat"));
 }
 
-#[cfg(not(any(target_vendor = "win7", feature = "win7-compat")))]
+#[cfg(any(not(any(target_vendor = "win7", feature = "win7-compat")), windows))]
 #[path = "terminal/pty.rs"]
 mod backend;
-#[cfg(any(target_vendor = "win7", feature = "win7-compat"))]
+#[cfg(all(not(windows), any(target_vendor = "win7", feature = "win7-compat")))]
 #[path = "terminal/unsupported.rs"]
 mod backend;
+#[cfg(any(not(any(target_vendor = "win7", feature = "win7-compat")), windows))]
+#[path = "terminal/native.rs"]
+mod native;
+#[cfg(all(windows, any(target_vendor = "win7", feature = "win7-compat")))]
+#[path = "terminal/winpty.rs"]
+mod winpty;
 pub use backend::{route, TerminalManager};
 
 /// Same deny-list as `src/core/terminal.ts`. Never weaken it.

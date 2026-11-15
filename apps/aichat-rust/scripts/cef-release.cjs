@@ -124,6 +124,7 @@ function packageCef({ directory, output, privateKey, minWindows }) {
   for (const file of files) if (/\.(exe|dll)$/i.test(file.path)) assert.equal(peMachine(path.join(directory, file.path)), machines[host.arch], 'Runtime binary architecture mismatch');
   assert.ok(files.some(file => file.path === 'CEF-LICENSE.txt'), 'CEF license is required');
   const manifest = { schemaVersion: 1, product: 'keepwork-aichat-cef', hostProtocol: 1, channel, arch: host.arch, version: host.hostVersion,
+    ...(host.serviceLauncher === 1 ? { serviceLauncher: 1 } : {}),
     cefVersion: host.cefVersion, chromiumMajor: host.cefMajor, minWindows: minWindows || (channel === 'legacy' ? [6, 1, 7601] : [10, 0, 19045]),
     entry: 'keepwork-cef.exe', files, unpackedSize: files.reduce((n, f) => n + f.size, 0), size: 1, sha256: '0'.repeat(64) };
   validateManifest(manifest); publicKey(privateKey);

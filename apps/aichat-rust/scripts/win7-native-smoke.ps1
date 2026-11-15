@@ -113,7 +113,6 @@ function Get-OwnedHealth($Child, [string]$Base, [string]$Workspace, $Expected, [
   Assert-Condition ($health['runtimeVersion'] -eq $Expected['version'] -and $health['runtimeCommit'] -eq $Expected['commit']) 'Compiled runtime identity differs from its staged metadata'
   Assert-Condition ((Normalize-Path $health['workspaceRoot']) -eq (Normalize-Path $Workspace)) 'Endpoint workspace differs from the isolated workspace'
   Assert-Condition ($health['requireAuth'] -eq $Auth) 'Authentication setting did not match the child environment'
-  Assert-Condition (-not $health.ContainsKey('terminalApi')) 'Win7 runtime must not advertise PTY'
   $baseline = @($health['minWindows'])
   Assert-Condition ($baseline.Length -eq 3 -and $baseline[0] -eq 6 -and $baseline[1] -eq 1 -and $baseline[2] -eq 7601) 'Win7 baseline is missing or incorrect'
   $Child.Refresh()
@@ -125,6 +124,108 @@ function Invoke-Owned($Child, [string]$Base, [string]$Workspace, $Expected, [boo
     [string]$Route, [string]$Method, $Body, [string]$Token, [hashtable]$Headers = @{}) {
   $null = Get-OwnedHealth $Child $Base $Workspace $Expected $Auth
   return Invoke-Http $Base $Route $Method $Body $Token $Headers
+}
+
+function Wait-PtyOutput($Child, [string]$Base, [string]$Workspace, $Expected, [bool]$Auth,
+    [string]$Route, [string]$Token, [string]$Marker) {
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $reply = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($Route + '/output?cursor=0') 'GET' $null $Token
+    Assert-Condition ($reply.Status -eq 200 -and $null -ne $reply.Json) 'PTY output request failed'
+    if ([string]$reply.Json['output'] -and ([string]$reply.Json['output']).Contains($Marker)) { return $reply.Json }
+    Start-Sleep -Milliseconds 50
+  }
+  throw ('PTY did not produce the computed output marker: ' + $Marker)
+}
+
+function Read-PtyEvent($Reader) {
+  $line = $Reader.ReadLine()
+  Assert-Condition ($null -ne $line -and $line.Length -le 1048576) 'PTY stream ended or exceeded the smoke size limit'
+  $event = $script:Json.DeserializeObject($line)
+  Assert-Condition ($null -ne $event -and $event.ContainsKey('cursor') -and
+    $event.ContainsKey('reset') -and $event.ContainsKey('output') -and $event.ContainsKey('closed')) 'Invalid NDJSON terminal event'
+  return $event
+}
+
+function Test-OwnedPty($Child, [string]$Base, [string]$Workspace, $Expected, [bool]$Auth, [string]$Token) {
+  $sessionRoute = ''
+  $response = $null
+  $reader = $null
+  try {
+    $traversal = Invoke-Owned $Child $Base $Workspace $Expected $Auth '/terminal/sessions' 'POST' @{ cwd = '../escaped-pty' } $Token
+    Assert-Condition ($traversal.Status -ge 400 -and $traversal.Status -lt 600) 'Relative PTY cwd escaped the isolated workspace'
+    Assert-Condition (-not [IO.Directory]::Exists((Join-Path ([IO.Path]::GetDirectoryName($Workspace)) 'escaped-pty'))) 'Rejected PTY cwd created an outside directory'
+    $folder = ([string][char]0x4e2d) + ([string][char]0x6587) + ' terminal'
+    $null = [IO.Directory]::CreateDirectory((Join-Path $Workspace $folder))
+    $created = Invoke-Owned $Child $Base $Workspace $Expected $Auth '/terminal/sessions' 'POST' @{ cwd = [string]$folder; cols = 80; rows = 24 } $Token
+    Assert-Condition ($created.Status -eq 201 -and $created.Json['id']) 'Advertised PTY could not create a real interactive shell'
+    $sessionRoute = '/terminal/sessions/' + [Uri]::EscapeDataString([string]$created.Json['id'])
+    Assert-Condition ((Normalize-Path ([string]$created.Json['cwd'])) -eq (Normalize-Path (Join-Path $Workspace $folder))) 'PTY started in an unexpected directory'
+    $other = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/output') 'GET' $null $Token @{ Origin = 'http://localhost:31338' }
+    Assert-Condition ($other.Status -eq 404) 'A different terminal owner could read this session'
+    $blocked = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/commands') 'POST' @{ command = 'shutdown -h now' } $Token
+    Assert-Condition ($blocked.Status -eq 400) 'Model command deny-list was weakened by the PTY backend'
+    # The final marker is computed by the real shell and is absent from its
+    # echoed input. This cannot pass by merely displaying submitted input.
+    $inputReply = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('$p = ''WIN7_PTY_''; Write-Output ($p + ''EXECUTED'')' + [char]13) } $Token
+    Assert-Condition ($inputReply.Status -eq 202) 'PTY rejected user input'
+    $output = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_EXECUTED'
+    $cursor = [long]$output['cursor']
+    Assert-Condition ($cursor -eq ([string]$output['output']).Length) 'PTY replay cursor did not count UTF-16 code units'
+    $resized = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/resize') 'POST' @{ cols = 101; rows = 31 } $Token
+    Assert-Condition ($resized.Status -eq 200 -and $resized.Json['cols'] -eq 101 -and $resized.Json['rows'] -eq 31) 'PTY dimensions did not update'
+
+    $null = Get-OwnedHealth $Child $Base $Workspace $Expected $Auth
+    $request = [Net.HttpWebRequest]::Create($Base + $sessionRoute + '/stream?cursor=' + $cursor)
+    $request.Method = 'GET'; $request.Proxy = $null; $request.AllowAutoRedirect = $false
+    $request.Timeout = 10000; $request.ReadWriteTimeout = 10000
+    $request.Accept = 'application/x-ndjson'; $request.Headers['Origin'] = 'https://keepwork.com'
+    if ($Token) { $request.Headers['Authorization'] = 'Bearer ' + $Token }
+    $response = $request.GetResponse()
+    Assert-Condition ([int]$response.StatusCode -eq 200 -and $response.ContentType.StartsWith('application/x-ndjson')) 'PTY stream did not use NDJSON'
+    $reader = New-Object IO.StreamReader -ArgumentList @($response.GetResponseStream(), $script:Utf8)
+    $initial = Read-PtyEvent $reader
+    Assert-Condition ([long]$initial['cursor'] -ge $cursor -and -not $initial['reset']) 'PTY stream did not replay from its existing cursor'
+    $unicode = ([string][char]0x4e2d) + ([string][char]0x6587) + ([string][char]0xd83d) + ([string][char]0xde00)
+    $command = 'Write-Output ([string][char]0x4e2d + [char]0x6587 + [char]0xd83d + [char]0xde00)' + [char]13
+    $null = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = [string]$command } $Token
+    $live = New-Object Text.StringBuilder
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    while (-not $live.ToString().Contains($unicode) -and [DateTime]::UtcNow -lt $deadline) {
+      $event = Read-PtyEvent $reader
+      $null = $live.Append([string]$event['output'])
+      Assert-Condition ($live.Length -le 1048576) 'PTY stream exceeded its smoke size limit'
+    }
+    Assert-Condition ($live.ToString().Contains($unicode)) 'PTY live output did not preserve Chinese and surrogate-pair text'
+    $unicodeOutput = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token $unicode
+    Assert-Condition ([long]$unicodeOutput['cursor'] -eq ([string]$unicodeOutput['output']).Length) 'Unicode terminal replay changed cursor units'
+    $reader.Close(); $reader = $null; $response.Close(); $response = $null
+
+    $null = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('Start-Sleep -Seconds 30' + [char]13) } $Token
+    Start-Sleep -Milliseconds 200
+    $interrupted = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/interrupt') 'POST' @{} $Token
+    Assert-Condition ($interrupted.Status -eq 200) 'PTY Ctrl+C was not accepted'
+    $null = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/input') 'POST' @{ data = ('$p = ''WIN7_PTY_''; Write-Output ($p + ''AFTER_INTERRUPT'')' + [char]13) } $Token
+    $null = Wait-PtyOutput $Child $Base $Workspace $Expected $Auth $sessionRoute $Token 'WIN7_PTY_AFTER_INTERRUPT'
+    $otherClose = Invoke-Owned $Child $Base $Workspace $Expected $Auth $sessionRoute 'DELETE' $null $Token @{ Origin = 'http://localhost:31338' }
+    Assert-Condition ($otherClose.Status -eq 404) 'A different terminal owner could close this session'
+    $closed = Invoke-Owned $Child $Base $Workspace $Expected $Auth $sessionRoute 'DELETE' $null $Token
+    Assert-Condition ($closed.Status -eq 200) 'Owned PTY cleanup failed'
+    $gone = Invoke-Owned $Child $Base $Workspace $Expected $Auth ($sessionRoute + '/output') 'GET' $null $Token
+    Assert-Condition ($gone.Status -eq 404) 'Deleted PTY remained reachable'
+    $sessionRoute = ''
+    return @{ ptyVerified = $true; terminalApi = 'pty-session-v1';
+      checks = @('real-shell-output', 'utf16-cursor-and-unicode', 'ndjson-replay-and-live-output',
+        'resize', 'ctrl-c-and-continued-input', 'origin-auth-owner', 'relative-cwd-confinement', 'owned-close') }
+  } finally {
+    if ($null -ne $reader) { $reader.Close() }
+    if ($null -ne $response) { $response.Close() }
+    if ($sessionRoute) {
+      # Mutation remains gated by the actual child PID and isolated profile,
+      # even on a failed assertion. Never delete a session on a replacement peer.
+      try { $null = Invoke-Owned $Child $Base $Workspace $Expected $Auth $sessionRoute 'DELETE' $null $Token } catch {}
+    }
+  }
 }
 
 function Test-FolderLocations($Document, [string]$ProfileDirectory, [string]$Workspace) {
@@ -228,7 +329,7 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
       $token = [IO.File]::ReadAllText($tokenPath).Trim()
       Assert-Condition ($token.Length -gt 0 -and $token.Length -le 4096 -and $token.IndexOf([char]10) -lt 0 -and $token.IndexOf([char]13) -lt 0) 'Invalid isolated token'
       $unauthorized = Invoke-Owned $child $base $workspace $Expected $Auth '/terminal/sessions' 'POST' @{} ''
-      Assert-Condition ($unauthorized.Status -eq 401) 'Authentication must precede unsupported-feature handling'
+      Assert-Condition ($unauthorized.Status -eq 401) 'Authentication must precede terminal handling'
     }
     $forbidden = Invoke-Owned $child $base $workspace $Expected $Auth '/terminal/sessions' 'POST' @{} $token @{ Origin = 'https://evil.example' }
     Assert-Condition ($forbidden.Status -eq 403) 'Disallowed Origin must remain rejected'
@@ -273,12 +374,21 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
       else { Assert-Condition ($toolText.Contains('WIN7_NATIVE_COMMAND_OK')) 'Ordinary command output is missing' }
       $caseReport['checks'] += [string]$operation['name']
     }
-    $pty = Invoke-Owned $child $base $workspace $Expected $Auth '/terminal/sessions' 'POST' @{} $token
-    Assert-Condition ($pty.Status -eq 501 -and $pty.Json['code'] -eq 'UNSUPPORTED_FEATURE' -and $pty.Json['feature'] -eq 'pty-session-v1') 'PTY must return a bounded unsupported-feature error'
+    if ($health.ContainsKey('terminalApi') -and $health['terminalApi'] -eq 'pty-session-v1') {
+      $caseReport['terminal'] = Test-OwnedPty $child $base $workspace $Expected $Auth $token
+      $caseReport['checks'] += 'advertised-pty-native-input-output-stream-resize-interrupt-and-close'
+    } else {
+      # Older runtimes and a failed/missing optional backend must retain their
+      # honest bounded fallback. This branch is not native PTY acceptance.
+      $pty = Invoke-Owned $child $base $workspace $Expected $Auth '/terminal/sessions' 'POST' @{} $token
+      Assert-Condition ($pty.Status -eq 501 -and $pty.Json['code'] -eq 'UNSUPPORTED_FEATURE' -and $pty.Json['feature'] -eq 'pty-session-v1' -and $pty.Text.Length -lt 1024) 'Unavailable PTY must return a bounded unsupported-feature error'
+      $caseReport['terminal'] = @{ ptyVerified = $false; terminalApi = ''; unsupportedVerified = $true }
+      $caseReport['checks'] += 'unavailable-pty-bounded-unsupported'
+    }
     $null = Get-OwnedHealth $child $base $workspace $Expected $Auth
     $status = Invoke-Owned $child $base $workspace $Expected $Auth '/mcp' 'POST' @{ jsonrpc = '2.0'; id = 5; method = 'tools/call'; params = @{ name = 'mcp_status'; arguments = @{} } } $token $sessionHeaders
-    Assert-Condition ($status.Status -eq 200 -and -not $status.Json['result']['isError']) 'Ordinary MCP operations failed after the unsupported PTY request'
-    $caseReport['checks'] += 'pty-refused-with-daemon-and-mcp-still-healthy'
+    Assert-Condition ($status.Status -eq 200 -and -not $status.Json['result']['isError']) 'Ordinary MCP operations failed after the terminal requests'
+    $caseReport['checks'] += 'terminal-requests-preserve-daemon-and-ordinary-mcp'
     $closed = Invoke-Owned $child $base $workspace $Expected $Auth '/mcp' 'DELETE' $null $token $sessionHeaders
     Assert-Condition ($closed.Status -ge 200 -and $closed.Status -lt 300) 'MCP session cleanup failed'
     $null = Invoke-Owned $child $base $workspace $Expected $Auth '/admin/stop' 'POST' $null $token

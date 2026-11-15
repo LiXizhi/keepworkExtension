@@ -34,7 +34,7 @@ function fixture(t, patch = {}) {
   return { root, binary, bytes, info, output: path.join(root, 'output') };
 }
 
-test('Windows 7/8 archive has independent channel, compiled variant, complete file digests and no native PTY claim', t => {
+test('Windows 7/8 archive includes pinned genuine WinPTY assets and complete file digests', t => {
   const f = fixture(t);
   const result = packageWin7Runtime({ ...f, expected: f.info });
   const archive = fs.readFileSync(result.archive), files = readRuntimeArchive(archive);
@@ -42,7 +42,9 @@ test('Windows 7/8 archive has independent channel, compiled variant, complete fi
   assert.equal(result.manifest.url, `${BASE}/0.3.0/windows-x64.zip`);
   assert.equal(result.manifest.size, archive.length);
   assert.equal(result.manifest.sha256, crypto.createHash('sha256').update(archive).digest('hex'));
-  assert.deepEqual([...files.keys()].filter(name => !name.endsWith('/')).sort(), ['LICENSE', 'bin/keepwork-mcp.exe', 'runtime.json']);
+  assert.deepEqual([...files.keys()].filter(name => !name.endsWith('/')).sort(),
+    ['LICENSE', 'bin/keepwork-mcp.exe', 'bin/winpty-agent.exe', 'bin/winpty.dll',
+      'licenses/winpty/LICENSE', 'licenses/winpty/provenance.json', 'runtime.json']);
   const runtime = JSON.parse(files.get('runtime.json'));
   for (const key of ['version', 'variant', 'minWindows', 'buildTarget', 'commit', 'sourceHash', 'platform', 'arch']) {
     assert.deepEqual(runtime[key], result.manifest[key], key);
@@ -50,12 +52,25 @@ test('Windows 7/8 archive has independent channel, compiled variant, complete fi
   assert.equal(runtime.variant, 'win7-win8');
   assert.equal(runtime.health.match.runtimeVariant, 'win7-win8');
   assert.equal(runtime.terminalApi, undefined);
+  const expected = require('./winpty-assets.cjs').readAssets();
+  for (const [name, bytes] of expected) assert.deepEqual(files.get(name), bytes);
   assert.equal(result.manifest.unpackedSize, result.manifest.files.reduce((sum, file) => sum + file.size, 0));
   for (const file of result.manifest.files) {
     assert.equal(file.size, files.get(file.path).length);
     assert.equal(file.sha256, crypto.createHash('sha256').update(files.get(file.path)).digest('hex'));
   }
   assert.throws(() => packageWin7Runtime({ ...f, expected: f.info }), /must be new/);
+});
+
+test('modified WinPTY assets are rejected before staging', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-winpty-digest-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const assets = require('./winpty-assets.cjs');
+  fs.cpSync(assets.directory, path.join(root, 'assets'), { recursive: true });
+  const binary = path.join(root, 'assets/x64/winpty-agent.exe');
+  const modified = fs.readFileSync(binary); modified[modified.length - 1] ^= 1; fs.writeFileSync(binary, modified);
+  assert.throws(() => assets.stageAssets(path.join(root, 'output'), path.join(root, 'assets')), /digest mismatch/);
+  assert.equal(fs.existsSync(path.join(root, 'output')), false);
 });
 
 for (const [label, patch] of [

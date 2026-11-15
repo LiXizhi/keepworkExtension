@@ -11,7 +11,9 @@ const { packageWin7Runtime } = require('../../mcp-rust/scripts/package-win7-runt
 const cefRelease = require('../scripts/cef-release.cjs');
 const key = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const otherKey = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-const nsisCompiler = process.env.KEEPWORK_WIN7_MAKENSIS || process.env.MAKENSIS;
+const nsisCompiler = process.env.KEEPWORK_WIN7_MAKENSIS || process.env.MAKENSIS || [
+  'C:/Program Files (x86)/NSIS/makensis.exe', '/opt/homebrew/bin/makensis', '/usr/local/bin/makensis', '/usr/bin/makensis',
+].find(file => fs.existsSync(file));
 
 function pe(machine = 0x8664) {
   const bytes = Buffer.alloc(0x400), optional = 0x98, section = 0x188;
@@ -91,7 +93,25 @@ test('Win7 payload retains independent MCP version, signed identity and bounded 
   assert.equal(validation.nativeWin7Verified, false);
   assert.equal(validation.checks.nativeCef, 'pending');
   assert.equal(validation.checks.nativeMcp, 'pending');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(prepared.output, 'static-pe-report.json'))).files.length, 2);
+  const peReport = JSON.parse(fs.readFileSync(path.join(prepared.output, 'static-pe-report.json')));
+  const auditedNames = ['Keepwork.exe', 'resources/win7-mcp/bin/keepwork-mcp.exe',
+    'resources/win7-mcp/bin/winpty.dll', 'resources/win7-mcp/bin/winpty-agent.exe'];
+  assert.deepEqual(peReport.files.map(file => file.path).sort(), [...auditedNames].sort(),
+    'every launcher, MCP, WinPTY DLL and agent PE must be present in the import audit');
+  const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  const winpty = JSON.parse(fs.readFileSync(path.join(__dirname, '../../mcp-rust/vendor/winpty-0.4.3/provenance.json')));
+  for (const name of auditedNames) {
+    const bytes = fs.readFileSync(path.join(prepared.payload, name));
+    const expected = name === 'Keepwork.exe' ? digest(fs.readFileSync(f.options.bootstrap))
+      : manifest.files.find(file => file.path === name.slice('resources/win7-mcp/'.length))?.sha256;
+    assert.equal(digest(bytes), expected, 'audited bytes must match the bootstrap or signed MCP member: ' + name);
+    if (name.endsWith('/winpty.dll') || name.endsWith('/winpty-agent.exe')) {
+      assert.equal(digest(bytes), winpty.files['x64/' + path.basename(name)].sha256,
+        'audited WinPTY bytes must also match the pinned official asset: ' + name);
+      assert.ok(peReport.files.find(file => file.path === name).imports.length > 0,
+        'real WinPTY imports must be parsed rather than represented by a filename-only audit entry');
+    }
+  }
   assert.equal(JSON.parse(fs.readFileSync(path.join(prepared.payload, 'win7-edition.json'))).bundledCef, false);
   assert.equal(fs.existsSync(path.join(prepared.payload, 'resources/cef-bundled.zip')), false);
 });
