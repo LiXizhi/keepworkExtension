@@ -23,7 +23,11 @@ Windows 兼容启动方案用于处理 WebView2 不可用的机器，包括 Wind
 
 专版的日常文件浏览不要求用户升级 Win7 自带的 PowerShell 2。`/fs/locations` 通过原生 Windows Known Folder 查询读取系统配置的 Desktop、Documents、Downloads、Pictures、Music 和 Videos，保留重定向及本地化后的实际路径，不硬编码用户目录下的英文子目录。位置发现只返回已存在的可用目录，不创建文件夹；单位置查询失败不阻断其他位置、Home、盘符或普通目录浏览，既有响应字段和位置 ID 保持兼容。构建机上使用现代 PowerShell 与此最终用户依赖边界分开。
 
-专版初始 MCP（包括 `0.2.66`）不提供交互式 PTY。从独立 MCP `0.2.67` 起，完整专版运行时打包固定来源的 WinPTY `0.4.3` x64 `winpty.dll`、`winpty-agent.exe` 及许可证，通过现有 HTTP `pty-session-v1` 提供真实交互式 shell、输入、输出续流、尺寸调整、打断和关闭，不依赖 Node 或现代 ConPTY。只有相邻依赖文件通过摘要核验、DLL 成功加载且后端就绪探测通过时，健康端点和能力通知才广告 `terminalApi`；首次探测创建并释放 WinPTY 后端，不启动用户 shell 或执行命令。依赖缺失、损坏、加载或就绪失败时不广告，终端路由返回 HTTP `501` / `UNSUPPORTED_FEATURE`，普通聊天、文件操作和非交互式 `run_terminal` 继续可用。`run_terminal` 的 `cmd.exe /c` 执行不能宣称为 PTY 的等价回退。
+专版初始 MCP（包括 `0.2.66`）不提供交互式 PTY。从独立 MCP `0.2.67` 起，完整专版运行时打包固定来源的 WinPTY `0.4.3` x64 `winpty.dll`、`winpty-agent.exe` 及许可证，通过现有 HTTP `pty-session-v1` 提供真实交互式 shell、输入、输出续流、尺寸调整、打断和关闭，不依赖 Node；旧系统路径不要求系统提供 ConPTY。只有相邻依赖文件通过摘要核验、DLL 成功加载且后端就绪探测通过时，健康端点和能力通知才广告 `terminalApi`；首次探测创建并释放 WinPTY 后端，不启动用户 shell 或执行命令。依赖缺失、损坏、加载或就绪失败时不广告，终端路由返回 HTTP `501` / `UNSUPPORTED_FEATURE`，普通聊天、文件操作和非交互式 `run_terminal` 继续可用。`run_terminal` 的 `cmd.exe /c` 执行不能宣称为 PTY 的等价回退。
+
+MCP `0.2.81` 按运行系统实际提供的 API 选择专版终端后端：本专版在具备所需系统导出的现代 Windows 上使用 ConPTY，缺少这些导出的 Win7/Win8 继续使用固定 WinPTY。专版新增的适配器仅从已加载的系统 `kernel32.dll` 动态解析 ConPTY 函数，不搜索额外的 `conpty.dll`，不向旧系统二进制增加静态 ConPTY 导入；普通现代 MCP 和 Unix 的既有原生适配路径不变。专版 `variant: "win7-win8"`、最低系统和独立 `mcp-win7-win8-rs` 渠道保持原样；即使运行在现代系统，完整包仍要求固定 WinPTY 依赖的摘要、加载与就绪检查通过。一个后端尝试启动 shell 后，失败不能静默切换后端再启动另一个 shell，也不重放输入。
+
+可选诊断 `terminalBackend: "conpty" | "winpty"` 在 `/health` 中仅于就绪后出现，表示新会话选择的后端；会话快照中的同名可选字段记录该会话实际启动成功的后端。该字段不在 Unix 返回，缺失或未知时保留未知语义，不能替代 `terminalApi`、后端就绪或命令执行结果。现代构建宿主通过 ConPTY 验证，不表示已验证 Win7 SP1、Win8、Win8.1 上 WinPTY 的非 BMP 字符、UTF-16 游标或其他原生交互。三个旧系统仍分别保留真实验收或当次用户授权豁免，豁免不等于实测通过。
 
 MCP `0.2.68` 将后端就绪探测放到后台，并修复首次启动超时被永久记为不可用的问题。单次探测和自动重试均有界，并发健康请求复用同一探测，不启动用户 shell；短暂启动失败可在同一进程恢复，依赖摘要或加载错误仍拒绝使用，修复依赖后需重新启动服务。健康响应新增可选 `terminalStatus`（`initializing`、`ready`、`unavailable`）和失败时的 `terminalReason`；原因使用固定有界文案，不包含本机路径或底层错误内容。只有 `ready` 才返回既有 `terminalApi: "pty-session-v1"`。每 25 秒的 SSE 心跳重新读取实际健康能力，使旧网页也能发现后台恢复；缺失或未知诊断字段表示状态未知，不要求客户端与 MCP 版本相同。
 
@@ -75,7 +79,7 @@ MCP 继续只监听 `127.0.0.1:8089`，遵守单 daemon 和进程归属保护。
 | 本地模型 | 保持现有行为 | 不提供 | 不提供 |
 | 文件、目录、搜索和普通命令 | 保持现有行为 | 经已连接 MCP 的 HTTP/tool 能力，依服务实际能力提供 | 经已连接 MCP 的 HTTP/tool 能力，保留网页确认和服务安全检查 |
 | 原生文件夹授权 / 文件 / PTY Bridge | 保持现有行为 | 尚未移植 | 尚未移植；HTTP 终端能力与原生 Bridge 分开协商 |
-| HTTP 交互式 PTY | 保持现有行为 | 依已连接 MCP 的实际 `terminalApi` 提供 | MCP `0.2.67` 完整依赖可用时使用 WinPTY；旧服务或依赖不可用时不广告并返回 unsupported |
+| HTTP 交互式 PTY | 保持现有行为 | 依已连接 MCP 的实际 `terminalApi` 提供 | MCP `0.2.67` 起依完整包实际能力提供；`0.2.81` 按系统 API 选择 ConPTY / WinPTY，固定依赖仍须通过；旧服务或依赖不可用时不广告并返回 unsupported |
 | 桌面菜单 | 保持现有行为 | 原生文件、编辑、视图、帮助菜单，下拉绘制跟随当前主题，限下述已实现操作 | 同通用 CEF 预览 |
 | 标题栏布局与交互 | 保持现有行为 | 单色 K、紧凑菜单、居中产品标题 / 公开入口地址 / 刷新、窗口按钮悬停与宽度适配 | 同通用 CEF 预览 |
 | 标题栏主题 | 保持现有行为 | 跟随主页面浅色、深色及皮肤颜色，限窗口绘制使用 | 同通用 CEF 预览 |

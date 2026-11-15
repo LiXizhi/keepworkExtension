@@ -1,0 +1,80 @@
+name: Legacy variant system ConPTY source validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native compatibility-path checks (modern Windows)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      KEEPWORK_TEST_EXPECTED_TERMINAL_BACKEND: conpty
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: x64
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: legacy-conpty-native
+          workspaces: apps/mcp-rust -> target
+      - name: Create isolated diagnostic log directory
+        run: mkdir -p .test-runtime/legacy-conpty-source
+      - name: Check source formatting
+        run: cargo fmt --all --check --manifest-path apps/mcp-rust/Cargo.toml 2>&1 | tee .test-runtime/legacy-conpty-source/format.log
+      - name: Lint the compatibility feature and all test modules
+        run: cargo clippy --locked --manifest-path apps/mcp-rust/Cargo.toml --features win7-compat --all-targets -- -D warnings 2>&1 | tee .test-runtime/legacy-conpty-source/clippy.log
+      - name: Compile the real compatibility-path test executables
+        run: cargo test --locked --manifest-path apps/mcp-rust/Cargo.toml --features win7-compat --lib --test terminal_sessions --no-run --message-format=json > .test-runtime/legacy-conpty-source/compile.jsonl 2> .test-runtime/legacy-conpty-source/compile.log
+      - name: Stage verified fixed WinPTY assets beside each owned test executable
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
+          const { readAssets } = require('./apps/mcp-rust/scripts/winpty-assets.cjs');
+          const directory = '.test-runtime/legacy-conpty-source';
+          const messages = fs.readFileSync(directory + '/compile.jsonl', 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+          const compiledTests = messages.filter(m => m.reason === 'compiler-artifact' && m.profile.test && m.executable);
+          const unit = compiledTests.filter(m => m.target.name === 'keepwork_mcp' && m.target.kind.includes('lib'));
+          const integration = compiledTests.filter(m => m.target.name === 'terminal_sessions' && m.target.kind.includes('test'));
+          assert.equal(unit.length, 1, 'Expected exactly one MCP library unit-test executable');
+          assert.equal(integration.length, 1, 'Expected exactly one actual PTY integration executable');
+          const artifacts = [...unit, ...integration];
+          const assets = readAssets();
+          const targets = [...new Set(artifacts.map(a => path.dirname(a.executable)))];
+          const targetRoot = fs.realpathSync('apps/mcp-rust/target') + path.sep;
+          for (const target of targets) {
+            assert.ok((fs.realpathSync(target) + path.sep).startsWith(targetRoot));
+            for (const name of ['winpty.dll', 'winpty-agent.exe']) fs.writeFileSync(path.join(target, name), assets.get('bin/' + name));
+          }
+          fs.writeFileSync(directory + '/provenance.json', JSON.stringify({
+            schemaVersion: 1, diagnosticOnly: true, acceptance: false, nativeLegacyVerified: false,
+            sourceCommit: process.env.GITHUB_SHA, buildHost: 'windows-2022', feature: 'win7-compat',
+            expectedBackend: process.env.KEEPWORK_TEST_EXPECTED_TERMINAL_BACKEND,
+            scope: 'Modern-host native compatibility code-path tests; not a Win7-target release build or old-OS acceptance',
+            executables: artifacts.map(a => a.executable), verifiedAssetDirectories: targets
+          }, null, 2) + '\n');
+          NODE
+      - name: Validate backend selection, dynamic boundary and integrity gates
+        run: |
+          cargo test --locked --manifest-path apps/mcp-rust/Cargo.toml --features win7-compat --lib terminal:: -- --nocapture 2>&1 | tee .test-runtime/legacy-conpty-source/unit.log
+      - name: Validate actual system ConPTY Unicode, interrupt, ownership and close
+        run: cargo test --locked --manifest-path apps/mcp-rust/Cargo.toml --features win7-compat --test terminal_sessions -- --nocapture 2>&1 | tee .test-runtime/legacy-conpty-source/native-pty.log
+      - name: Preserve source diagnostics only (never release packages)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-legacy-system-conpty-source
+          path: .test-runtime/legacy-conpty-source/
+          if-no-files-found: warn
+          retention-days: 14

@@ -8,7 +8,7 @@
 
 | 产物 | 入口 / 标识 | 发行范围 |
 | --- | --- | --- |
-| Win7/Win8 Rust MCP 构建 | `apps/mcp-rust/scripts/build-win7.cjs` | 共享 Rust 源码，Win7/Win8 专用二进制；基础文件、搜索、`run_terminal`，以及依实际后端能力提供的 WinPTY 交互终端 |
+| Win7/Win8 Rust MCP 构建 | `apps/mcp-rust/scripts/build-win7.cjs` | 共享 Rust 源码，Win7/Win8 专用二进制；基础文件、搜索、`run_terminal`，以及依实际系统后端能力提供的交互终端 |
 | Win7/Win8 Rust MCP 归档 | `apps/mcp-rust/scripts/package-win7-runtime.cjs` | `windows-x64`，`variant: "win7-win8"`，最低系统 Win7 SP1 |
 | Win7/Win8 构建入口 | `apps/aichat-rust/scripts/build-win7.cjs` | 编译旧系统 C++ 启动器，并调用专版打包器；固定 legacy CEF109，尝试启动/附着 MCP |
 | Win7/Win8 安装包 | `apps/aichat-rust/scripts/package-win7.cjs` | 组装 Launcher + 兼容版 MCP；拒绝现代 Tauri EXE |
@@ -43,6 +43,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Win7 MCP build failed' }
 不使用 `rustup target add` 假设已有此目标的预编译标准库，也不通过 `RUSTFLAGS --cfg` 冒充 Win7 target。实际编译或 PE 导入检查失败就保留日志，不退回普通 Windows 二进制。
 
 从 MCP `0.2.67` 起，构建 / 打包脚本一并校验和暂存仓库固定的 WinPTY `0.4.3` x64 依赖；完整归档必须包含同目录的 `bin/keepwork-mcp.exe`、`bin/winpty.dll`、`bin/winpty-agent.exe`，以及 `licenses/winpty/` 下的许可证与来源记录。保持固定上游原始文件与摘要，不从系统 PATH 或任意 DLL 下载站补齐，不省略 agent，也不把普通现代 ConPTY 包混入专版。运行时核验依赖、加载 DLL 并完成后端就绪探测后，才通过 `/health` 和能力通知广告 `terminalApi: "pty-session-v1"`；首次探测创建并释放 WinPTY 后端，不启动用户 shell 或执行命令，归档版本或清单不能代替运行时能力检测。依赖缺失、损坏、加载或就绪失败时终端路由返回 HTTP `501` / `UNSUPPORTED_FEATURE`，普通 MCP 仍可使用。
+
+MCP `0.2.81` 的同一专版二进制按系统 API 选择实际终端后端：本专版在具备所需系统导出的现代 Windows 上使用系统 ConPTY，缺少导出的 Win7/Win8 继续使用固定 WinPTY。专版适配器仅从已加载的 `kernel32.dll` 动态解析，不搜索额外的 `conpty.dll`，旧系统 PE 导入门禁保持；普通现代 MCP 和 Unix 的原生路径不变。专版身份、归档和 `mcp-win7-win8-rs` 渠道不变，固定 WinPTY 的完整性、加载与就绪门禁在现代宿主上也不能跳过；尝试启动 shell 后不静默切换后端或重放输入。`/health` 的可选 `terminalBackend: "conpty" | "winpty"` 只在就绪后表示新会话所选后端，会话快照的同名字段表示实际启动成功的后端；Unix 不返回，缺失或未知不能推断能力或命令成功。现代宿主的 ConPTY smoke 不能证明三个旧系统的 WinPTY 非 BMP 字符、UTF-16 游标及原生交互已验证，仍按各系统真实回执或当次实测豁免记录；现代宿主已失败的实际检查不属于旧系统豁免范围。
 
 MCP `0.2.68` 使用后台单次探测和有界退避重试，首次启动超时不再永久关闭当前进程的终端能力；依赖摘要或加载错误仍拒绝使用。`/health` 可选返回 `terminalStatus: "initializing" | "ready" | "unavailable"`，失败原因 `terminalReason` 为固定有界文案，不包含本机路径或底层错误。仅就绪时广告原有 `terminalApi`，每 25 秒的 SSE 心跳重新读取能力；旧客户端忽略新增诊断字段仍能发现恢复。灰色终端菜单不能单独证明运行的是旧服务或命中了某个后端故障，须记录实际 peer 的健康响应，保留缺失 / 未知字段为未知的语义。
 

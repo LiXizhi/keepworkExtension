@@ -46,6 +46,11 @@ impl Readiness {
 
     pub(super) fn finish(&mut self, now: Duration, result: Result<(), Failure>) {
         self.working = false;
+        // A synchronous fixed-asset failure can race an older successful
+        // background probe. It must remain closed until process restart.
+        if self.permanent {
+            return;
+        }
         match result {
             Ok(()) => {
                 self.ready = true;
@@ -157,5 +162,25 @@ mod tests {
         assert_eq!(state.health().status, "unavailable");
         assert_eq!(state.begin(Duration::from_secs(86400)), None);
         assert!(state.health().reason.unwrap().len() <= 512);
+    }
+
+    #[test]
+    fn a_stale_success_cannot_reopen_after_a_session_integrity_failure() {
+        let mut state = Readiness::default();
+        state.begin(Duration::ZERO);
+        state.finish(Duration::ZERO, Ok(()));
+        state.begin(VERIFY_INTERVAL);
+        state.finish(
+            VERIFY_INTERVAL,
+            Err(Failure::Permanent("Modified fixed terminal assets")),
+        );
+        state.finish(VERIFY_INTERVAL, Ok(()));
+        assert!(!state.health().ready);
+        assert_eq!(state.health().status, "unavailable");
+        assert_eq!(
+            state.health().reason,
+            Some("Modified fixed terminal assets")
+        );
+        assert_eq!(state.begin(Duration::from_secs(86400)), None);
     }
 }

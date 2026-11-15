@@ -18,6 +18,27 @@ pub struct SpawnedTerminal {
     pub child: Box<dyn ChildControl>,
     pub reader: Box<dyn Read + Send>,
     pub writer: Box<dyn Write + Send>,
+    pub backend: Option<&'static str>,
+}
+
+#[cfg(windows)]
+pub(super) fn restore_ctrl_c() -> Result<(), String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+    // Clear only the inheritable ignore flag, preserving application handlers.
+    // Detached processes may have no console handler table to reset.
+    if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(6) {
+            return Err(format!("Cannot restore terminal Ctrl+C handling: {error}"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(windows, any(target_vendor = "win7", feature = "win7-compat")))]
@@ -27,7 +48,15 @@ pub fn spawn_shell(
     cwd: &Path,
     size: PtySize,
 ) -> Result<SpawnedTerminal, String> {
-    super::winpty::spawn(shell, args, cwd, size)
+    use super::selection::{choose_backend, spawn_guarded};
+    let backend = choose_backend(true, super::system_conpty::export_presence())
+        .expect("the compatibility edition retains WinPTY");
+    spawn_guarded(
+        super::winpty::session_guard(),
+        backend,
+        |_| super::system_conpty::spawn(args, cwd, size),
+        |guard| super::winpty::spawn_verified(shell, args, cwd, size, guard),
+    )
 }
 
 #[cfg(not(all(windows, any(target_vendor = "win7", feature = "win7-compat"))))]
@@ -66,25 +95,7 @@ pub fn spawn_shell(
         })
         .map_err(|error| error.to_string())?;
     #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn SetConsoleCtrlHandler(
-                handler: Option<unsafe extern "system" fn(u32) -> i32>,
-                add: i32,
-            ) -> i32;
-        }
-        // Windows children inherit their parent's ignore-Ctrl+C flag. Clear
-        // that flag before CreateProcess, as the Node ConPTY reference does;
-        // existing application handlers stay registered. Detached processes
-        // without a console have no console handler table to reset.
-        if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(6) {
-                return Err(format!("Cannot restore terminal Ctrl+C handling: {error}"));
-            }
-        }
-    }
+    restore_ctrl_c()?;
     let mut command = CommandBuilder::new(shell);
     command.args(args);
     command.cwd(cwd);
@@ -116,6 +127,7 @@ pub fn spawn_shell(
         child: Box::new(Child(child)),
         reader,
         writer,
+        backend: if cfg!(windows) { Some("conpty") } else { None },
     })
 }
 

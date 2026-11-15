@@ -132,6 +132,11 @@ impl AppState {
                 "terminalApi".into(),
                 serde_json::json!(crate::terminal::TERMINAL_API),
             );
+            // Optional selection diagnostics; availability still comes from
+            // the existing readiness contract, never a product version.
+            if let Some(backend) = crate::terminal::backend_name() {
+                caps.insert("terminalBackend".into(), serde_json::json!(backend));
+            }
         }
         caps.insert("fsDirApi".into(), serde_json::json!("mkdir-v1"));
         caps.insert("aichatPresenceApi".into(), serde_json::json!("post-sse-v1"));

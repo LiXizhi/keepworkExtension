@@ -71,7 +71,7 @@ struct Api {
 const DLL_HASH: &str = "936f611c2129600d35ab7aad45546a837f4f3a9ca7f673e5d66b48c313b9cd75";
 const AGENT_HASH: &str = "9add1a61155ec47cf6f347faf776b746eebbde1dc9360d81b8a909da34650642";
 
-fn wide(value: impl AsRef<OsStr>) -> Result<Vec<u16>, String> {
+pub(super) fn wide(value: impl AsRef<OsStr>) -> Result<Vec<u16>, String> {
     let mut units: Vec<_> = value.as_ref().encode_wide().collect();
     if units.contains(&0) {
         return Err("terminal path or argument contains NUL".into());
@@ -285,12 +285,16 @@ impl Controller {
 /// The first call returns immediately, and concurrent health/SSE requests never
 /// launch duplicate probes. Transient startup failures retry at a bounded rate;
 /// fixed-asset failures stay closed until the corrected runtime is restarted.
-pub fn health() -> super::TerminalHealth {
+fn controller() -> &'static Controller {
     static CONTROLLER: OnceLock<Controller> = OnceLock::new();
-    let controller = CONTROLLER.get_or_init(|| Controller {
+    CONTROLLER.get_or_init(|| Controller {
         epoch: Instant::now(),
         state: Mutex::new(Readiness::default()),
-    });
+    })
+}
+
+pub fn health() -> super::TerminalHealth {
+    let controller = controller();
     let work = controller
         .state
         .lock()
@@ -375,7 +379,7 @@ impl ChildControl for Child {
 }
 
 // Standard CreateProcess argument quoting, including trailing backslashes.
-fn quote(value: &str) -> String {
+pub(super) fn quote(value: &str) -> String {
     let mut result = String::from("\"");
     let mut slashes = 0;
     for ch in value.chars() {
@@ -395,7 +399,7 @@ fn quote(value: &str) -> String {
     result
 }
 
-fn environment() -> Vec<u16> {
+pub(super) fn environment() -> Vec<u16> {
     let mut variables: Vec<_> = std::env::vars_os()
         .filter(|(key, _)| !key.to_string_lossy().eq_ignore_ascii_case("TERM"))
         .collect();
@@ -412,12 +416,12 @@ fn environment() -> Vec<u16> {
     block
 }
 
-pub fn spawn(
-    _shell: &str,
-    args: &[String],
-    cwd: &Path,
-    size: PtySize,
-) -> Result<SpawnedTerminal, String> {
+pub(super) struct SessionGuard {
+    api: &'static Api,
+    _agent: File,
+}
+
+pub(super) fn session_guard() -> Result<SessionGuard, String> {
     let readiness = health();
     if !readiness.ready {
         return Err(readiness
@@ -425,8 +429,38 @@ pub fn spawn(
             .unwrap_or("Terminal backend is initializing; retry shortly.")
             .into());
     }
-    let api = api()?;
-    let _agent = api.verified_agent()?;
+    let reject = |error: String| {
+        let controller = controller();
+        controller.state.lock().expect("terminal readiness").finish(controller.now(),
+            Err(Failure::Permanent("Bundled terminal backend is missing, modified or unavailable. Reinstall the complete compatibility runtime and restart the local service.")));
+        error
+    };
+    let api = api().map_err(reject)?;
+    let agent = api.verified_agent().map_err(reject)?;
+    Ok(SessionGuard { api, _agent: agent })
+}
+
+pub(super) fn system_shell() -> Result<String, String> {
+    let mut system = vec![0u16; 32768];
+    let length = unsafe { GetSystemDirectoryW(system.as_mut_ptr(), system.len() as u32) } as usize;
+    if length == 0 || length >= system.len() {
+        return Err("Windows system directory is unavailable".into());
+    }
+    system.truncate(length);
+    Ok(format!(
+        "{}\\WindowsPowerShell\\v1.0\\powershell.exe",
+        String::from_utf16_lossy(&system)
+    ))
+}
+
+pub(super) fn spawn_verified(
+    _shell: &str,
+    args: &[String],
+    cwd: &Path,
+    size: PtySize,
+    guard: &SessionGuard,
+) -> Result<SpawnedTerminal, String> {
+    let api = guard.api;
     let mut error = null_mut();
     let instance = api.open_instance(size, 5000)?;
     let shared = Arc::new(Shared {
@@ -450,16 +484,7 @@ pub fn spawn(
     let writer = open_pipe(unsafe { (api.conin)(instance) }, 0x4000_0000)?;
     // Use the inbox PowerShell at a system absolute path, never a similarly
     // named executable in the workspace or PATH. This exists on Win7 SP1.
-    let mut system = vec![0u16; 32768];
-    let length = unsafe { GetSystemDirectoryW(system.as_mut_ptr(), system.len() as u32) } as usize;
-    if length == 0 || length >= system.len() {
-        return Err("Windows system directory is unavailable".into());
-    }
-    system.truncate(length);
-    let shell = format!(
-        "{}\\WindowsPowerShell\\v1.0\\powershell.exe",
-        String::from_utf16_lossy(&system)
-    );
+    let shell = system_shell()?;
     let app = wide(&shell)?;
     let command = std::iter::once(shell.as_str())
         .chain(args.iter().map(String::as_str))
@@ -504,6 +529,7 @@ pub fn spawn(
         child: Box::new(Child(shared)),
         reader: Box::new(reader),
         writer: Box::new(writer),
+        backend: Some("winpty"),
     })
 }
 

@@ -1,7 +1,7 @@
 //! Terminal policy shared by model-operated commands and optional user PTYs.
 //!
-//! The Windows 7/8 edition uses the bundled WinPTY agent, never ConPTY. A missing
-//! or modified backend remains an optional-feature failure, not a daemon failure.
+//! The compatibility edition retains verified WinPTY on old systems and selects
+//! existing system ConPTY APIs on newer hosts. Fixed assets remain mandatory.
 
 pub const TERMINAL_API: &str = "pty-session-v1";
 pub const GLOBAL_TERMINAL_CAP: usize = 4;
@@ -34,6 +34,35 @@ pub fn health() -> TerminalHealth {
 pub fn supported() -> bool {
     health().ready
 }
+
+/// Ready backend selection for a future session, not proof of shell startup.
+/// Successful session snapshots separately record their actual opened backend.
+pub fn backend_name() -> Option<&'static str> {
+    if !health().ready {
+        return None;
+    }
+    #[cfg(all(windows, any(target_vendor = "win7", feature = "win7-compat")))]
+    return match selection::choose_backend(true, system_conpty::export_presence()) {
+        Some(selection::Backend::Conpty) => Some("conpty"),
+        Some(selection::Backend::Winpty) => Some("winpty"),
+        None => None,
+    };
+    #[cfg(all(windows, not(any(target_vendor = "win7", feature = "win7-compat"))))]
+    return Some("conpty");
+    #[cfg(not(windows))]
+    None
+}
+
+#[cfg(any(
+    test,
+    all(windows, any(target_vendor = "win7", feature = "win7-compat"))
+))]
+#[path = "terminal/selection.rs"]
+mod selection;
+
+#[cfg(all(windows, any(target_vendor = "win7", feature = "win7-compat")))]
+#[path = "terminal/system_conpty.rs"]
+mod system_conpty;
 
 #[cfg(any(
     test,

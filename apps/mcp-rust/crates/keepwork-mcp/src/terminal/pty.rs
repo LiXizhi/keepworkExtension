@@ -50,12 +50,13 @@ struct TerminalSession {
     touched_at: AtomicI64,
     cols: AtomicU64,
     rows: AtomicU64,
+    backend: Option<&'static str>,
     listeners: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<TerminalOutputEvent>>>,
 }
 
 impl TerminalSession {
     fn snapshot(&self) -> Value {
-        json!({
+        let mut snapshot = json!({
             "id": self.id,
             "cwd": self.cwd,
             "createdAt": iso_from_millis(self.created_at),
@@ -63,7 +64,11 @@ impl TerminalSession {
             "closed": self.closed.load(Ordering::SeqCst),
             "cols": self.cols.load(Ordering::SeqCst),
             "rows": self.rows.load(Ordering::SeqCst),
-        })
+        });
+        if let Some(backend) = self.backend {
+            snapshot["terminalBackend"] = json!(backend);
+        }
+        snapshot
     }
 
     fn append(&self, text: &str) {
@@ -294,6 +299,7 @@ impl TerminalManager {
         let rows = clamp_dimension(rows_raw, DEFAULT_ROWS, MIN_ROWS, MAX_ROWS);
         let (shell, args) = shell_spec();
         let opened = spawn_shell(&shell, &args, &resolved_cwd, PtySize { rows, cols })?;
+        let backend = opened.backend;
         let mut reader = opened.reader;
 
         let now = now_millis();
@@ -311,6 +317,7 @@ impl TerminalManager {
             touched_at: AtomicI64::new(now),
             cols: AtomicU64::new(cols as u64),
             rows: AtomicU64::new(rows as u64),
+            backend,
             listeners: Mutex::new(Vec::new()),
         });
         let snapshot = session.snapshot();
@@ -522,6 +529,19 @@ fn error_body(message: &str) -> Response {
     )
 }
 
+fn unavailable_body(terminal: super::TerminalHealth) -> Response {
+    let reason = terminal
+        .reason
+        .unwrap_or("Terminal backend is initializing; retry shortly.");
+    json_response(
+        StatusCode::NOT_IMPLEMENTED,
+        &json!({
+            "ok": false, "code": "UNSUPPORTED_FEATURE", "feature": "pty-session-v1",
+            "terminalStatus": terminal.status, "terminalReason": reason, "error": reason,
+        }),
+    )
+}
+
 fn ok_body(status: StatusCode, body: Value) -> Response {
     let mut map = serde_json::Map::new();
     map.insert("ok".into(), json!(true));
@@ -558,17 +578,7 @@ pub async fn route(
     if path == "/terminal/sessions" || path.starts_with("/terminal/sessions/") {
         let terminal = super::health();
         if !terminal.ready {
-            let reason = terminal
-                .reason
-                .unwrap_or("Terminal backend is initializing; retry shortly.");
-            return Some(json_response(
-                StatusCode::NOT_IMPLEMENTED,
-                &json!({
-                    "ok": false, "code": "UNSUPPORTED_FEATURE", "feature": "pty-session-v1",
-                    "terminalStatus": terminal.status, "terminalReason": reason,
-                    "error": reason,
-                }),
-            ));
+            return Some(unavailable_body(terminal));
         }
     }
     if path == "/terminal/sessions" && method == Method::POST {
@@ -579,7 +589,14 @@ pub async fn route(
         let rows = as_number(body.get("rows"));
         return Some(match manager.create(root, cwd, &owner, cols, rows) {
             Ok(snapshot) => ok_body(StatusCode::CREATED, snapshot),
-            Err(message) => error_body(&message),
+            Err(message) => {
+                let terminal = super::health();
+                if !terminal.ready {
+                    unavailable_body(terminal)
+                } else {
+                    error_body(&message)
+                }
+            }
         });
     }
 
@@ -966,6 +983,7 @@ foreach ($token in $tokens) {{ if ($token.Type -eq 'Command') {{ throw 'Initiali
             touched_at: AtomicI64::new(now),
             cols: AtomicU64::new(80),
             rows: AtomicU64::new(24),
+            backend: None,
             listeners: Mutex::new(Vec::new()),
         });
         manager

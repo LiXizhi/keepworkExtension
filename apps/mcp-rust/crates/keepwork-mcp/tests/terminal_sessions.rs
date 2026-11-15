@@ -123,31 +123,6 @@ async fn wait_output_matching(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contracts() {
-    #[cfg(all(windows, not(any(target_vendor = "win7", feature = "win7-compat"))))]
-    {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn SetConsoleCtrlHandler(
-                handler: Option<unsafe extern "system" fn(u32) -> i32>,
-                add: i32,
-            ) -> i32;
-            fn AllocConsole() -> i32;
-        }
-        // This integration-test executable owns one test. Reproduce the
-        // inheritable flag of CI/detached launchers; spawning the actual PTY
-        // must clear it without replacing the shell or weakening interrupt.
-        let mut enabled = unsafe { SetConsoleCtrlHandler(None, 1) };
-        if enabled == 0 && std::io::Error::last_os_error().raw_os_error() == Some(6) {
-            // A headless runner may lack a console. Only this isolated test
-            // allocates one so the inheritable precondition is real.
-            assert_ne!(unsafe { AllocConsole() }, 0);
-            enabled = unsafe { SetConsoleCtrlHandler(None, 1) };
-        }
-        assert_ne!(
-            enabled, 0,
-            "must establish the inherited ignore-Ctrl+C state"
-        );
-    }
     // Legacy readiness starts asynchronously. Missing assets still fail this
     // native test, while a cold agent has time for bounded startup retries.
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -162,6 +137,44 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
             keepwork_mcp::terminal::health()
         )
     });
+    #[cfg(windows)]
+    {
+        let backend = keepwork_mcp::terminal::backend_name()
+            .expect("a ready native Windows terminal must identify its selected backend");
+        assert!(matches!(backend, "conpty" | "winpty"));
+        eprintln!("native PTY selected backend: {backend}");
+        if let Ok(expected) = std::env::var("KEEPWORK_TEST_EXPECTED_TERMINAL_BACKEND") {
+            assert_eq!(
+                backend, expected,
+                "native CI must execute its expected backend"
+            );
+        }
+        if backend == "conpty" {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn SetConsoleCtrlHandler(
+                    handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                    add: i32,
+                ) -> i32;
+                fn AllocConsole() -> i32;
+            }
+            // This integration-test executable owns one test. Reproduce the
+            // inheritable flag for every ConPTY adapter, including the legacy
+            // edition on a current host. The WinPTY-only old OS path retains
+            // its existing preconditions and runs the same interrupt gate.
+            let mut enabled = unsafe { SetConsoleCtrlHandler(None, 1) };
+            if enabled == 0 && std::io::Error::last_os_error().raw_os_error() == Some(6) {
+                // Only this isolated test allocates a console when needed to
+                // establish the inherited flag. Production never does so.
+                assert_ne!(unsafe { AllocConsole() }, 0);
+                enabled = unsafe { SetConsoleCtrlHandler(None, 1) };
+            }
+            assert_ne!(
+                enabled, 0,
+                "must establish the inherited ignore-Ctrl+C state"
+            );
+        }
+    }
     let f = Fixture::new();
     for (owner, auth, expected) in [
         ("https://evil.example", true, StatusCode::FORBIDDEN),
@@ -215,6 +228,12 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{session}");
+    #[cfg(windows)]
+    assert_eq!(
+        session["terminalBackend"].as_str(),
+        keepwork_mcp::terminal::backend_name(),
+        "the opened native session must use the selected backend"
+    );
     assert!(session["cwd"].as_str().unwrap().ends_with("中文 folder"));
     let route = format!("/terminal/sessions/{}", session["id"].as_str().unwrap());
     assert_eq!(
