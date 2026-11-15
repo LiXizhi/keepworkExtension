@@ -7,6 +7,40 @@ mod tests {
     use super::auto_start::AutoPolicy;
 
     #[test]
+    fn sleeping_invalidates_a_paired_probe_and_duplicate_wakes_keep_the_next_probe_valid() {
+        let mut policy = AutoPolicy::default();
+        let before = policy.ticket(true, false).unwrap();
+        assert!(policy.power_changed(true));
+        assert!(policy.ticket(true, false).is_none());
+        assert!(!policy.power_changed(true));
+        assert!(policy.power_changed(false));
+        let after = policy.ticket(true, false).unwrap();
+        assert_ne!(before, after);
+        assert!(!policy.accepts(before, true, false));
+        assert!(!policy.power_changed(false));
+        assert!(policy.accepts(after, true, false));
+    }
+
+    #[test]
+    fn waking_does_not_override_a_stop_permission_block_disabled_preference_or_shutdown() {
+        for guard in 0..4 {
+            let mut policy = AutoPolicy::default();
+            let previous = policy.ticket(true, false).unwrap();
+            policy.power_changed(true);
+            match guard {
+                0 => policy.pause(),
+                1 => policy.block(),
+                2 => {}, // Saved preference is provided separately.
+                _ => policy.close(),
+            }
+            policy.power_changed(false);
+            let enabled = guard != 2;
+            assert!(policy.ticket(enabled, false).is_none());
+            assert!(!policy.accepts(previous, enabled, false));
+        }
+    }
+
+    #[test]
     fn preference_off_and_running_state_reject_an_otherwise_current_probe() {
         let policy = AutoPolicy::default();
         let ticket = policy.ticket(true, false).unwrap();

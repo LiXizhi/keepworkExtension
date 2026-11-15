@@ -4,6 +4,8 @@
 #import <IOBluetooth/IOBluetooth.h>
 #import <IOKit/IOKitLib.h>
 #import <IOKit/hid/IOHIDKeys.h>
+#import "hid_transport_macos.h"
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,8 +31,7 @@ static BOOL knownKeyboard(NSDictionary *properties) {
     if (![vendor isKindOfClass:NSNumber.class] || ![product isKindOfClass:NSNumber.class]
         || [vendor unsignedLongLongValue] != 0x2717 || [product unsignedLongLongValue] != 0x32B8) return NO;
     NSString *transport = stringProperty(properties, @kIOHIDTransportKey);
-    if (![transport isEqualToString:@kIOHIDTransportBluetoothValue]
-        && ![transport isEqualToString:@kIOHIDTransportBluetoothLowEnergyValue]) return NO;
+    if (!transport || ![remoteHIDTransports() containsObject:transport]) return NO;
     NSArray *pairs = properties[@kIOHIDDeviceUsagePairsKey];
     if ([pairs isKindOfClass:NSArray.class]) {
         for (id pair in pairs) {
@@ -66,25 +67,30 @@ static NSDictionary *connectedKeyboard(NSDictionary *properties, uint64_t regist
     };
 }
 
-static NSDictionary *pairedInventory(void) {
-    // Querying authorization is passive. Creating a central manager or inquiry
-    // here could present consent UI; automatic probes must never do that.
+bool keepwork_voice_bluetooth_denied(void) {
     if (@available(macOS 10.15, *)) {
-        if (CBManager.authorization != CBManagerAuthorizationAllowedAlways) {
-            return @{@"error":@"尚未允许 Keepwork 使用蓝牙，自动启用已暂停；请在系统隐私设置授权，或手动开启语音输入。"};
-        }
-    } else {
-        return @{@"error":@"系统无法无提示地确认蓝牙授权，请手动开启语音输入。"};
+        CBManagerAuthorization access = CBManager.authorization;
+        return access == CBManagerAuthorizationDenied || access == CBManagerAuthorizationRestricted;
     }
-    IOBluetoothHostController *controller = IOBluetoothHostController.defaultController;
-    if (!controller || controller.powerState == kBluetoothHCIPowerStateOFF) {
-        return @{@"candidates":@[]};
+    return false;
+}
+
+static NSDictionary *pairedInventory(void) {
+    // HID registry properties are available even on first launch. Keep the
+    // Bluetooth inventory behind consent; neither path prompts or connects.
+    BOOL allowed = NO;
+    if (@available(macOS 10.15, *)) {
+        allowed = CBManager.authorization == CBManagerAuthorizationAllowedAlways;
     }
     NSMutableArray *candidates = [NSMutableArray new];
-    // Classic pairedDevices is an existing system inventory, never an inquiry.
-    // BLE HID can be absent from it, so live known HID registry services below
-    // provide an independent connected-device evidence path.
-    NSArray *paired = [IOBluetoothDevice pairedDevices];
+    NSArray *paired = nil;
+    if (allowed) {
+        IOBluetoothHostController *controller = IOBluetoothHostController.defaultController;
+        if (!controller || controller.powerState == kBluetoothHCIPowerStateOFF) {
+            return @{@"candidates":@[], @"bluetoothAllowed":@YES};
+        }
+        paired = [IOBluetoothDevice pairedDevices];
+    }
     if (paired.count > 256) return @{@"error":@"已配对设备过多，请在设置中指定遥控器设备 ID。"};
     for (IOBluetoothDevice *device in paired) {
         if (![device isPaired]) continue;
@@ -99,7 +105,9 @@ static NSDictionary *pairedInventory(void) {
     }
     io_iterator_t iterator = IO_OBJECT_NULL;
     kern_return_t result = IOServiceGetMatchingServices(0, IOServiceMatching("IOHIDDevice"), &iterator);
-    if (result != KERN_SUCCESS) return @{@"error":@"无法只读查询已连接遥控器，请检查系统蓝牙权限后手动开启。"};
+    if (result == kIOReturnNotPrivileged || result == kIOReturnNotPermitted)
+        return @{@"error":@"系统拒绝读取已连接遥控器，请检查访问权限后手动开启。"};
+    if (result != KERN_SUCCESS) return @{@"error":@"暂时无法查询已连接遥控器，将自动重试。", @"retry":@YES};
     io_service_t service;
     NSUInteger seen = 0;
     while ((service = IOIteratorNext(iterator))) {
@@ -120,7 +128,7 @@ static NSDictionary *pairedInventory(void) {
     IOObjectRelease(iterator);
     // Registry addresses are not CoreBluetooth UUIDs. identifiers intentionally
     // remain absent so selection cannot pretend an explicit UUID was verified.
-    return @{@"candidates":candidates};
+    return @{@"candidates":candidates, @"bluetoothAllowed":@(allowed)};
 }
 
 char *keepwork_paired_remotes_json(void) {

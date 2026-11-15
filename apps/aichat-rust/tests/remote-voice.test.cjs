@@ -46,7 +46,7 @@ test("native voice packaging needs no Python, Node sidecar, model weights or sib
   for (const oldFile of ["worker.py", "native_input.py", "atvv.py", "requirements.txt", "model-files.json"]) {
     assert.equal(fs.existsSync(path.join(appRoot, "voice", oldFile)), false, `${oldFile} is no longer a runtime dependency`);
   }
-  assert.match(sources, /asr::transcribe/);
+  assert.match(read("src-tauri/src/remote_voice/ble.rs"), /SpeechConnection\b/);
   const manifest = read("src-tauri/Cargo.toml");
   assert.match(manifest, /btleplug\s*=/);
   assert.match(manifest, /tokio-tungstenite\s*=/);
@@ -56,9 +56,9 @@ test("native voice packaging needs no Python, Node sidecar, model weights or sib
 
 test("cloud ASR uses the fixed Keepwork speech endpoint and a bounded cancellable PCM contract", () => {
   const source = read("src-tauri/src/remote_voice/asr.rs");
-  const production = source.split("#[cfg(test)]")[0];
+  const production = source.split("#[cfg(test)]\nmod tests")[0];
   assert.ok(production.includes("wss://speechrtc.keepwork.com/speech?asr_format=pcm&asr_rate=16000"));
-  assert.match(production, /pub async fn transcribe\(pcm: &\[i16\], cancel: watch::Receiver<bool>\)/);
+  assert.match(production, /async fn transcribe\(\s*&self,\s*audio: [\w:]*Receiver<Vec<i16>>,\s*cancel: watch::Receiver<bool>,\s*preview: impl FnMut\(&str\)/);
   assert.ok(production.includes("sample.to_le_bytes()"));
   assert.ok(production.includes('"asr_end"'));
   assert.doesNotMatch(production, /std::fs|tokio::fs|File::create|access_token|Authorization|asr_start/);

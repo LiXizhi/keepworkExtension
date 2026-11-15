@@ -23,7 +23,7 @@ const snapshot = (extra = {}) => ({
   ...extra,
 });
 
-async function renderer(initial = snapshot()) {
+async function renderer(initial = snapshot(), { speech } = {}) {
   const elements = new Map();
   const documentListeners = new Map();
   const windowListeners = new Map();
@@ -39,6 +39,7 @@ async function renderer(initial = snapshot()) {
     "permission-bubble": { left: 500, top: 250, width: 348, height: 210 },
   };
   let frameId = 0;
+  let elapsed = 0;
   let current = initial;
   let publish;
   let handler;
@@ -68,6 +69,8 @@ async function renderer(initial = snapshot()) {
     disconnect() { this.observed.clear(); }
   }
   const document = {
+    hidden: false,
+    visibilityState: "visible",
     querySelectorAll: () => [],
     addEventListener(type, callback) { addListener(documentListeners, type, callback); },
     body: { style: { setProperty() {} }, classList: {
@@ -77,12 +80,21 @@ async function renderer(initial = snapshot()) {
     getElementById(id) {
       if (!elements.has(id)) {
         const listeners = new Map();
+        const classes = new Set();
         elements.set(id, {
           id, style: {}, dataset: {}, children: [], value: "", textContent: "", disabled: false,
-          hidden: surfaceIds.includes(id) && id !== "pet",
+          hidden: ["remote-recording-status", "remote-transcribing-status", "remote-voice-preview"].includes(id) || (surfaceIds.includes(id) && id !== "pet"),
           rect: { left: 0, top: 0, width: 0, height: 0, ...defaultRects[id] },
           scrollTop: 0, scrollHeight: 100, clientHeight: 100,
-          classList: { toggle() {}, add() {}, remove() {} },
+          classList: {
+            contains(name) { return classes.has(name); },
+            add(...names) { names.forEach(name => classes.add(name)); },
+            remove(...names) { names.forEach(name => classes.delete(name)); },
+            toggle(name, force = !classes.has(name)) {
+              if (force) classes.add(name); else classes.delete(name);
+              return force;
+            },
+          },
           setAttribute(key, value) { this[key] = value; },
           addEventListener(type, callback) { addListener(listeners, type, callback); },
           replaceChildren(...children) { this.children = children; },
@@ -120,27 +132,56 @@ async function renderer(initial = snapshot()) {
       if (name === "pointer-hold") { pointerHolds.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
       calls.push({ name, args: JSON.parse(JSON.stringify(args)) });
       if (handler) return handler(name, args);
+      if (name === "expand") {
+        current = { ...current, expanded: args.expanded };
+        publish(current);
+      }
       if (name === "input") current = { ...current, draft: args.text };
       if (name === "send") current = { ...current, draft: "" };
       return current;
     },
   };
-  vm.runInNewContext(javascript, {
-    exports: {},
-    require: name => name === "./petAudio" ? { installPetAudioCapture() {} } : {},
-    window: {
-      desktopPet: api, innerWidth: 1000, innerHeight: 800,
-      addEventListener(type, callback) { addListener(windowListeners, type, callback); },
-      matchMedia: () => ({ matches: true }),
-      getSelection: () => null, setTimeout,
+  const window = {
+    desktopPet: api, innerWidth: 1000, innerHeight: 800,
+    addEventListener(type, callback) { addListener(windowListeners, type, callback); },
+    matchMedia: () => ({ matches: true }),
+    getSelection: () => null, clearTimeout, ...speech?.browser,
+    setTimeout(callback, delay) {
+      const timer = setTimeout(callback, delay);
+      timer.unref?.();
+      return timer;
     },
+  };
+  const modules = new Map();
+  const nativeCalls = [];
+  const sandbox = {
+    exports: {},
+    require(name) {
+      if (name === "@tauri-apps/api/core") return {
+        async invoke(command, args) { nativeCalls.push({ command, args: JSON.parse(JSON.stringify(args)) }); },
+      };
+      if (name === "./petAudio") return { installPetAudioCapture() {} };
+      if (!name.startsWith("./")) return {};
+      if (!modules.has(name)) {
+        const moduleSource = fs.readFileSync(path.join(__dirname, "../src", name + ".ts"), "utf8");
+        const code = ts.transpileModule(moduleSource, {
+          compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+        }).outputText;
+        const exports = {};
+        vm.runInNewContext(code, { ...sandbox, exports });
+        modules.set(name, exports);
+      }
+      return modules.get(name);
+    },
+    window, setTimeout, clearTimeout, Date, ...speech?.browser,
     document,
-    performance,
+    performance: { now: () => performance.now() + elapsed },
     ResizeObserver,
     getComputedStyle: element => ({ display: visible(element) ? "block" : "none", visibility: "visible" }),
     requestAnimationFrame(callback) { const id = ++frameId; frames.set(id, callback); return id; },
     cancelAnimationFrame(id) { frames.delete(id); },
-  });
+  };
+  vm.runInNewContext(javascript, sandbox);
   await settle();
   async function flushFrame() {
     await settle();
@@ -159,15 +200,22 @@ async function renderer(initial = snapshot()) {
     element: id => document.getElementById(id),
     calls,
     regionCalls,
+    nativeCalls,
     pointerHolds,
     captures,
     releasedCaptures,
     bodyHasClass: name => bodyClasses.has(name),
     flushFrame,
     frameCount: () => frames.size,
+    advanceClock(ms) { elapsed += ms; },
     flushLayout,
     focusedId() { return document.activeElement?.id; },
     documentEvent(type, event) { dispatch(documentListeners, type, event); },
+    setHidden(hidden) {
+      document.hidden = hidden;
+      document.visibilityState = hidden ? "hidden" : "visible";
+      dispatch(documentListeners, "visibilitychange");
+    },
     windowEvent(type, event) { dispatch(windowListeners, type, event); },
     resizeObserved() {
       for (const observer of resizeObservers) observer.callback([...observer.observed].map(target => ({ target })));
@@ -183,6 +231,381 @@ async function renderer(initial = snapshot()) {
     },
   };
 }
+
+function speechBrowser() {
+  const utterances = [];
+  const actions = [];
+  const systemVoice = { name: "Fixture voice", lang: "en-US", localService: true, default: true };
+  const synth = {
+    speaking: false,
+    paused: false,
+    getVoices: () => [systemVoice],
+    speak(utterance) {
+      utterances.push(utterance);
+      this.speaking = true;
+      queueMicrotask(() => utterance.onstart?.({ type: "start" }));
+    },
+    pause() { this.paused = true; actions.push("pause"); },
+    resume() { this.paused = false; actions.push("resume"); },
+    cancel() { this.speaking = false; this.paused = false; actions.push("cancel"); },
+  };
+  return {
+    browser: {
+      speechSynthesis: synth,
+      SpeechSynthesisUtterance: class { constructor(text) { this.text = text; } },
+    },
+    actions, utterances,
+    finish() {
+      synth.speaking = false;
+      utterances.at(-1)?.onend?.({ type: "end" });
+    },
+  };
+}
+
+const petTurn = (extra = {}) => snapshot({
+  target: "session", context: "session:fixture", petReplyPresentationVersion: 1,
+  ready: true, draft: "A question", attention: "", ...extra,
+});
+
+async function beginPetTurn(pet, extra = {}) {
+  pet.handle(name => {
+    assert.equal(name, "send");
+    return petTurn({ expanded: false, draft: "", sentRequestId: "pet-turn-1", ...extra });
+  });
+  pet.element("send").click();
+  await settle();
+  pet.publish({ expanded: false, busy: true, draft: "", reply: { thinking: true, text: "Reasoning preview" } });
+}
+
+const finalPetReply = (text, extra = {}) => ({
+  draft: "", expanded: false, busy: false,
+  reply: { requestId: "pet-turn-1", thinking: false, text, speechText: text, options: [], ...extra },
+});
+
+test("pet send collapses and starts waiting before its command acknowledgement", async () => {
+  const pet = await renderer(petTurn({ reply: { text: "Previous reply" } }));
+  let acknowledge;
+  pet.handle(name => {
+    assert.equal(name, "send");
+    return new Promise(resolve => { acknowledge = resolve; });
+  });
+  pet.element("send").click();
+  // The UI must react before the host, including when the desktop bridge is slow.
+  await settle();
+  assert.equal(pet.element("panel").hidden, true);
+  assert.equal(pet.element("bubble").hidden, false);
+  assert.equal(pet.element("thinking").hidden, false);
+  assert.equal(pet.element("bubble").classList.contains("thinking"), true);
+  pet.publish({ expanded: true, reply: { text: "Previous reply" } });
+  assert.equal(pet.element("panel").hidden, true, "a queued pre-send snapshot cannot reopen the composer");
+  assert.equal(pet.element("bubble").classList.contains("thinking"), true);
+  acknowledge(petTurn({ draft: "", expanded: false, sentRequestId: "pet-turn-1" }));
+  await settle();
+  assert.equal(pet.element("bubble").classList.contains("thinking"), true);
+  assert.equal(pet.calls.filter(call => call.name === "send").length, 1);
+});
+
+test("pet reply narrates matched final prose once, pauses and resumes on click, and dismisses at speech end", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const speech = speechBrowser();
+  const pet = await renderer(petTurn({ reply: { text: "An older answer" } }), { speech });
+  await beginPetTurn(pet);
+  pet.publish({ busy: true, reply: { text: "Partial response", requestId: "pet-turn-1" } });
+  assert.equal(speech.utterances.length, 0, "old, reasoning, and partial replies must stay silent");
+  const final = finalPetReply("Hello! ![diagram](https://example.test/chart.png)", { speechText: "Hello!" });
+  pet.publish(final);
+  await settle();
+  assert.deepEqual(speech.utterances.map(u => u.text), ["Hello!"]);
+  assert.equal(pet.element("bubble").hidden, false);
+  assert.equal(pet.element("bubble").classList.contains("thinking"), false);
+  pet.publish({ ...final, attention: "another snapshot" });
+  await settle();
+  assert.equal(speech.utterances.length, 1);
+  pet.element("reply").click();
+  t.mock.timers.tick(60_000);
+  assert.equal(pet.element("bubble").hidden, false, "paused audio keeps its reply visible");
+  pet.element("reply").click();
+  assert.deepEqual(speech.actions.filter(action => action !== "cancel"), ["pause", "resume"]);
+  assert.equal(pet.calls.some(call => call.name === "open"), false);
+  speech.finish();
+  await settle();
+  assert.equal(pet.element("bubble").hidden, true);
+  pet.publish(final);
+  assert.equal(pet.element("bubble").hidden, true, "an identical later snapshot cannot resurrect a finished reply");
+  assert.equal(speech.utterances.length, 1);
+});
+
+test("pet reply without narration expires by text length and preserves quick reply options", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  async function timedReply(text, options = []) {
+    const pet = await renderer(petTurn());
+    await beginPetTurn(pet);
+    pet.publish(finalPetReply(text, { options }));
+    await settle();
+    assert.equal(pet.element("reply").hidden, false);
+    return pet;
+  }
+  const short = await timedReply("Yes.");
+  const long = await timedReply("A longer answer for the reader to finish. ".repeat(12), [{ text: "Continue" }]);
+  let shortExpiry;
+  let longExpiry;
+  for (let seconds = 1; seconds <= 20; seconds++) {
+    t.mock.timers.tick(1000);
+    await settle();
+    if (shortExpiry === undefined && short.element("bubble").hidden) shortExpiry = seconds;
+    if (longExpiry === undefined && long.element("reply").hidden) longExpiry = seconds;
+  }
+  assert.ok(shortExpiry >= 2 && shortExpiry < longExpiry && longExpiry <= 20,
+    `expected short then long expiry, got ${shortExpiry}s and ${longExpiry}s`);
+  assert.equal(long.element("bubble").hidden, false);
+  assert.equal(long.element("options").children[0].disabled, false);
+});
+
+test("pet reply binds a fast final to the acknowledged send and respects empty spoken text", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  for (const speechText of ["Matched answer", ""]) {
+    const speech = speechBrowser();
+    const pet = await renderer(petTurn(), { speech });
+    let acknowledge;
+    pet.handle(() => new Promise(resolve => { acknowledge = resolve; }));
+    pet.element("send").click();
+    await settle();
+    pet.publish(finalPetReply("Another turn", { requestId: "other-request" }));
+    assert.equal(speech.utterances.length, 0);
+    const final = finalPetReply(speechText || "![image](https://example.test/photo.jpg)", { speechText });
+    pet.publish(final);
+    acknowledge(petTurn({ ...final, sentRequestId: "pet-turn-1" }));
+    await settle();
+    assert.deepEqual(speech.utterances.map(u => u.text), speechText ? [speechText] : []);
+    assert.equal(pet.element("bubble").classList.contains("thinking"), false);
+    speech.finish();
+  }
+});
+
+test("pet reply from a legacy page uses the sent turn's busy transition before speaking", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const speech = speechBrowser();
+  const initial = snapshot({ ready: true, draft: "Hello", reply: { text: "Previous turn" } });
+  const pet = await renderer(initial, { speech });
+  pet.handle(() => ({ ...initial, draft: "", expanded: false }));
+  pet.element("send").click();
+  await settle();
+  pet.publish({ expanded: false, draft: "", busy: false });
+  assert.equal(speech.utterances.length, 0);
+  pet.publish({ busy: true, reply: { thinking: true, text: "private reasoning" } });
+  pet.publish({ busy: false, reply: { text: "Final words ![picture](https://example.test/x.png)" } });
+  await settle();
+  assert.deepEqual(speech.utterances.map(u => u.text.trim()), ["Final words"]);
+  speech.finish();
+});
+
+test("pet reply keeps thinking while busy, bounds an idle wait and still speaks a late tagged result", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const speech = speechBrowser();
+  const pet = await renderer(petTurn(), { speech });
+  await beginPetTurn(pet);
+  t.mock.timers.tick(180_001);
+  assert.equal(pet.element("thinking").hidden, false, "the page is still actively generating");
+  pet.publish({ busy: false, reply: null });
+  assert.equal(pet.element("thinking").hidden, true);
+  pet.publish(finalPetReply("A late result"));
+  await settle();
+  assert.equal(pet.element("reply").hidden, false);
+  assert.deepEqual(speech.utterances.map(u => u.text), ["A late result"]);
+  speech.finish();
+});
+
+test("pet reply shows untagged coalesced or external answers silently without reviving expired text", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const speech = speechBrowser();
+  const initial = snapshot({ ready: true, draft: "Hello", reply: { text: "Previous" } });
+  const pet = await renderer(initial, { speech });
+  pet.handle(() => ({ ...initial, draft: "", expanded: false }));
+  pet.element("send").click();
+  await settle();
+  const first = { text: "An answer without a busy transition" };
+  pet.publish({ expanded: false, draft: "", reply: first, busy: false });
+  assert.equal(pet.element("reply").textContent, first.text);
+  assert.equal(pet.element("reply").hidden, false);
+  t.mock.timers.tick(16_000);
+  const external = { text: "What next?", options: [{ text: "Continue" }] };
+  pet.publish({ reply: external });
+  assert.equal(pet.element("reply").textContent, external.text);
+  assert.equal(pet.element("options").children[0].disabled, false);
+  pet.publish({ reply: first });
+  assert.ok(pet.element("reply").hidden || pet.element("reply").textContent !== first.text);
+  assert.deepEqual(speech.utterances, []);
+});
+
+test("pet send failure restores the composer and draft without speaking or retrying", async () => {
+  const speech = speechBrowser();
+  const pet = await renderer(petTurn(), { speech });
+  pet.handle((name, args) => {
+    if (name === "expand") return petTurn({ expanded: args.expanded });
+    assert.equal(name, "send");
+    throw Error("Send rejected");
+  });
+  pet.element("send").click();
+  await settle();
+  assert.equal(pet.element("panel").hidden, false);
+  assert.equal(pet.element("draft").value, "A question");
+  assert.match(pet.element("error").textContent, /Send rejected/);
+  assert.equal(pet.element("bubble").hidden, true);
+  assert.equal(speech.utterances.length, 0);
+  assert.equal(pet.calls.filter(call => call.name === "send").length, 1);
+});
+
+test("pet quick reply sends immediately or opens the editable composer as requested", async () => {
+  for (const immediate of [true, false]) {
+    const initial = petTurn({ expanded: false, draft: "", reply: { text: "Choose", immediate, options: [{ text: "Continue" }] } });
+    const pet = await renderer(initial);
+    await pet.element("options").children[0].onclick();
+    await settle();
+    assert.deepEqual(pet.calls.filter(call => ["input", "send"].includes(call.name)).map(call => call.name),
+      immediate ? ["input", "send"] : ["input"]);
+    assert.equal(pet.element("panel").hidden, immediate);
+    if (immediate) assert.equal(pet.element("bubble").classList.contains("thinking"), true);
+    else assert.equal(pet.element("draft").value, "Continue");
+  }
+});
+
+test("pet reply stops narration on native hide or context change and ignores a late speech event", async () => {
+  for (const leave of ["native-hide", "document-hide", "context"]) {
+    const speech = speechBrowser();
+    const pet = await renderer(petTurn(), { speech });
+    await beginPetTurn(pet);
+    const final = finalPetReply("Read this answer");
+    pet.publish(final);
+    await settle();
+    assert.equal(speech.utterances.length, 1);
+    if (leave === "native-hide") pet.windowEvent("aichat:pet-hidden");
+    else if (leave === "document-hide") pet.setHidden(true);
+    else pet.publish({ context: "session:other", busy: false, reply: null });
+    await settle();
+    assert.ok(speech.actions.includes("cancel"), `speech must stop on ${leave}`);
+    speech.finish();
+    await settle();
+    assert.equal(speech.utterances.length, 1);
+    assert.equal(pet.element("bubble").hidden, true);
+  }
+});
+
+const sharedTurn = (extra = {}) => petTurn({ petStreamingSpeechVersion: 1, ...extra });
+const sharedSpeech = (state, text = "", requestId = "pet-turn-1") => ({ requestId, state, text });
+
+async function sharedPet() {
+  const system = speechBrowser();
+  const pet = await renderer(sharedTurn(), { speech: system });
+  pet.handle(name => name === "send"
+    ? sharedTurn({ expanded: false, draft: "", sentRequestId: "pet-turn-1" }) : null);
+  pet.element("send").click();
+  await settle();
+  return { pet, system };
+}
+
+test("shared pet speech displays live prose before the final reply and controls that same turn", async () => {
+  const { pet, system } = await sharedPet();
+  const first = "A full sentence is available now.";
+  const more = first + " The answer continues.";
+  pet.publish({ expanded: false, busy: true, reply: null, petSpeech: sharedSpeech("waiting") });
+  assert.equal(pet.element("thinking").hidden, false);
+  pet.publish({ busy: true, reply: null, petSpeech: sharedSpeech("speaking", first) });
+  assert.equal(pet.element("thinking").hidden, true);
+  assert.equal(pet.element("reply").hidden, false);
+  assert.equal(pet.element("reply").textContent, first);
+  assert.match(pet.element("reply").title, /暂停/);
+  let releasePause;
+  pet.handle(name => name === "pause-speech" ? new Promise(resolve => { releasePause = resolve; }) : null);
+  pet.element("reply").click();
+  pet.element("reply").click();
+  await settle();
+  assert.equal(pet.calls.filter(c => c.name === "pause-speech").length, 1);
+  pet.publish({ busy: true, petSpeech: sharedSpeech("paused", more) });
+  releasePause(null);
+  await settle();
+  assert.match(pet.element("reply").title, /继续|恢复/);
+  assert.equal(pet.element("reply").textContent, more);
+  pet.element("reply").click();
+  await settle();
+  const controls = pet.calls.filter(call => call.name.endsWith("-speech"));
+  assert.deepEqual(controls.map(call => call.name), ["pause-speech", "resume-speech"]);
+  assert.ok(controls.every(call => call.args.context === "session:fixture" && call.args.speechRequestId === "pet-turn-1"));
+  assert.equal(pet.calls.some(call => call.name === "open"), false);
+  pet.publish({ ...finalPetReply(more), petSpeech: sharedSpeech("speaking", more) });
+  assert.equal(pet.element("reply").hidden, false, "receiving the final text must keep ongoing playback visible");
+  pet.publish({ petSpeech: sharedSpeech("ended", more) });
+  assert.equal(pet.element("bubble").hidden, true);
+  assert.deepEqual(system.utterances, [], "shared SDK speech must never be replayed through the system voice");
+});
+
+test("shared pet speech binds pre-ack snapshots to the originating request and ignores foreign IDs", async () => {
+  const system = speechBrowser();
+  const pet = await renderer(sharedTurn(), { speech: system });
+  let acknowledge;
+  pet.handle(() => new Promise(resolve => { acknowledge = resolve; }));
+  pet.element("send").click();
+  await settle();
+  pet.publish({ expanded: false, busy: true, petSpeech: sharedSpeech("speaking", "Someone else's turn", "other") });
+  assert.equal(pet.element("reply").hidden, true);
+  pet.publish({ petSpeech: sharedSpeech("speaking", "The first phrase") });
+  assert.equal(pet.element("reply").hidden, true);
+  acknowledge(sharedTurn({ expanded: false, draft: "", busy: true, sentRequestId: "pet-turn-1" }));
+  await settle();
+  assert.equal(pet.element("reply").textContent, "The first phrase");
+  assert.equal(pet.element("reply").hidden, false);
+  pet.publish({ petSpeech: sharedSpeech("ended", "Stale completion", "other") });
+  assert.equal(pet.element("reply").textContent, "The first phrase");
+  assert.equal(pet.element("reply").hidden, false);
+  pet.windowEvent("aichat:pet-hidden");
+  assert.deepEqual(system.utterances, []);
+});
+
+test("shared pet speech stays dismissed when audio ends before the final snapshot or after hiding", async () => {
+  for (const finish of ["ended", "native-hide", "context-change"]) {
+    const { pet, system } = await sharedPet();
+    pet.publish({ busy: true, reply: null, petSpeech: sharedSpeech("speaking", "Audio first.") });
+    assert.equal(pet.element("reply").hidden, false);
+    if (finish === "ended") pet.publish({ busy: true, petSpeech: sharedSpeech("ended", "Audio first.") });
+    if (finish === "native-hide") pet.windowEvent("aichat:pet-hidden");
+    if (finish === "context-change") pet.publish({ context: "session:next", busy: false, reply: null, petSpeech: null });
+    const oldTurn = { ...finalPetReply("Audio first."), petSpeech: sharedSpeech("ended", "Audio first.") };
+    pet.publish(oldTurn);
+    await settle();
+    assert.equal(pet.element("bubble").hidden, true, `late final after ${finish} revived the reply`);
+    assert.deepEqual(system.utterances, []);
+  }
+});
+
+test("shared pet speech cancels the original send if its acknowledgment arrives after switching conversations", async () => {
+  const system = speechBrowser();
+  const pet = await renderer(sharedTurn(), { speech: system });
+  let acknowledge;
+  pet.handle(name => name === "send" ? new Promise(resolve => { acknowledge = resolve; }) : null);
+  pet.element("send").click();
+  await settle();
+  pet.publish({ context: "session:next", busy: false, reply: null, petSpeech: null });
+  assert.equal(pet.calls.some(call => call.name === "cancel-speech"), false);
+  acknowledge(sharedTurn({ expanded: false, draft: "", sentRequestId: "pet-turn-1" }));
+  await settle();
+  const cancels = pet.calls.filter(call => call.name === "cancel-speech");
+  assert.equal(cancels.length, 1);
+  assert.equal(cancels[0].args.context, "session:fixture");
+  assert.equal(cancels[0].args.speechRequestId, "pet-turn-1");
+  assert.equal(pet.element("bubble").hidden, true);
+  assert.deepEqual(system.utterances, []);
+});
+
+test("shared pet speech falls back to timed text if the configured voice is unavailable", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const { pet, system } = await sharedPet();
+  pet.publish({ busy: true, petSpeech: sharedSpeech("unavailable") });
+  pet.publish({ ...finalPetReply("The written answer"), petSpeech: sharedSpeech("unavailable") });
+  assert.equal(pet.element("reply").textContent, "The written answer");
+  assert.equal(pet.element("reply").hidden, false);
+  assert.deepEqual(system.utterances, []);
+  t.mock.timers.tick(16_000);
+  assert.equal(pet.element("bubble").hidden, true);
+});
 
 test("offline and legacy pet snapshots allow typing while remote actions stay unavailable", async () => {
   for (const ready of [false, undefined]) {
@@ -430,10 +853,443 @@ test("IME composition and Shift+Enter never submit the draft", async () => {
   assert.deepEqual(pet.calls, []);
 });
 
+function remoteBack(pet, context = "persona:alice") {
+  pet.windowEvent("aichat:remote-back", { detail: { context } });
+}
+
+test("remote Back clears all visible text, collapses the empty composer, then temporarily hides the pet", async () => {
+  const pet = await renderer(snapshot({ ready: true, draft: "  " }));
+  for (let i = 0; i < 3; i++) remoteBack(pet);
+  await settle();
+  assert.equal(pet.element("draft").value, "");
+  assert.equal(pet.element("panel").hidden, true);
+  assert.deepEqual(pet.calls, [
+    { name: "input", args: { text: "", context: "persona:alice" } },
+    { name: "expand", args: { expanded: false, context: "persona:alice" } },
+    { name: "hide-temporarily", args: { context: "persona:alice" } },
+  ]);
+});
+
+test("remote Back counts a locally edited draft while offline and preserves a collapsed draft", async () => {
+  const pet = await renderer();
+  pet.input("本地草稿");
+  remoteBack(pet);
+  await settle();
+  pet.publish({ draft: "旧草稿" });
+  assert.equal(pet.element("draft").value, "");
+  assert.equal(pet.element("panel").hidden, false);
+  assert.deepEqual(pet.calls, []);
+  remoteBack(pet);
+  await settle();
+  assert.equal(pet.element("panel").hidden, true);
+  const collapsed = await renderer(snapshot({ expanded: false, ready: true, draft: "保留草稿" }));
+  remoteBack(collapsed);
+  await settle();
+  assert.equal(collapsed.element("draft").value, "保留草稿");
+  assert.deepEqual(collapsed.calls.map(call => call.name), ["hide-temporarily"]);
+});
+
+test("remote Back clears a pending edit immediately and sends its empty value after the earlier edit", async () => {
+  const pet = await renderer(snapshot({ ready: true }));
+  let acknowledge;
+  pet.handle((name, args) => {
+    if (args.text === "新输入") return new Promise(resolve => { acknowledge = resolve; });
+    return snapshot({ ready: true, draft: args.text });
+  });
+  pet.input("新输入");
+  await settle();
+  remoteBack(pet);
+  await settle();
+  assert.equal(pet.element("draft").value, "");
+  assert.deepEqual(pet.calls.map(call => call.args.text), ["新输入"]);
+  pet.publish({ draft: "旧草稿" });
+  assert.equal(pet.element("draft").value, "");
+  acknowledge(snapshot({ ready: true, draft: "新输入" }));
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.args.text), ["新输入", ""]);
+  assert.equal(pet.element("draft").value, "");
+});
+
+test("remote Back waits for draft writes and never applies queued presses to a new context", async () => {
+  const pet = await renderer(snapshot({ ready: true, draft: "Alice" }));
+  let acknowledge;
+  pet.handle(() => new Promise(resolve => { acknowledge = resolve; }));
+  remoteBack(pet);
+  remoteBack(pet);
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["input"]);
+  pet.publish({ context: "persona:bob", draft: "Bob" });
+  acknowledge(snapshot({ ready: true, draft: "" }));
+  remoteBack(pet, "persona:alice");
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["input"]);
+  assert.equal(pet.element("draft").value, "Bob");
+  assert.equal(pet.element("panel").hidden, false);
+});
+
+test("a queued Back press expires while a slow clear is in flight", async () => {
+  const pet = await renderer(snapshot({ ready: true, draft: "旧输入" }));
+  let acknowledge;
+  pet.handle(() => new Promise(resolve => { acknowledge = resolve; }));
+  remoteBack(pet);
+  remoteBack(pet);
+  await settle();
+  pet.advanceClock(1500);
+  acknowledge(snapshot({ ready: true, draft: "" }));
+  await settle();
+  assert.equal(pet.element("panel").hidden, false);
+  assert.deepEqual(pet.calls.map(call => call.name), ["input"]);
+});
+
+test("a delayed temporary-hide action cannot hide the composer after it reopens", async () => {
+  const pet = await renderer(snapshot({ ready: true, expanded: false, canCall: true }));
+  let acknowledge;
+  pet.handle(() => new Promise(resolve => { acknowledge = resolve; }));
+  pet.element("call").click();
+  await settle();
+  remoteBack(pet);
+  await settle();
+  acknowledge(snapshot({ ready: true, expanded: true }));
+  await settle();
+  assert.equal(pet.element("panel").hidden, false);
+  assert.deepEqual(pet.calls.map(call => call.name), ["call"]);
+});
+
+test("failed clear requires an acknowledged empty edit before Back collapses", async () => {
+  const pet = await renderer(snapshot({ ready: true, draft: "未同步" }));
+  pet.handle(() => { throw Error("同步失败"); });
+  remoteBack(pet);
+  await settle();
+  assert.equal(pet.element("draft").value, "");
+  pet.handle((name, args) => snapshot({ ready: true, draft: "", expanded: name !== "expand" }));
+  remoteBack(pet);
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["input", "input"]);
+  assert.equal(pet.element("panel").hidden, false);
+  remoteBack(pet);
+  await settle();
+  assert.equal(pet.element("panel").hidden, true);
+});
+
+test("remote Back respects protected pet prompts and non-editable drafts", async () => {
+  for (const extra of [
+    { exitPrompt: { id: "exit", personas: [] } },
+    { permission: { id: "capture", client: "QA" } },
+    { richDraft: true },
+    { dictating: true },
+  ]) {
+    const pet = await renderer(snapshot({ ready: true, draft: "保留", ...extra }));
+    remoteBack(pet);
+    await settle();
+    assert.deepEqual(pet.calls, []);
+    assert.equal(pet.element("draft").value, "保留");
+  }
+});
+
 function surfaceIds(pet) {
   assert.ok(pet.regionCalls.length, "visible surfaces must be reported without mouse movement");
   return pet.regionCalls.at(-1).regions.map(region => region.id).filter(id => id !== "pet").sort();
 }
+
+function remoteVoiceFocus(pet, detail) {
+  let accepted = false;
+  pet.windowEvent("aichat:remote-voice-focus", {
+    cancelable: true, detail,
+    preventDefault() { accepted = true; },
+  });
+  return accepted;
+}
+
+const remoteDialogueId = "97f4a4c8-63a0-4607-9bcd-142aeef952b4";
+function physicalDialogue(pet, action, id = remoteDialogueId) {
+  const detail = { action, id };
+  pet.windowEvent(action === "interrupt" ? "aichat:remote-dialogue" : "aichat:remote-dialogue-live", { detail });
+  return detail.status;
+}
+
+test("physical Record interrupts an older page's ongoing system narration before a new recording", async () => {
+  const speech = speechBrowser();
+  const pet = await renderer(petTurn(), { speech });
+  await beginPetTurn(pet);
+  const final = finalPetReply("First reply is being read.");
+  pet.publish(final);
+  await settle();
+  assert.equal(speech.utterances.length, 1);
+  physicalDialogue(pet, "interrupt");
+  assert.equal(speech.actions.at(-1), "cancel");
+  speech.finish();
+  pet.publish(final);
+  await settle();
+  assert.equal(speech.utterances.length, 1);
+});
+
+test("the pet displays the main phone phase without claiming audio or opening the composer", async () => {
+  for (const source of ["desktop", "remote"]) {
+    const pet = await renderer(petTurn({ expanded: false, ready: false, context: "persona:alice" }));
+    const icon = pet.element("dialogue-icon");
+    assert.equal(icon.hidden, true);
+    for (const state of ["starting", "listening", "thinking", "speaking", "paused"]) {
+      const status = source === "desktop" ? { phoneState: state } : { remoteDialogue: { id: remoteDialogueId, state } };
+      pet.publish({ ...status, reply: { text: "Call transcript." }, attention: "Speaking", compactVoice: true });
+      assert.equal(pet.element("panel").hidden, true);
+      assert.equal(pet.element("bubble").hidden, true);
+      assert.equal(pet.element("compact-controls").hidden, true);
+      assert.equal(icon.hidden, false);
+      assert.equal(icon.dataset.state, state);
+      assert.equal(pet.element("badge").hidden, true);
+      assert.match(icon.title, /语音通话 · /);
+    }
+    for (const action of ["enter", "record", "exit"]) assert.equal(physicalDialogue(pet, action), undefined);
+    pet.windowEvent("aichat:pet-hidden");
+    pet.setHidden(true);
+    assert.equal(icon.hidden, true);
+    pet.setHidden(false);
+    assert.equal(icon.hidden, false);
+    pet.windowEvent("pagehide");
+    pet.publish({ context: "session:next" });
+    assert.equal(icon.hidden, false);
+    pet.publish({ phoneState: "", remoteDialogue: null });
+    assert.equal(icon.hidden, true);
+    assert.equal(pet.element("bubble").hidden, true);
+    assert.deepEqual(pet.calls, []);
+    assert.deepEqual(pet.nativeCalls, []);
+  }
+  const html = fs.readFileSync(path.join(__dirname, "../pet.html"), "utf8");
+  assert.match(html, /<[^>]+id="dialogue-icon"[^>]*>\s*(?:☎|&#9742;|&#x260[eE];)/u);
+});
+
+test("phone start errors offer to open the desktop while the pet is collapsed", async () => {
+  const pet = await renderer(petTurn({ expanded: false }));
+  const button = pet.element("phone-error");
+  pet.publish({ error: "Persona offline" });
+  assert.equal(button.hidden, true);
+  assert.equal(pet.element("bubble").hidden, true);
+  pet.publish({ phoneError: "麦克风权限已拒绝" });
+  assert.equal(button.hidden, false);
+  assert.match(button.textContent, /麦克风权限已拒绝.*打开 AIChat/);
+  assert.equal(pet.element("bubble").hidden, false);
+  assert.equal(pet.element("panel").hidden, true);
+  assert.equal(pet.element("draft").value, "A question");
+  button.click();
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["open"]);
+  pet.publish({ exitPrompt: { personas: [] } });
+  assert.equal(pet.element("bubble").hidden, true);
+  pet.publish({ exitPrompt: null, permission: { client: "fixture" } });
+  assert.equal(pet.element("bubble").hidden, true);
+  pet.publish({ permission: null, expanded: true });
+  assert.equal(button.hidden, true);
+  assert.match(pet.element("error").textContent, /麦克风权限已拒绝/);
+  pet.publish({ expanded: false, phoneError: "" });
+  assert.equal(pet.element("bubble").hidden, true);
+});
+
+test("existing pet persona calls retain their voice controls and phone status", async () => {
+  const pet = await renderer(petTurn({ expanded: false, compactVoice: true, canCall: true,
+    voice: { active: true, state: "listening" } }));
+  assert.equal(pet.element("dialogue-icon").hidden, false);
+  assert.equal(pet.element("compact-controls").hidden, false);
+  assert.equal(pet.element("compact-call")["aria-pressed"], "true");
+  pet.publish({ voice: { active: false } });
+  assert.equal(pet.element("dialogue-icon").hidden, true);
+});
+
+test("partial remote dictation previews replace one another without entering the pet draft", async () => {
+  const pet = await renderer(snapshot({ ready: true, expanded: false, draft: "已有的草稿" }));
+  const preview = pet.element("remote-voice-preview");
+  const draft = pet.element("draft");
+  const phase = (name, detail) => pet.windowEvent("aichat:remote-voice-" + name, { detail });
+  const show = (press, text) => phase("preview", { press, text });
+  show(30, "延迟回调");
+  assert.equal(preview.hidden, true);
+  assert.equal(remoteVoiceFocus(pet, 31), true);
+  phase("recording", 31);
+  draft.selectionStart = 1;
+  draft.selectionEnd = 3;
+  pet.element("target").focus();
+  const first = "第一句话。";
+  const second = first + "第二句话包含小于号 <示例>。";
+  show(31, first);
+  assert.equal(preview.hidden, false);
+  assert.equal(preview.textContent, first);
+  show(31, second);
+  pet.publish({ attention: "普通界面更新" });
+  show(30, "上一轮结果");
+  assert.equal(preview.textContent, second);
+  assert.equal(preview.hidden, false);
+  assert.equal(draft.value, "已有的草稿");
+  assert.deepEqual([draft.selectionStart, draft.selectionEnd], [1, 3]);
+  assert.equal(pet.focusedId(), "target");
+  phase("transcribing", 31);
+  phase("end", 31);
+  show(31, "迟到的结果");
+  assert.equal(preview.hidden, true);
+  assert.equal(preview.textContent, "");
+  assert.equal(remoteVoiceFocus(pet, 32), true);
+  show(31, "上一轮结果");
+  assert.equal(preview.hidden, true);
+  show(32, "新的录音");
+  phase("end", 31);
+  assert.equal(preview.textContent, "新的录音");
+  phase("end", 32);
+  assert.equal(preview.hidden, true);
+  assert.equal(draft.value, "已有的草稿");
+  await settle();
+  assert.deepEqual(pet.calls, []);
+});
+
+test("remote PTT opens and focuses the editable pet draft without changing its text or selection", async () => {
+  for (const ready of [true, false]) {
+    const pet = await renderer(snapshot({ expanded: false, ready, draft: "保留这段草稿" }));
+    const draft = pet.element("draft");
+    pet.element("pet").focus();
+    draft.selectionStart = 2;
+    draft.selectionEnd = 4;
+    assert.equal(remoteVoiceFocus(pet), true, "confirm only after focus succeeds");
+    assert.equal(pet.element("panel").hidden, false);
+    assert.equal(pet.focusedId(), "draft");
+    assert.equal(draft.value, "保留这段草稿");
+    assert.deepEqual([draft.selectionStart, draft.selectionEnd], [2, 4]);
+    await pet.flushLayout();
+    assert.ok(surfaceIds(pet).includes("panel"), "expanded panel must accept pointer input");
+
+    pet.element("target").focus();
+    pet.publish({ expanded: true });
+    assert.equal(pet.focusedId(), "target", "updates after the press must not reclaim focus");
+    assert.deepEqual(pet.calls, [], "native PTT must not start webpage dictation, sync or send a draft");
+  }
+});
+
+test("PTT shows the red recording state immediately and clears it synchronously on release", async () => {
+  const pet = await renderer(snapshot({ expanded: false, ready: false, draft: "已有的文字" }));
+  const panel = pet.element("panel");
+  const status = pet.element("remote-recording-status");
+  const draft = pet.element("draft");
+  assert.equal(panel.classList.contains("remote-recording"), false);
+  assert.equal(status.hidden, true);
+  assert.equal(remoteVoiceFocus(pet, 17), true);
+  assert.equal(panel.classList.contains("remote-recording"), true);
+  assert.equal(status.hidden, false);
+  assert.match(status.textContent, /语音键已按下/);
+  pet.windowEvent("aichat:remote-voice-recording", { detail: 17 });
+  assert.equal(status.hidden, false);
+  assert.match(status.textContent, /录音中/);
+
+  pet.input("已有的文字加上未同步编辑");
+  draft.selectionStart = 2;
+  draft.selectionEnd = 5;
+  pet.element("target").focus();
+  pet.publish({ expanded: true, attention: "普通状态刷新" });
+  assert.equal(panel.classList.contains("remote-recording"), true);
+  assert.equal(status.hidden, false);
+  assert.equal(pet.focusedId(), "target");
+  pet.windowEvent("aichat:remote-voice-end", { detail: 17 });
+  assert.equal(panel.classList.contains("remote-recording"), false);
+  assert.equal(status.hidden, true);
+  assert.equal(panel.hidden, false);
+  assert.equal(draft.disabled, false);
+  assert.equal(draft.value, "已有的文字加上未同步编辑");
+  assert.deepEqual([draft.selectionStart, draft.selectionEnd], [2, 5]);
+  assert.equal(pet.focusedId(), "target");
+  await settle();
+  assert.deepEqual(pet.calls, []);
+});
+
+test("only the released press shows recognition dots and leaves the draft and focus intact", async () => {
+  const pet = await renderer(snapshot({ expanded: false, draft: "已有草稿" }));
+  const dots = pet.element("remote-transcribing-status");
+  const recording = pet.element("remote-recording-status");
+  const panel = pet.element("panel");
+  const draft = pet.element("draft");
+  const phase = (name, detail) => pet.windowEvent("aichat:remote-voice-" + name, { detail });
+  assert.equal(dots.hidden, true);
+  assert.equal(remoteVoiceFocus(pet, 18), true);
+  phase("recording", 18);
+  phase("transcribing", 17);
+  assert.equal(dots.hidden, true);
+  assert.equal(panel.classList.contains("remote-recording"), true);
+
+  pet.input("已有草稿继续编辑");
+  draft.selectionStart = 1;
+  draft.selectionEnd = 3;
+  pet.element("target").focus();
+  phase("transcribing", 18);
+  phase("recording", 18); // A late notification must not restore the red recording cue.
+  assert.equal(recording.hidden, true);
+  assert.equal(panel.classList.contains("remote-recording"), false);
+  assert.equal(dots.hidden, false);
+  phase("end", 17);
+  assert.equal(dots.hidden, false);
+  assert.equal(pet.focusedId(), "target");
+  assert.equal(draft.value, "已有草稿继续编辑");
+  assert.deepEqual([draft.selectionStart, draft.selectionEnd], [1, 3]);
+  phase("end", 18);
+  phase("transcribing", 18);
+  assert.equal(dots.hidden, true);
+  assert.deepEqual(pet.calls, []);
+
+  remoteVoiceFocus(pet, 19);
+  phase("transcribing", 19);
+  remoteVoiceFocus(pet, 20);
+  phase("end", 19);
+  assert.equal(dots.hidden, true);
+  assert.equal(recording.hidden, false);
+  assert.equal(panel.classList.contains("remote-recording"), true);
+});
+
+test("late PTT releases cannot clear a newer press and a focus-only event does not start recording", async () => {
+  const pet = await renderer(snapshot({ expanded: false }));
+  const status = pet.element("remote-recording-status");
+  assert.equal(remoteVoiceFocus(pet), true);
+  assert.equal(status.hidden, true);
+  assert.equal(remoteVoiceFocus(pet, 21), true);
+  pet.windowEvent("aichat:remote-voice-end", { detail: 21 });
+  assert.equal(remoteVoiceFocus(pet, 22), true);
+  pet.windowEvent("aichat:remote-voice-end", { detail: 21 });
+  pet.windowEvent("aichat:remote-voice-recording", { detail: 21 });
+  assert.equal(remoteVoiceFocus(pet, 21), false);
+  assert.match(status.textContent, /语音键已按下/);
+  assert.equal(status.hidden, false);
+  assert.equal(pet.element("panel").classList.contains("remote-recording"), true);
+  pet.windowEvent("aichat:remote-voice-recording", { detail: 22 });
+  assert.match(status.textContent, /录音中/);
+  pet.windowEvent("aichat:remote-voice-end", { detail: 22 });
+  pet.windowEvent("aichat:remote-voice-recording", { detail: 22 });
+  assert.equal(remoteVoiceFocus(pet, 22), false);
+  assert.equal(status.hidden, true);
+  pet.windowEvent("aichat:remote-voice-end", { detail: 23 });
+  assert.equal(remoteVoiceFocus(pet, 23), false, "release can arrive ahead of a delayed press");
+  assert.equal(status.hidden, true);
+});
+
+test("remote PTT declines before pet initialization and in modal or read-only states", async () => {
+  for (const initial of [
+    null,
+    snapshot({ expanded: false, exitPrompt: { id: "exit", personas: [] } }),
+    snapshot({ expanded: false, permission: { id: "capture", client: "QA" } }),
+    snapshot({ expanded: false, richDraft: true }),
+    snapshot({ expanded: false, dictating: true }),
+  ]) {
+    const pet = await renderer(initial);
+    const focus = pet.focusedId();
+    assert.equal(remoteVoiceFocus(pet, 8), false);
+    pet.windowEvent("aichat:remote-voice-recording", { detail: 8 });
+    assert.equal(pet.element("panel").classList.contains("remote-recording"), false);
+    assert.equal(pet.element("remote-recording-status").hidden, true);
+    assert.equal(pet.focusedId(), focus);
+    assert.equal(pet.element("panel").hidden, true);
+    assert.deepEqual(pet.calls, []);
+  }
+});
+
+test("remote PTT declines if the pet webview cannot focus the draft", async () => {
+  const pet = await renderer(snapshot({ expanded: true }));
+  pet.element("target").focus();
+  pet.element("draft").focus = () => {};
+  assert.equal(remoteVoiceFocus(pet), false);
+  assert.equal(pet.focusedId(), "target");
+  assert.deepEqual(pet.calls, []);
+});
 
 test("visible hit regions are published without mouse movement or focus changes", async () => {
   const pet = await renderer();

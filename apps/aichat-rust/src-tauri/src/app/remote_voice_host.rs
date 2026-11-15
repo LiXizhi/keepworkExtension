@@ -1,8 +1,120 @@
 //! Only the local settings window can start/stop native cloud dictation.
 use super::state::AppCore;
-use crate::remote_voice::{VoiceConfig, VoiceSnapshot};
+use crate::remote_voice::{RecordingFocus, VoiceConfig, VoiceSnapshot};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+
+const PREPARE_COMPOSER: &str = include_str!("remote_voice_composer.js");
+
+enum ComposerOwner {
+    Document,
+    Restored,
+    Other,
+    // On Windows a focused descendant HWND could belong to either WebView2 controller.
+    #[cfg(not(target_os = "macos"))]
+    CheckDocument,
+    Blocked,
+}
+
+#[cfg(target_os = "macos")]
+fn composer_owner(view: &tauri::webview::PlatformWebview) -> ComposerOwner {
+    extern "C" { fn keepwork_voice_prepare_document(owner: *mut std::ffi::c_void) -> i32; }
+    match unsafe { keepwork_voice_prepare_document(view.inner()) } {
+        2 => ComposerOwner::Restored,
+        1 => ComposerOwner::Document,
+        0 => ComposerOwner::Other,
+        _ => ComposerOwner::Blocked,
+    }
+}
+
+#[cfg(windows)]
+fn composer_owner(view: &tauri::webview::PlatformWebview) -> ComposerOwner {
+    use windows::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+
+    let controller = view.controller();
+    let mut parent = HWND::default();
+    unsafe {
+        if controller.ParentWindow(&mut parent).is_err() { return ComposerOwner::Blocked; }
+        let root = GetAncestor(parent.0, GA_ROOT);
+        if root.is_null() || GetForegroundWindow() != root { return ComposerOwner::Other; }
+        let mut info = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        if GetGUIThreadInfo(0, &mut info) == 0 { return ComposerOwner::Blocked; }
+        if info.hwndActive != root || info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE) != 0 {
+            return ComposerOwner::Other;
+        }
+        if info.hwndFocus.is_null() || info.hwndFocus == root || info.hwndFocus == parent.0 {
+            // Only empty native chrome: never redirect another child control's focus.
+            return if controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC).is_ok() {
+                ComposerOwner::Restored
+            } else {
+                ComposerOwner::Blocked
+            };
+        }
+        ComposerOwner::CheckDocument
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn composer_owner(_view: &tauri::webview::PlatformWebview) -> ComposerOwner {
+    ComposerOwner::CheckDocument
+}
+
+/// Preserve another app or native control. Only repair the owner of an already-active main window.
+pub(super) fn prepare_main_composer(app: &AppHandle) -> RecordingFocus {
+    let Some(main) = app.get_webview_window("main") else { return Ok(None); };
+    if !main.is_focused().unwrap_or(false) { return Ok(None); }
+    let core = app.state::<Arc<AppCore>>();
+    if !main.url().is_ok_and(|url| crate::security::trusted_page(url.as_str(), core.current_dev_url().as_deref())) {
+        return Ok(None);
+    }
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let document = main.clone();
+    main.with_webview(move |view| {
+        let script = match composer_owner(&view) {
+            ComposerOwner::Other => { let _ = send.send(true); return; }
+            ComposerOwner::Blocked => { let _ = send.send(false); return; }
+            ComposerOwner::Document => PREPARE_COMPOSER.to_owned(),
+            ComposerOwner::Restored => {
+                tauri::async_runtime::spawn(async move {
+                    // Native first-responder changes reach the WebKit content process asynchronously.
+                    // Only recheck ownership; never activate a window or issue a second focus repair.
+                    for _ in 0..6 {
+                        if send.is_closed() { return; }
+                        if !document.is_focused().unwrap_or(false) { let _ = send.send(true); return; }
+                        let (reply, state) = tokio::sync::oneshot::channel();
+                        let reply = std::sync::Mutex::new(Some(reply));
+                        let script = format!("document.hasFocus() ? ({PREPARE_COMPOSER}) : null");
+                        if document.eval_with_callback(script, move |result| {
+                            if let Some(reply) = reply.lock().unwrap().take() {
+                                let _ = reply.send(result);
+                            }
+                        }).is_err() { break; }
+                        let Ok(Ok(result)) = tokio::time::timeout(std::time::Duration::from_millis(150), state).await else { break; };
+                        match result.as_str() {
+                            "true" => { let _ = send.send(true); return; }
+                            "null" => tokio::time::sleep(std::time::Duration::from_millis(16)).await,
+                            _ => break,
+                        }
+                    }
+                    let _ = send.send(false);
+                });
+                return;
+            }
+            #[cfg(not(target_os = "macos"))]
+            ComposerOwner::CheckDocument => format!("!document.hasFocus() || ({PREPARE_COMPOSER})"),
+        };
+        let send = std::sync::Mutex::new(Some(send));
+        // A dropped callback also fails closed through the existing per-press acknowledgement.
+        let _ = document.eval_with_callback(script, move |result| {
+            if let Some(send) = send.lock().unwrap().take() {
+                let _ = send.send(result == "true");
+            }
+        });
+    }).map_err(|_| "无法聚焦 AIChat 输入框。".to_owned())?;
+    Ok(Some(receive))
+}
 
 pub(super) fn trusted_voice_settings(label: &str, url: &url::Url) -> bool {
     if label != "remote-voice"
@@ -40,17 +152,34 @@ pub(super) fn open_remote_voice_window(app: &AppHandle) {
         let _ = window.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(
+    let _ = build_voice_settings(app, true);
+}
+
+/// First-use setup is only presented beside a focused main window. A hidden
+/// client or another foreground application keeps its focus.
+pub(super) fn show_voice_setup_if_focused(app: &AppHandle) -> bool {
+    if app.get_webview_window("remote-voice").is_some() { return true; }
+    if !app.get_webview_window("main").is_some_and(|w| w.is_focused().unwrap_or(false)) {
+        return false;
+    }
+    let core = app.state::<Arc<AppCore>>();
+    if core.remote_voice.snapshot().state != "needs-permission" { return false; }
+    build_voice_settings(app, false).is_ok()
+}
+
+fn build_voice_settings(app: &AppHandle, focus: bool) -> tauri::Result<WebviewWindow> {
+    WebviewWindowBuilder::new(
         app,
         "remote-voice",
         WebviewUrl::App("remote-voice.html".into()),
     )
+    .focused(focus)
     .title("遥控器语音输入")
     .inner_size(620.0, 560.0)
     .min_inner_size(480.0, 480.0)
     .on_navigation(|url| trusted_voice_settings("remote-voice", url))
     .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-    .build();
+    .build()
 }
 
 #[tauri::command]

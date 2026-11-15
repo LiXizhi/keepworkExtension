@@ -143,21 +143,86 @@ pub(super) fn select_paired(
         .map(|candidate| candidate.identifier.unwrap_or_default()))
 }
 
-pub(super) async fn paired_remote(config_device: &str) -> Result<Option<String>, String> {
-    let candidates = platform::candidates(config_device).await?;
-    select_paired(candidates, config_device)
+#[derive(Debug, PartialEq)]
+pub(super) enum Probe {
+    Waiting,
+    Retry(String),
+    NeedsPermission(&'static str),
+    Available(String),
+}
+
+#[derive(Debug)]
+enum InventoryError {
+    Temporary(String),
+    Blocked(String),
+}
+impl InventoryError {
+    fn probe(self) -> Result<Probe, String> {
+        match self {
+            Self::Temporary(reason) => Ok(Probe::Retry(reason)),
+            Self::Blocked(reason) => Err(reason),
+        }
+    }
+}
+impl From<&str> for InventoryError {
+    fn from(reason: &str) -> Self {
+        Self::Blocked(reason.into())
+    }
+}
+
+pub(super) async fn paired_remote(config_device: &str) -> Result<Probe, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let inventory = match platform::inventory().await {
+            Ok(inventory) => inventory,
+            Err(error) => return error.probe(),
+        };
+        admit_macos(inventory.candidates, config_device, inventory.bluetooth_allowed, super::native_input::missing_permission)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let candidates = match platform::candidates(config_device).await {
+            Ok(candidates) => candidates,
+            Err(error) => return error.probe(),
+        };
+        Ok(select_paired(candidates, config_device)?.map_or(Probe::Waiting, Probe::Available))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn admit_macos(
+    candidates: Vec<PairedRemote>,
+    config_device: &str,
+    bluetooth_allowed: bool,
+    input_permission: impl FnOnce() -> Option<&'static str>,
+) -> Result<Probe, String> {
+    let Some(device) = select_paired(candidates, config_device)? else {
+        return Ok(Probe::Waiting);
+    };
+    if !bluetooth_allowed {
+        return Ok(Probe::NeedsPermission("已检测到小米遥控器。请点「启动语音输入」，按系统提示依次授权。若曾拒绝蓝牙访问，请到系统设置 → 隐私与安全性 → 蓝牙中授权。通过编辑器或终端启动时，系统可能显示该应用的名称。"));
+    }
+    Ok(match input_permission() {
+        Some(reason) => Probe::NeedsPermission(reason),
+        None => Probe::Available(device),
+    })
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::PairedRemote;
+    use super::{InventoryError, PairedRemote};
     use serde::Deserialize;
     use std::ffi::{c_char, CStr};
     #[derive(Deserialize)]
-    struct Inventory {
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct Inventory {
         #[serde(default)]
-        candidates: Vec<PairedRemote>,
+        pub candidates: Vec<PairedRemote>,
+        #[serde(default)]
+        pub bluetooth_allowed: bool,
         error: Option<String>,
+        #[serde(default)]
+        retry: bool,
     }
     #[link(name = "IOKit", kind = "framework")]
     #[link(name = "IOBluetooth", kind = "framework")]
@@ -167,16 +232,17 @@ mod platform {
         fn keepwork_paired_remotes_json() -> *mut c_char;
         fn keepwork_paired_remotes_free(value: *mut c_char);
     }
-    pub async fn candidates(_config: &str) -> Result<Vec<PairedRemote>, String> {
-        tokio::task::spawn_blocking(|| {
+    pub(super) async fn inventory() -> Result<Inventory, InventoryError> {
+        static WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        run_inventory_worker(&WORKER, || {
             let raw = unsafe { keepwork_paired_remotes_json() };
             if raw.is_null() {
-                return Err("无法读取已配对遥控器，请手动开启语音输入。".into());
+                return Err(InventoryError::Temporary("暂时无法读取系统配对记录，将自动重试。".into()));
             }
             let bytes = unsafe { CStr::from_ptr(raw) }.to_bytes();
             let result = if bytes.len() <= 131_072 {
                 serde_json::from_slice::<Inventory>(bytes)
-                    .map_err(|_| "系统配对记录格式不可用，请手动开启语音输入。".to_string())
+                    .map_err(|_| InventoryError::Blocked("系统配对记录格式不可用，请手动开启语音输入。".into()))
             } else {
                 Err("系统配对记录过长，请手动开启语音输入。".into())
             };
@@ -185,29 +251,75 @@ mod platform {
             }
             let inventory = result?;
             if let Some(error) = inventory.error {
-                return Err(error);
+                return Err(if inventory.retry {
+                    InventoryError::Temporary(error)
+                } else {
+                    InventoryError::Blocked(error)
+                });
             }
-            Ok(inventory.candidates)
+            Ok(inventory)
         })
         .await
-        .map_err(|_| "读取已配对遥控器的任务未完成，请手动开启。".to_string())?
+    }
+
+    async fn run_inventory_worker<T: Send + 'static>(
+        worker: &'static tokio::sync::Semaphore,
+        read: impl FnOnce() -> Result<T, InventoryError> + Send + 'static,
+    ) -> Result<T, InventoryError> {
+        // Cancelling a waiter cannot interrupt an IOBluetooth call. Keep the permit
+        // inside the native worker and let later probes retry until the OS returns.
+        let permit = worker.try_acquire().map_err(|_| {
+            InventoryError::Temporary("系统配对查询尚未完成，将自动重试。".into())
+        })?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            read()
+        })
+        .await
+        .map_err(|_| InventoryError::Temporary("系统配对记录查询暂时中断，将自动重试。".into()))?
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn interrupted_probe_bounds_workers_until_the_os_call_returns() {
+            static WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (finish, release) = std::sync::mpsc::channel();
+            let task = tokio::spawn(run_inventory_worker(&WORKER, move || {
+                started.send(()).unwrap();
+                release.recv().unwrap();
+                Ok(())
+            }));
+            ready.await.unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let retry = run_inventory_worker::<()>(&WORKER, || panic!("spawned a second worker")).await;
+            assert!(matches!(retry, Err(InventoryError::Temporary(_))));
+            finish.send(()).unwrap();
+            let permit = tokio::time::timeout(std::time::Duration::from_secs(2), WORKER.acquire()).await.unwrap().unwrap();
+            drop(permit);
+            assert_eq!(run_inventory_worker(&WORKER, || Ok(23)).await.unwrap(), 23);
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{canonical_mac, known_remote_name, PairedRemote};
+    use super::{canonical_mac, known_remote_name, InventoryError, PairedRemote};
     use windows::core::{Interface, HSTRING};
     use windows::Devices::{Bluetooth::BluetoothLEDevice, Enumeration::DeviceInformation};
     use windows::Foundation::IPropertyValue;
-    fn error(error: windows::core::Error) -> String {
+    fn error(error: windows::core::Error) -> InventoryError {
         if error.code().0 as u32 == 0x80070005 || error.code().0 as u32 == 0x80070522 {
             "系统拒绝读取已配对蓝牙设备，请检查蓝牙隐私权限后手动开启语音输入。".into()
         } else {
-            "无法读取系统已配对蓝牙设备，请检查蓝牙设置后手动开启语音输入。".into()
+            InventoryError::Temporary("系统蓝牙设备列表暂不可用，将自动重试。".into())
         }
     }
-    pub async fn candidates(config: &str) -> Result<Vec<PairedRemote>, String> {
+    pub(super) async fn candidates(config: &str) -> Result<Vec<PairedRemote>, InventoryError> {
         let requested = if config.trim().is_empty() {
             None
         } else {
@@ -289,8 +401,8 @@ mod platform {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod platform {
-    use super::PairedRemote;
-    pub async fn candidates(_config: &str) -> Result<Vec<PairedRemote>, String> {
+    use super::{InventoryError, PairedRemote};
+    pub(super) async fn candidates(_config: &str) -> Result<Vec<PairedRemote>, InventoryError> {
         Err("当前平台不支持只读查询已配对遥控器，请手动开启语音输入。".into())
     }
 }
@@ -298,6 +410,13 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inventory_io_retries_but_policy_or_data_errors_require_user_action() {
+        let reason = String::from("native inventory unavailable");
+        assert_eq!(InventoryError::Temporary(reason.clone()).probe(), Ok(Probe::Retry(reason.clone())));
+        assert_eq!(InventoryError::Blocked(reason.clone()).probe(), Err(reason));
+    }
+
     #[test]
     fn paired_probe_future_can_move_between_runtime_threads() {
         fn assert_send<T: Send>(_: T) {}
@@ -313,6 +432,36 @@ mod tests {
             ..Default::default()
         }
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_unique_eligible_remote_needs_setup_and_external_grants_resume_admission() {
+        let device = remote(None, Some("hid:one"));
+        let skip = || panic!("input preflight precedes device selection or Bluetooth consent");
+        assert_eq!(
+            admit_macos(vec![], "", false, skip).unwrap(),
+            Probe::Waiting
+        );
+        assert!(admit_macos(
+            vec![device.clone(), remote(None, Some("hid:two"))],
+            "",
+            false,
+            skip
+        )
+        .is_err());
+        assert!(matches!(
+            admit_macos(vec![device.clone()], "", false, skip),
+            Ok(Probe::NeedsPermission(_))
+        ));
+        assert_eq!(
+            admit_macos(vec![device.clone()], "", true, || Some("Input Monitoring")).unwrap(),
+            Probe::NeedsPermission("Input Monitoring")
+        );
+        assert_eq!(
+            admit_macos(vec![device], "", true, || None).unwrap(),
+            Probe::Available(String::new())
+        );
+    }
+
     #[test]
     fn names_exclude_ordinary_bluetooth_keyboards_and_headphones() {
         for name in [

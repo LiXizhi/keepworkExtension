@@ -13,6 +13,9 @@
 @end
 
 static Boolean fixtureTrusted(void);
+static Boolean fixtureRequestTrusted(CFDictionaryRef options);
+static bool fixtureListenAllowed(void);
+static bool fixtureRequestListen(void);
 static void fixturePost(CGEventTapLocation location, CGEventRef event);
 static CGEventFlags fixtureFlags(CGEventSourceStateID state);
 static AXError fixtureAttribute(AXUIElementRef element, CFStringRef attribute, CFTypeRef *value);
@@ -23,8 +26,17 @@ static AXError fixtureSettable(AXUIElementRef element, CFStringRef attribute, Bo
 static CGEventRef fixtureCreateKeyboardEvent(CGEventSourceRef source, CGKeyCode key, bool down);
 static void fixtureSetFlags(CGEventRef event, CGEventFlags flags);
 static int64_t fixtureGetInteger(CGEventRef event, CGEventField field);
+// The fixture events below are CFData, so substitute just the optional
+// CGEvent -> HID sender lookup. No real keystrokes or input sources are used.
+static uint64_t fixtureSender;
+#define CGEventCopyIOHIDEvent fixtureCopyHID
+#define IOHIDEventGetSenderID fixtureSenderID
+bool keepwork_remote_home_sender(uint64_t sender) { return sender == 42; }
 #define NSPasteboard FixturePasteboard
 #define AXIsProcessTrusted fixtureTrusted
+#define AXIsProcessTrustedWithOptions fixtureRequestTrusted
+#define CGPreflightListenEventAccess fixtureListenAllowed
+#define CGRequestListenEventAccess fixtureRequestListen
 #define CGEventPost fixturePost
 #define CGEventSourceFlagsState fixtureFlags
 #define AXUIElementCopyAttributeValue fixtureAttribute
@@ -36,8 +48,20 @@ static int64_t fixtureGetInteger(CGEventRef event, CGEventField field);
 #define CGEventSetFlags fixtureSetFlags
 #define CGEventGetIntegerValueField fixtureGetInteger
 #include "../../src-tauri/src/remote_voice/native_input_macos.m"
+CFTypeRef fixtureCopyHID(CGEventRef event) { return CFRetain(event); }
+uint64_t fixtureSenderID(CFTypeRef hid) { return fixtureSender; }
+static bool dialogueActive;
+static unsigned dialogueDownEdges, dialogueUpEdges;
+bool keepwork_remote_dialogue_ok_edge(bool down) {
+    assert(fixtureSender == 42); // Only the paired Xiaomi keyboard owns this control.
+    if (down) dialogueDownEdges++; else dialogueUpEdges++;
+    return dialogueActive;
+}
 #undef NSPasteboard
 #undef AXIsProcessTrusted
+#undef AXIsProcessTrustedWithOptions
+#undef CGPreflightListenEventAccess
+#undef CGRequestListenEventAccess
 #undef CGEventPost
 #undef CGEventSourceFlagsState
 #undef AXUIElementCopyAttributeValue
@@ -50,6 +74,9 @@ static int64_t fixtureGetInteger(CGEventRef event, CGEventField field);
 #undef CGEventGetIntegerValueField
 
 static bool trusted = true;
+static bool listenAllowed = false;
+static bool allowOnRequest = false;
+static NSUInteger axRequests, listenRequests;
 static bool clipboardAllowed = true;
 static NSString *clipboardText;
 static NSMutableString *focusedInput;
@@ -96,6 +123,16 @@ static int64_t fixtureGetInteger(CGEventRef event, CGEventField field) {
 @end
 
 static Boolean fixtureTrusted(void) { return trusted; }
+static Boolean fixtureRequestTrusted(CFDictionaryRef options) {
+    assert(CFDictionaryGetValue(options, kAXTrustedCheckOptionPrompt) == kCFBooleanTrue);
+    axRequests++;
+    return trusted;
+}
+static bool fixtureListenAllowed(void) { return listenAllowed; }
+static bool fixtureRequestListen(void) {
+    listenRequests++;
+    return listenAllowed = allowOnRequest;
+}
 static CGEventFlags fixtureFlags(CGEventSourceStateID state) {
     assert(state == kCGEventSourceStateHIDSystemState);
     return heldFlags;
@@ -124,6 +161,57 @@ static AXError fixtureTimeout(AXUIElementRef element, float seconds) { (void)ele
 static AXError fixtureSettable(AXUIElementRef element, CFStringRef attribute, Boolean *settable) {
     (void)element; assert(CFEqual(attribute, kAXValueAttribute)); *settable = editable; return kAXErrorSuccess;
 }
+static void home_does_not_type_into_the_foreground_app(void) {
+    KeepworkVoiceTap tap = {0};
+    atomic_init(&tap.enabled, true);
+    for (int down = 0; down <= 1; down++) {
+        CGEventType type = down ? kCGEventKeyDown : kCGEventKeyUp;
+        CGEventRef home = fixtureCreateKeyboardEvent(NULL, 115, down);
+        fixtureSender = 0;
+        assert(voiceKey(NULL, type, home, &tap) == home);
+        fixtureSender = 7; // Ordinary keyboard Home keeps its navigation behavior.
+        assert(voiceKey(NULL, type, home, &tap) == home);
+        fixtureSender = 42;
+        assert(voiceKey(NULL, type, home, &tap) == NULL);
+        atomic_store(&tap.enabled, false);
+        assert(voiceKey(NULL, type, home, &tap) == home);
+        atomic_store(&tap.enabled, true);
+        CFRelease(home);
+
+        CGEventRef ordinary = fixtureCreateKeyboardEvent(NULL, 0, down);
+        assert(voiceKey(NULL, type, ordinary, &tap) == ordinary);
+        CFRelease(ordinary);
+    }
+}
+
+static void remote_ok_routes_only_the_active_dialogue_without_an_extra_enter(void) {
+    KeepworkVoiceTap tap = {0};
+    atomic_init(&tap.enabled, true);
+    for (unsigned k = 0; k < 2; k++) {
+        const CGKeyCode key = k == 0 ? 36 : 76;
+        for (unsigned active = 0; active < 2; active++) {
+            dialogueActive = active != 0;
+            for (unsigned i = 0; i < 2; i++) {
+                bool down = i == 0;
+                CGEventType type = down ? kCGEventKeyDown : kCGEventKeyUp;
+                CGEventRef event = fixtureCreateKeyboardEvent(NULL, key, down);
+                unsigned before = dialogueDownEdges + dialogueUpEdges;
+                for (unsigned sender = 0; sender <= 7; sender += 7) {
+                    fixtureSender = sender;
+                    assert(voiceKey(NULL, type, event, &tap) == event);
+                }
+                assert(dialogueDownEdges + dialogueUpEdges == before);
+                fixtureSender = 42;
+                assert(voiceKey(NULL, type, event, &tap) == (dialogueActive ? NULL : event));
+                assert(dialogueDownEdges + dialogueUpEdges == before + 1);
+                CFRelease(event);
+            }
+        }
+    }
+    assert(dialogueDownEdges == 4 && dialogueUpEdges == 4);
+    dialogueActive = false;
+}
+
 static void fixturePost(CGEventTapLocation location, CGEventRef event) {
     assert(location == kCGHIDEventTap);
     FixtureEvent *keyboard = keyboardEvent(event);
@@ -149,6 +237,22 @@ static void fixturePost(CGEventTapLocation location, CGEventRef event) {
 
 int main(void) {
     @autoreleasepool {
+        home_does_not_type_into_the_foreground_app();
+        remote_ok_routes_only_the_active_dialogue_without_an_extra_enter();
+        trusted = false;
+        assert(keepwork_voice_input_permissions(false) == 1);
+        assert(keepwork_voice_input_start() == 1 && axRequests == 0 && listenRequests == 0);
+        assert(keepwork_voice_input_permissions(true) == 1 && axRequests == 1 && listenRequests == 0);
+        trusted = true;
+        assert(keepwork_voice_input_permissions(false) == 2);
+        assert(keepwork_voice_input_start() == 2 && axRequests == 1 && listenRequests == 0);
+        assert(keepwork_voice_input_permissions(true) == 2 && listenRequests == 1);
+        allowOnRequest = true;
+        assert(keepwork_voice_input_permissions(true) == 0 && listenRequests == 2);
+        assert(keepwork_voice_input_permissions(true) == 0);
+        assert(keepwork_voice_input_permissions(false) == 0);
+        assert(axRequests == 1 && listenRequests == 2 && posts == 0 && copies == 0);
+
         NSMutableString *original = [@"original:" mutableCopy];
         NSMutableString *current = [@"current:tail" mutableCopy];
         focusedInput = original;

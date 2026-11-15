@@ -55,13 +55,18 @@ test('one main window loads hidden and removes recovery before revealing the ver
   const hide = lifecycle.slice(lifecycle.indexOf('fn hide_main_window('), lifecycle.indexOf('fn sync_window_presentation('));
   assert.match(hide, /set_foreground\(false\)/);
   assert.match(hide, /sync_window_presentation\(app,\s*false\)/);
-  assert.equal((startup.match(/hide_main_window\(&app_for_close/g) || []).length, 1, 'the only main window owns close-to-tray');
+  assert.match(startup, /main_win\.on_window_event\([\s\S]*?WindowEvent::CloseRequested[\s\S]*?api\.prevent_close\(\);\s*dismiss_main_window\([^)]+DismissAction::Close/, 'the main window routes close through the desktop pet policy');
   assert.doesNotMatch(lifecycle, /get_window\("startup"\)/);
   assert.match(lifecycle, /native_startup::update\(/);
   assert.match(lifecycle, /native_startup::remove\(/);
   const mainPresentation = lifecycle.slice(lifecycle.indexOf('Presentation::Main =>'), lifecycle.indexOf('pub(super) fn current_entry_url'));
   const removeRecovery = mainPresentation.indexOf('native_startup::remove(');
   assert.ok(removeRecovery >= 0 && removeRecovery < mainPresentation.indexOf('window.show()'), 'remove recovery before the ready workspace becomes visible');
+});
+
+test('the macOS application event loop forwards Dock reopens to the main window', () => {
+  const startup = read('src-tauri/src/app/startup.rs');
+  assert.match(startup, /app\.run\(move \|app, event\| \{\s*#\[cfg\(target_os = "macos"\)\]\s*main_window::handle_dock_reopen\(app, &event\)/);
 });
 
 test('native recovery shortcuts stay within startup and include focused Windows buttons', () => {
@@ -83,7 +88,7 @@ test('native recovery shortcuts stay within startup and include focused Windows 
   assert.doesNotMatch(native, /RegisterHotKey|SetWindowsHookEx|WH_KEYBOARD|addGlobalMonitorForEvents|grab_keyboard|gdk_keyboard_grab/);
   const startup = read('src-tauri/src/app/startup.rs');
   assert.match(startup, /native_startup::Action::Retry =>\s*\{?\s*main_window::reload_main_window/);
-  assert.match(startup, /native_startup::Action::Hide =>\s*\{\s*hide_main_window/);
+  assert.match(startup, /native_startup::Action::Hide =>\s*\{?\s*dismiss_main_window\([^)]+DismissAction::Close/);
 });
 
 test('macOS startup overlay covers and preserves one WebView, restores focus, and releases callbacks', {

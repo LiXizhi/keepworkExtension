@@ -37,7 +37,7 @@ static void finish(ButtonContext *context) {
     assert(pthread_mutex_destroy(&context->mutex) == 0);
 }
 static ButtonSource source(uint64_t registry, const char *physical) {
-    ButtonSource value = {.registry = registry, .device = (uintptr_t)(registry + 100)};
+    ButtonSource value = {.registry = registry, .device = (uintptr_t)(registry + 100), .hasHome = true};
     snprintf(value.physical, sizeof(value.physical), "%s", physical);
     snprintf(value.label, sizeof(value.label), "Xiaomi RC003");
     return value;
@@ -48,15 +48,16 @@ static void click(ButtonContext *context, uint64_t registry, uint64_t when) {
 }
 
 static void known_device_and_source_selection(void) {
-    assert(knownRemote(0x2717, 0x32B8, "Bluetooth", 1, 6));
-    assert(knownRemote(0x2717, 0x32B8, "BluetoothLowEnergy", 1, 6));
-    assert(!knownRemote(0x2718, 0x32B8, "Bluetooth", 1, 6));
-    assert(!knownRemote(0x2717, 0x32B9, "Bluetooth", 1, 6));
-    assert(!knownRemote(0x2717, 0x32B8, "USB", 1, 6));
-    assert(!knownRemote(0x2717, 0x32B8, NULL, 1, 6));
-    assert(!knownRemote(0x2717, 0x32B8, "bluetooth", 1, 6));
-    assert(!knownRemote(0x2717, 0x32B8, "Bluetooth", 0x0C, 6));
-    assert(!knownRemote(0x2717, 0x32B8, "Bluetooth", 1, 2));
+    assert(knownRemote(0x2717, 0x32B8, @"Bluetooth", 1, 6));
+    assert(knownRemote(0x2717, 0x32B8, @"BluetoothLowEnergy", 1, 6));
+    assert(knownRemote(0x2717, 0x32B8, @"Bluetooth Low Energy", 1, 6));
+    assert(!knownRemote(0x2718, 0x32B8, @"Bluetooth", 1, 6));
+    assert(!knownRemote(0x2717, 0x32B9, @"Bluetooth", 1, 6));
+    assert(!knownRemote(0x2717, 0x32B8, @"USB", 1, 6));
+    assert(!knownRemote(0x2717, 0x32B8, nil, 1, 6));
+    assert(!knownRemote(0x2717, 0x32B8, @"bluetooth", 1, 6));
+    assert(!knownRemote(0x2717, 0x32B8, @"Bluetooth", 0x0C, 6));
+    assert(!knownRemote(0x2717, 0x32B8, @"Bluetooth", 1, 2));
     ButtonSource sources[] = {source(1, "physical-remote-A"), source(2, "physical-remote-A")};
     assert(selectSources(NULL, 0) == NoSource);
     assert(selectSources(sources, 1) == UniqueSource);
@@ -84,6 +85,7 @@ static void only_selected_back_releases_trigger_once(void) {
         buttonEdge(&context, 1, 7, usage, true, 10);
         buttonEdge(&context, 1, 7, usage, false, 20);
         assert(!pollContextAt(&context, 21));
+        if (usage == 0x4A) assert(pollHomeAt(&context, 21));
     }
     click(&context, 999, 100); // A second keyboard with exactly the same code.
     assert(!pollContextAt(&context, 151));
@@ -129,8 +131,15 @@ static void long_press_and_pending_action_age_are_bounded(void) {
     assert(!pollContextAt(&context, 11051));
     click(&context, 1, 12000);
     click(&context, 1, 12100);
-    assert(pollContextAt(&context, 12151)); // One pending slot, not an action queue.
-    assert(!pollContextAt(&context, 12152));
+    click(&context, 1, 12200);
+    assert(pollContextAt(&context, 12251));
+    assert(pollContextAt(&context, 12252));
+    assert(pollContextAt(&context, 12253));
+    assert(!pollContextAt(&context, 12254));
+    click(&context, 1, 13000);
+    click(&context, 1, 13900);
+    assert(pollContextAt(&context, 14050)); // Drop the stale first press only.
+    assert(!pollContextAt(&context, 14051));
     finish(&context);
 }
 
@@ -167,7 +176,7 @@ static void collections_share_one_press_and_reordering_drops_partial_edges(void)
 static void startup_held_or_unknown_state_requires_release_before_a_new_click(void) {
     ButtonContext context; initialize(&context);
     ButtonSource remote = source(1, "physical-remote-A");
-    remote.needsRelease = true; // Startup sampled a held key or could not read its value.
+    remote.needsRelease[BackButton] = true; // Startup sampled a held key or could not read its value.
     applySources(&context, &remote, 1);
     assert(!context.snapshot.ready && context.snapshot.code == 10);
     buttonEdge(&context, 1, 7, 0x28, false, 10); // Native OK cannot lift Back's barrier.
@@ -227,11 +236,143 @@ static void source_changes_and_shutdown_invalidate_pressed_and_pending_actions(v
     finish(&context);
 }
 
+static void homeTap(ButtonContext *context, uint64_t registry, uint64_t time) {
+    buttonEdge(context, registry, 7, 0x4A, true, time);
+    buttonEdge(context, registry, 7, 0x4A, false, time + 30);
+}
+
+static void back_and_home_are_consumed_in_release_order(void) {
+    ButtonContext context; initialize(&context);
+    ButtonSource remote = source(1, "physical-remote-A");
+    applySources(&context, &remote, 1);
+    click(&context, 1, 100);
+    homeTap(&context, 1, 180);
+    click(&context, 1, 250);
+    assert(!pollHomeAt(&context, 310));
+    assert(pollContextAt(&context, 311));
+    assert(!pollContextAt(&context, 312));
+    assert(pollHomeAt(&context, 313));
+    assert(pollContextAt(&context, 314));
+    assert(!pollHomeAt(&context, 315) && !pollContextAt(&context, 315));
+    finish(&context);
+}
+
+static void home_taps_remain_distinct_and_independent_of_back(void) {
+    ButtonContext context; initialize(&context);
+    ButtonSource remote = source(1, "physical-remote-A");
+    applySources(&context, &remote, 1);
+    for (uint32_t usage = 0; usage < 0x100; usage++) {
+        if (usage == 0x4A) continue;
+        buttonEdge(&context, 1, 7, usage, true, 10);
+        buttonEdge(&context, 1, 7, usage, false, 20);
+        assert(!pollHomeAt(&context, 21));
+    }
+    assert(pollContextAt(&context, 21)); // Back still routes exclusively to clear.
+    homeTap(&context, 999, 30);
+    buttonEdge(&context, 1, 0x0C, 0x4A, true, 65);
+    buttonEdge(&context, 1, 0x0C, 0x4A, false, 70);
+    buttonEdge(&context, 1, 7, 0x4A, false, 80);
+    assert(!pollHomeAt(&context, 81));
+    buttonEdge(&context, 1, 7, 0x4A, true, 100);
+    buttonEdge(&context, 1, 7, 0x4A, true, 200); // Held-key repeat.
+    click(&context, 1, 201);
+    assert(pollContextAt(&context, 252) && !pollHomeAt(&context, 252));
+    buttonEdge(&context, 1, 7, 0x4A, false, 260);
+    homeTap(&context, 1, 270);
+    homeTap(&context, 1, 310);
+    assert(!pollContextAt(&context, 350));
+    for (int i = 0; i < 3; i++) assert(pollHomeAt(&context, 350));
+    assert(!pollHomeAt(&context, 350));
+    buttonEdge(&context, 1, 7, 0x4A, true, 500);
+    buttonEdge(&context, 1, 7, 0x4A, true, 1450);
+    buttonEdge(&context, 1, 7, 0x4A, false, 1500); // Long hold never toggles.
+    assert(!pollHomeAt(&context, 1501));
+    homeTap(&context, 1, 1600);
+    homeTap(&context, 1, 2499);
+    assert(pollHomeAt(&context, 2630)); // Old tap expired; the newer one survives.
+    assert(!pollHomeAt(&context, 2630));
+    finish(&context);
+}
+
+static void home_releases_are_scoped_to_the_current_source_and_session(void) {
+    ButtonContext context; initialize(&context);
+    ButtonSource sources[] = {source(1, "physical-remote-A"), source(2, "physical-remote-A")};
+    sources[0].needsRelease[HomeButton] = true;
+    applySources(&context, sources, 2);
+    click(&context, 1, 100);
+    assert(pollContextAt(&context, 151)); // Startup-held Home does not disable Back.
+    buttonEdge(&context, 1, 7, 0x4A, true, 160);
+    buttonEdge(&context, 1, 7, 0x4A, false, 170);
+    assert(!pollHomeAt(&context, 171));
+    buttonEdge(&context, 1, 7, 0x4A, true, 200);
+    buttonEdge(&context, 2, 7, 0x4A, true, 201);
+    buttonEdge(&context, 2, 7, 0x4A, false, 220);
+    assert(!pollHomeAt(&context, 220));
+    buttonEdge(&context, 1, 7, 0x4A, false, 221);
+    assert(pollHomeAt(&context, 221) && !pollHomeAt(&context, 221));
+    homeTap(&context, 2, 250);
+    buttonEdge(&context, 2, 7, 0x4A, true, 300);
+    ButtonSource reversed[] = {context.sources[1], context.sources[0]};
+    applySources(&context, reversed, 2);
+    assert(!pollHomeAt(&context, 301));
+    buttonEdge(&context, 2, 7, 0x4A, true, 320);
+    buttonEdge(&context, 2, 7, 0x4A, false, 321);
+    assert(!pollHomeAt(&context, 322));
+    homeTap(&context, 2, 400);
+    assert(pollHomeAt(&context, 431));
+    homeTap(&context, 2, 500);
+    applySources(&context, NULL, 0);
+    assert(!pollHomeAt(&context, 531));
+    finish(&context);
+}
+
+static void status_reports_home_availability_separately(void) {
+    ButtonContext context; initialize(&context);
+    activeButtons = &context; // Exercise the exported snapshot without installing a listener.
+    ButtonSnapshot status;
+    ButtonSource collection = source(1, "physical-remote-A");
+    collection.hasHome = false;
+    applySources(&context, &collection, 1);
+    keepwork_remote_buttons_status(&status);
+    assert(status.ready && !status.homeReady);
+    homeTap(&context, 1, 1);
+    assert(!pollHomeAt(&context, 32));
+
+    collection.hasHome = true;
+    collection.needsRelease[HomeButton] = true;
+    applySources(&context, &collection, 1);
+    keepwork_remote_buttons_status(&status);
+    assert(status.ready && !status.homeReady);
+    buttonEdge(&context, 1, 7, 0x4A, false, 50);
+    keepwork_remote_buttons_status(&status);
+    assert(status.ready && status.homeReady);
+
+    ButtonSource collections[] = {context.sources[0], source(2, "physical-remote-A")};
+    collections[1].hasHome = false;
+    collections[1].needsRelease[BackButton] = true;
+    applySources(&context, collections, 2);
+    keepwork_remote_buttons_status(&status);
+    assert(!status.ready && status.homeReady);
+    assert(keepwork_remote_home_sender(collections[0].registry));
+    assert(!keepwork_remote_home_sender(collections[1].registry));
+    assert(!keepwork_remote_home_sender(0));
+    disableButtons(&context, 4);
+    keepwork_remote_buttons_status(&status);
+    assert(!status.ready && !status.homeReady);
+    assert(!keepwork_remote_home_sender(collections[0].registry));
+    activeButtons = NULL;
+    finish(&context);
+}
+
 int main(void) {
     assert(activeButtons == NULL);
     known_device_and_source_selection();
+    status_reports_home_availability_separately();
+    home_taps_remain_distinct_and_independent_of_back();
+    home_releases_are_scoped_to_the_current_source_and_session();
     only_selected_back_releases_trigger_once();
     long_press_and_pending_action_age_are_bounded();
+    back_and_home_are_consumed_in_release_order();
     collections_share_one_press_and_reordering_drops_partial_edges();
     startup_held_or_unknown_state_requires_release_before_a_new_click();
     source_changes_and_shutdown_invalidate_pressed_and_pending_actions();

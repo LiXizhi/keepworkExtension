@@ -2,7 +2,7 @@
 //! Every path and HTTP listener belongs to this fixture. Runtime supervisors
 //! are constructed for status snapshots but are never started or checked.
 
-use super::{main_window, native_startup, state::AppCore};
+use super::{main_window, native_startup, pet_host, state::AppCore};
 use crate::{
     files::NativeFiles,
     launch_intents::LaunchIntents,
@@ -49,6 +49,15 @@ const poll = setInterval(async () => {
     clearInterval(poll);
   } catch (_) {}
 }, 50);
+addEventListener('aichat:remote-phone', ({ detail }) => {
+  if (detail.action === 'enter' && detail.surface === 'pet') {
+    detail.status = 'active';
+    detail.liveVersion = 1;
+    window.__TAURI_INTERNALS__.invoke('desktop_publish_pet_state', {state:{
+      remotePhoneVersion:1, remoteDialogue:{id:detail.id, state:'starting'}
+    }});
+  }
+});
 addEventListener('pagehide', () => clearInterval(poll), { once: true });
 </script>"#;
 
@@ -75,6 +84,7 @@ struct FixtureState {
     styles_finished: AtomicUsize,
     statuses: AtomicUsize,
     retries: AtomicUsize,
+    dock_reopens: AtomicUsize,
     unexpected: AtomicUsize,
     stopped: AtomicBool,
 }
@@ -116,6 +126,7 @@ impl Fixture {
                         server.entries.fetch_add(1, Ordering::Relaxed);
                         (200, "text/html", PAGE.to_string())
                     }
+                    "/pet.html" => (200, "text/html", "<!doctype html><title>Isolated pet</title>".into()),
                     "/recovery" => (200, "text/html", SHELL.to_string()),
                     "/gate" => {
                         server.gates.fetch_add(1, Ordering::Relaxed);
@@ -238,6 +249,7 @@ fn core(profile: &Path, fixture: &Fixture) -> Result<Arc<AppCore>, String> {
         zoom: Mutex::new(1.0),
         signed_in: AtomicBool::new(false),
         quitting: AtomicBool::new(false),
+        pet_temporarily_hidden: AtomicBool::new(false),
         replacing_instance: AtomicBool::new(false),
         channels: Mutex::new(crate::tray_channels::channel_states(&Value::Null)),
         lock: Mutex::new(None),
@@ -254,6 +266,22 @@ where
     let (send, receive) = tokio::sync::oneshot::channel();
     let handle = app.clone();
     app.run_on_main_thread(move || {
+        let core = handle.state::<Arc<AppCore>>();
+        let _ = send.send(action(&handle, core.inner()));
+    })
+    .map_err(|e| e.to_string())?;
+    receive.await.map_err(|e| e.to_string())?
+}
+
+// Use the production remote dispatch queue for remote button sequences. Native
+// menu restores below deliberately originate in a Tao event callback.
+async fn remote_ui<F>(app: &AppHandle, action: F) -> Result<(), String>
+where
+    F: FnOnce(&AppHandle, &Arc<AppCore>) -> Result<(), String> + Send + 'static,
+{
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    main_window::run_on_window_thread(app, move || {
         let core = handle.state::<Arc<AppCore>>();
         let _ = send.send(action(&handle, core.inner()));
     })
@@ -389,6 +417,7 @@ async fn wait_count(counter: &AtomicUsize, expected: usize, label: &str) -> Resu
 extern "C" {
     fn keepwork_startup_smoke_passive_application() -> bool;
     fn keepwork_startup_smoke_restore_application();
+    fn keepwork_startup_smoke_dock_reopen(expected_visible: bool) -> bool;
     fn keepwork_startup_smoke_capture_main(window: *mut std::ffi::c_void) -> bool;
     fn keepwork_startup_smoke_main_intact(window: *mut std::ffi::c_void) -> bool;
     fn keepwork_startup_smoke_overlay_present(window: *mut std::ffi::c_void) -> bool;
@@ -430,6 +459,256 @@ async fn reload(
     .await?;
     wait_count(&fixture.entries, expected, "entry navigation").await?;
     Ok(expected)
+}
+
+// Begin with a visible pet and the main window in the background. Finish in
+// the same state so the caller can verify normal restore and the page request count.
+fn check_temporary_pet_hide(app: &AppHandle, core: &AppCore) -> Result<(), String> {
+    let main = app.get_webview_window("main").ok_or("Missing main window")?;
+    let pet = app.get_webview_window("pet").ok_or("Missing pet")?;
+    let context = core.pet.snapshot()["context"].clone();
+
+    core.pet.set_expanded(true);
+    if pet_host::temporarily_hide_pet(app, core, &context).is_ok() {
+        return Err("An expanded pet accepted temporary hide".into());
+    }
+    core.pet.set_expanded(false);
+    if pet_host::temporarily_hide_pet(app, core, &json!("stale-pet-context")).is_ok()
+        || !pet.is_visible().map_err(|e| e.to_string())?
+    {
+        return Err("Stale pet context was allowed to hide the window".into());
+    }
+
+    pet_host::temporarily_hide_pet(app, core, &context)?;
+    if !pet_host::route_remote_back(app)? {
+        return Err("Back on the temporarily hidden pet fell through to native clear".into());
+    }
+    if pet.is_visible().map_err(|e| e.to_string())?
+        || main.is_visible().map_err(|e| e.to_string())?
+        || core.page_connection.lock().unwrap().presentation() != Presentation::Hidden
+        || !core.settings().pet_visible
+    {
+        return Err("Temporary hide changed the main presentation or saved pet preference".into());
+    }
+
+    main_window::toggle_remote_home(app);
+    let native = main.ns_window().map_err(|e| e.to_string())?;
+    if !main.is_visible().map_err(|e| e.to_string())?
+        || main.is_minimized().map_err(|e| e.to_string())?
+        || pet.is_visible().map_err(|e| e.to_string())?
+        || !unsafe { keepwork_startup_smoke_main_intact(native) }
+        || pet_host::route_remote_back(app)?
+    {
+        return Err("Home from temporary hide failed to restore the retained main document".into());
+    }
+    main_window::toggle_remote_home(app);
+    if main.is_visible().map_err(|e| e.to_string())?
+        || !pet.is_visible().map_err(|e| e.to_string())?
+        || !core.settings().pet_visible
+    {
+        return Err("Minimizing after temporary hide failed to show the pet again".into());
+    }
+    println!("{}", json!({"case": "remote-back-temporarily-hide-pet"}));
+    Ok(())
+}
+
+// Run the physical gesture's production dispatch, page IPC and presentation
+// without requesting a microphone or contacting a service in this shell smoke.
+async fn exercise_pet_phone_start(app: &AppHandle) -> Result<(), String> {
+    let service = app.state::<Arc<AppCore>>().remote_voice.dialogue.clone();
+    let handle = app.clone();
+    service.install(move |background| super::remote_dialogue::surface(&handle, background));
+    service.enter();
+    for expected_attached in [true, false] {
+        if !expected_attached {
+            service.exit("ok");
+            super::remote_phone_view::sync(app);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let attached = ui(app, |app, _| {
+                let main = app.get_webview_window("main").ok_or("Missing phone owner")?;
+                let native = main.ns_window().map_err(|e| e.to_string())?;
+                if main.is_visible().map_err(|e| e.to_string())? {
+                    return Err("Pet phone opened the full window".into());
+                }
+                Ok(!unsafe { keepwork_startup_smoke_main_intact(native) })
+            }).await?;
+            if attached == expected_attached { break; }
+            if Instant::now() >= deadline { return Err(format!("Pet phone view did not reach attached={expected_attached}")); }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    }
+    println!("{}", json!({ "case": "pet-gesture-retains-main-phone" }));
+    Ok(())
+}
+
+async fn minimize_to_pet(app: &AppHandle, fixture: &FixtureState) -> Result<(), String> {
+    let entries = fixture.entries.load(Ordering::Relaxed);
+    // Start with the native control to cover creation and reuse of the pet.
+    // Remote Home then switches each direction, including tightly spaced presses.
+    for (enabled, home_presses) in [
+        (true, 0), (false, 0), (true, 0),
+        (true, 1), (false, 1), (true, 2), (false, 2),
+    ] {
+        ui(app, move |_, core| {
+            core.update_settings(|s| s.pet_visible = enabled);
+            Ok(())
+        })
+        .await?;
+        if home_presses == 0 {
+            native_action(app, 3).await?;
+        } else {
+            remote_ui(app, move |app, _| {
+                for _ in 0..home_presses {
+                    main_window::toggle_remote_home(app);
+                }
+                Ok(())
+            })
+            .await?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = ui(app, |app, core| {
+                let main = app
+                    .get_webview_window("main")
+                    .ok_or("Main window was destroyed")?;
+                let pet_visible = app
+                    .get_webview_window("pet")
+                    .map_or(Ok(false), |pet| pet.is_visible())
+                    .map_err(|e| e.to_string())?;
+                Ok((
+                    core.page_connection.lock().unwrap().presentation(),
+                    main.is_visible().map_err(|e| e.to_string())?,
+                    main.is_minimized().map_err(|e| e.to_string())?,
+                    pet_visible,
+                ))
+            })
+            .await?;
+            let (presentation, main_visible, main_minimized, pet_visible) = state;
+            let expected = if home_presses == 2 {
+                presentation == Presentation::Main && main_visible && !main_minimized && !pet_visible
+            } else if enabled {
+                presentation == Presentation::Hidden && !main_visible && pet_visible
+            } else {
+                presentation == Presentation::Main && main_minimized && !pet_visible
+            };
+            if expected {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Minimize with pet enabled={enabled}, Home presses={home_presses} produced {state:?}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        if enabled && home_presses == 0 {
+            exercise_pet_phone_start(app).await?;
+        }
+        if home_presses == 0 {
+            ui(app, |app, core| {
+                main_window::show_main_window(app, core);
+                Ok(())
+            })
+            .await?;
+        } else if home_presses == 1 {
+            remote_ui(app, move |app, core| {
+                if enabled {
+                    check_temporary_pet_hide(app, core)?;
+                }
+                main_window::toggle_remote_home(app);
+                Ok(())
+            })
+            .await?;
+        }
+        remote_ui(app, |app, _| {
+            let main = app
+                .get_webview_window("main")
+                .ok_or("Missing restored window")?;
+            let pet = app.get_webview_window("pet").ok_or("Missing pet")?;
+            let native = main.ns_window().map_err(|e| e.to_string())?;
+            if !main.is_visible().map_err(|e| e.to_string())?
+                || main.is_minimized().map_err(|e| e.to_string())?
+                || pet.is_visible().map_err(|e| e.to_string())?
+                || !unsafe { keepwork_startup_smoke_main_intact(native) }
+            {
+                return Err("Restore did not return to the retained main WebView".into());
+            }
+            Ok(())
+        })
+        .await?;
+        if fixture.entries.load(Ordering::Relaxed) != entries {
+            return Err("Minimize/restore reloaded the active document".into());
+        }
+        println!(
+            "{}",
+            json!({"case": if home_presses == 0 { "native-minimize-restore" } else { "remote-home-restore" },
+                "petEnabled":enabled, "consecutiveHomePresses":home_presses})
+        );
+    }
+    Ok(())
+}
+
+async fn dock_reopen(app: &AppHandle, fixture: &FixtureState) -> Result<(), String> {
+    let entries = fixture.entries.load(Ordering::Relaxed);
+    for (pet_enabled, temporary_hide) in [(true, true), (true, false), (false, false)] {
+        remote_ui(app, move |app, core| {
+            core.update_settings(|s| s.pet_visible = pet_enabled);
+            main_window::toggle_remote_home(app);
+            if temporary_hide {
+                let context = core.pet.snapshot()["context"].clone();
+                pet_host::temporarily_hide_pet(app, core, &context)?;
+            }
+            Ok(())
+        }).await?;
+        for repeat in [false, true] {
+            let expected_event = fixture.dock_reopens.load(Ordering::Relaxed) + 1;
+            let has_visible_windows = repeat || (pet_enabled && !temporary_hide);
+            // Ordinary Dock minimization is animated. Wait for the native window
+            // state before delivering the next real application-delegate event.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let dispatched = ui(app, move |app, _| {
+                    let main = app.get_webview_window("main").ok_or("Missing main window")?;
+                    if !repeat && !pet_enabled && !main.is_minimized().map_err(|e| e.to_string())? {
+                        return Ok(false);
+                    }
+                    Ok(unsafe { keepwork_startup_smoke_dock_reopen(has_visible_windows) })
+                }).await?;
+                if dispatched {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!("Cannot dispatch Dock reopen with visible windows={has_visible_windows}, pet={pet_enabled}, temporary hide={temporary_hide}, repeat={repeat}"));
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            wait_count(&fixture.dock_reopens, expected_event, "Dock reopen event").await?;
+            remote_ui(app, move |app, core| {
+                let main = app.get_webview_window("main").ok_or("Missing main window")?;
+                let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
+                let native = main.ns_window().map_err(|e| e.to_string())?;
+                if !main.is_visible().map_err(|e| e.to_string())?
+                    || main.is_minimized().map_err(|e| e.to_string())?
+                    || pet.is_visible().map_err(|e| e.to_string())?
+                    || core.pet_temporarily_hidden.load(Ordering::Relaxed)
+                    || core.settings().pet_visible != pet_enabled
+                    || core.page_connection.lock().unwrap().presentation() != Presentation::Main
+                    || !unsafe { keepwork_startup_smoke_main_intact(native) }
+                    || !unsafe { keepwork_startup_smoke_document_focused(native) }
+                {
+                    return Err(format!("Dock reopen failed: pet={pet_enabled}, temporary hide={temporary_hide}, repeat={repeat}"));
+                }
+                Ok(())
+            }).await?;
+        }
+        if fixture.entries.load(Ordering::Relaxed) != entries {
+            return Err("Dock reopen reloaded the active document".into());
+        }
+        println!("{}", json!({"case":"dock-reopen","petEnabled":pet_enabled,"temporarilyHidden":temporary_hide,"repeatVerified":true}));
+    }
+    Ok(())
 }
 
 async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), String> {
@@ -585,6 +864,8 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>) -> Result<(), Stri
     loading_stays_hidden(&app, &fixture, "native-retry-loading-shell-hidden").await?;
     fixture.ready.store(true, Ordering::Relaxed);
     wait_view(&app, "native-retry-ready", Phase::Ready, true, Some(false), 8).await?;
+    minimize_to_pet(&app, &fixture).await?;
+    dock_reopen(&app, &fixture).await?;
     if fixture.unexpected.load(Ordering::Relaxed) != 0 {
         return Err(
             "Unexpected IPC failure, runtime probe, or network path reached the fixture".into(),
@@ -642,11 +923,15 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
         let exit = Arc::new(AtomicI32::new(1));
         let setup_exit = exit.clone();
         let setup_core = core.clone();
+        // Allow production pet window creation to use only this private fixture.
+        let mut context = tauri::generate_context!(test = true);
+        context.config_mut().build.dev_url = Some(fixture.origin.parse().unwrap());
         let app = tauri::Builder::default()
             .activate_ignoring_other_apps(false)
             .enable_macos_default_menu(false)
             .manage(core)
             .invoke_handler(tauri::generate_handler![
+                pet_host::desktop_publish_pet_state,
                 main_window::desktop_page_connection_status,
                 main_window::desktop_retry_page_connection,
                 main_window::desktop_page_connection_attempt,
@@ -684,6 +969,7 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                         );
                     })
                     .build()?;
+                main_window::observe_main_minimize(&main)?;
                 main.set_focusable(false)?;
                 main.set_ignore_cursor_events(true)?;
                 let native = main.ns_window()?;
@@ -742,9 +1028,15 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                 });
                 Ok(())
             })
-            .build(tauri::generate_context!(test = true))
+            .build(context)
             .map_err(|e| e.to_string())?;
-        let returned = app.run_return(|_, _| {});
+        let reopen_state = fixture.state.clone();
+        let returned = app.run_return(move |app, event| {
+            main_window::handle_dock_reopen(app, &event);
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                reopen_state.dock_reopens.fetch_add(1, Ordering::Relaxed);
+            }
+        });
         let code = exit.load(Ordering::Relaxed);
         Ok(if code == 0 { returned } else { code })
     })();

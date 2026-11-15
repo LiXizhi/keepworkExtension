@@ -12,6 +12,59 @@ body.dragging #art{filter:none}
 #panel{animation:pet-composer-in 180ms ease-out;transform-origin:bottom right}
 @keyframes pet-composer-in{from{opacity:0;transform:translateY(7px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
 @media(prefers-reduced-motion:reduce){#panel{animation:none}}
+#panel.remote-voice-open { animation: none; }
+#panel.remote-recording #draft {
+  background: #fffafa;
+  border-color: transparent;
+  outline: 1.5px solid rgba(169, 78, 86, .5);
+  outline-offset: -1px;
+}
+#remote-recording-status {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 5px;
+  margin-right: 8px;
+  color: #90575d;
+  font-weight: 600;
+}
+#remote-recording-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+#remote-voice-preview {
+  max-height: 2.8em;
+  flex-shrink: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+  color: #496053;
+}
+#remote-transcribing-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+  color: #637268;
+}
+#remote-transcribing-status > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  #remote-transcribing-status > span { animation: remote-transcribing-dot 1.2s ease-in-out infinite; }
+  #remote-transcribing-status > span:nth-child(2) { animation-delay: 150ms; }
+  #remote-transcribing-status > span:nth-child(3) { animation-delay: 300ms; }
+  @keyframes remote-transcribing-dot {
+    0%, 60%, 100% { opacity: .4; }
+    30% { opacity: 1; }
+  }
+}
 #pet{right:auto;bottom:auto}
 #exit-bubble{position:relative;min-height:0;padding:14px;border:1px solid #bed5c7;border-radius:18px;background:#f7fbf8fc;box-shadow:0 3px 8px #0002;overflow-y:auto}#exit-bubble p{margin:10px 0;line-height:1.5}#exit-personas{padding-left:20px;max-height:160px;overflow-y:auto;overflow-wrap:anywhere}#exit-personas:empty{display:none}#exit-confirm{margin-left:auto;background:#a63630;color:white}#exit-status{font-size:12px;color:#637268}
 
@@ -26,3 +79,32 @@ body.dragging #art{filter:none}
 #compact-controls output{display:block;max-width:220px;font-size:12px;padding:0 4px;overflow-wrap:anywhere}
 #compact-controls button{padding:5px 8px;margin:2px}
 #compact-controls button[aria-pressed=true]{background:#226145;color:white}
+
+#thinking { color: #53675a; line-height: 20px; }
+#thinking i { display: inline-block; font-style: normal; }
+@media (prefers-reduced-motion: no-preference) {
+  #thinking i { animation: remote-transcribing-dot 1.2s ease-in-out infinite; }
+  #thinking i:nth-child(2) { animation-delay: 150ms; }
+  #thinking i:nth-child(3) { animation-delay: 300ms; }
+}
+
+#phone-error {
+  padding: 0;
+  background: transparent;
+  color: #a52a23;
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#dialogue-icon {
+  position: absolute; top: 3px; left: 2px;
+  display: grid; place-items: center;
+  width: 26px; height: 26px;
+  border: 1px solid #a6c6b3; border-radius: 50%;
+  background: #eff9f2; color: #286740;
+  font: 17px/1 system-ui, sans-serif;
+  pointer-events: none;
+}
+#dialogue-icon[data-state="speaking"] { border-color: #c2b5de; background: #f4effb; color: #60408d; }
+#dialogue-icon[data-state="paused"] { background: #f1f2f3; color: #59636a; }

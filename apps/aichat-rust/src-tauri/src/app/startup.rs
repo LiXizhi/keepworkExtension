@@ -2,10 +2,11 @@
 
 use super::host_menu::setup_native_menu_and_tray;
 use super::main_window::{
-    handle_main_page_load, hide_main_window, show_main_window, sync_window_presentation,
+    dismiss_main_window, handle_main_page_load, show_main_window, sync_window_presentation,
+    DismissAction,
 };
 use super::pet_audio_host::notify_pet_audio_stopped;
-use super::pet_host::{broadcast_pet_state, ensure_pet_window};
+use super::pet_host::broadcast_pet_state;
 use super::platform::open_in_system_browser;
 use super::state::{resolve_profile_dir, AppCore};
 use super::updates_window::broadcast_update_status;
@@ -335,6 +336,7 @@ pub fn run() {
         zoom: Mutex::new(1.0),
         signed_in: AtomicBool::new(true),
         quitting: AtomicBool::new(false),
+        pet_temporarily_hidden: AtomicBool::new(false),
         replacing_instance: AtomicBool::new(false),
         channels: Mutex::new(channel_states(&Value::Null)),
         lock: Mutex::new(None),
@@ -400,7 +402,49 @@ pub fn run() {
             }
 
             let _ = setup_native_menu_and_tray(&app_handle, &core_for_setup);
-            core_for_setup.remote_voice.start_automatic();
+            let dialogue_app = app_handle.clone();
+            core_for_setup.remote_voice.dialogue.install(move |background| super::remote_dialogue::surface(&dialogue_app, background));
+            let pet_app = app_handle.clone();
+            core_for_setup.remote_voice.set_recording_focus(move || {
+                super::pet_host::focus_pet_for_remote_voice(&pet_app)
+            });
+            #[cfg(windows)]
+            crate::remote_voice::home_windows::install();
+            let back_app = app_handle.clone();
+            core_for_setup.remote_voice.set_pet_back(move |generation| {
+                let handle = back_app.clone();
+                let pressed = std::time::Instant::now();
+                let (done, result) = std::sync::mpsc::sync_channel(1);
+                // Decide the Back target on the same UI queue as Home. Discard
+                // expired or disconnected input without clearing another app.
+                main_window::run_on_window_thread(&back_app, move || {
+                    let active = pressed.elapsed() < Duration::from_secs(1)
+                        && handle.state::<Arc<AppCore>>().remote_voice.current(generation);
+                    let routed = if active { super::pet_host::route_remote_back(&handle) } else { Ok(true) };
+                    let _ = done.send(routed);
+                }).map_err(|e| e.to_string())?;
+                result.recv_timeout(Duration::from_secs(1)).map_err(|e| e.to_string())?
+            });
+            let home_app = app_handle.clone();
+            core_for_setup.remote_voice.set_home_pressed(move |generation| {
+                let handle = home_app.clone();
+                let pressed = std::time::Instant::now();
+                let _ = main_window::run_on_window_thread(&home_app, move || {
+                    if pressed.elapsed() < Duration::from_secs(1)
+                        && handle.state::<Arc<AppCore>>().remote_voice.current(generation)
+                    {
+                        main_window::toggle_remote_home(&handle);
+                    }
+                });
+            });
+            let composer_app = app_handle.clone();
+            core_for_setup.remote_voice.set_composer_focus(move || {
+                super::remote_voice_host::prepare_main_composer(&composer_app)
+            });
+            let voice_app = app_handle.clone();
+            core_for_setup.remote_voice.start_automatic(move || {
+                super::remote_voice_host::show_voice_setup_if_focused(&voice_app)
+            });
 
             // Configure main window navigation guard, close-to-tray, and initialization script
             let entry_target = core_for_setup
@@ -450,6 +494,7 @@ pub fn run() {
             // hidden. WebKit's default inactive scheduling can suspend speech
             // callbacks after cancel/restart, leaving the next reply silent.
             .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
+            .initialization_script(main_window::HOME_TEXT_GUARD)
             .initialization_script(&connection_script)
             .initialization_script(&init_script)
             .on_navigation(move |nav_url| {
@@ -469,6 +514,8 @@ pub fn run() {
                 // Finished can arrive after the new page has published its pet
                 // snapshot, so it must leave that state intact.
                 if payload.event() == PageLoadEvent::Started {
+                    core_for_page_load.remote_voice.dialogue.exit("navigation");
+                    super::remote_phone_view::sync(window.app_handle());
                     core_for_page_load.launch_intents.lock().unwrap().invalidate_document();
                     #[cfg(any(target_os = "macos", windows))]
                     super::browser_surface::reset(&window);
@@ -521,6 +568,7 @@ pub fn run() {
                 error
             });
             let main_win = main_win?;
+            main_window::observe_main_minimize(&main_win)?;
             #[cfg(target_os = "macos")]
             crate::navigation::install_frame_navigation(&main_win, &entry_target)?;
             #[cfg(windows)]
@@ -539,10 +587,7 @@ pub fn run() {
                         main_window::reload_main_window(&app_for_startup, &core_for_startup)
                     }
                     native_startup::Action::Hide => {
-                        hide_main_window(&app_for_startup, &core_for_startup);
-                        if core_for_startup.settings().pet_visible {
-                            ensure_pet_window(&app_for_startup, &core_for_startup, true);
-                        }
+                        dismiss_main_window(&app_for_startup, &core_for_startup, DismissAction::Close);
                     }
                 },
             )?;
@@ -570,10 +615,7 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     if !core_for_close.quitting.load(Ordering::Relaxed) {
                         api.prevent_close();
-                        hide_main_window(&app_for_close, &core_for_close);
-                        if core_for_close.settings().pet_visible {
-                            ensure_pet_window(&app_for_close, &core_for_close, true);
-                        }
+                        dismiss_main_window(&app_for_close, &core_for_close, DismissAction::Close);
                     }
                 }
             });
@@ -689,6 +731,7 @@ pub fn run() {
             updates_window::updates_window_apply_mcp,
             updates_window::updates_window_apply_desktop,
             super::remote_voice_host::remote_voice_status,
+            super::remote_dialogue::remote_voice_dialogue_closed,
             super::remote_voice_host::remote_voice_start,
             super::remote_voice_host::remote_voice_stop,
             super::remote_voice_host::remote_voice_begin_input,
@@ -701,6 +744,8 @@ pub fn run() {
             let automatic_exit_started = Arc::new(AtomicBool::new(false));
             let automatic_exit_finished = Arc::new(AtomicBool::new(false));
             app.run(move |app, event| {
+                #[cfg(target_os = "macos")]
+                main_window::handle_dock_reopen(app, &event);
                 #[cfg(target_os = "macos")]
                 if let tauri::RunEvent::Opened { urls } = &event {
                     for action in urls.iter().filter_map(|url| parse_launch_url(url.as_str())) {

@@ -12,6 +12,8 @@ mod pet_audio_host;
 mod pet_host;
 mod platform;
 mod remote_voice_host;
+mod remote_dialogue;
+mod remote_phone_view;
 mod sender;
 mod startup;
 #[cfg(all(feature = "dev-bins", target_os = "macos"))]

@@ -161,11 +161,13 @@ pub fn build_main_window_init_script_with_launch_capability(
     defaultBrainFolder: true,
     gitSetup: true,
     floatingPet: true,
+    petReplyPresentationVersion: 1,
+    petStreamingSpeechVersion: 1,
     petDictationAudioVersion: 1,
     petVoiceAudioVersion: 1,
     startupSignIn: true,
     ...(launchEnabled ? {{ launchIntents: true }} : {{}}),
-    ...(["darwin", "win32"].includes(bootstrap.platform) ? {{ browserSurfaceVersion: 1 }} : {{}}),
+    ...(["darwin", "win32"].includes(bootstrap.platform) ? {{ browserSurfaceVersion: 1, remoteDialogueVersion: 1, remotePhoneVersion: 1 }} : {{}}),
     ...(bootstrap.platform === "darwin" ? {{ browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
   }});
 
@@ -189,6 +191,7 @@ pub fn build_main_window_init_script_with_launch_capability(
         return () => browserListeners.delete(cb);
       }},
       reportStartupSignIn: (signedIn) => invoke("desktop_report_startup_signin", {{ signedIn: !!signedIn }}),
+      closeRemoteDialogue: (id) => invoke("remote_voice_dialogue_closed", {{ id }}),
       publishPetState: (state) => invoke("desktop_publish_pet_state", {{ state: state || {{}}, document: petAudioDocument }}),
       petResult: (result) => invoke("desktop_pet_result", {{ result: result || {{}} }}),
       petAudio: (op, id, seq) => invoke("desktop_pet_audio", {{ op: String(op || ""), id: String(id || ""), ...(seq == null ? {{}} : {{ seq }}), document: petAudioDocument }}),
