@@ -71,13 +71,16 @@ fn marker_command(name: &str) -> String {
     }
 }
 async fn wait_output(f: &Fixture, route: &str, marker: &str) -> Value {
+    wait_output_since(f, route, marker, 0).await
+}
+async fn wait_output_since(f: &Fixture, route: &str, marker: &str, cursor: u64) -> Value {
     let mut last_snapshot = Value::Null;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let (status, value) = send(
                 f,
                 "GET",
-                &format!("{route}/output?cursor=0"),
+                &format!("{route}/output?cursor={cursor}"),
                 json!({}),
                 OWNER,
                 true,
@@ -288,9 +291,9 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
     .unwrap();
 
     let sleeping = if cfg!(windows) {
-        "Start-Sleep -Seconds 30\r"
+        "function prompt { 'KW_PTY_' + 'READY> ' }; $p = 'KW_PTY_'; Write-Output ($p + 'SLEEPING'); Start-Sleep -Seconds 30\r"
     } else {
-        "sleep 30\r"
+        "PS1='KW_PTY_''READY> '; printf '%s%s\\n' KW_PTY_ SLEEPING; sleep 30\r"
     };
     send(
         &f,
@@ -301,7 +304,10 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
         true,
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A write acknowledgement does not prove that the shell has started the
+    // long command. Its computed output cannot be satisfied by input echo.
+    let sleeping_output = wait_output(&f, &route, "KW_PTY_SLEEPING").await;
+    let before_interrupt = sleeping_output["cursor"].as_u64().unwrap();
     assert_eq!(
         send(
             &f,
@@ -315,6 +321,9 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
         .0,
         StatusCode::OK
     );
+    // Ctrl+C is asynchronous. Wait for a new prompt so cancellation cannot
+    // flush the next command, and never accept an old prompt from replay.
+    wait_output_since(&f, &route, "KW_PTY_READY> ", before_interrupt).await;
     send(
         &f,
         "POST",
