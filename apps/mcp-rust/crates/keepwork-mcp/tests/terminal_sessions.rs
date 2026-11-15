@@ -71,6 +71,7 @@ fn marker_command(name: &str) -> String {
     }
 }
 async fn wait_output(f: &Fixture, route: &str, marker: &str) -> Value {
+    let mut last_snapshot = Value::Null;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let (status, value) = send(
@@ -86,11 +87,22 @@ async fn wait_output(f: &Fixture, route: &str, marker: &str) -> Value {
             if value["output"].as_str().unwrap_or("").contains(marker) {
                 return value;
             }
+            let tail: String = value["output"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .rev()
+                .take(4096)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            last_snapshot = json!({"outputTail":tail,"cursor":value["cursor"],"closed":value["closed"]});
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("real PTY must produce the command result, not just echo its input")
+    .unwrap_or_else(|_| panic!("real PTY must execute {marker}, not just echo its input; last snapshot: {last_snapshot}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

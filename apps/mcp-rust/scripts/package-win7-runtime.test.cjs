@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { packageWin7Runtime, BASE } = require('./package-win7-runtime.cjs');
 const { readRuntimeArchive } = require('../../../scripts/lib/runtime-archive.cjs');
 const { buildEnvironment, buildCommand, config } = require('./build-win7.cjs');
@@ -60,6 +61,34 @@ test('Windows 7/8 archive includes pinned genuine WinPTY assets and complete fil
     assert.equal(file.sha256, crypto.createHash('sha256').update(files.get(file.path)).digest('hex'));
   }
   assert.throws(() => packageWin7Runtime({ ...f, expected: f.info }), /must be new/);
+});
+
+test('Windows autocrlf checkout preserves upstream WinPTY bytes and integrity checks reject the unprotected control', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-winpty-checkout-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const assets = require('./winpty-assets.cjs');
+  const relative = 'apps/mcp-rust/vendor/winpty-0.4.3';
+  const attributes = fs.readFileSync(path.resolve(__dirname, '../../../.gitattributes'));
+  for (const protectedBytes of [true, false]) {
+    const repository = path.join(root, protectedBytes ? 'protected' : 'control');
+    fs.mkdirSync(repository);
+    fs.writeFileSync(path.join(repository, '.gitattributes'), protectedBytes ? attributes : '# control without pinned byte attributes\n');
+    fs.cpSync(assets.directory, path.join(repository, relative), { recursive: true });
+    const git = args => execFileSync('git', ['-c', 'core.autocrlf=true', '-c', 'core.safecrlf=false', ...args],
+      { cwd: repository, stdio: ['ignore', 'pipe', 'pipe'] });
+    git(['init', '--quiet']);
+    git(['add', '--', '.gitattributes', relative]);
+    fs.rmSync(path.join(repository, relative), { recursive: true });
+    git(['checkout-index', '--all', '--force']);
+    const checkedOut = path.join(repository, relative);
+    if (protectedBytes) {
+      const actual = assets.readAssets(checkedOut);
+      for (const [name, bytes] of assets.readAssets()) assert.deepEqual(actual.get(name), bytes, name);
+    } else {
+      assert.ok(fs.readFileSync(path.join(checkedOut, 'LICENSE'), 'utf8').includes('\r\n'));
+      assert.throws(() => assets.readAssets(checkedOut), /Bundled WinPTY digest mismatch: LICENSE/);
+    }
+  }
 });
 
 test('modified WinPTY assets are rejected before staging', t => {
