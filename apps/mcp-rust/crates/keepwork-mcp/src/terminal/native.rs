@@ -65,6 +65,26 @@ pub fn spawn_shell(
             pixel_height: 0,
         })
         .map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        // Windows children inherit their parent's ignore-Ctrl+C flag. Clear
+        // that flag before CreateProcess, as the Node ConPTY reference does;
+        // existing application handlers stay registered. Detached processes
+        // without a console have no console handler table to reset.
+        if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(6) {
+                return Err(format!("Cannot restore terminal Ctrl+C handling: {error}"));
+            }
+        }
+    }
     let mut command = CommandBuilder::new(shell);
     command.args(args);
     command.cwd(cwd);

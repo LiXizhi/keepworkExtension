@@ -110,6 +110,31 @@ async fn wait_output_since(f: &Fixture, route: &str, marker: &str, cursor: u64) 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contracts() {
+    #[cfg(all(windows, not(any(target_vendor = "win7", feature = "win7-compat"))))]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+            fn AllocConsole() -> i32;
+        }
+        // This integration-test executable owns one test. Reproduce the
+        // inheritable flag of CI/detached launchers; spawning the actual PTY
+        // must clear it without replacing the shell or weakening interrupt.
+        let mut enabled = unsafe { SetConsoleCtrlHandler(None, 1) };
+        if enabled == 0 && std::io::Error::last_os_error().raw_os_error() == Some(6) {
+            // A headless runner may lack a console. Only this isolated test
+            // allocates one so the inheritable precondition is real.
+            assert_ne!(unsafe { AllocConsole() }, 0);
+            enabled = unsafe { SetConsoleCtrlHandler(None, 1) };
+        }
+        assert_ne!(
+            enabled, 0,
+            "must establish the inherited ignore-Ctrl+C state"
+        );
+    }
     // Legacy readiness starts asynchronously. Missing assets still fail this
     // native test, while a cold agent has time for bounded startup retries.
     tokio::time::timeout(Duration::from_secs(30), async {
