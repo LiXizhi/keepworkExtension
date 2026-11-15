@@ -80,7 +80,7 @@ jobs:
       - name: Build mandatory Node reference
         run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-node-reference --level source --output .test-runtime/mcp-rust -- node scripts/build-node-reference.cjs
       - name: Check validation infrastructure
-        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-validation --level fixture --output .test-runtime/mcp-rust -- node --test --test-reporter=tap scripts/contract/harness-reference.test.cjs scripts/sync-aichat-runtime.test.cjs scripts/aichat-runtime-build.test.mjs scripts/aichat-runtime-freshness.test.cjs scripts/rust-validation-evidence.test.cjs scripts/rust-validation-workflows.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/smoke.test.cjs
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-validation --level fixture --output .test-runtime/mcp-rust -- node --test --test-concurrency=1 --test-reporter=tap scripts/contract/harness-reference.test.cjs scripts/sync-aichat-runtime.test.cjs scripts/aichat-runtime-build.test.mjs scripts/aichat-runtime-freshness.test.cjs scripts/rust-validation-evidence.test.cjs scripts/rust-validation-workflows.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/smoke.test.cjs
       - name: Format
         run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-format --level source --output .test-runtime/mcp-rust -- cargo fmt --all --check --manifest-path apps/mcp-rust/Cargo.toml
       - name: Lint
@@ -101,7 +101,7 @@ jobs:
             # The Mac Intel slice executes through Rosetta on the ARM runner;
             # this is wire/fixture evidence, not Intel-machine live acceptance.
             KEEPWORK_MCP_TEST_BIN="$GITHUB_WORKSPACE/apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX" \
-              node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "fixture-contracts-wire-$receipt_suffix" --level fixture --output .test-runtime/mcp-rust -- node --test --test-reporter=tap scripts/contract/*.test.cjs
+              node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "fixture-contracts-wire-$receipt_suffix" --level fixture --output .test-runtime/mcp-rust -- node --test --test-concurrency=1 --test-reporter=tap scripts/contract/*.test.cjs
           done
       - name: Smoke (spawn, handshake, /admin/stop)
         run: |

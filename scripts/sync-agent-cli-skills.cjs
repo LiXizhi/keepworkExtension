@@ -6,7 +6,7 @@ const developmentRoot = path.join(root, '.github/skills/agent-cli-maintenance');
 const catalog = require('../.github/skills/agent-cli-maintenance/config/providers.json');
 
 function recipe(value) {
-    return value.kind === 'npm' ? `运行 \`${value.command}\`。`
+    return ['npm', 'command'].includes(value.kind) ? `运行 \`${value.command}\`。`
         : `从 \`${value.url}\` 下载临时脚本，检查当前官方内容后用 ${value.shell || 'PowerShell'} 执行。`;
 }
 function render(p) {
@@ -25,7 +25,7 @@ function render(p) {
 - macOS：${recipe(p.macos)}证据：${p.macos.evidence}。
 - 检查版本：\`${p.commands[0]} --version\`；安装后旧 GUI PATH 可能尚未刷新，
   先检查常见安装目录，不为此重复安装。
-- 登录入口：\`${p.login}\`。在用户可见终端让用户完成授权，不复制凭据。
+- ${p.authentication === 'configuration' ? '配置入口（仅帮助，无登录/注销）' : '登录入口'}：\`${p.login}\`。${p.authentication === 'configuration' ? '按上游示例由用户配置模型服务；此命令不验证凭据。' : '在用户可见终端让用户完成授权，不复制凭据。'}
 - 更新：${p.update ? `\`${p.update}\`，仍需确认当前官方方法与原有安装渠道一致。` : '沿用原安装渠道核对官方稳定版，再执行对应包管理器更新；先记录旧版本与回退方法。'}
 
 ${p.notes.map(note => '- ' + note).join('\n')}
@@ -33,7 +33,7 @@ ${p.notes.map(note => '- ' + note).join('\n')}
 ## 维护验证
 
 原生协议：\`${p.protocol}\`；注册的命令候选：${p.commands.map(c => '`' + c + '`').join('、')}；
-原生参数：\`${p.args.join(' ') || '由 Claude stream-json adapter 构造'}\`。
+原生参数：\`${p.args.join(' ') || (p.protocol === 'trae' ? '由 Trae run adapter 构造' : '由 Claude stream-json adapter 构造')}\`。
 定期核对官方发布说明、安装脚本和协议变化。更新安装参考与源码注册表后，
 重新同步 AIChat/MCP Skill，并运行对应发现、协议和浏览器回归。
 
@@ -50,7 +50,7 @@ ${p.notes.map(note => '- ' + note).join('\n')}
 }
 
 function installReference(p) {
-    return `# ${p.name} CLI 安装参考\n\n这是产品运行时安装参考，不是独立 Skill。后端：\`${p.id}\`。\n官方来源：[${p.name}](${p.source})；核对日期：${p.reviewedAt}。\n\n先查已有 CLI 路径和版本，只安装用户请求的平台。通过 Keepwork run_terminal 和现有确认流程执行；没有本机工具时不声称已安装。\n\n- Windows：${recipe(p.windows)}证据：${p.windows.evidence}。\n- macOS：${recipe(p.macos)}证据：${p.macos.evidence}。\n- 版本：\`${p.commands[0]} --version\`。\n- 登录：\`${p.login}\`，由用户完成授权，不读取或复制凭据。\n\n${p.notes.map(n => '- ' + n).join('\n')}\n\n安装后重新检测真实路径，验证握手、原生模型及真实请求；未登录、未测试不能报告通过。旧 GUI PATH 不代表安装丢失。\n`;
+    return `# ${p.name} CLI 安装参考\n\n这是产品运行时安装参考，不是独立 Skill。后端：\`${p.id}\`。\n官方来源：[${p.name}](${p.source})；核对日期：${p.reviewedAt}。\n\n先查已有 CLI 路径和版本，只安装用户请求的平台。通过 Keepwork run_terminal 和现有确认流程执行；没有本机工具时不声称已安装。\n\n- Windows：${recipe(p.windows)}证据：${p.windows.evidence}。\n- macOS：${recipe(p.macos)}证据：${p.macos.evidence}。\n- 版本：\`${p.commands[0]} --version\`。\n- ${p.authentication === 'configuration' ? '配置帮助（无登录/注销）' : '登录'}：\`${p.login}\`，${p.authentication === 'configuration' ? '由用户按上游示例配置模型服务；此命令不验证凭据。' : '由用户完成授权，不读取或复制凭据。'}\n\n${p.notes.map(n => '- ' + n).join('\n')}\n\n安装后重新检测真实路径，验证握手、原生模型及真实请求；未登录、未测试不能报告通过。旧 GUI PATH 不代表安装丢失。\n`;
 }
 
 function sync({ aichatDir, write = false } = {}) {

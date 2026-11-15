@@ -18,6 +18,7 @@ mod path_identity;
 #[cfg(test)]
 mod persistence_tests;
 mod sessions;
+mod trae;
 #[cfg(test)]
 use persistence_tests::PersistenceStats;
 
@@ -352,6 +353,7 @@ impl AgentManager {
             let needs_native_history = data["backend"] == "codex" && !data["items"].is_array();
             if !data["items"].is_array()
                 || (data["backend"] == "gemini" && !data["nativeMetadata"]["nativeId"].is_string())
+                || (data["backend"] == "trae" && !data["nativeMetadata"]["driver"].is_string())
             {
                 let loaded = history::load(
                     &file,

@@ -1,5 +1,5 @@
-//! NSIS update handoff. The installer waits for this exact process to exit;
-//! it never terminates the desktop to make replacement succeed.
+//! NSIS update handoff waits for this exact process to exit normally. Subsequent
+//! installer checks may stop a reopened desktop in the same installation.
 use std::path::Path;
 
 pub(super) fn validate_install(executable: &Path) -> Result<(), String> {

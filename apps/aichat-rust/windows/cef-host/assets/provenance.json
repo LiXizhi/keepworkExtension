@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "asset": "dragon-sheet.png",
+  "source": "https://cdn.keepwork.com/maisi/magichaqi/pet/dragon_green_20260528090748.webp",
+  "sourceReference": "src/pet/pet.css default AIChat 抱抱龙",
+  "sourceSha256": "6a620801887b2356330990d2ef3a388fa98a6e31232759fa916241a2db7d9b20",
+  "sourceSize": 69868,
+  "operation": "Lossless RGBA pixel conversion from existing WebP to PNG; native renderer uses first cell of existing 4x4 sheet, matching CSS background-size:400% 400%",
+  "dimensions": [
+    1254,
+    1254
+  ],
+  "pngSha256": "1db613fb903aff8b9e831cb54c242c90fa4cf61151b4f7047c3ee2d42e28665c",
+  "nativeRuntimeNetworkRequired": false
+}

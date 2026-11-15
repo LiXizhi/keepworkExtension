@@ -1,0 +1,62 @@
+name: Windows PTY startup differential diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    name: Diagnostic only (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            rust: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            arch: arm64
+            rust: aarch64-pc-windows-msvc
+    env:
+      KEEPWORK_PTY_DIAGNOSTIC_OUTPUT: ${{ github.workspace }}/.test-runtime/pty-diagnostic
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-${{ matrix.rust }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pty-diagnostic-${{ matrix.arch }}
+          workspaces: apps/mcp-rust -> target
+      - name: Install local Node PTY comparison dependencies
+        run: |
+          mkdir -p .test-runtime/pty-diagnostic
+          npm ci --include=dev 2>&1 | tee .test-runtime/pty-diagnostic/dependencies.log
+      - name: Observe actual Rust native spawn boundary in isolated test processes
+        timeout-minutes: 15
+        run: |
+          cargo test --locked --manifest-path apps/mcp-rust/Cargo.toml --lib terminal::backend::tests::windows_pty_startup_differential_diagnostic -- --ignored --exact --nocapture 2>&1 | tee .test-runtime/pty-diagnostic/rust.log
+      - name: Observe Node PTY with the identical diagnostic case manifest
+        if: always()
+        timeout-minutes: 5
+        run: |
+          node apps/mcp-rust/scripts/pty-startup-diagnostic.cjs .test-runtime/pty-diagnostic 2>&1 | tee .test-runtime/pty-diagnostic/node.log
+      - name: Preserve diagnostic observations (not release acceptance)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-pty-startup-${{ matrix.arch }}
+          path: .test-runtime/pty-diagnostic/
+          if-no-files-found: warn
+          retention-days: 14

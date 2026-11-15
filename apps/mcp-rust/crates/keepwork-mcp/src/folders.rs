@@ -5,6 +5,9 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_vendor = "win7")]
+mod windows_legacy;
+
 pub const FOLDER_BROWSER_API: &str = "folders-v1";
 
 fn is_directory(path: &Path) -> bool {
@@ -43,6 +46,12 @@ fn mac_folder(key: &str) -> Option<String> {
     }
 }
 
+#[cfg(target_vendor = "win7")]
+fn windows_user_folders() -> Vec<(String, String, String)> {
+    windows_legacy::user_folders()
+}
+
+#[cfg(not(target_vendor = "win7"))]
 fn windows_user_folders() -> Vec<(String, String, String)> {
     // Fixed script; user data is never interpolated into PowerShell source.
     const SCRIPT: &str = "$k=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders'; $f=@{}; foreach($p in $k.PSObject.Properties){if($p.Value -is [string]){$f[$p.Name]=[Environment]::ExpandEnvironmentVariables($p.Value)}}; $f | ConvertTo-Json -Compress";

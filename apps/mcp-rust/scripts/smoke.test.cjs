@@ -58,7 +58,10 @@ function fixture(t, mode = 'normal') {
   `);
   return {
     directory, journal,
-    options: { binary: process.execPath, args: [script], expectedBuildInfo: identity, startupTimeoutMs: 2000, requestTimeoutMs: 200, shutdownTimeoutMs: 300, env: { KP_SMOKE_FIXTURE_MODE: mode, KP_SMOKE_FIXTURE_JOURNAL: journal, KEEPWORK_MCP_REQUIRE_AUTH: '0' } },
+    // Success and identity assertions exercise runSmoke's normal bounded
+    // production budgets. Tight deadlines belong only to the timeout cases;
+    // a 200ms scheduler delay must not replace an expected ownership error.
+    options: { binary: process.execPath, args: [script], expectedBuildInfo: identity, env: { KP_SMOKE_FIXTURE_MODE: mode, KP_SMOKE_FIXTURE_JOURNAL: journal, KEEPWORK_MCP_REQUIRE_AUTH: '0' } },
     rows: () => fs.existsSync(journal) ? fs.readFileSync(journal, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [],
   };
 }
@@ -140,7 +143,7 @@ for (const mode of ['replace-before-stop', 'wrong-version', 'wrong-commit', 'wro
 for (const mode of ['hang-headers', 'hang-body', 'large-body', 'early-exit', 'ignore-stop']) test('a failed daemon is bounded and reaped: ' + mode, async t => {
   const f = fixture(t, mode);
   const started = Date.now();
-  await assert.rejects(runSmoke({ ...f.options, startupTimeoutMs: 450, requestTimeoutMs: 100 }), /timed out|exceeded|exited|exit cleanly/);
+  await assert.rejects(runSmoke({ ...f.options, startupTimeoutMs: 450, requestTimeoutMs: 100, shutdownTimeoutMs: 300 }), /timed out|exceeded|exited|exit cleanly/);
   assert.ok(Date.now() - started < 2500, 'failure and cleanup stay bounded');
   assertReaped(f);
 });

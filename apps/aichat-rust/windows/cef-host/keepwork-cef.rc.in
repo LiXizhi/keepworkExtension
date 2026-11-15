@@ -1,2 +1,6 @@
 #include <winres.h>
+101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/../../src-tauri/icons/icon.ico"
+102 RCDATA "@CMAKE_CURRENT_SOURCE_DIR@/assets/dragon-sheet.png"
+#if !defined(CEF_USE_BOOTSTRAP)
 1 RT_MANIFEST "@CMAKE_CURRENT_SOURCE_DIR@/keepwork-cef.exe.manifest"
+#endif

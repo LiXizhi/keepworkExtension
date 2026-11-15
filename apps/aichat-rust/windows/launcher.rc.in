@@ -1,0 +1,2 @@
+#include <winres.h>
+101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/../src-tauri/icons/icon.ico"

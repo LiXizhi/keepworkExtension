@@ -9,6 +9,8 @@ InstallDirRegKey HKCU "Software\Keepwork\Compatible" "InstallDir"
 !include "WinVer.nsh"
 !include "x64.nsh"
 !define MUI_ABORTWARNING
+!define MUI_ICON "..\src-tauri\icons\icon.ico"
+!define MUI_UNICON "..\src-tauri\icons\icon.ico"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -51,7 +53,7 @@ Section "Keepwork"
     MessageBox MB_ICONSTOP "请完全退出 Keepwork（包括兼容窗口）后重试安装。"
     Abort
   ${EndIf}
-  ; Do not run the modern Rust helper on Windows 7/8. CEF mode starts no MCP.
+  ; Do not run the modern Rust helper on Windows 7/8.
   ${If} ${AtLeastWin10}
     InitPluginsDir
     File /oname=$PLUGINSDIR\keepwork-installer-helper.exe "${PAYLOAD}\aichat-rust.exe"
@@ -69,11 +71,13 @@ Section "Keepwork"
   File /r "${PAYLOAD}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\Keepwork"
-  CreateShortcut "$SMPROGRAMS\Keepwork\Keepwork 兼容版.lnk" "$INSTDIR\Keepwork.exe"
+  CreateShortcut "$SMPROGRAMS\Keepwork\Keepwork 兼容版.lnk" "$INSTDIR\Keepwork.exe" "" "$INSTDIR\Keepwork.exe" 0
+  CreateShortcut "$DESKTOP\Keepwork 兼容版.lnk" "$INSTDIR\Keepwork.exe" "" "$INSTDIR\Keepwork.exe" 0
   WriteRegStr HKCU "Software\Keepwork\Compatible" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkCompatible" "DisplayName" "Keepwork 兼容版"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkCompatible" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkCompatible" "UninstallString" '$"$INSTDIR\Uninstall.exe$"'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkCompatible" "DisplayIcon" '"$INSTDIR\Keepwork.exe",0'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkCompatible" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkCompatible" "InstallLocation" "$INSTDIR"
 SectionEnd
 
@@ -96,12 +100,13 @@ Section "Uninstall"
     ${EndIf}
   ${EndIf}
   Delete "$SMPROGRAMS\Keepwork\Keepwork 兼容版.lnk"
+  Delete "$DESKTOP\Keepwork 兼容版.lnk"
   RMDir "$SMPROGRAMS\Keepwork"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "Software\Keepwork\Compatible"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\KeepworkCompatible"
   ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "KeepworkAIChatDesktop"
-  StrCmp $0 '$"$INSTDIR\Keepwork.exe$" --background' 0 +2
+  StrCmp $0 '"$INSTDIR\Keepwork.exe" --background' 0 +2
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "KeepworkAIChatDesktop"
   ; Keep browser profiles, conversations and verified downloads in LocalAppData.
 SectionEnd

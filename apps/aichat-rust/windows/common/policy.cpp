@@ -49,6 +49,24 @@ std::string zip_path(const std::string& input, bool directory) {
   }
   return s;
 }
+bool newer_cef_host(const Manifest& candidate, const Manifest& current) {
+  if (candidate.channel != current.channel || candidate.arch != current.arch) return false;
+  // Compare numeric components without truncating long signed version strings.
+  auto next = [](const std::string& value, std::size_t& offset) {
+    const auto end = value.find('.', offset);
+    auto part = value.substr(offset, end == std::string::npos ? end : end - offset);
+    offset = end == std::string::npos ? value.size() : end + 1;
+    const auto significant = part.find_first_not_of('0');
+    return significant == std::string::npos ? std::string("0") : part.substr(significant);
+  };
+  std::size_t left = 0, right = 0;
+  for (unsigned i = 0; i < 3; ++i) {
+    const auto a = next(candidate.version, left), b = next(current.version, right);
+    if (a.size() != b.size()) return a.size() > b.size();
+    if (a != b) return a > b;
+  }
+  return false;
+}
 Manifest validate_manifest(const std::string& payload, const std::string& channel,
                            const std::string& arch, WindowsVersion os) {
   require(payload.size() <= 1024 * 1024, "Manifest too large");
@@ -67,6 +85,12 @@ Manifest validate_manifest(const std::string& payload, const std::string& channe
   require(tuple(minimum) >= tuple(channel == "legacy" ? WindowsVersion{6, 1, 7601} : WindowsVersion{10, 0, 0}), "Invalid package Windows baseline");
   Manifest m;
   m.channel = channel; m.arch = arch;
+  // Optional host capability. Missing, malformed or future contracts leave
+  // ordinary browser startup available without sending an unknown argument.
+  m.service_launcher = j.contains("serviceLauncher") && j["serviceLauncher"].is_number_integer()
+    && j["serviceLauncher"] == 1;
+  m.maintenance = j.contains("maintenance") && j["maintenance"].is_number_integer()
+    && j["maintenance"] == 1;
   m.version = j.at("version").get<std::string>();
   m.cef_version = j.at("cefVersion").get<std::string>();
   require(std::regex_match(m.version, std::regex("[0-9]+\\.[0-9]+\\.[0-9]+")), "Invalid host version");

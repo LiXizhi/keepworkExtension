@@ -1,0 +1,28 @@
+#pragma once
+namespace keepwork_cef {
+// The existing app-local theme sampler only observes CSS. Its native reporter
+// is captured in a closure and removed from the window before page scripts run.
+inline constexpr char kChromeThemeScript[] = R"KW_THEME((() => {
+  const report = window.__keepworkChromeColors;
+  delete window.__keepworkChromeColors;
+  if (typeof report !== "function") return;
+  @KEEPWORK_CHROME_THEME_SCRIPT@
+  const values = Object.create(null);
+  const names = ["--chrome-bg", "--chrome-text", "--chrome-hover"];
+  let queued = false, previous = "";
+  const style = { setProperty(name, value) {
+    if (!names.includes(name)) return;
+    values[name] = value;
+    if (queued) return;
+    queued = true;
+    Promise.resolve().then(() => {
+      queued = false;
+      const colors = names.map(key => values[key]);
+      if (!colors.every(color => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color))) return;
+      const key = colors.join(":");
+      if (key !== previous) { previous = key; report(...colors); }
+    });
+  }};
+  mountDesktopTheme({ host: { style }, invoke: () => Promise.resolve() });
+})())KW_THEME";
+}

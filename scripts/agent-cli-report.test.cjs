@@ -32,6 +32,14 @@ test('legacy Gemini ACP uses advertised protocol and missing probe metadata stay
   const { report } = await fixture(t, { gemini:{available:true,probe:'protocol',protocol:'acp'}, claude:{available:true} }, {backends:['gemini','claude']});
   assert.deepEqual(report.results.map(row => row.checks), [['handshake'],['backend-availability']]);
 });
+test('open-source Trae discovery does not count as an ACP handshake; older Trae services retain their advertised contract', async t => {
+  const native = await fixture(t, { trae:{available:true,probe:'executable',protocol:'trae',authenticated:null} }, {backends:['trae']});
+  assert.deepEqual(native.report.results[0].checks, ['cli-executable']);
+  assert.equal(native.report.results[0].status, 'not_tested');
+  const legacy = await fixture(t, { trae:{available:true,probe:'protocol',protocol:'acp'} }, {backends:['trae']});
+  assert.deepEqual(legacy.report.results[0].checks, ['handshake']);
+  assert.equal(legacy.report.passed, false);
+});
 test('a selected provider absent from an older service remains unavailable', async t => {
   const { report } = await fixture(t, { codex:{available:true} }, {backends:['deepseek']});
   assert.equal(report.results[0].backend, 'deepseek');

@@ -56,7 +56,7 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
 
 ### 小米遥控器语音输入
 
-正常的 Tauri 客户端在「编辑 → 遥控器语音输入…」和系统托盘提供独立设置窗口，适配小米蓝牙语音遥控器 2 / 2 Pro（RC001 / RC003）。蓝牙连接、ATVV 音频解码与输入控制内置于 Rust 客户端，语音由 **Keepwork 云端 ASR** 转为文字，识别完成时直接输入到当前前台应用的输入焦点。无需安装 Python、下载本地语音模型或准备额外运行环境。此入口独立于 AIChat 网页和 MCP 版本；语音识别需要网络。CEF 兼容宿主不包含此能力。真实蓝牙与跨应用输入的验收状态见 [VALIDATION.md](VALIDATION.md)。
+正常的 Tauri 客户端在「编辑 → 遥控器语音输入…」和系统托盘提供独立设置窗口，适配小米蓝牙语音遥控器 2 / 2 Pro（RC001 / RC003）。蓝牙连接、ATVV 音频解码与输入控制内置于 Rust 客户端，语音由 **Keepwork 云端 ASR** 转为文字，识别完成时直接输入到当前前台应用的输入焦点。无需安装 Python、下载本地语音模型或准备额外运行环境。此入口独立于 AIChat 网页和 MCP 版本；语音识别需要网络。`0.2.153` 起，Windows 10 1703（15063）及以上 / Windows 11 的 CEF 兼容宿主也通过随包原生语音进程复用该能力；Windows 7/8/8.1 显示明确的系统能力限制，麦克风语音输入和普通聊天仍可使用。兼容宿主的范围见 [Windows CEF 兼容说明](docs/windows-cef.md)，真实蓝牙与跨应用输入的验收状态见 [VALIDATION.md](VALIDATION.md)。
 
 **0.2.76 起默认配对后自动开启。** 客户端启动后被动检查系统中已配对或已连接的小米 RC001 / RC003，只有找到唯一匹配设备才自动启用遥控器会话；没有候选设备时不主动扫描、不拦截 F5、不弹出设置，也不抢焦点。后台定时检查会继续识别之后的配对或唤醒。多个设备且未指定设备 ID 时不会任意选取，可在设置查看状态并指定目标；指定 ID 没有匹配时也不会改连其他设备。系统不能提供足够的配对/连接证据时不自动启用，并在设置说明原因；权限未就绪时只显示状态，不反复弹出授权。
 
@@ -90,7 +90,7 @@ macOS 上，如果前台 Chrome 或 Electron 应用尚未提供输入框位置�
 
 在桌宠模式以外，清除仅对当前可编辑输入框执行全选、Backspace，不读写剪贴板、不切换窗口；只读区域或无法确认可编辑性时提示先点击可编辑输入框。macOS 的物理返回键还会取消当前录音和在途识别，丢弃迟到结果；语音键仍按住时丢弃到松手，不主动关闭 ATVV 通道，清除后不会被旧结果重新填回。语音「清除提示词」需要等待本段识别成功，不提供即时中断在途识别的能力。
 
-macOS 首次使用需按系统提示授予 Keepwork 蓝牙、辅助功能和输入监控权限。权限拒绝或缺失时按窗口提示在系统设置中处理，不绕过系统授权。Windows 需要可用 BLE 适配器；向权限级别更高的应用粘贴可能被系统阻止。Linux 及旧 Windows/CEF 路径不在本轮支持范围内。
+macOS 首次使用需按系统提示授予 Keepwork 蓝牙、辅助功能和输入监控权限。权限拒绝或缺失时按窗口提示在系统设置中处理，不绕过系统授权。Windows 需要可用 BLE 适配器；向权限级别更高的应用粘贴可能被系统阻止。Linux 及 Windows 7/8/8.1 的原生 BLE 遥控器路径不在支持范围内。
 
 ATVV 只在按住语音键时采集录音。请等识别完成后再录下一段；忙时按下的新段整段丢弃，不排队，也不接收后半句。就绪期间会全局预留 F5，实体键盘的 F5 也会被拦截；停止、断连或退出会释放。客户端不全局拦截 Enter、Escape 或菜单键，不改写系统设备 UserKeyMapping。口述、清除和发送命令均使用当前焦点，识别结束时不恢复录音开始时的窗口或光标；口述输入不要求 WebView 提供可访问性选区信息，只有清除需要确认当前焦点可编辑。执行客户端动作时如仍按住 Ctrl、Alt、Shift、Command 或 Windows 等修饰键，本次不执行，并明确提示「请松开修饰键」；OK 的系统原生行为仍由操作系统处理。普通口述的系统粘贴会使用剪贴板，替换原有剪贴板内容。
 
@@ -174,7 +174,13 @@ AIChat 本地源码服务通过 `AICHAT_DESKTOP_LOCAL_SOURCE=1` 或「使用本�
 
 Windows 发布工作流支持仓库 Secrets `WINDOWS_CERT_PFX_BASE64`（含代码签名私钥的 PFX，Base64 编码）和 `WINDOWS_CERT_PASSWORD`。配置后先对 Rust MCP 签名，再生成资源清单；Tauri 对桌面程序和 NSIS 安装包签名，最后验证安装包及解包后的程序签名和证书指纹。未配置证书时工作流明确告警，生成的仍是未签名测试包。证书须支持 CI 签名；依赖硬件或云签名服务的证书需要对应签名提供程序。
 
-安装器通过本版本程序的 `--stop-mcp <安装目录>` 模式停止该目录内的 MCP：原生 Windows API 核对可执行文件路径、保留同一进程句柄并等待退出，失败则中止安装，不按进程名全局结束服务，也不运行 PowerShell 脚本。新安装的登录自启动默认关闭，已有开关偏好保留。新版本在后台下载并校验后，于完全退出时静默覆盖原安装目录；点击“重启并更新”则在覆盖后重新打开应用。安装器先核对原进程身份并等待退出，不强制结束桌面进程。更新包须位于下载目录且通过大小和 SHA-256 校验。开发版、便携版和兼容 Launcher 不走此原生覆盖路径。MCP ZIP 更新在 Rust 内解压，支持 Zip64 和 data descriptor。
+原生 Tauri 安装器在安装、覆盖和卸载前，使用本版本打包的 `--stop-desktop <可执行文件路径>` helper 终止目标安装目录内仍在运行的 `Keepwork.exe` / `aichat-rust.exe`（包括隐藏到托盘或宠物的桌面进程），确认退出后再用 `--stop-mcp <安装目录>` 停止该目录内的 MCP。选择“安装前卸载”时，此关闭步骤在运行旧版卸载器之前完成；仅打开或取消安装器不会关闭应用。原生 Windows API 核对完整可执行文件路径，保留同一进程句柄并等待退出；不按进程名全局结束进程，不影响其他安装或 VS Code / Local Helper 的服务，也不运行 PowerShell 脚本。无法核验路径、权限不足、终止失败或等待超时时，中止替换或删除文件，并以中文显示具体原因及处理建议，保留已下载更新包。兼容 Launcher 安装器使用独立流程，不适用上述桌面终止逻辑。
+
+每个安装器或卸载器只在自己的临时插件目录中解压一次辅助程序，后续关闭与检查操作复用该文件，避免重复覆盖刚运行或仍被安全软件扫描的可执行文件。首次解压失败时，以中文显示失败步骤、目标路径和排查建议并中止操作；不会允许忽略错误后继续替换或删除应用文件。
+
+此解压修复从 **0.2.125** 的安装器与其生成的卸载器起生效，不能追溯修改已经安装的旧卸载器。若旧卸载器仍提示无法写入临时目录中的 `keepwork-installer-helper.exe`，运行新版安装器时选择“请勿卸载”，覆盖安装以更新卸载器，再正常卸载。选择“安装前卸载”仍会运行旧卸载器，可能再次遇到旧问题；覆盖安装保留用户数据，卸载时仍按用户选择的数据清理选项执行。
+
+新安装的登录自启动默认关闭，已有开关偏好保留。新版本在后台下载并校验后，于完全退出时静默覆盖原安装目录；点击“重启并更新”则在覆盖后重新打开应用。自动更新交接仍先核对原进程的 PID、创建时间和可执行文件路径并等待正常退出；身份核验失败或等待超时时中止本次更新并显示中文原因。更新包须位于下载目录且通过大小和 SHA-256 校验。开发版、便携版和兼容 Launcher 不走此原生覆盖路径。覆盖安装保留用户配置、聊天数据和工作区；卸载仍按用户选择的数据清理选项执行。MCP ZIP 更新在 Rust 内解压，支持 Zip64 和 data descriptor。
 
 这些措施不能保证杀毒软件不误报。确有误报时应保留告警名称、被隔离文件路径和 SHA-256，向对应厂商提交样本复核；提交样本会向厂商上传二进制，应由发布负责人执行。现有 GrokX 的历史检测不能证明 Keepwork 的具体触发原因。
 
@@ -240,7 +246,7 @@ xcrun swiftc -parse-as-library -module-cache-path /private/tmp/aichat-wk-module-
 
 从 2026-11-13 起，后续桌面发布统一使用标准 `v<主版本>.<次版本>.<补丁版本>` 标签，例如 `v0.2.112`，标签中的版本必须与四处桌面清单一致。此约定同时记录在根目录 [AGENTS.md](../../AGENTS.md#rust-desktop-release-tags-appsaichat-rust)，供后续开发和发布遵循；其他产品继续使用各自独立的版本与标签约定。
 
-在 `v<版本>` 标签上手动触发 [Rust 安装包发布工作流](../../.github/workflows/aichat-rust-windows-release.yml) 后，GitHub 负责构建、校验 Windows x64 / ARM64 EXE 与 macOS Universal DMG，并将三个安装包、Windows 产物验证清单和 `SHA256SUMS-<版本>.txt` 汇总为 `aichat-rust-release-packages` artifact。GitHub 不再上传七牛或公开 Release；创建或推送标签也不会自动发布。
+在 `v<版本>` 标签上手动触发 [Rust 安装包发布工作流](../../.github/workflows/aichat-rust-windows-release.yml) 时，默认 `edition=all` 同时构建现代版和 Win7/Win8 x64 专版。现代 Windows x64 / ARM64 EXE 与 macOS Universal DMG、Windows 产物验证清单和 `SHA256SUMS-<版本>.txt` 汇总为 `aichat-rust-release-packages`，专版另存为 `aichat-rust-win7-win8-x64` artifact。仅现代版可显式选 `edition=modern`，仅专版选 `win7-win8`。GitHub 不再上传七牛或公开 Release；创建或推送标签也不会自动发布。
 
 产物由此设备通过 `http://127.0.0.1:7890` 下载，本地核对 run ID、完整源提交和校验和后，由此设备直连七牛上传。七牛凭据使用本机环境中的 `KP_QINIU_ACCESS_KEY`、`KP_QINIU_SECRET_KEY`，不写入命令参数或仓库。三个安装包全部通过 CDN 大小与 SHA-256 校验后，本地发布器才提升三个更新 feed、在 GitHub Release 正文顶部写入可点击的 CDN 下载地址，最后上传附件并公开 Release。新建 Release 在失败时保持草稿；重跑时保留原说明并替换同一自动下载区块。
 
@@ -263,10 +269,18 @@ node .github/skills/rust-release/scripts/publish-local.cjs \
 
 实际发布时给第二条命令显式添加 `--publish true`。所有 GitHub `gh` 子进程（包括 Release 附件上传）均强制使用本机代理并剔除七牛密钥；七牛发布器自身清除代理后直连七牛。代理不可用、身份不匹配或验收失败时中止，不回退到 GitHub 上传七牛。保留下载目录不变，发布日志和新增回执存到目录外，避免重试时文件清单校验失败。
 
-独立 MCP 四个目标也采用同样的本机下载和上传路径。其证据验证需要仓库根目录的 Node 依赖，尚未安装时先运行 `npm ci --ignore-scripts`，已有依赖可复用。完整双产品流程与验收要求见 [rust-release Skill](../../.github/skills/rust-release/SKILL.md)。
+独立 MCP 四个现代目标也采用同样的本机下载和上传路径。其证据验证需要仓库根目录的 Node 依赖，尚未安装时先运行 `npm ci --ignore-scripts`，已有依赖可复用。默认 `/rust-release` / `all` 还必须通过专版发布器上传 Win7/Win8 客户端、专用 MCP 和 CEF；实际发布显式选择 `legacy-signing=production` 并保留三系统验收门禁。完整流程与验收要求见 [rust-release Skill](../../.github/skills/rust-release/SKILL.md)，`modern` 模式保留仅现代双产品发布。
 
 已有本地安装包仍可使用原入口预览 CDN 发布计划（不上传）：
 
 ```bash
 node apps/aichat-rust/scripts/publish-release.cjs --release-dir dist --version <版本> --dry-run
 ```
+
+## Win7 / Win8 x64 专版（兼容预览）
+
+独立专版面向 Windows 7 SP1 x64、Windows 8 x64、Windows 8.1 x64，使用原生 C++ Launcher、CEF109 和共享源码构建的兼容版 Rust MCP，安装到 `KeepworkWin7Win8`。默认完整预览包内置同信任根签名的 CEF109 归档；薄包首次无缓存时需要联网下载。保留基础文件、搜索和普通 `run_terminal`；交互式 WinPTY 终端按运行服务实际声明的 `terminalApi` 能力提供，后端未就绪时仅终端功能降级。不提供现代 Tauri Bridge，MCP 启动失败仍可打开云聊天。
+
+`0.2.153` 为兼容宿主的宠物对话面板增加语音输入、通话 / 结束通话和静音；使用同一 AIChat 主页的账号、草稿与语音设置，麦克风需要用户授权。文字输入支持 Enter 发送、Shift+Enter 换行，输入法确认候选不会误发送。麦克风音频由受信任主页采集，原生窗口仅操作原有宠物协议；语音和文字能力均不要求同步升级 MCP。Windows 7/8/8.1 的真实设备、CEF 录音及通话仍待分别实测。
+
+此入口与前述历史通用 CEF 预览分开，构建和更新渠道独立于现代版。使用 [rust-release 的 Win7/Win8 流程](../../.github/skills/rust-release/references/windows7.md) 准备专版；完整支持范围、完整包/薄包区别和逐系统验收以 [Windows CEF 兼容说明](docs/windows-cef.md) 为准。现代 Windows 构建或单份 MCP smoke 不能代表三个旧系统的安装、CEF、登录和更新已验收；本轮开发未执行发布。

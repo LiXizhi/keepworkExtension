@@ -10,13 +10,15 @@ const {AcpHarness}=require('../src/core/acpHarness.ts');
 const {CodexHarness}=require('../src/core/codexHarness.ts');
 const {ClaudeHarness}=require('../src/core/claudeHarness.ts');
 const {AntigravityHarness}=require('../src/core/antigravityHarness.ts');
+const {TraeHarness}=require('../src/core/traeHarness.ts');
 const antigravityFixture=path.join(__dirname,'fixtures/fake-antigravity.cjs');
+const traeFixture=path.join(__dirname,'fixtures/fake-trae.cjs');
 const {AGENT_CLI}=require('../src/core/agentCliBackends.ts');
 const claudeFixture=path.join(__dirname,'fixtures/fake-claude.cjs');
 const codexFixture=path.join(__dirname,'fixtures/fake-codex-session.cjs');
 const {cliCommand}=require('../src/core/agentCliProcess.ts');
 const {handleAgentHttp}=require('../src/mcp/agentHttp.ts');
-for (const backend of AGENT_BACKENDS) test(`${backend}: versioned AIChat context and scoped MCP survive two turns and reload without persisting capability`, async t => {
+for (const backend of AGENT_BACKENDS.filter(backend=>backend!=='trae')) test(`${backend}: versioned AIChat context and scoped MCP survive two turns and reload without persisting capability`, async t => {
  const {manager, dir, file, owner, adapters} = setup(t);
  const adapter = adapters[backend], calls = [], original = adapter.call.bind(adapter);
  adapter.call = (method, params) => { calls.push({method, params}); return original(method, params); };
@@ -46,6 +48,28 @@ for (const backend of AGENT_BACKENDS) test(`${backend}: versioned AIChat context
  restarted.toolBridge.register(owner,'context-chat',{...context,pageId:'reconnected'});
  await restarted.turn(session.id,owner,{requestId:'restored',text:'continue'});
  assert.equal((await done(restarted,session.id,owner)).status,'completed');
+});
+test('Trae keeps the legacy backend ID while unsupported context and modes fail only at their feature boundary', async t => {
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'trae-api-contract-'))),log=path.join(dir,'runs.jsonl');
+ const adapter=new TraeHarness(path.join(dir,'trae'),process.execPath,[traeFixture,'--log='+log]);
+ const manager=new AgentSessions(path.join(dir,'registry.json'),undefined,{trae:adapter}),owner='trae-owner';
+ t.after(async()=>{manager.close();await new Promise(resolve=>setTimeout(resolve,100));await fs.promises.rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100});});
+ const status=await manager.status('trae');assert.equal(status.available,true);assert.equal(status.authenticated,null);assert.equal(status.authState,'unknown');assert.deepEqual(status.models,[]);assert.notEqual(status.protocol,'acp');
+ assert.equal(status.aichatContext,false);assert.equal(status.executionMode,'one-shot');assert.deepEqual(status.supportedModes,['craft']);
+ manager.toolBridge.register(owner,'context-chat',{pageId:'page',generation:'generation',instructions:'context must not be silently dropped',revision:'v1',tools:[]});
+ await assert.rejects(manager.create(owner,{backend:'trae',conversationId:'context-chat',roots:[dir],contextVersion:1}),/MCP|unsupported/i);
+ assert.equal(fs.existsSync(log),false);
+ const session=await manager.create(owner,{backend:'trae',conversationId:'ordinary',roots:[dir]});
+ assert.equal(session.backend,'trae');
+ for(const mode of ['ask','plan'])await assert.rejects(manager.turn(session.id,owner,{requestId:mode,text:'do not execute',mode}),/unsupported|mode|Ask|Plan|read.only/i);
+ await assert.rejects(manager.turn(session.id,owner,{requestId:'effort',text:'do not execute',mode:'craft',effort:'high'}),/effort|reasoning|unsupported/i);
+ const image='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=';
+ await assert.rejects(manager.turn(session.id,owner,{requestId:'image',text:'do not execute',mode:'craft',images:[image]}),/image|text|unsupported/i);
+ assert.equal(fs.existsSync(log),false);
+ await assert.rejects(manager.nativeCatalog(owner,undefined,'trae'),/unsupported|history|native/i);
+ await manager.turn(session.id,owner,{requestId:'ordinary',text:'ordinary task',mode:'craft'});
+ assert.equal((await done(manager,session.id,owner)).status,'completed');
+ assert.equal(fs.readFileSync(log,'utf8').trim().split('\n').length,1);
 });
 const fixture=path.join(__dirname,'fixtures/fake-acp.cjs');
 for (const backend of ['workbuddy', 'codebuddy']) test(`${backend}: process cwd follows each workspace after discovery, concurrent turns and restart`, async t => {
@@ -86,7 +110,7 @@ async function done(manager,id,owner) {
 function setup(t,args=[]) {
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'keepwork-backends-'));
  const file=path.join(dir,'registry.json');
- const adapters=Object.fromEntries(AGENT_BACKENDS.map(backend=>[backend,backend==='codex'?new CodexHarness(process.execPath,[codexFixture,...args]):backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture,...args]):backend==='gemini'?new AntigravityHarness(path.join(dir,backend),process.execPath,[antigravityFixture,...args]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture,...args])]));
+ const adapters=Object.fromEntries(AGENT_BACKENDS.map(backend=>[backend,backend==='codex'?new CodexHarness(process.execPath,[codexFixture,...args]):backend==='claude'?new ClaudeHarness(path.join(dir,backend),process.execPath,[claudeFixture,...args]):backend==='gemini'?new AntigravityHarness(path.join(dir,backend),process.execPath,[antigravityFixture,...args]):backend==='trae'?new TraeHarness(path.join(dir,backend),process.execPath,[traeFixture,...args]):new AcpHarness(backend,path.join(dir,backend),process.execPath,[fixture,...args])]));
  const manager=new AgentSessions(file,undefined,adapters);
  t.after(()=>{manager.close();});
  return {dir,file,manager,adapters,owner:'fixture-owner'};
@@ -119,7 +143,7 @@ test('backend IDs scope idempotency, native thread collisions, event routing and
  adapters.workbuddy.emit('exit');assert.equal((await manager.read(b.id,owner)).status,'completed');
  await assert.rejects(manager.create(owner,{backend:'arbitrary',conversationId:'x',roots:[dir]}),/Unsupported/);
 });
-for(const backend of AGENT_BACKENDS.filter(b=>b!=='codex'&&b!=='gemini')) test(`${backend}: permissions, interrupt and daemon restart preserve history without resending`,async t=>{
+for(const backend of AGENT_BACKENDS.filter(b=>b!=='codex'&&b!=='gemini'&&b!=='trae')) test(`${backend}: permissions, interrupt and daemon restart preserve history without resending`,async t=>{
  const {manager,dir,file,owner}=setup(t);
  const s=await manager.create(owner,{backend,conversationId:'x',roots:[dir]});
  await manager.turn(s.id,owner,{requestId:'permission',text:'permission'});

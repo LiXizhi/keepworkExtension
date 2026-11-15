@@ -122,10 +122,17 @@ impl AppState {
             "folderBrowserApi".into(),
             serde_json::json!(crate::folders::FOLDER_BROWSER_API),
         );
-        caps.insert(
-            "terminalApi".into(),
-            serde_json::json!(crate::terminal::TERMINAL_API),
-        );
+        let terminal = crate::terminal::health();
+        caps.insert("terminalStatus".into(), serde_json::json!(terminal.status));
+        if let Some(reason) = terminal.reason {
+            caps.insert("terminalReason".into(), serde_json::json!(reason));
+        }
+        if terminal.ready {
+            caps.insert(
+                "terminalApi".into(),
+                serde_json::json!(crate::terminal::TERMINAL_API),
+            );
+        }
         caps.insert("fsDirApi".into(), serde_json::json!("mkdir-v1"));
         caps.insert("aichatPresenceApi".into(), serde_json::json!("post-sse-v1"));
         caps.insert("personasApi".into(), serde_json::json!("personas-v1"));
@@ -946,17 +953,6 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .fallback(dispatch)
         .layer(axum::middleware::from_fn(cors_layer))
         .with_state(state)
-}
-
-// TEMP probe: forces the Send bound so rustc reports the offending await path.
-#[allow(dead_code)]
-fn __dispatch_send_probe<F: std::future::Future + Send>(
-    _f: fn(axum::extract::State<std::sync::Arc<AppState>>, Request<axum::body::Body>) -> F,
-) {
-}
-#[allow(dead_code)]
-fn __dispatch_send_probe_use() {
-    __dispatch_send_probe(dispatch);
 }
 
 #[cfg(test)]

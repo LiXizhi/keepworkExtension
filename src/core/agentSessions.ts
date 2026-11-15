@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { CodexHarness, HarnessAdapter } from './codexHarness';
 import { AcpHarness } from './acpHarness';
 import { AntigravityHarness } from './antigravityHarness';
+import { TraeHarness } from './traeHarness';
 import { CopilotHarness } from './copilotHarness';
 import { ClaudeHarness } from './claudeHarness';
 import { agentAccountDisplay } from './agentAccount';
@@ -38,7 +39,7 @@ function visibleItem(item: any) {
 export function agentImageParts(backend: Backend, images: unknown) {
     if (images === undefined) return [];
     if (!Array.isArray(images) || !images.length || images.length > 4) throw new Error('Attach 1 to 4 images');
-    if (AGENT_CLI[backend].protocol === 'antigravity') throw new Error('This CLI accepts text only; remove the images or switch agents.');
+    if (['antigravity', 'trae'].includes(AGENT_CLI[backend].protocol)) throw new Error('This CLI accepts text only; remove the images or switch agents.');
     let bytes = 0;
     return images.map(url => {
         if (typeof url !== 'string' || url.length > 5_600_000) throw new Error('Image too large');
@@ -145,7 +146,7 @@ export class AgentSessions {
             return ['read_file', 'list_dir', 'search_files', 'create_file', 'replace_string_in_file'].includes(name);
         });
         this.workspaceFiles = new AichatWorkspaceFiles(path.join(path.dirname(file), 'agent-git-drafts'));
-        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'gemini' ? new AntigravityHarness(file + '.gemini') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
+        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'gemini' ? new AntigravityHarness(file + '.gemini') : backend === 'trae' ? new TraeHarness(file + '.trae') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
         try {
             const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
             for (const row of rows) if (row.id && row.owner && row.threadId) this.sessions.set(row.id, { ...row, backend: row.backend || 'codex', status: ACTIVE.has(row.status) ? 'interrupted' : row.status, pending: [], events: [], items: [] });
@@ -194,9 +195,9 @@ export class AgentSessions {
             const spec = AGENT_CLI[backend];
             try {
                 const cli = resolveAgentCli(backend, spec.args);
-                return [backend, { name: spec.name, installUrl: spec.installUrl, available: true, authenticated: null, probe: 'executable', cli: { path: cli.path, source: cli.source }, models: [] }];
+                return [backend, { name: spec.name, installUrl: spec.installUrl, ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), available: true, authenticated: null, probe: 'executable', cli: { path: cli.path, source: cli.source }, models: [] }];
             } catch (error) {
-                return [backend, { name: spec.name, installUrl: spec.installUrl, available: false, probe: 'executable', models: [], error: (error as Error).message }];
+                return [backend, { name: spec.name, installUrl: spec.installUrl, ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), available: false, probe: 'executable', models: [], error: (error as Error).message }];
             }
         }));
     }
@@ -258,12 +259,12 @@ export class AgentSessions {
             modelsError ||= result.modelsError;
             const loginRequired = !!modelsError && /^Authentication required[.!]?$/i.test(modelsError.trim());
             const authenticated = loginRequired ? false : account.authUnknown ? null : !!account.account || account.requiresOpenaiAuth === false;
-            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, probe: account.probe || 'protocol', account: loginRequired ? undefined : agentAccountDisplay(account.account), available: true, cli: adapter.cliInfo?.(), authenticated, authState: authenticated === null ? 'unknown' : authenticated ? 'verified' : 'required', models: bounded(result.data || []), ...(backend === 'codex' ? { approvalModes: CODEX_APPROVAL_MODES } : {}), ...(modelsError ? { modelsError } : {}) };
-        } catch (error) { return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, available: false, cli: adapter?.cliInfo?.(), authenticated: false, models: [], error: (error as Error).message }; }
+            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), probe: account.probe || 'protocol', account: loginRequired ? undefined : agentAccountDisplay(account.account), available: true, cli: adapter.cliInfo?.(), authenticated, authState: authenticated === null ? 'unknown' : authenticated ? 'verified' : 'required', models: bounded(result.data || []), ...(backend === 'codex' ? { approvalModes: CODEX_APPROVAL_MODES } : {}), ...(modelsError ? { modelsError } : {}) };
+        } catch (error) { return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), available: false, cli: adapter?.cliInfo?.(), authenticated: false, models: [], error: (error as Error).message }; }
     }
     async login(backend: string = 'codex') {
         this.clearCapabilities(backend);
-        if (backend !== 'codex') { this.adapterFor(backend); return { command: AGENT_CLI[backend as Backend].login, message: 'Run this command in your terminal to sign in, then reconnect.' }; }
+        if (backend !== 'codex') { this.adapterFor(backend); return { command: AGENT_CLI[backend as Backend].login, message: backend === 'trae' ? 'Configure trae_config.yaml or TRAE_CONFIG_FILE with your model provider and API key, then reconnect. Trae Agent has no CLI account login.' : 'Run this command in your terminal to sign in, then reconnect.' }; }
         const result = await this.adapterFor(backend).call('account/login/start', { type: 'chatgpt' });
         if (typeof result.authUrl !== 'string' || !result.authUrl.startsWith('https://')) throw new Error('Codex did not return a browser login URL');
         return { url: result.authUrl };
