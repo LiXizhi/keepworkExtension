@@ -74,6 +74,15 @@ async fn wait_output(f: &Fixture, route: &str, marker: &str) -> Value {
     wait_output_since(f, route, marker, 0).await
 }
 async fn wait_output_since(f: &Fixture, route: &str, marker: &str, cursor: u64) -> Value {
+    wait_output_matching(f, route, marker, cursor, |text| text.contains(marker)).await
+}
+async fn wait_output_matching(
+    f: &Fixture,
+    route: &str,
+    description: &str,
+    cursor: u64,
+    matches: impl Fn(&str) -> bool,
+) -> Value {
     let mut last_snapshot = Value::Null;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -87,7 +96,7 @@ async fn wait_output_since(f: &Fixture, route: &str, marker: &str, cursor: u64) 
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{value}");
-            if value["output"].as_str().unwrap_or("").contains(marker) {
+            if matches(value["output"].as_str().unwrap_or("")) {
                 return value;
             }
             let tail: String = value["output"]
@@ -105,7 +114,7 @@ async fn wait_output_since(f: &Fixture, route: &str, marker: &str, cursor: u64) 
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("real PTY must execute {marker}, not just echo its input; last snapshot: {last_snapshot}"))
+    .unwrap_or_else(|_| panic!("real PTY must produce {description}, not just echo its input; last snapshot: {last_snapshot}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -231,6 +240,18 @@ async fn real_pty_preserves_input_stream_resize_interrupt_owner_and_auth_contrac
         StatusCode::BAD_REQUEST
     );
     // Raw user input remains a PTY byte stream; it is not run_terminal.
+    #[cfg(windows)]
+    {
+        // Backend readiness is separate from a new shell's first prompt. Do
+        // not mix initialization with the command's own 10-second deadline or
+        // inject input while PowerShell is still changing its console modes.
+        // No input has been sent, and both parts must come from this session's
+        // default NoProfile prompt rather than the executable's window title.
+        wait_output_matching(&f, &route, "initial PowerShell prompt", 0, |text| {
+            text.contains("PS ") && text.contains("中文 folder>")
+        })
+        .await;
+    }
     assert_eq!(
         send(
             &f,
