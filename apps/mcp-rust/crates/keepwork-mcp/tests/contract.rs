@@ -89,6 +89,16 @@ async fn health_reports_identity_and_only_served_capabilities() {
     assert!(value.get("workspaceRoot").is_some());
     // P1 advertises the local surface it serves and nothing further.
     assert_eq!(value["fsApi"], "workspace");
+    assert!(matches!(
+        value["terminalStatus"].as_str(),
+        Some("initializing" | "ready" | "unavailable")
+    ));
+    if let Some(reason) = value.get("terminalReason") {
+        let reason = reason.as_str().unwrap();
+        assert!(reason.chars().count() <= 512);
+        assert!(!reason.contains(state.root.to_str().unwrap()));
+        assert!(!reason.contains(&state.token));
+    }
     if keepwork_mcp::terminal::supported() {
         assert_eq!(value["terminalApi"], "pty-session-v1");
     } else {

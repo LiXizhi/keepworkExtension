@@ -7,12 +7,40 @@ pub const TERMINAL_API: &str = "pty-session-v1";
 pub const GLOBAL_TERMINAL_CAP: usize = 4;
 pub const OUTPUT_CHAR_CAP: usize = 24_000;
 
-pub fn supported() -> bool {
-    #[cfg(all(windows, any(target_vendor = "win7", feature = "win7-compat")))]
-    return winpty::available();
-    #[cfg(not(all(windows, any(target_vendor = "win7", feature = "win7-compat"))))]
-    return !cfg!(any(target_vendor = "win7", feature = "win7-compat"));
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalHealth {
+    pub ready: bool,
+    pub status: &'static str,
+    pub reason: Option<&'static str>,
 }
+
+pub fn health() -> TerminalHealth {
+    #[cfg(all(windows, any(target_vendor = "win7", feature = "win7-compat")))]
+    return winpty::health();
+    #[cfg(all(not(windows), any(target_vendor = "win7", feature = "win7-compat")))]
+    return TerminalHealth {
+        ready: false,
+        status: "unavailable",
+        reason: Some("The Windows compatibility terminal backend is unavailable on this platform."),
+    };
+    #[cfg(not(any(target_vendor = "win7", feature = "win7-compat")))]
+    return TerminalHealth {
+        ready: true,
+        status: "ready",
+        reason: None,
+    };
+}
+
+pub fn supported() -> bool {
+    health().ready
+}
+
+#[cfg(any(
+    test,
+    all(windows, any(target_vendor = "win7", feature = "win7-compat"))
+))]
+#[path = "terminal/readiness.rs"]
+mod readiness;
 
 #[cfg(any(not(any(target_vendor = "win7", feature = "win7-compat")), windows))]
 #[path = "terminal/pty.rs"]

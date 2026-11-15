@@ -44,9 +44,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Win7 MCP build failed' }
 
 从 MCP `0.2.67` 起，构建 / 打包脚本一并校验和暂存仓库固定的 WinPTY `0.4.3` x64 依赖；完整归档必须包含同目录的 `bin/keepwork-mcp.exe`、`bin/winpty.dll`、`bin/winpty-agent.exe`，以及 `licenses/winpty/` 下的许可证与来源记录。保持固定上游原始文件与摘要，不从系统 PATH 或任意 DLL 下载站补齐，不省略 agent，也不把普通现代 ConPTY 包混入专版。运行时核验依赖、加载 DLL 并完成后端就绪探测后，才通过 `/health` 和能力通知广告 `terminalApi: "pty-session-v1"`；首次探测创建并释放 WinPTY 后端，不启动用户 shell 或执行命令，归档版本或清单不能代替运行时能力检测。依赖缺失、损坏、加载或就绪失败时终端路由返回 HTTP `501` / `UNSUPPORTED_FEATURE`，普通 MCP 仍可使用。
 
+MCP `0.2.68` 使用后台单次探测和有界退避重试，首次启动超时不再永久关闭当前进程的终端能力；依赖摘要或加载错误仍拒绝使用。`/health` 可选返回 `terminalStatus: "initializing" | "ready" | "unavailable"`，失败原因 `terminalReason` 为固定有界文案，不包含本机路径或底层错误。仅就绪时广告原有 `terminalApi`，每 25 秒的 SSE 心跳重新读取能力；旧客户端忽略新增诊断字段仍能发现恢复。灰色终端菜单不能单独证明运行的是旧服务或命中了某个后端故障，须记录实际 peer 的健康响应，保留缺失 / 未知字段为未知的语义。
+
 新客户端附着旧 `0.2.66` 兼容 daemon 时，终端灰显属于预期降级；仅更新安装目录不表示已有进程已切换后端。遵守原有 daemon 归属和更新激活规则，不结束其他产品进程，也不以新端口绕过单实例。客户端和 MCP 独立升版，已有客户端继续消费同一 HTTP 终端协议；断流或降级不自动重放输入。终端相对 `cwd` 继续限制在工作区内，拒绝 `..` 与存在祖先的链接逃逸，canonicalize 失败不能放行；已存在绝对 / `~` 目录的允许语义保持。本轮完成目标交叉构建，真实 Win7/Win8/Win8.1 上的 WinPTY 执行仍待分别验收。
 
 升级后的人工激活路径：先完成所有相关客户端任务，在「本地 MCP 面板」核对当前服务并主动确认 `Stop service`，明确接受已连接客户端断开及该 daemon 中运行工作结束；服务停止后，点击原生帮助或托盘的「启动本地服务」，再打开网页「＋」菜单重新探测终端能力。该入口使用宿主启动时传入的绝对专版 `Keepwork.exe` 路径及固定 `--start-mcp` 参数，在同一个启动器锁内只启动 / 附着服务，允许 CEF 主窗口保持打开，不刷新网页或清理草稿。没有有效启动器参数时隐藏入口。已有 Keepwork peer 继续附着，其他端口占用保持明确错误，不自动停止任何服务、不抢端口、不增加网页 API。`--update-mcp` 仍仅暂存更新，不等同于服务重启；其他产品拥有的服务应由用户在其相应管理入口处理。
+
+桌面 `0.2.149` 在此启动 / 附着动作后显示只读服务健康结果；缺终端能力且缺已知状态时说明「当前服务未声明交互终端能力」，不按版本号断言原因。该版单色 K 改用浮点 GDI+ 抗锯齿路径，其清晰度和完整轮廓仍需目标系统目视验收；健康诊断或绘制 fixture 均不等于真实终端或 UI 验收。
 
 CEF SDK 使用 `fetch-cef-sdk.py` 的 `legacy` / `x64` 选择或经过校验的锁文件，保持 CEF109 与匹配宿主、沙箱库、资源及 locale 成套。正式信任根必须由发布方准备；临时预览密钥只可用于隔离验证。私钥不进入产物、源码或日志。现有 CEF 构建、清单签名和验证命令见产品说明，不在这里复制另一份。
 
@@ -153,10 +157,10 @@ gh workflow run aichat-rust-windows-release.yml --ref <source-ref> -f edition=al
 可将 `apps/aichat-rust/scripts/win7-native-smoke.ps1` 与待测 runtime 一起复制到目标机，以系统自带 PowerShell 执行基础 MCP smoke；它兼容 PowerShell 2，不依赖 Node。以下示例使用安装后的 runtime，并为本次结果选择新的目录：
 
 ```powershell
-powershell.exe -NoProfile -File C:/validation/win7-native-smoke.ps1 -RuntimeDirectory "$env:LOCALAPPDATA\Programs\KeepworkWin7Win8\resources\win7-mcp" -OutputDirectory C:/validation/mcp-smoke
+powershell.exe -NoProfile -File C:/validation/win7-native-smoke.ps1 -RuntimeDirectory "$env:LOCALAPPDATA\Programs\KeepworkWin7Win8\resources\win7-mcp" -OutputDirectory C:/validation/mcp-smoke -RequireTerminal
 ```
 
-脚本在随机且非 `8089` 的隔离端口运行 `requireAuth=false` / `true` 两组，核对包身份和基础工具，并应按实际 `terminalApi` 分支验证可用终端或有界 unsupported；不能继续对完整 `0.2.67` 包固定断言 PTY 不可用。保留真实 OS 和 `scope: "mcp-native-basic-smoke"` 的回执，终端实际覆盖范围另行记录；基础 smoke 不等同于中文、交互输入、resize、Ctrl+C 及清理全部通过。`nativeLegacyVerified` 只有在实际 WMI 识别到上述旧系统的 x64 workstation 且两组通过时才为真，它只覆盖报告中的 `system.osFamily`；现代 Windows 跑过仍不能标为旧系统已验收。保留三个系统的独立报告，不能编辑一个 JSON 将结果推广到其他系统。该 smoke 不启动或验证 CEF/UI，`cefUiVerified` 仍为 false，不能代替下表完整验收。
+脚本在随机且非 `8089` 的隔离端口运行 `requireAuth=false` / `true` 两组，核对包身份和基础工具。当前完整包验收必须传 `-RequireTerminal`，等待有界初始化后要求真实 `terminalApi`，并在两组报告中确认 `ptyVerified: true`；始终没有 PTY 能力时必须失败，不能将有界 `501` 当作本轮终端通过。为验证旧包或依赖缺失的降级行为可省略此开关，缺省模式保留 unsupported-feature 检查，但应记录 `ptyVerified: false`，不能据脚本成功推断真实交互终端已通过。保留真实 OS 和 `scope: "mcp-native-basic-smoke"` 的回执及实际终端覆盖范围；脚本所执行的 Unicode、输入 / 输出、resize、Ctrl+C、游标和清理检查仍不能替代完整终端应用与输入法验收。`nativeLegacyVerified` 只有在实际 WMI 识别到上述旧系统的 x64 workstation 且两组通过时才为真，它只覆盖报告中的 `system.osFamily`；现代 Windows 跑过仍不能标为旧系统已验收。保留三个系统的独立报告，不能编辑一个 JSON 将结果推广到其他系统。该 smoke 不启动或验证 CEF/UI，`cefUiVerified` 仍为 false，不能代替下表完整验收。
 
 每个目标系统至少覆盖：
 

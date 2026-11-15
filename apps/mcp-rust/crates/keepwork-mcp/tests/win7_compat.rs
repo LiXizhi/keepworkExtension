@@ -89,6 +89,8 @@ async fn legacy_clients_cannot_create_or_access_a_pty_and_other_routes_keep_work
     assert_eq!(status, StatusCode::OK);
     let health: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(health.get("terminalApi").is_none());
+    assert_eq!(health["terminalStatus"], "unavailable");
+    assert!(health["terminalReason"].as_str().unwrap().len() <= 512);
     assert_eq!(health["runtimeVariant"], "win7-win8");
     assert_eq!(health["minWindows"], json!([6, 1, 7601]));
     assert_eq!(health["fsApi"], "workspace");

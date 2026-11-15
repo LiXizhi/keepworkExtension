@@ -42,7 +42,7 @@ inline std::string mcp_service_status(const McpHealth& health) {
   if (!health.keepwork) return "本地服务未响应，请检查端口占用和安装目录中的服务日志。";
   std::string message;
   if (health.terminal_api == "pty-session-v1")
-    message = "本地服务已运行，交互终端已就绪。\n请重新打开网页右上角的加号菜单。";
+    message = "本地服务已运行，交互终端已就绪。\n请稍候（最多约30秒），再重新打开网页右上角的加号菜单。";
   else if (health.terminal_status == "initializing")
     message = "本地服务已运行，正在准备交互终端。\n请稍后重新打开网页右上角的加号菜单。";
   else if (health.terminal_status == "unavailable") {

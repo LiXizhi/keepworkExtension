@@ -2,6 +2,7 @@
 //! load; missing assets never prevent ordinary MCP startup. No PATH/CWD search,
 //! ConPTY, redirected-pipe shell substitute, Node, or arbitrary DLL loading.
 use super::native::{ChildControl, PtyControl, PtySize, SpawnedTerminal};
+use super::readiness::{Failure, Readiness, Work};
 use sha2::{Digest, Sha256};
 use std::ffi::{c_void, OsStr, OsString};
 use std::fs::File;
@@ -12,6 +13,7 @@ use std::os::windows::io::FromRawHandle;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 type Ptr = *mut c_void;
 type Error = Ptr;
@@ -236,10 +238,11 @@ impl Api {
     }
 
     fn probe(&self) -> Result<(), String> {
-        let _agent = self.verified_agent()?;
         // Prove that this OS can initialize the hidden console/agent before
-        // advertising a real PTY. No shell or user command is started here.
-        let instance = self.open_instance(PtySize { rows: 24, cols: 80 }, 1500)?;
+        // advertising a real PTY. The caller retains a verified agent handle.
+        // This runs on a dedicated worker, never in a health/HTTP executor.
+        // No shell or user command is started here.
+        let instance = self.open_instance(PtySize { rows: 24, cols: 80 }, 5000)?;
         unsafe {
             (self.free)(instance);
         }
@@ -251,20 +254,74 @@ fn api() -> Result<&'static Api, String> {
     static API: OnceLock<Result<Api, String>> = OnceLock::new();
     API.get_or_init(Api::load).as_ref().map_err(Clone::clone)
 }
-fn ready() -> Result<(), String> {
-    static READY: OnceLock<Result<(), String>> = OnceLock::new();
-    READY
-        .get_or_init(|| {
-            api()
-                .and_then(Api::probe)
-                .map_err(|error| error.chars().take(512).collect())
-        })
-        .as_ref()
-        .map(|_| ())
-        .map_err(Clone::clone)
+struct Controller {
+    epoch: Instant,
+    state: Mutex<Readiness>,
 }
-pub fn available() -> bool {
-    ready().is_ok() && api().is_ok_and(|api| api.verified_agent().is_ok())
+impl Controller {
+    fn now(&self) -> Duration {
+        self.epoch.elapsed()
+    }
+
+    fn work(&self, work: Work) -> Result<(), Failure> {
+        let api = api().map_err(|error| {
+            eprintln!("keepwork-mcp: terminal backend load failed: {error}");
+            Failure::Permanent("Bundled terminal backend could not be loaded or verified. Reinstall the complete compatibility runtime and restart the local service.")
+        })?;
+        let _agent = api.verified_agent().map_err(|error| {
+            eprintln!("keepwork-mcp: terminal backend integrity check failed: {error}");
+            Failure::Permanent("Bundled terminal agent is missing, modified or unavailable. Reinstall the complete compatibility runtime and restart the local service.")
+        })?;
+        if work == Work::Probe {
+            api.probe().map_err(|error| {
+                eprintln!("keepwork-mcp: terminal readiness probe failed: {error}");
+                Failure::Transient("Terminal backend initialization failed. It will retry automatically; check Windows security software if this continues.")
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// The first call returns immediately, and concurrent health/SSE requests never
+/// launch duplicate probes. Transient startup failures retry at a bounded rate;
+/// fixed-asset failures stay closed until the corrected runtime is restarted.
+pub fn health() -> super::TerminalHealth {
+    static CONTROLLER: OnceLock<Controller> = OnceLock::new();
+    let controller = CONTROLLER.get_or_init(|| Controller {
+        epoch: Instant::now(),
+        state: Mutex::new(Readiness::default()),
+    });
+    let work = controller
+        .state
+        .lock()
+        .expect("terminal readiness")
+        .begin(controller.now());
+    if let Some(work) = work {
+        if std::thread::Builder::new()
+            .name("winpty-readiness".into())
+            .spawn(move || {
+                let result = controller.work(work);
+                controller
+                    .state
+                    .lock()
+                    .expect("terminal readiness")
+                    .finish(controller.now(), result);
+            })
+            .is_err()
+        {
+            controller.state.lock().expect("terminal readiness").finish(
+                controller.now(),
+                Err(Failure::Transient(
+                    "Terminal readiness worker could not start. It will retry automatically.",
+                )),
+            );
+        }
+    }
+    controller
+        .state
+        .lock()
+        .expect("terminal readiness")
+        .health()
 }
 
 struct Shared {
@@ -361,7 +418,13 @@ pub fn spawn(
     cwd: &Path,
     size: PtySize,
 ) -> Result<SpawnedTerminal, String> {
-    ready()?;
+    let readiness = health();
+    if !readiness.ready {
+        return Err(readiness
+            .reason
+            .unwrap_or("Terminal backend is initializing; retry shortly.")
+            .into());
+    }
     let api = api()?;
     let _agent = api.verified_agent()?;
     let mut error = null_mut();

@@ -85,3 +85,57 @@ test('native smoke serializes real WMI scalars and preserves a failed manifest c
   assert.equal(typeof report.completedAtUtc, 'string');
   assert.doesNotMatch(result.stdout + result.stderr, /PSParameterizedProperty|circular reference/i);
 });
+
+test('native smoke explicitly requires a declared PTY and bounds additive health diagnostics', {
+  skip: process.platform !== 'win32' ? 'Requires actual Windows PowerShell 2 compatible function execution; not inferred from source matching.' : false,
+}, t => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../scripts/win7-native-smoke.ps1'), 'utf8').replace(/\r\n?/g, '\n');
+  const functions = source.match(/function Get-TerminalDiagnostic\([\s\S]*?(?=function Normalize-Path\()/)?.[0];
+  assert.ok(functions, 'execute the actual production diagnostic and acceptance functions');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-smoke-terminal-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const output = path.join(root, 'terminal-policy.json');
+  const script = path.join(root, 'terminal-policy.ps1');
+  fs.writeFileSync(script, `$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version 2\n` +
+    `Add-Type -AssemblyName System.Web.Extensions\n` +
+    `$json = New-Object System.Web.Script.Serialization.JavaScriptSerializer\n` +
+    `$utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false\n${functions}\n` +
+    `$rows = @()\n` +
+    `$cases = @(\n` +
+    `  @{ name = 'legacy optional'; health = @{}; required = $false },\n` +
+    `  @{ name = 'legacy required'; health = @{}; required = $true },\n` +
+    `  @{ name = 'declared PTY'; health = @{ terminalApi = 'pty-session-v1' }; required = $true },\n` +
+    `  @{ name = 'unknown contract'; health = @{ terminalApi = 'future-pty'; terminalStatus = 'ready' }; required = $true },\n` +
+    `  @{ name = 'initializing'; health = @{ terminalStatus = 'initializing' }; required = $true },\n` +
+    `  @{ name = 'bounded failure'; health = @{ terminalStatus = 'unavailable'; terminalReason = ('timeout' + [char]10 + ('x' * 2048)) }; required = $true },\n` +
+    `  @{ name = 'malformed optional'; health = @{ terminalApi = @('pty-session-v1'); terminalStatus = 42; terminalReason = @{} }; required = $false }\n` +
+    `)\n` +
+    `foreach ($case in $cases) {\n` +
+    `  $diagnostic = Get-TerminalDiagnostic $case['health']\n` +
+    `  $failure = ''\n` +
+    `  try { Assert-TerminalRequirement $diagnostic ([bool]$case['required']) } catch { $failure = [string]$_.Exception.Message }\n` +
+    `  $rows += @{ name = [string]$case['name']; diagnostic = $diagnostic; failure = [string]$failure }\n` +
+    `}\n` +
+    `[IO.File]::WriteAllText($env:KEEPWORK_SMOKE_TERMINAL_OUTPUT, $json.Serialize($rows), $utf8)\n`);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
+  env.KEEPWORK_SMOKE_TERMINAL_OUTPUT = output;
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
+  const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script],
+    { env, encoding: 'utf8', timeout: 30000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const rows = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(rows.length, 7);
+  assert.equal(rows[0].failure, '', 'the default legacy smoke retains its unsupported-feature acceptance');
+  assert.match(rows[1].failure, /Required native PTY was not advertised/);
+  assert.equal(rows[2].failure, '');
+  assert.equal(rows[2].diagnostic.available, true);
+  assert.equal(rows[3].diagnostic.available, false, 'an unknown API or ready status cannot invent PTY capability');
+  assert.match(rows[3].failure, /Required native PTY/);
+  assert.match(rows[4].failure, /terminalStatus=initializing/);
+  assert.equal(rows[5].diagnostic.terminalReason.length, 512);
+  assert.doesNotMatch(rows[5].diagnostic.terminalReason, /[\x00-\x1f\x7f]/);
+  assert.ok(rows[5].failure.length < 700);
+  assert.deepEqual(rows[6].diagnostic, { available: false, terminalApi: '', terminalStatus: '', terminalReason: '' });
+  assert.equal(rows[6].failure, '');
+});

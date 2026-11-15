@@ -513,16 +513,21 @@ pub async fn route(
     headers: &HeaderMap,
 ) -> Option<Response> {
     let method = req.method().clone();
-    if (path == "/terminal/sessions" || path.starts_with("/terminal/sessions/"))
-        && !super::supported()
-    {
-        return Some(json_response(
-            StatusCode::NOT_IMPLEMENTED,
-            &json!({
-                "ok": false, "code": "UNSUPPORTED_FEATURE", "feature": "pty-session-v1",
-                "error": "Interactive terminal backend is unavailable. Reinstall the complete compatibility runtime and restart it. Ordinary MCP operations remain available.",
-            }),
-        ));
+    if path == "/terminal/sessions" || path.starts_with("/terminal/sessions/") {
+        let terminal = super::health();
+        if !terminal.ready {
+            let reason = terminal
+                .reason
+                .unwrap_or("Terminal backend is initializing; retry shortly.");
+            return Some(json_response(
+                StatusCode::NOT_IMPLEMENTED,
+                &json!({
+                    "ok": false, "code": "UNSUPPORTED_FEATURE", "feature": "pty-session-v1",
+                    "terminalStatus": terminal.status, "terminalReason": reason,
+                    "error": reason,
+                }),
+            ));
+        }
     }
     if path == "/terminal/sessions" && method == Method::POST {
         let owner = terminal_owner(headers);

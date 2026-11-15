@@ -1,9 +1,11 @@
 # PowerShell 2.0 / .NET 3.5 test harness. This is a QA prerequisite, not an
 # application dependency. Run separately in Win7 SP1 / Win8 / Win8.1 x64 VMs
 # with a staged legacy MCP runtime; no shared 8089 or user-profile changes.
+# Use -RequireTerminal for a runtime expected to provide interactive PTYs.
 param(
   [Parameter(Mandatory = $true)][string]$RuntimeDirectory,
-  [Parameter(Mandatory = $true)][string]$OutputDirectory
+  [Parameter(Mandatory = $true)][string]$OutputDirectory,
+  [switch]$RequireTerminal
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +21,28 @@ $script:Utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false
 
 function Assert-Condition([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
+}
+
+function Get-TerminalDiagnostic([hashtable]$Health) {
+  $diagnostic = @{ available = $false; terminalApi = ''; terminalStatus = ''; terminalReason = '' }
+  foreach ($entry in @(@{ key = 'terminalApi'; limit = 64 }, @{ key = 'terminalStatus'; limit = 64 },
+      @{ key = 'terminalReason'; limit = 512 })) {
+    $key = [string]$entry['key']
+    if ($Health.ContainsKey($key) -and $Health[$key] -is [string]) {
+      $value = [string]$Health[$key]
+      if ($value.Length -gt [int]$entry['limit']) { $value = $value.Substring(0, [int]$entry['limit']) }
+      $diagnostic[$key] = [string]([regex]::Replace($value, '[\x00-\x1f\x7f]', ' '))
+    }
+  }
+  $diagnostic['available'] = [bool]($diagnostic['terminalApi'] -eq 'pty-session-v1')
+  return $diagnostic
+}
+
+function Assert-TerminalRequirement([hashtable]$Diagnostic, [bool]$Required) {
+  if ($Required -and -not $Diagnostic['available']) {
+    throw ('Required native PTY was not advertised; terminalStatus=' + [string]$Diagnostic['terminalStatus'] +
+      '; terminalReason=' + [string]$Diagnostic['terminalReason'])
+  }
 }
 
 function Normalize-Path([string]$Value) {
@@ -303,7 +327,8 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
   }
   $child = New-Object Diagnostics.Process
   $child.StartInfo = $start
-  $caseReport = @{ requireAuth = [bool]$Auth; port = [int]$port; passed = $false; checks = @(); profileIsolated = $true }
+  $caseReport = @{ requireAuth = [bool]$Auth; requireTerminal = [bool]$RequireTerminal; port = [int]$port;
+    passed = $false; checks = @(); profileIsolated = $true }
   try {
     Assert-Condition ($child.Start()) 'Could not start the owned runtime'
     $caseReport['pid'] = [int]$child.Id
@@ -374,7 +399,22 @@ function Run-Case([bool]$Auth, [string]$Executable, [string]$CaseDirectory, $Exp
       else { Assert-Condition ($toolText.Contains('WIN7_NATIVE_COMMAND_OK')) 'Ordinary command output is missing' }
       $caseReport['checks'] += [string]$operation['name']
     }
-    if ($health.ContainsKey('terminalApi') -and $health['terminalApi'] -eq 'pty-session-v1') {
+    $terminalDiagnostic = Get-TerminalDiagnostic $health
+    if ($RequireTerminal) {
+      # A backend may initialize asynchronously or retry a transient failure.
+      # Bound the wait and recheck the owned peer on every health request.
+      $terminalDeadline = [DateTime]::UtcNow.AddSeconds(20)
+      while (-not $terminalDiagnostic['available'] -and
+          @('initializing', 'unavailable') -contains $terminalDiagnostic['terminalStatus'] -and
+          [DateTime]::UtcNow -lt $terminalDeadline) {
+        Start-Sleep -Milliseconds 250
+        $health = Get-OwnedHealth $child $base $workspace $Expected $Auth
+        $terminalDiagnostic = Get-TerminalDiagnostic $health
+      }
+    }
+    $caseReport['terminalHealth'] = $terminalDiagnostic
+    Assert-TerminalRequirement $terminalDiagnostic ([bool]$RequireTerminal)
+    if ($terminalDiagnostic['available']) {
       $caseReport['terminal'] = Test-OwnedPty $child $base $workspace $Expected $Auth $token
       $caseReport['checks'] += 'advertised-pty-native-input-output-stream-resize-interrupt-and-close'
     } else {
@@ -426,7 +466,8 @@ Assert-Condition ($env:OS -eq 'Windows_NT') 'Run this acceptance harness on Wind
 Assert-Condition (-not (Test-Path -LiteralPath $output)) 'Use a new output directory'
 $null = [IO.Directory]::CreateDirectory($output)
 $report = @{ schemaVersion = 1; scope = 'mcp-native-basic-smoke'; nativeLegacyVerified = $false; nativeWin7Verified = $false;
-  cefUiVerified = $false; passed = $false; startedAtUtc = [DateTime]::UtcNow.ToString('o'); cases = @() }
+  cefUiVerified = $false; requireTerminal = [bool]$RequireTerminal; passed = $false;
+  startedAtUtc = [DateTime]::UtcNow.ToString('o'); cases = @() }
 try {
   $osInfo = Get-WmiObject -Class Win32_OperatingSystem
   $computer = Get-WmiObject -Class Win32_ComputerSystem
