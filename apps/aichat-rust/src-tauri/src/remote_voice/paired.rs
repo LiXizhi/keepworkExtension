@@ -400,6 +400,8 @@ mod platform {
             let properties: windows_collections::IIterable<HSTRING> = vec![
                 HSTRING::from("System.Devices.Aep.DeviceAddress"),
                 HSTRING::from("System.Devices.Aep.IsConnected"),
+                // Pairing().IsPaired() reads this property even for a paired-only query.
+                HSTRING::from("System.Devices.Aep.IsPaired"),
             ]
             .into();
             DeviceInformation::FindAllAsyncAqsFilterAndAdditionalProperties(

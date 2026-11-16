@@ -429,7 +429,7 @@ pub fn run() {
                 }).map_err(|e| e.to_string())?;
                 let pet_handled = result.recv_timeout(Duration::from_secs(1)).map_err(|e| e.to_string())??;
                 if pet_handled { return Ok(BackRoute::Pet); }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 {
                     let voice = back_app.state::<Arc<AppCore>>().remote_voice.clone();
                     if super::remote_voice_host::clear_main_composer(&back_app, pressed, move || voice.current(generation))? {

@@ -32,17 +32,26 @@ test('begin-input is an explicit local settings action without a remote keyboard
   assert.doesNotMatch(bridge, /remote_voice_begin_input/);
 });
 
-test('Home and Back are independent controls and the HID reader never synthesizes Enter', () => {
+test('Home and Back/Menu are independent device-scoped controls and the HID reader never synthesizes Enter', () => {
   const source = read('src-tauri/src/remote_voice/buttons.rs');
   const mac = read('src-tauri/src/remote_voice/buttons_macos.m');
   const windows = read('src-tauri/src/remote_voice/home_windows.rs');
+  const startup = read('src-tauri/src/app/startup.rs');
+  const host = read('src-tauri/src/app/remote_voice_host.rs');
   assert.doesNotMatch(source + mac + windows, /CGEventPost|SendInput|SetWindowsHookEx|WH_KEYBOARD_LL/);
   assert.match(source, /keepwork_remote_home_poll/);
   assert.match(source, /keepwork_remote_buttons_poll/);
   assert.match(source, /pub fn poll_home\(listener: &Listener\) -> bool\s*\{\s*listener\.poll\(\)/);
-  const fallback = source.slice(source.indexOf('#[cfg(not(target_os = "macos"))]'));
+  assert.match(source, /pub fn poll_clear\(listener: &Listener\) -> bool\s*\{\s*listener\.poll_clear\(\)/);
+  assert.match(windows, /attrs\.VendorID == 0x2717[\s\S]*?attrs\.ProductID == 0x32b8/);
+  assert.match(windows, /VK_APPS\s*=>\s*\(RemoteButton::Clear/);
+  assert.match(startup, /#\[cfg\(any\(target_os = "macos", windows\)\)\]\s*\{\s*let voice = back_app[\s\S]*?clear_main_composer/);
+  assert.match(host, /#\[cfg\(any\(target_os = "macos", windows\)\)\]\r?\npub\(super\) fn clear_main_composer/);
+  const fallback = source.slice(source.indexOf('#[cfg(not(any(target_os = "macos", windows)))]'));
   assert.match(fallback, /pub fn poll_clear\(_:\s*&Listener\) -> bool\s*\{\s*false\s*\}/);
   const input = read('src-tauri/src/remote_voice/native_input.rs');
+  assert.match(input, /take_menu_keyup_suppression\(\)/);
+  assert.match(input, /should_suppress_menu_keydown\(\)/);
   assert.ok(source.includes('清除提示词'));
   assert.ok(input.includes('is_command(text, "清除提示词")'));
   assert.doesNotMatch(source, /可说“清空输入”/);

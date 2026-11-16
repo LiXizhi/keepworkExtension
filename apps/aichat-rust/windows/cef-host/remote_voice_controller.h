@@ -237,7 +237,7 @@ class RemoteVoiceController {
     start_ = Control(L"BUTTON", L"启动语音输入", BS_PUSHBUTTON | WS_TABSTOP, 20, 288, 160, 32, start_id);
     stop_ = Control(L"BUTTON", L"停止", BS_PUSHBUTTON | WS_TABSTOP, 192, 288, 100, 32, stop_id);
     ready_ = Control(L"BUTTON", L"就绪，开始输入", BS_PUSHBUTTON | WS_TABSTOP, 320, 288, 250, 32, ready_id);
-    Control(L"STATIC", L"识别文字输入到完成时的当前焦点，不会自动发送；OK 保留原生回车。整句“发送提示词”发送一次回车，“清除提示词”仅清除当前可编辑输入框。请等识别和回复结束再发送。普通口述会替换剪贴板。", 0, 20, 340, 550, 82);
+    Control(L"STATIC", L"识别文字输入到完成时的当前焦点，不会自动发送；OK 保留原生回车。短按遥控器菜单键可取消在途识别并清空当前可编辑输入框（仅接管唯一 RC003 遥控器来源，普通键盘菜单键保持不变）。整句“发送提示词”发送一次回车，“清除提示词”同样可清空当前可编辑输入框。普通口述会替换剪贴板。", 0, 20, 340, 550, 82);
     initialized_controls_ = false; Refresh();
   }
   static LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM w, LPARAM l) {

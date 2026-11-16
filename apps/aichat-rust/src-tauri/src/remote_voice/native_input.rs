@@ -109,6 +109,7 @@ fn deliver_transcript(
 
 pub struct NativeInput {
     enabled: AtomicBool,
+    back_enabled: AtomicBool,
     gate: Mutex<()>,
     platform: platform::Input,
 }
@@ -130,9 +131,21 @@ impl NativeInput {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
             enabled: AtomicBool::new(false),
+            back_enabled: AtomicBool::new(false),
             gate: Mutex::new(()),
             platform: platform::Input::new()?,
         })
+    }
+
+    /// Arm device-scoped remote button guards without reserving global F5 yet.
+    pub fn enable_remote_buttons(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
+            self.platform.enable_menu_guard()?;
+            self.back_enabled.store(true, Ordering::Release);
+        }
+        Ok(())
     }
 
     /// Reserve F5 only after the native ATVV session is ready.
@@ -142,17 +155,37 @@ impl NativeInput {
             return Ok(());
         }
         self.platform.start()?;
+        self.back_enabled.store(true, Ordering::Release);
         self.enabled.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Release F5 on BLE disconnect while keeping Windows remote Menu/Home active
+    /// across reconnects until the user stops the session.
+    pub fn disarm_ptt(&self) {
+        #[cfg(windows)]
+        {
+            self.enabled.store(false, Ordering::Release);
+            if let Ok(_gate) = self.gate.lock() {
+                self.enabled.store(false, Ordering::Release);
+                self.platform.release_f5();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.stop();
+        }
     }
 
     pub fn stop(&self) {
         // Revoke before acquiring the gate; a pending delivery must not begin.
         self.enabled.store(false, Ordering::Release);
+        self.back_enabled.store(false, Ordering::Release);
         #[cfg(target_os = "macos")]
         platform::interrupt_back();
         if let Ok(_gate) = self.gate.lock() {
             self.enabled.store(false, Ordering::Release);
+            self.back_enabled.store(false, Ordering::Release);
             self.platform.stop();
         }
     }
@@ -168,18 +201,19 @@ impl NativeInput {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
         deliver_transcript(&self.enabled, &self.platform, text, false)
     }
-    #[cfg(target_os = "macos")]
     pub fn clear_back(&self) -> Result<Delivery, String> {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
-        if !self.enabled.load(Ordering::Acquire) {
-            return Ok(Delivery::Cancelled);
+        #[cfg(target_os = "macos")]
+        {
+            if !self.enabled.load(Ordering::Acquire) {
+                return Ok(Delivery::Cancelled);
+            }
+            platform::clear_back()
         }
-        platform::clear_back()
-    }
-    #[cfg(not(target_os = "macos"))]
-    pub fn clear(&self) -> Result<Delivery, String> {
-        let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
-        clear_current(&self.enabled, &self.platform)
+        #[cfg(not(target_os = "macos"))]
+        {
+            clear_current(&self.back_enabled, &self.platform)
+        }
     }
 }
 
@@ -340,15 +374,18 @@ mod platform {
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-        VK_BACK, VK_CONTROL, VK_F5, VK_RETURN,
+        VK_APPS, VK_BACK, VK_CONTROL, VK_F5, VK_RETURN,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, CreateWindowExW, DestroyWindow, GetMessageW, PeekMessageW,
-        PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HWND_MESSAGE, KBDLLHOOKSTRUCT,
-        MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
+        CallNextHookEx, CreateWindowExW, DestroyWindow, GetAncestor, GetClassNameW,
+        GetForegroundWindow, GetGUIThreadInfo, GetMessageW, PeekMessageW, PostThreadMessageW,
+        SetWindowsHookExW, UnhookWindowsHookEx, GA_ROOT, GUITHREADINFO, GUI_INMENUMODE,
+        GUI_INMOVESIZE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE, HWND_MESSAGE, KBDLLHOOKSTRUCT,
+        LLKHF_INJECTED, LLKHF_UP, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WM_QUIT,
     };
 
     static RESERVED: AtomicBool = AtomicBool::new(false);
+    static MENU_GUARD: AtomicBool = AtomicBool::new(false);
     static CLAIMED: AtomicBool = AtomicBool::new(false);
 
     fn keyboard_event(vk: u16, up: bool) -> INPUT {
@@ -365,12 +402,24 @@ mod platform {
     }
 
     unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0
-            && lparam != 0
-            && RESERVED.load(Ordering::Acquire)
-            && (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode == VK_F5 as u32
-        {
-            return 1;
+        if code >= 0 && lparam != 0 {
+            let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+            if RESERVED.load(Ordering::Acquire) && kb.vkCode == VK_F5 as u32 {
+                return 1;
+            }
+            if MENU_GUARD.load(Ordering::Acquire)
+                && kb.vkCode == VK_APPS as u32
+                && kb.flags & LLKHF_INJECTED == 0
+            {
+                let suppress = if kb.flags & LLKHF_UP != 0 {
+                    super::super::home_windows::take_menu_keyup_suppression()
+                } else {
+                    super::super::home_windows::should_suppress_menu_keydown()
+                };
+                if suppress {
+                    return 1;
+                }
+            }
         }
         CallNextHookEx(null_mut(), code, wparam, lparam)
     }
@@ -390,9 +439,13 @@ mod platform {
                 hook: Mutex::new(None),
             })
         }
-        pub fn start(&self) -> Result<(), String> {
+        fn ensure_hook(&self, reserve_f5: bool) -> Result<(), String> {
             let mut guard = self.hook.lock().map_err(|_| "语音键状态不可用")?;
             if guard.is_some() {
+                MENU_GUARD.store(true, Ordering::Release);
+                if reserve_f5 {
+                    RESERVED.store(true, Ordering::Release);
+                }
                 return Ok(());
             }
             if CLAIMED
@@ -422,12 +475,16 @@ mod platform {
                     CLAIMED.store(false, Ordering::Release);
                     return;
                 }
-                RESERVED.store(true, Ordering::Release);
+                MENU_GUARD.store(true, Ordering::Release);
+                if reserve_f5 {
+                    RESERVED.store(true, Ordering::Release);
+                }
                 let _ = sender.send(Ok(GetCurrentThreadId()));
                 while !cancel_thread.load(Ordering::Acquire)
                     && GetMessageW(&mut message, null_mut(), 0, 0) > 0
                 {}
                 RESERVED.store(false, Ordering::Release);
+                MENU_GUARD.store(false, Ordering::Release);
                 UnhookWindowsHookEx(hook);
                 CLAIMED.store(false, Ordering::Release);
             });
@@ -443,6 +500,7 @@ mod platform {
                 _ => {
                     cancelled.store(true, Ordering::Release);
                     RESERVED.store(false, Ordering::Release);
+                    MENU_GUARD.store(false, Ordering::Release);
                     let thread_id = startup_thread_id.load(Ordering::Acquire);
                     if thread_id != 0 {
                         unsafe {
@@ -453,10 +511,21 @@ mod platform {
                 }
             }
         }
+        pub fn enable_menu_guard(&self) -> Result<(), String> {
+            self.ensure_hook(false)
+        }
+        pub fn start(&self) -> Result<(), String> {
+            self.ensure_hook(true)
+        }
+        pub fn release_f5(&self) {
+            RESERVED.store(false, Ordering::Release);
+        }
         pub fn stop(&self) {
+            super::super::home_windows::clear_menu_suppression();
+            RESERVED.store(false, Ordering::Release);
+            MENU_GUARD.store(false, Ordering::Release);
             if let Ok(mut guard) = self.hook.lock() {
                 if let Some(hook) = guard.take() {
-                    RESERVED.store(false, Ordering::Release);
                     hook.cancelled.store(true, Ordering::Release);
                     unsafe {
                         PostThreadMessageW(hook.thread_id, WM_QUIT, 0, 0);
@@ -597,25 +666,157 @@ mod platform {
         }
     }
 
+    unsafe fn window_class_name(hwnd: windows_sys::Win32::Foundation::HWND) -> String {
+        if hwnd.is_null() {
+            return String::new();
+        }
+        let mut buf = [0u16; 96];
+        let len = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len <= 0 {
+            String::new()
+        } else {
+            String::from_utf16_lossy(&buf[..len as usize])
+        }
+    }
+
+    unsafe fn active_gui_focus() -> Option<(windows_sys::Win32::Foundation::HWND, GUITHREADINFO)> {
+        let foreground = GetForegroundWindow();
+        if foreground.is_null() {
+            return None;
+        }
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        // Query `0` (the active foreground input thread) rather than the top-level
+        // window's host thread so out-of-process child HWNDs (WebView2, UWP/WinUI)
+        // report their true focused window and caret.
+        if GetGUIThreadInfo(0, &mut info) == 0
+            || info.flags
+                & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE)
+                != 0
+            || info.hwndFocus.is_null()
+            || (info.hwndFocus != foreground && GetAncestor(info.hwndFocus, GA_ROOT) != foreground)
+        {
+            return None;
+        }
+        Some((foreground, info))
+    }
+
+    fn has_insertion_caret(info: &GUITHREADINFO) -> bool {
+        if info.hwndCaret.is_null() || info.hwndCaret != info.hwndFocus {
+            return false;
+        }
+        let r = info.rcCaret;
+        r.bottom
+            .checked_sub(r.top)
+            .is_some_and(|h| (2..=256).contains(&h))
+            && r.right
+                .checked_sub(r.left)
+                .is_some_and(|w| (0..=128).contains(&w))
+    }
+
     // Read only role/flags, never the value or selection. UIA timeouts keep an
     // unresponsive provider from indefinitely blocking the BLE event loop.
     fn editable_focus() -> bool {
-        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
-        use windows::Win32::UI::Accessibility::{CUIAutomation8, IUIAutomation2, IUIAutomationValuePattern, UIA_EditControlTypeId, UIA_ValuePatternId};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_MULTITHREADED,
+        };
+        use windows::Win32::UI::Accessibility::{
+            CUIAutomation8, IUIAutomation2, IUIAutomationValuePattern, UIA_CustomControlTypeId,
+            UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
+            UIA_PaneControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId,
+        };
         unsafe {
-            if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() { return false; }
+            let Some((foreground, info)) = active_gui_focus() else {
+                return false;
+            };
+            let focus_class = window_class_name(info.hwndFocus);
+            let fg_class = window_class_name(foreground);
+            let is_chromium =
+                focus_class.starts_with("Chrome_") || fg_class.starts_with("Chrome_");
+            let is_richedit = focus_class.to_ascii_lowercase().contains("richedit");
+            if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
+                return false;
+            }
             let result = (|| -> windows::core::Result<bool> {
-                let automation: IUIAutomation2 = CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
+                let automation: IUIAutomation2 =
+                    CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)?;
                 automation.SetConnectionTimeout(500)?;
                 automation.SetTransactionTimeout(500)?;
-                let focus = automation.GetFocusedElement()?;
-                if focus.CurrentControlType()? != UIA_EditControlTypeId
-                    || !focus.CurrentHasKeyboardFocus()?.as_bool()
-                    || !focus.CurrentIsEnabled()?.as_bool()
-                    || focus.CurrentIsPassword()?.as_bool() { return Ok(false); }
-                let value: IUIAutomationValuePattern = focus.GetCurrentPatternAs(UIA_ValuePatternId)?;
-                Ok(!value.CurrentIsReadOnly()?.as_bool())
-            })().unwrap_or(false);
+                let max_attempts = if is_chromium { 20 } else { 1 };
+                for attempt in 0..max_attempts {
+                    if attempt > 0 {
+                        thread::sleep(Duration::from_millis(60));
+                        let Some((cur_fg, cur_info)) = active_gui_focus() else {
+                            return Ok(false);
+                        };
+                        if cur_fg != foreground || cur_info.hwndFocus != info.hwndFocus {
+                            return Ok(false);
+                        }
+                    }
+                    let Ok(focus) = automation.GetFocusedElement() else {
+                        if is_chromium && attempt + 1 < max_attempts {
+                            continue;
+                        }
+                        return Ok(false);
+                    };
+                    if !focus.CurrentHasKeyboardFocus()?.as_bool()
+                        || !focus.CurrentIsEnabled()?.as_bool()
+                        || focus.CurrentIsPassword()?.as_bool()
+                    {
+                        return Ok(false);
+                    }
+                    let role = focus.CurrentControlType()?;
+                    if let Ok(value) =
+                        focus.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                    {
+                        if value.CurrentIsReadOnly()?.as_bool() {
+                            return Ok(false);
+                        }
+                        if [
+                            UIA_EditControlTypeId,
+                            UIA_DocumentControlTypeId,
+                            UIA_CustomControlTypeId,
+                        ]
+                        .contains(&role)
+                        {
+                            return Ok(active_gui_focus().is_some_and(|(after_fg, after_info)| {
+                                after_fg == foreground && after_info.hwndFocus == info.hwndFocus
+                            }));
+                        }
+                    }
+                    if role == UIA_EditControlTypeId
+                        || ([
+                            UIA_DocumentControlTypeId,
+                            UIA_CustomControlTypeId,
+                            UIA_PaneControlTypeId,
+                        ]
+                        .contains(&role)
+                            && (has_insertion_caret(&info) || is_richedit))
+                    {
+                        return Ok(active_gui_focus().is_some_and(|(after_fg, after_info)| {
+                            after_fg == foreground && after_info.hwndFocus == info.hwndFocus
+                        }));
+                    }
+                    // Cold Chromium/Electron windows initially expose a Pane/Document/Window
+                    // wrapper while building the renderer accessibility tree asynchronously.
+                    let pending_chromium = is_chromium
+                        && [
+                            UIA_PaneControlTypeId,
+                            UIA_DocumentControlTypeId,
+                            UIA_WindowControlTypeId,
+                            UIA_GroupControlTypeId,
+                        ]
+                        .contains(&role);
+                    if !pending_chromium {
+                        return Ok(false);
+                    }
+                }
+                Ok(false)
+            })()
+            .unwrap_or(false);
             CoUninitialize();
             result
         }

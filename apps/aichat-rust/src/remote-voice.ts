@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 interface Config { device: string; autoStart: boolean }
-interface ButtonStatus { supported: boolean; ready: boolean; homeReady?: boolean; device: string; error: string }
+interface ButtonStatus { supported: boolean; ready: boolean; homeReady?: boolean; clearKey?: string; device: string; error: string }
 interface Snapshot { supported: boolean; running: boolean; state: string; error: string; device: string; config: Config; buttons?: ButtonStatus; autoPaused?: boolean }
 const input = (id: string) => document.getElementById(id) as HTMLInputElement;
 const button = (id: string) => document.getElementById(id) as HTMLButtonElement;
@@ -51,13 +51,14 @@ function render(next: Snapshot, replaceConfig = false) {
   text("home-help", keys?.homeReady
     ? "短按一次进入桌宠，再按一次回到原会话。关闭桌宠时切换最小化和还原。"
     : "连接一只 RC003 并启动遥控器输入后可用。");
-  document.getElementById("clear-key")!.textContent = keys?.supported ? "返回键" : "语音口令";
+  const clearKeyLabel = keys?.supported ? (keys.clearKey || "返回键") : "语音口令";
+  document.getElementById("clear-key")!.textContent = clearKeyLabel;
   document.getElementById("clear-help")!.textContent = keys?.ready
-    ? "在桌宠中，每次短按执行一步：清空文字、收起空输入框、临时隐藏桌宠。"
+    ? "短按清空当前输入框并取消在途识别；在桌宠中逐次短按清空文字、收起输入框、临时隐藏桌宠。"
     : "单独说“清除提示词”；识别后清空。";
   text("key-status", keys?.error || (keys?.ready
-    ? "返回键已连接 · " + keys.device
-    : next.running ? "返回键未连接，可使用语音清除口令。" : "启动后会检测遥控器按键来源。"));
+    ? `${clearKeyLabel}已连接 · ${keys.device}`
+    : next.running ? `${clearKeyLabel}未连接，可使用语音清除口令。` : "启动后会检测遥控器按键来源。"));
 }
 async function action(command: "remote_voice_start" | "remote_voice_stop" | "remote_voice_begin_input" | "remote_voice_set_auto_start") {
   const enabled = input("auto-start").checked;

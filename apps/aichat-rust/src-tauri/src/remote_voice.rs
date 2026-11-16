@@ -263,6 +263,11 @@ impl RemoteVoice {
         inner.snapshot.state = "scanning".into();
         inner.snapshot.error.clear();
         inner.snapshot.device.clear();
+        #[cfg(windows)]
+        {
+            let _ = native.enable_remote_buttons();
+            let _ = inner.buttons.start();
+        }
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             let service = Arc::clone(self);
@@ -490,9 +495,10 @@ impl RemoteVoice {
         let inner = self.inner.lock().unwrap();
         if inner.generation == generation {
             dialogue::release_device();
+            #[cfg(not(windows))]
             inner.buttons.stop();
             if let Some(native) = &inner.native {
-                native.stop();
+                native.disarm_ptt();
             }
         }
     }
@@ -598,6 +604,21 @@ impl RemoteVoice {
             }
         }
     }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub(super) fn dispatch_idle_buttons(&self, generation: u64) {
+        self.dispatch_home(generation);
+        if self.poll_clear(generation) {
+            self.clear(generation);
+        }
+    }
+    fn finish_pet_back(&self, generation: u64) {
+        if !matches!(
+            self.snapshot().state.as_str(),
+            "scanning" | "connecting" | "reconnecting" | "preparing-microphone"
+        ) {
+            self.update(generation, "ready", "", None);
+        }
+    }
     // The BLE loop cancels the utterance before invoking this mutation.
     fn clear(&self, generation: u64) {
         if !self.current(generation) || self.dialogue.exit("back") { return; }
@@ -605,7 +626,7 @@ impl RemoteVoice {
         if let Some(route) = self.back_route.get() {
             match route(generation) {
                 Ok(BackRoute::Pet) => {
-                    self.update(generation, "ready", "", None);
+                    self.finish_pet_back(generation);
                     return;
                 }
                 Err(error) => {
@@ -627,10 +648,7 @@ impl RemoteVoice {
         };
         // A cold external editor can take a few seconds to expose its text field.
         // Keep settings and session cancellation available during that AX lookup.
-        #[cfg(target_os = "macos")]
         let result = native.clear_back();
-        #[cfg(not(target_os = "macos"))]
-        let result = native.clear();
         let mut inner = self.inner.lock().unwrap();
         if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return; }
         Self::input_result(&mut inner.snapshot, result);

@@ -259,9 +259,50 @@ fn deliver_main_composer_current(
     Ok(Some(receive))
 }
 
+#[cfg(windows)]
+fn delivery_modifiers_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    [0x10, 0x11, 0x12, 0x5B, 0x5C]
+        .iter()
+        .any(|key| unsafe { GetAsyncKeyState(*key) } < 0)
+}
+
+#[cfg(windows)]
+fn delivery_document_owned(view: &tauri::webview::PlatformWebview) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    let controller = view.controller();
+    let mut parent = HWND::default();
+    unsafe {
+        if controller.ParentWindow(&mut parent).is_err() {
+            return false;
+        }
+        let root = GetAncestor(parent.0, GA_ROOT);
+        if root.is_null() || GetForegroundWindow() != root {
+            return false;
+        }
+        let mut info = GUITHREADINFO {
+            cbSize: size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        if GetGUIThreadInfo(0, &mut info) == 0 {
+            return false;
+        }
+        if info.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE)
+            != 0
+        {
+            return false;
+        }
+        // WebView2 hosts its input HWND in a child thread/process whose per-thread
+        // hwndActive need not equal `root`; verify root ancestry of `hwndFocus`.
+        !info.hwndFocus.is_null() && GetAncestor(info.hwndFocus, GA_ROOT) == root
+    }
+}
+
 /// Called on the remote worker after the pet declines Back. A positive result
 /// consumes this press. Only an untouched target may fall through to native AX.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub(super) fn clear_main_composer(
     app: &AppHandle,
     pressed: std::time::Instant,
@@ -283,21 +324,19 @@ pub(super) fn clear_main_composer(
     let (send, reply) = std::sync::mpsc::sync_channel(1);
     let document = main.clone();
     main.with_webview(move |view| {
-        extern "C" {
-            fn keepwork_voice_document_has_input(view: *mut std::ffi::c_void) -> bool;
-            fn keepwork_voice_input_modifiers() -> bool;
-        }
-        if !is_current() ||
-            pressed.elapsed() >= Duration::from_secs(1) || unsafe { keepwork_voice_input_modifiers() } {
+        if !is_current()
+            || pressed.elapsed() >= Duration::from_secs(1)
+            || delivery_modifiers_down()
+        {
             let _ = send.send(-1);
             return;
         }
-        if !unsafe { keepwork_voice_document_has_input(view.inner()) } {
+        if !delivery_document_owned(&view) {
             let _ = send.send(0);
             return;
         }
         let _ = document.eval_with_callback(script, move |result| {
-            let _ = send.send(result.parse::<i8>().unwrap_or(-1));
+            let _ = send.send(result.trim().parse::<i8>().unwrap_or(-1));
         });
     }).map_err(|e| e.to_string())?;
     match reply.recv_timeout(remaining()?).map_err(|_| STALE)? {

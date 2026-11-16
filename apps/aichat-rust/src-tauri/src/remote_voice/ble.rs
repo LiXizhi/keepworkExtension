@@ -306,6 +306,23 @@ async fn powered_adapter(cancel: &watch::Receiver<bool>) -> Result<Adapter, Fail
     Err(last_error.unwrap_or_else(|| radio_unavailable(absent, false)))
 }
 
+async fn with_idle_buttons<T>(
+    service: &RemoteVoice,
+    generation: u64,
+    work: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(work);
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut work => return output,
+            _ = tick.tick() => service.dispatch_idle_buttons(generation),
+        }
+    }
+}
+
 pub(super) async fn run(
     service: &RemoteVoice,
     generation: u64,
@@ -321,8 +338,10 @@ pub(super) async fn run(
     while service.current(generation) {
         service.update(generation, "scanning", "", None);
         let attempt = async {
-            let adapter = powered_adapter(&cancel).await?;
-            let peripheral = discover(&adapter, requested.as_ref(), &cancel).await?;
+            let adapter = with_idle_buttons(service, generation, powered_adapter(&cancel)).await?;
+            let peripheral =
+                with_idle_buttons(service, generation, discover(&adapter, requested.as_ref(), &cancel))
+                    .await?;
             service.update(
                 generation,
                 "connecting",
@@ -355,7 +374,11 @@ pub(super) async fn run(
             Err(error) => service.update(generation, "reconnecting", &error.message, None),
         }
         let mut stop = cancel.clone();
-        tokio::select! { biased; _=cancelled(&mut stop)=>break, _=sleep(Duration::from_secs(delay))=>{} }
+        tokio::select! {
+            biased;
+            _ = cancelled(&mut stop) => break,
+            _ = with_idle_buttons(service, generation, sleep(Duration::from_secs(delay))) => {}
+        }
         delay = (delay * 2).min(30);
     }
     Ok(())
@@ -537,11 +560,11 @@ async fn connection(
     peripheral: &Peripheral,
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), Failure> {
-    let mut events = operation(cancel, adapter.events(), 5).await?;
-    if !operation(cancel, peripheral.is_connected(), 5).await? {
-        operation(cancel, peripheral.connect(), 15).await?;
+    let mut events = with_idle_buttons(service, generation, operation(cancel, adapter.events(), 5)).await?;
+    if !with_idle_buttons(service, generation, operation(cancel, peripheral.is_connected(), 5)).await? {
+        with_idle_buttons(service, generation, operation(cancel, peripheral.connect(), 15)).await?;
     }
-    operation(cancel, peripheral.discover_services(), 15).await?;
+    with_idle_buttons(service, generation, operation(cancel, peripheral.discover_services(), 15)).await?;
     // A newly resumed radio can publish its characteristics in stages. Remember only
     // the last successfully negotiated device across reconnects and service restarts.
     static LAST_VALIDATED: std::sync::Mutex<Option<PeripheralId>> = std::sync::Mutex::new(None);
@@ -572,12 +595,12 @@ async fn connection(
     let negotiation = tokio::select! {
         biased;
         _ = cancelled(&mut stop) => return Ok(()),
-        result = startup::negotiate(&mut notifications, setup, || {
+        result = with_idle_buttons(service, generation, startup::negotiate(&mut notifications, setup, || {
             service.update(generation, "preparing-microphone", "", None);
             if !service.dialogue.active() {
                 startup_target = Some(service.prepare_recording_focus(generation));
             }
-        }) => result,
+        })) => result,
     };
     let (caps, mut backlog) = match negotiation {
         Ok(ready) => ready,

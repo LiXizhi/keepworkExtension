@@ -8,8 +8,19 @@ pub struct ButtonStatus {
     pub supported: bool,
     pub ready: bool,
     pub home_ready: bool,
+    pub clear_key: String,
     pub device: String,
     pub error: String,
+}
+
+fn default_clear_key() -> String {
+    if cfg!(target_os = "macos") {
+        "返回键".into()
+    } else if cfg!(windows) {
+        "菜单键".into()
+    } else {
+        String::new()
+    }
 }
 
 pub struct Buttons {
@@ -76,13 +87,14 @@ impl Buttons {
                 .map(|value| value.clone())
                 .unwrap_or_default();
             ButtonStatus {
-                supported: cfg!(target_os = "macos"),
+                supported: cfg!(any(target_os = "macos", windows)),
                 ready: false,
                 home_ready: false,
+                clear_key: default_clear_key(),
                 device: String::new(),
                 error: if !last_error.is_empty() {
                     last_error
-                } else if cfg!(target_os = "macos") {
+                } else if cfg!(any(target_os = "macos", windows)) {
                     String::new()
                 } else {
                     "当前平台未接管遥控器清空键，可说“清除提示词”；OK 键保持系统原生回车。".into()
@@ -160,6 +172,7 @@ mod platform {
             supported: true,
             ready: out.ready != 0,
             home_ready: out.home_ready != 0,
+            clear_key: "返回键".into(),
             device,
             error: match out.code {
                 0 | 1 => "",
@@ -177,26 +190,32 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 mod platform {
-    #[cfg(windows)]
     pub(super) use super::super::home_windows::HomeListener as Listener;
     use super::ButtonStatus;
-    #[cfg(windows)]
+
     pub fn start() -> Result<Listener, String> {
         Listener::start()
     }
-    #[cfg(windows)]
     pub fn poll_home(listener: &Listener) -> bool {
         listener.poll()
     }
-    #[cfg(not(windows))]
+    pub fn poll_clear(listener: &Listener) -> bool {
+        listener.poll_clear()
+    }
+    pub fn status(listener: &Listener) -> ButtonStatus {
+        listener.status()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod platform {
+    use super::ButtonStatus;
     pub struct Listener;
-    #[cfg(not(windows))]
     pub fn start() -> Result<Listener, String> {
         Err("当前平台不支持遥控器按键。".into())
     }
-    #[cfg(not(windows))]
     pub fn poll_home(_: &Listener) -> bool {
         false
     }
@@ -207,10 +226,8 @@ mod platform {
         ButtonStatus {
             supported: false,
             ready: false,
-            #[cfg(windows)]
-            home_ready: _listener.ready(),
-            #[cfg(not(windows))]
             home_ready: false,
+            clear_key: String::new(),
             device: String::new(),
             error: "当前平台不支持遥控器清空键。".into(),
         }

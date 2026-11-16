@@ -62,6 +62,17 @@ test('paired-device admission probes never perform discovery, connection, or key
   assert.ok(source.includes('select_paired'), 'multiple/unknown candidates are handled before starting voice');
 });
 
+test('Windows pairing inventory requests the pairing state it checks before auto-start', () => {
+  const source = read('src-tauri/src/remote_voice/paired.rs');
+  const windows = source.match(/#\[cfg\(target_os = "windows"\)\]\s*mod platform \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(windows, 'expected the Windows pairing inventory');
+  const requested = windows.match(/let properties:[\s\S]*?= vec!\[([\s\S]*?)\]\s*\.into\(\)/)?.[1];
+  assert.ok(requested, 'expected additional properties for the Windows BLE inventory query');
+  assert.match(requested, /"System\.Devices\.Aep\.IsPaired"/,
+    'Pairing().IsPaired() can report false on paired endpoints when the query omits IsPaired');
+  assert.match(windows, /GetDeviceSelectorFromPairingState\(true\)/);
+});
+
 test('automatic monitoring starts after core initialization and shutdown revokes both watcher and input', () => {
   const startup = read('src-tauri/src/app/startup.rs');
   const setup = startup.indexOf('.setup(');
