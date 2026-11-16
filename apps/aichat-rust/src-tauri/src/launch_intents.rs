@@ -129,9 +129,11 @@ impl LaunchIntents {
         }
     }
 
-    /// Reading marks only this trusted main document ready. A pending ticket
-    /// read by one origin never moves to another local-source/published origin.
-    pub fn read(&mut self, document: &str, origin: &str) -> Result<Option<LaunchIntent>, String> {
+    pub(crate) fn current_document(&self, document: &str, origin: &str) -> bool {
+        self.document.as_ref().is_some_and(|(id, scope)| id == document && scope == origin)
+    }
+
+    pub(crate) fn bind_document(&mut self, document: &str, origin: &str) -> Result<(), String> {
         if Uuid::parse_str(document).is_err() || origin.is_empty() {
             return Err("Invalid launch document".to_string());
         }
@@ -144,6 +146,13 @@ impl LaunchIntents {
         } else if self.document.as_ref().map(|(_, value)| value.as_str()) != Some(origin) {
             return Err("Launch document origin changed".to_string());
         }
+        Ok(())
+    }
+
+    /// Reading marks only this trusted main document ready. A pending ticket
+    /// read by one origin never moves to another local-source/published origin.
+    pub fn read(&mut self, document: &str, origin: &str) -> Result<Option<LaunchIntent>, String> {
+        self.bind_document(document, origin)?;
         if self.pending.is_none() && !self.offered {
             self.offer("first-launch");
         }

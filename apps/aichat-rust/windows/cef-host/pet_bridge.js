@@ -131,6 +131,29 @@
       stopAudio(String(error?.message || error)); throw error;
     }
   }
+  const presentations = new Map();
+  let presentationSequence = 0;
+  const finishPresentation = (id, shown, error) => {
+    const request = presentations.get(id);
+    if (!request) return;
+    presentations.delete(id);
+    clearTimeout(request.timer);
+    if (error) request.reject(error);
+    else request.resolve(shown);
+  };
+  const sendPresentation = (id, request) => {
+    if (request.sent) return;
+    request.sent = true;
+    if (!native(request.kind, id)) finishPresentation(id, false, Error('桌宠窗口不可用'));
+  };
+  const present = kind => new Promise((resolve, reject) => {
+    if (disposed || presentations.size >= 16) throw Error('桌宠窗口不可用');
+    const id = String(++presentationSequence);
+    const timer = setTimeout(() => finishPresentation(id, false, Error('等待桌宠窗口响应超时')), 5000);
+    const request = { kind, resolve, reject, timer, sent: false };
+    presentations.set(id, request);
+    if (connected) sendPresentation(id, request);
+  });
   const flush = () => {
     if (connected && listeners.size && latest && !disposed) {
       native('state', latest);
@@ -142,6 +165,7 @@
     if (kind === 'connect') {
       connected = native('connect', payload) === true;
       sentArtwork = null;
+      if (connected) presentations.forEach((request, id) => sendPresentation(id, request));
       flush(); return;
     }
     if (kind === 'folder-picked' && connected && folderRequest) {
@@ -152,6 +176,10 @@
       const request = folderRequest; folderRequest = null;
       if (result.error) request.reject(Error(text(result.error, 300)));
       else request.resolve(result.path ? Object.freeze({ path: result.path }) : null);
+      return;
+    }
+    if (kind === 'approval-shown' || kind === 'approval-inactive') {
+      if (presentations.get(payload)?.sent) finishPresentation(payload, kind === 'approval-shown');
       return;
     }
     if (kind !== 'command' || !connected) return;
@@ -183,8 +211,12 @@
   const bridge = Object.freeze({
     version: 1,
     capabilities: Object.freeze({ floatingPet: true, petTextChatVersion: 1, petMediaChatVersion: 1,
-      petDictationAudioVersion: 1, petVoiceAudioVersion: 1, nativeFolderPickerVersion: 1 }),
+      petDictationAudioVersion: 1, petVoiceAudioVersion: 1, nativeFolderPickerVersion: 1, petApprovalRevealVersion: 1, petApprovalReturnVersion: 1 }),
     pickFolder,
+    revealPetApproval(options) {
+      return present(options?.returnToPet === true ? 'reveal-approval-for-return' : 'reveal-approval');
+    },
+    returnToPetAfterApproval() { return present('return-after-approval'); },
     petAudio,
     onPetAudio(listener) {
       if (typeof listener !== 'function') throw TypeError('需要回调函数');
@@ -195,7 +227,7 @@
       // Keep artwork separate so its PNG cannot crowd out chat/media status.
       const state = {
         version: 1, context: text(value.context, 160),
-        target: value.target === 'chat' ? 'chat' : 'persona',
+        target: value.target === 'persona' ? 'persona' : 'chat',
         title: text(value.title, 160), draft: text(value.draft, 32000),
         ready: value.ready === true, busy: value.busy === true,
         richDraft: value.richDraft === true, dictating: value.dictating === true,
@@ -239,6 +271,7 @@
     disposed = true; latest = latestState = pendingInput = confirmedInput = null; listeners.clear();
     folderRequest?.resolve(null); folderRequest = null;
     artwork?.dispose(); latestArtwork = null;
+    for (const id of presentations.keys()) finishPresentation(id, false, Error('页面已关闭'));
     stopAudio(); audioListeners.clear();
   }, { once: true });
 })();

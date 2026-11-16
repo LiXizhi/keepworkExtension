@@ -65,6 +65,10 @@ impl PageConnection {
         self.foreground = foreground;
     }
 
+    pub fn wants_foreground(&self) -> bool {
+        self.foreground
+    }
+
     pub fn presentation(&self) -> Presentation {
         if !self.foreground || matches!(self.phase, Phase::Idle | Phase::Connecting) {
             Presentation::Hidden

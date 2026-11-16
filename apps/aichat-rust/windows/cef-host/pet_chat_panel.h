@@ -11,11 +11,11 @@
 #include "pet_input_policy.h"
 
 namespace keepwork_cef {
-enum class PetChatAction { Send, Stop, ToggleTarget, OpenMain, Collapse, AcknowledgeUnknown, Dictation, Call, Mute };
+enum class PetChatAction { Send, Stop, HidePet, OpenMain, Collapse, AcknowledgeUnknown, Dictation, Call, Mute };
 struct PetChatView {
   std::wstring title, transcript, status, error;
   bool ready = false, busy = false, rich_draft = false, dictating = false;
-  bool can_switch = false, pending = false, uncertain = false, unsynced = false;
+  bool pending = false, uncertain = false;
   bool can_dictate = true, can_call = false, calling = false, muted = false;
 };
 
@@ -27,7 +27,7 @@ class PetChatPanel {
   static constexpr int title_id = 101, transcript_id = 102, status_id = 103, error_id = 104;
   static constexpr int draft_id = 105, send_id = 106, stop_id = 107, target_id = 108;
   static constexpr int open_id = 109, collapse_id = 110, acknowledge_id = 111;
-  static constexpr int dictation_id = 112, call_id = 113, mute_id = 114;
+  static constexpr int dictation_id = 112, call_id = 113, mute_id = 114, minimize_id = 115;
   ~PetChatPanel() { Destroy(); }
   bool Create(HINSTANCE instance, std::function<void(PetChatAction)> action,
               std::function<void(std::wstring)> edit) {
@@ -71,7 +71,7 @@ class PetChatPanel {
     font_ = title_font_ = small_font_ = nullptr;
     if (background_brush_) { DeleteObject(background_brush_); background_brush_ = nullptr; }
     transcript_ = status_ = error_ = draft_ = nullptr;
-    send_ = stop_ = target_ = open_ = collapse_ = acknowledge_ = nullptr;
+    send_ = stop_ = target_ = minimize_ = open_ = collapse_ = acknowledge_ = nullptr;
     dictation_ = call_ = mute_ = nullptr;
     setting_draft_ = composing_ = creating_ = false;
     have_anchor_ = false;
@@ -128,7 +128,7 @@ class PetChatPanel {
  private:
   HWND window_ = nullptr, transcript_ = nullptr, status_ = nullptr;
   HWND error_ = nullptr, draft_ = nullptr, send_ = nullptr, stop_ = nullptr, target_ = nullptr;
-  HWND open_ = nullptr, collapse_ = nullptr, acknowledge_ = nullptr;
+  HWND minimize_ = nullptr, open_ = nullptr, collapse_ = nullptr, acknowledge_ = nullptr;
   HWND dictation_ = nullptr, call_ = nullptr, mute_ = nullptr;
   HINSTANCE instance_ = nullptr;
   HFONT font_ = nullptr, title_font_ = nullptr, small_font_ = nullptr;
@@ -219,10 +219,6 @@ class PetChatPanel {
       !view_.pending && !view_.uncertain && !composing_ && HasDraft();
   }
   bool CanStop() const { return view_.ready && view_.busy && !view_.pending; }
-  bool CanSwitch() const {
-    return view_.can_switch && !view_.busy && !view_.pending && !view_.uncertain && !view_.unsynced &&
-      !view_.rich_draft && !view_.dictating && !view_.calling && !composing_;
-  }
   bool CanDictate() const { return view_.ready && (view_.dictating || (view_.can_dictate && !view_.rich_draft && !view_.calling)) &&
     !view_.pending && !view_.uncertain && !composing_; }
   bool CanCall() const { return view_.ready && (view_.can_call || view_.calling) && !view_.dictating &&
@@ -246,7 +242,6 @@ class PetChatPanel {
     if (!window_) return;
     EnableWindow(send_, CanSend());
     EnableWindow(stop_, CanStop());
-    EnableWindow(target_, CanSwitch());
     SetText(dictation_, view_.dictating ? L"停止输入" : L"语音输入");
     SetText(call_, view_.calling ? L"结束通话" : L"通话");
     SetText(mute_, view_.muted ? L"取消静音" : L"静音");
@@ -268,7 +263,6 @@ class PetChatPanel {
   void Dispatch(PetChatAction action) {
     if (action == PetChatAction::Send && !CanSend()) return;
     if (action == PetChatAction::Stop && !CanStop()) return;
-    if (action == PetChatAction::ToggleTarget && !CanSwitch()) return;
     if (action == PetChatAction::Dictation && !CanDictate()) return;
     if (action == PetChatAction::Call && !CanCall()) return;
     if (action == PetChatAction::Mute && (!view_.calling || view_.pending)) return;
@@ -311,16 +305,17 @@ class PetChatPanel {
     draft_ = Control(L"EDIT", L"", ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_TABSTOP, draft_id);
     send_ = Control(L"BUTTON", L"发送", BS_OWNERDRAW | WS_TABSTOP, send_id);
     stop_ = Control(L"BUTTON", L"停止", BS_OWNERDRAW | WS_TABSTOP, stop_id);
-    target_ = Control(L"BUTTON", L"切换目标", BS_OWNERDRAW | WS_TABSTOP, target_id);
+    target_ = Control(L"STATIC", L"当前对话", SS_CENTERIMAGE | SS_ENDELLIPSIS | SS_NOPREFIX, target_id);
+    minimize_ = Control(L"BUTTON", L"暂时隐藏桌面宠物", BS_OWNERDRAW | WS_TABSTOP, minimize_id);
     open_ = Control(L"BUTTON", L"打开主窗口", BS_OWNERDRAW | WS_TABSTOP, open_id);
-    collapse_ = Control(L"BUTTON", L"收起", BS_OWNERDRAW | WS_TABSTOP, collapse_id);
+    collapse_ = Control(L"BUTTON", L"关闭对话面板", BS_OWNERDRAW | WS_TABSTOP, collapse_id);
     acknowledge_ = Control(L"BUTTON", L"已核查，继续", BS_OWNERDRAW | WS_TABSTOP, acknowledge_id);
     dictation_ = Control(L"BUTTON", L"语音输入", BS_OWNERDRAW | WS_TABSTOP, dictation_id);
     call_ = Control(L"BUTTON", L"通话", BS_OWNERDRAW | WS_TABSTOP, call_id);
     mute_ = Control(L"BUTTON", L"静音", BS_OWNERDRAW | WS_TABSTOP, mute_id);
     SendMessageW(draft_, EM_SETLIMITTEXT, 32000, 0);
     SendMessageW(transcript_, EM_SETLIMITTEXT, 1024 * 1024, 0);
-    return transcript_ && status_ && error_ && draft_ && send_ && stop_ && target_ && open_ && collapse_ && acknowledge_ && dictation_ && call_ && mute_;
+    return transcript_ && status_ && error_ && draft_ && send_ && stop_ && target_ && minimize_ && open_ && collapse_ && acknowledge_ && dictation_ && call_ && mute_;
   }
   void RefreshFont() {
     const auto make = [this](int size, int weight) {
@@ -332,7 +327,7 @@ class PetChatPanel {
       for (const auto font : {next, title, secondary}) if (font) DeleteObject(font);
       return;
     }
-    for (const auto control : {transcript_, status_, error_, draft_, send_, stop_, target_, open_, collapse_, acknowledge_, dictation_, call_, mute_})
+    for (const auto control : {transcript_, status_, error_, draft_, send_, stop_, target_, minimize_, open_, collapse_, acknowledge_, dictation_, call_, mute_})
       if (control) SendMessageW(control, WM_SETFONT,
         reinterpret_cast<WPARAM>(control == target_ ? title : control == status_ || control == error_ ? secondary : next), TRUE);
     for (const auto font : {font_, title_font_, small_font_}) if (font) DeleteObject(font);
@@ -347,9 +342,15 @@ class PetChatPanel {
     const auto place = [](HWND control, int left, int top, int width, int height) {
       if (control) SetWindowPos(control, nullptr, left, top, std::max(0, width), std::max(0, height), SWP_NOZORDER | SWP_NOACTIVATE);
     };
-    place(target_, margin, y, std::max(0, width - Scale(64)), Scale(32));
-    place(collapse_, margin + std::max(0, width - Scale(64)), y, Scale(32), Scale(28));
-    place(open_, margin + std::max(0, width - Scale(32)), y, Scale(32), Scale(28)); y += Scale(32) + gap;
+    const int button_width = Scale(32);
+    const int title_width = std::max(0, width - 3 * button_width);
+    place(target_, margin, y, title_width, Scale(32));
+    int button_x = margin + title_width;
+    for (const auto control : {minimize_, open_, collapse_}) {
+      place(control, button_x, y, button_width, Scale(28));
+      button_x += button_width;
+    }
+    y += Scale(32) + gap;
     const bool has_status = !StatusText().empty();
     ShowWindow(status_, has_status ? SW_SHOWNA : SW_HIDE);
     if (has_status) { place(status_, margin, y, width, Scale(32)); y += Scale(32) + gap; }
@@ -401,33 +402,32 @@ class PetChatPanel {
     const int saved = SaveDC(item.hDC);
     const bool enabled = !(item.itemState & ODS_DISABLED);
     const bool highlighted = (item.itemState & ODS_SELECTED) || hovered_ == item.hwndItem;
-    const bool header = item.CtlID == target_id || item.CtlID == open_id || item.CtlID == collapse_id;
+    const bool header = item.CtlID == minimize_id || item.CtlID == open_id || item.CtlID == collapse_id;
     const COLORREF fill = enabled && item.CtlID == send_id ? green :
       enabled && highlighted ? hover : header ? background : RGB(232, 243, 236);
     FillRect(item.hDC, &item.rcItem, BackgroundBrush());
     Rounded(item.hDC, item.rcItem, 9, fill, fill);
     const COLORREF text_color = !enabled ? muted : item.CtlID == send_id ? RGB(255, 255, 255) : foreground;
     SetTextColor(item.hDC, text_color); SetBkMode(item.hDC, TRANSPARENT);
-    SelectObject(item.hDC, item.CtlID == target_id ? title_font_ : font_);
+    SelectObject(item.hDC, font_);
     RECT text = item.rcItem;
-    if (item.CtlID == open_id || item.CtlID == collapse_id) {
+    if (header) {
       const int cx = (text.left + text.right) / 2, cy = (text.top + text.bottom) / 2;
       const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(1)), text_color);
       const auto old_pen = SelectObject(item.hDC, pen);
       const auto old_brush = SelectObject(item.hDC, GetStockObject(NULL_BRUSH));
       if (item.CtlID == open_id) Rectangle(item.hDC, cx - Scale(5), cy - Scale(5), cx + Scale(5), cy + Scale(5));
-      else { MoveToEx(item.hDC, cx - Scale(5), cy, nullptr); LineTo(item.hDC, cx + Scale(5), cy); }
+      else if (item.CtlID == collapse_id) {
+        const int r = Scale(4);
+        MoveToEx(item.hDC, cx - r, cy - r, nullptr); LineTo(item.hDC, cx + r, cy + r);
+        MoveToEx(item.hDC, cx - r, cy + r, nullptr); LineTo(item.hDC, cx + r, cy - r);
+      } else { MoveToEx(item.hDC, cx - Scale(5), cy, nullptr); LineTo(item.hDC, cx + Scale(5), cy); }
       SelectObject(item.hDC, old_brush); SelectObject(item.hDC, old_pen); DeleteObject(pen);
     } else {
       text.left += Scale(6); text.right -= Scale(6);
-      if (item.CtlID == target_id) text.right -= Scale(12);
       const auto label = Text(item.hwndItem);
       DrawTextW(item.hDC, label.c_str(), static_cast<int>(label.size()), &text,
-        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | (item.CtlID == target_id ? DT_LEFT : DT_CENTER));
-      if (item.CtlID == target_id) {
-        RECT arrow = item.rcItem; arrow.left = arrow.right - Scale(16);
-        DrawTextW(item.hDC, L"⌄", 1, &arrow, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
-      }
+        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | DT_CENTER);
     }
     if (item.itemState & ODS_FOCUS) {
       RECT focus = item.rcItem; InflateRect(&focus, -Scale(3), -Scale(3));
@@ -536,7 +536,7 @@ class PetChatPanel {
         if (HIWORD(w) != BN_CLICKED) break;
         if (LOWORD(w) == send_id) self->Dispatch(PetChatAction::Send);
         else if (LOWORD(w) == stop_id) self->Dispatch(PetChatAction::Stop);
-        else if (LOWORD(w) == target_id) self->Dispatch(PetChatAction::ToggleTarget);
+        else if (LOWORD(w) == minimize_id) self->Dispatch(PetChatAction::HidePet);
         else if (LOWORD(w) == open_id) self->Dispatch(PetChatAction::OpenMain);
         else if (LOWORD(w) == collapse_id) self->Dispatch(PetChatAction::Collapse);
         else if (LOWORD(w) == acknowledge_id) self->Dispatch(PetChatAction::AcknowledgeUnknown);

@@ -532,9 +532,17 @@ pub fn sanitize_pet_state(
         "petReplyPresentationVersion": presentation_version,
         "petStreamingSpeechVersion": supports_streaming_speech(raw).then_some(1),
         "petSpeech": pet_speech(raw),
+        "remoteNarrationToken": raw["remoteNarrationToken"].as_str().filter(|token|
+            raw["ready"] == true && raw["target"] == "chat" && !token.is_empty() && token.len() <= 64),
         "remotePhoneVersion": raw["remotePhoneVersion"].as_u64().filter(|v| *v == 1),
         "remoteDialogue": dialogue_state(raw),
         "phoneState": phone_state(raw, &raw["phoneState"]),
+        "phoneActivity": (raw["remotePhoneActivityVersion"] == 1 && raw["phoneActivity"] == "tool"
+            && phone_state(raw, &raw["phoneState"]) == Some("thinking")).then_some("tool"),
+        "phoneCaption": if phone_state(raw, &raw["phoneState"]).is_some() && raw["remoteDialogue"].is_null() {
+            phone_caption(raw, &raw["phoneCaption"])
+        } else { None },
+        "petStopOnlyCallVersion": raw["petStopOnlyCallVersion"].as_u64().filter(|v| *v == 1),
         "phoneError": raw["phoneError"].as_str().filter(|_| raw["remotePhoneVersion"] == 1).map(|s| truncate_str(s, 300)),
         "petVoiceAudioVersion": raw.get("petVoiceAudioVersion").and_then(|v| v.as_u64()).filter(|v| *v == 1),
         "draft": raw.get("draft").and_then(|v| v.as_str()).map(|s| truncate_str(s, MAX_PET_INPUT_CHARS)).unwrap_or_default(),
@@ -559,7 +567,18 @@ fn dialogue_state(raw: &Value) -> Option<Value> {
     let state = phone_state(raw, &dialogue["state"])?;
     let id = dialogue["id"].as_str()?;
     Uuid::parse_str(id).ok()?;
-    Some(json!({ "id": id, "state": state }))
+    let mut result = json!({ "id": id, "state": state });
+    if let Some(caption) = phone_caption(raw, &dialogue["caption"]) {
+        result["caption"] = caption;
+    }
+    Some(result)
+}
+
+fn phone_caption(raw: &Value, caption: &Value) -> Option<Value> {
+    if raw["remotePhoneCaptionVersion"] != 1 { return None; }
+    let role @ ("user" | "assistant") = caption["role"].as_str()? else { return None };
+    let text = caption["text"].as_str()?.trim();
+    (!text.is_empty()).then(|| json!({ "role": role, "text": truncate_str(text, 512) }))
 }
 
 pub fn sanitize_exit_personas(raw: &Value) -> Vec<PetPersonaSummary> {
@@ -887,10 +906,11 @@ impl PetController {
         snap
     }
 
-    pub fn starting_phone_id(&self) -> Option<String> {
+    pub fn active_phone_id(&self) -> Option<String> {
         let page = self.page_state.lock().ok()?;
         let dialogue = &page.raw["remoteDialogue"];
-        if page.raw["remotePhoneVersion"] != 1 || dialogue["state"] != "starting" { return None; }
+        let phase = phone_state(&page.raw, &dialogue["state"])?;
+        if phase == "stopping" { return None; }
         dialogue["id"].as_str().map(str::to_owned)
     }
 

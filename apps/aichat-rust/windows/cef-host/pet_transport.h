@@ -17,6 +17,10 @@ inline constexpr char kPetResult[] = "keepwork.cef.pet.result.v1";
 inline constexpr char kPetCommand[] = "keepwork.cef.pet.command.v1";
 inline constexpr char kPickFolder[] = "keepwork.cef.folder.pick.v1";
 inline constexpr char kFolderPicked[] = "keepwork.cef.folder.picked.v1";
+inline constexpr char kPetApprovalReveal[] = "keepwork.cef.pet.approval-reveal.v1";
+inline constexpr char kPetApprovalRevealForReturn[] = "keepwork.cef.pet.approval-reveal-for-return.v1";
+inline constexpr char kPetApprovalReturn[] = "keepwork.cef.pet.approval-return.v1";
+inline constexpr char kPetApprovalRevealed[] = "keepwork.cef.pet.approval-revealed.v1";
 inline std::string PetToken() {
   GUID guid{}; wchar_t value[40]{};
   if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid, value, 40)) return {};
@@ -57,6 +61,11 @@ class PetRenderDocument final : public CefV8Handler {
       if (args->GetSize() != 1 || args->GetType(0) != VTYPE_STRING || args->GetString(0).length() > 64) return;
       challenge_ = args->GetString(0).ToString();
       if (!challenge_.empty()) Dispatch("connect", challenge_);
+    } else if (message->GetName() == kPetApprovalRevealed) {
+      if (args->GetSize() != 4 || args->GetType(0) != VTYPE_STRING || args->GetType(1) != VTYPE_STRING ||
+          args->GetType(2) != VTYPE_STRING || args->GetType(3) != VTYPE_BOOL || args->GetString(0) != document_ ||
+          challenge_.empty() || args->GetString(1) != challenge_ || args->GetString(2).length() > 20) return;
+      Dispatch(args->GetBool(3) ? "approval-shown" : "approval-inactive", args->GetString(2));
     } else if (message->GetName() == kPetCommand || message->GetName() == kFolderPicked) {
       if (args->GetSize() != 3 || args->GetType(0) != VTYPE_STRING || args->GetType(1) != VTYPE_STRING ||
           args->GetType(2) != VTYPE_STRING || args->GetString(0) != document_ ||
@@ -84,14 +93,26 @@ class PetRenderDocument final : public CefV8Handler {
       message->GetArgumentList()->SetString(0, document_);
       message->GetArgumentList()->SetString(1, challenge_);
       context->GetFrame()->SendProcessMessage(PID_BROWSER, message);
-    } else if ((kind == "state" || kind == "result" || kind == "artwork" || kind == "pick-folder") && !challenge_.empty() &&
-               payload.length() <= (kind == "pick-folder" ? 64 : kind == "artwork" ? 132000 : 196608)) {
-      const auto message = CefProcessMessage::Create(kind == "state" ? kPetState : kind == "result" ? kPetResult : kind == "artwork" ? kPetArtwork : kPickFolder);
+    } else {
+      if (challenge_.empty() || payload.length() > 196608) return true;
+      const char* name;
+      if (kind == "state") name = kPetState;
+      else if (kind == "result") name = kPetResult;
+      else if (kind == "artwork" && payload.length() <= 132000) name = kPetArtwork;
+      else if (kind == "pick-folder" && payload.length() <= 64) name = kPickFolder;
+      else {
+        if (payload.empty() || payload.length() > 20) return true;
+        if (kind == "reveal-approval") name = kPetApprovalReveal;
+        else if (kind == "reveal-approval-for-return") name = kPetApprovalRevealForReturn;
+        else if (kind == "return-after-approval") name = kPetApprovalReturn;
+        else return true;
+      }
+      const auto message = CefProcessMessage::Create(name);
       message->GetArgumentList()->SetString(0, document_);
       message->GetArgumentList()->SetString(1, challenge_);
       message->GetArgumentList()->SetString(2, payload);
       context->GetFrame()->SendProcessMessage(PID_BROWSER, message);
-    } else return true;
+    }
     result = CefV8Value::CreateBool(true); return true;
   }
  private:

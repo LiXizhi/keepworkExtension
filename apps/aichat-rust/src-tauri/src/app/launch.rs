@@ -24,13 +24,13 @@ pub(super) fn accept_launch_action(app: &AppHandle, core: &AppCore, action: Laun
     }
 }
 
-fn launch_origin(window: &WebviewWindow, core: &AppCore) -> Result<String, String> {
+pub(super) fn trusted_main_document_origin(window: &WebviewWindow, core: &AppCore) -> Result<String, String> {
     verify_main_sender(window, core)?;
     let url = window.url().map_err(|_| "Cannot verify launch document")?;
     if core.page_connection.lock().unwrap().is_shell(&url)
         || !crate::security::trusted_page(url.as_str(), core.current_dev_url().as_deref())
     {
-        return Err("Launch intents require the trusted AIChat main document".to_string());
+        return Err("This action requires the trusted AIChat main document".to_string());
     }
     Ok(url.origin().ascii_serialization())
 }
@@ -42,7 +42,7 @@ pub(super) fn desktop_get_launch_intent(
     document: String,
     token: String,
 ) -> Result<Option<LaunchIntent>, String> {
-    let origin = launch_origin(&window, &state)?;
+    let origin = trusted_main_document_origin(&window, &state)?;
     let mut intents = state.launch_intents.lock().unwrap();
     intents.authenticate(&token)?;
     intents.read(&document, &origin)
@@ -56,7 +56,7 @@ pub(super) fn desktop_acknowledge_launch_intent(
     id: String,
     token: String,
 ) -> Result<bool, String> {
-    let origin = launch_origin(&window, &state)?;
+    let origin = trusted_main_document_origin(&window, &state)?;
     let mut intents = state.launch_intents.lock().unwrap();
     intents.authenticate(&token)?;
     intents.acknowledge(&document, &origin, &id)

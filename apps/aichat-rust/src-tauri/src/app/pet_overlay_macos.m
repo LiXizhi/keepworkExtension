@@ -175,31 +175,13 @@ static CGRect frontmostExternalBounds(pid_t pid) {
     return CGRectNull;
 }
 
-bool keepwork_pet_overlay_target(void *mainWindow, void *petWindow,
-    int32_t *x, int32_t *y, int32_t *width, int32_t *height) {
+bool keepwork_pet_overlay_target(int32_t *x, int32_t *y, int32_t *width, int32_t *height) {
     if (!NSThread.isMainThread || !x || !y || !width || !height) return false;
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
-    if (!front) return false;
-    NSScreen *target = nil;
-    if (front.processIdentifier == NSProcessInfo.processInfo.processIdentifier) {
-        NSWindow *main = (__bridge NSWindow *)mainWindow;
-        NSWindow *pet = (__bridge NSWindow *)petWindow;
-        if (!main || !main.visible || main.miniaturized || !main.onActiveSpace) return false;
-        NSWindow *focused = NSApp.keyWindow;
-        if (!focused) {
-            for (NSWindow *window in NSApp.orderedWindows) {
-                if (window != pet && window.visible && !window.miniaturized && window.onActiveSpace &&
-                    window.level == NSNormalWindowLevel) { focused = window; break; }
-            }
-        }
-        if (focused != main || !main.screen) return false;
-        if ((main.styleMask & NSWindowStyleMaskFullScreen) || main.zoomed ||
-            keepwork_pet_rect_fills_screen(NSRectToCGRect(main.frame), NSRectToCGRect(main.screen.frame),
-                                           NSRectToCGRect(main.screen.visibleFrame))) target = main.screen;
-    } else {
-        target = screenFilledBy(frontmostExternalBounds(front.processIdentifier));
-        if (front.processIdentifier != NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier) return false;
-    }
+    // Home over our own chat switches windows, including when zoomed or fullscreen.
+    if (!front || front.processIdentifier == NSProcessInfo.processInfo.processIdentifier) return false;
+    NSScreen *target = screenFilledBy(frontmostExternalBounds(front.processIdentifier));
+    if (front.processIdentifier != NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier) return false;
     if (!target) return false;
     CGRect display = displayBounds(target);
     if (!validRect(display)) return false;

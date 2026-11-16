@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <unistd.h>
 
-extern bool keepwork_pet_overlay_target(void *, void *, int32_t *, int32_t *, int32_t *, int32_t *);
+extern bool keepwork_pet_overlay_target(int32_t *, int32_t *, int32_t *, int32_t *);
 extern bool keepwork_pet_overlay_show(void *);
 extern bool keepwork_pet_rect_fills_screen(CGRect, CGRect, CGRect);
 extern void keepwork_pet_overlay_finish(void *, bool);
@@ -123,7 +123,7 @@ static int testOverlay(NSString *executable, NSString *mode, NSString *dir) {
             return 77;
         }
         int32_t x = 0, y = 0, width = 0, height = 0;
-        if (!keepwork_pet_overlay_target((__bridge void *)chat, (__bridge void *)pet, &x, &y, &width, &height)
+        if (!keepwork_pet_overlay_target(&x, &y, &width, &height)
                 || width <= 0 || height <= 0) {
             fprintf(stderr, "Production target lookup missed the foreground %s editor.\n", mode.UTF8String);
             return 1;

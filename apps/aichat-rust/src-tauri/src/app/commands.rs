@@ -320,6 +320,7 @@ pub(super) fn desktop_titlebar_action(
             window.close().map_err(|e| e.to_string())?;
         }
         "toggle-maximize" => {
+            state.pet_approval_return.lock().unwrap().take();
             if let Ok(is_max) = window.is_maximized() {
                 if is_max {
                     let _ = window.unmaximize();

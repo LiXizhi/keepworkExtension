@@ -31,12 +31,18 @@ fn main() {
             .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+        println!("cargo:rustc-link-lib=framework=ImageIO");
+        println!("cargo:rerun-if-changed=src/app/screenshot_macos.m");
         let mut native = cc::Build::new();
         if std::env::var_os("CARGO_FEATURE_DEV_BINS").is_some() {
+            native.file("src/app/screenshot_fixture_macos.m");
+            println!("cargo:rerun-if-changed=src/app/screenshot_fixture_macos.m");
             native.file("src/app/startup_smoke_macos.m");
             println!("cargo:rerun-if-changed=src/app/startup_smoke_macos.m");
         }
         native
+            .file("src/app/screenshot_macos.m")
             .file("src/navigation_macos.m")
             .file("src/local_mcp_macos.m")
             .file("src/browser_surface_macos.m")

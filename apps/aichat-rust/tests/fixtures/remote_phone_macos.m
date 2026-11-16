@@ -88,6 +88,8 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
     @autoreleasepool {
         WKWebViewConfiguration *cfg = [WKWebViewConfiguration new];
         cfg.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+        // Wry enables autoplay for the retained desktop document.
+        cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
         SEL setMock = NSSelectorFromString(@"_setMockCaptureDevicesEnabled:");
         SEL getMock = NSSelectorFromString(@"_mockCaptureDevicesEnabled");
         if (![cfg.preferences respondsToSelector:setMock] || ![cfg.preferences respondsToSelector:getMock]) {
@@ -153,23 +155,18 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
         } else {
             Check([Eval(mainView, @"captureState") isEqual:@"NotAllowedError"], @"permission denied stays denied");
         }
+        if (delegate.allow) {
+            Eval(mainView, @"reacquireMic().catch(e=>window.reacquireError=e.name);true");
+            Check(Until(^BOOL { return [Eval(mainView, @"window.samples || 0") integerValue] >= 2; }, 8),
+                @"an active listening call can reacquire the mock microphone and process nonzero 16 kHz Web Audio frames");
+            Check(mainView.window == petWindow && !main.visible, @"chat stayed hidden while recording new speech");
+            Eval(mainView, @"processor.disconnect();source.disconnect();ctx.close();track.stop();true");
+        }
         keepwork_restore_phone_view(owner);
         keepwork_restore_phone_view(owner);
         Check(mainView.superview == parent && NSEqualRects(mainView.frame, frame) && !main.visible, @"restoration returns to the original ordered-out hierarchy");
         if (delegate.allow) {
-            Check(Until(^BOOL { return [Eval(mainView, @"document.hidden") boolValue]; }, 3), @"listening main page returns to hidden");
-            Eval(mainView, @"window.recorder = new MediaRecorder(stream);window.recorded = 0;"
-                 "recorder.ondataavailable = e => window.recorded += e.data.size;recorder.start();true");
-            NSDate *afterHandoff = [NSDate dateWithTimeIntervalSinceNow:0.6];
-            Until(^BOOL { return afterHandoff.timeIntervalSinceNow <= 0; }, 1);
-            Check([Eval(mainView, @"track.readyState === 'live' && !track.muted && track.enabled") boolValue],
-                @"acquired track stays live and unmuted after restoring to hidden main");
-            Eval(mainView, @"recorder.stop();true");
-            Check(Until(^BOOL { return [Eval(mainView, @"window.recorded") integerValue] > 256; }, 3),
-                @"hidden main recorded a nonempty audio chunk from the existing synthetic track");
-            Eval(mainView, @"track.stop();true");
-            keepwork_restore_phone_view(owner);
-            Check([Eval(mainView, @"track.readyState") isEqual:@"ended"], @"hangup ends the same track");
+            Check([Eval(mainView, @"track.readyState") isEqual:@"ended"], @"hangup ends the active mock track");
         }
         // A Dock restore can race startup or hangup. Exercising a second presentation checks cleanup of the first.
         Check(keepwork_attach_phone_view(owner, host, (__bridge void *)mainView) != 0, @"subsequent presentation works");

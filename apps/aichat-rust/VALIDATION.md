@@ -1,5 +1,22 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-16 遥控器暂停讲解与免提通话字幕（0.2.175）
+
+- macOS 独立 WKWebView 用模拟麦克风验证桌宠隐藏主窗口时仍能采到非零的 16 kHz 音频。通过应用锁定版本的 KeepworkSDK、合成输入和模拟语音网关验证了 PCM 上行、双方字幕，以及返回的 Opus 音频在 WebKit 播放器中走到结尾。
+- 隔离的 Tauri 原生窗口验证通话进入聆听后仍由可见桌宠承载同一通话页面，挂断即归还。Chrome 验证两方字幕、主聊天记录、通话归属及旧桌面只接收状态。
+- 播放器、遥控输入路由与课堂续讲回归覆盖朗读期间按确定键后暂停、保留通话及阻止迟到完成信号自动翻页。未使用用户的麦克风、实体遥控器或线上语音账户。
+
+## 2026-11-16 主聊天与独立桌宠互斥（0.2.174）
+
+- macOS 0.2.173 可在最大化聊天中按 Home 复现两个窗口同时可见。新版原生窗口回归检查普通、最大化及全屏聊天、快速连按 Home、程序坞恢复和延迟到达的桌宠显示请求，并核对恢复时仍是同一个聊天文档。
+- 两个独立 AppKit 进程验证外部应用最大化和原生全屏时，桌宠仍可显示和收起，外部应用保持前台。测试通过生产 Home 处理函数触发，未使用实体遥控器。
+- Windows CEF 的原生显示和恢复路径增加 HWND 用例，覆盖已展开的桌宠面板。x64 交叉编译通过，Windows 图形环境待实测。
+
+## 2026-11-16 原生主屏截图（0.2.173）
+
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml --features dev-bins --lib app::screenshot` 通过。自建 32×24 像素 CGImage 经生产图像处理路径缩放、JPEG 编码并组装为 MCP 响应，解码后校验 16×12 尺寸及中心像素。授权测试覆盖按来源记忆、撤销和拒收迟到结果。
+- 独立 macOS WKWebView 验证受信任页面调用截图设置、主窗隐藏时点击独立 NSAlert 的“取消”、授权仍关闭，以及非授权文档凭据遭拒绝。测试未授权系统屏幕录制或捕获用户屏幕。
+- `tests/launch-intents.test.cjs` 和 `tests/native-clipboard-acl.test.cjs` 验证注入与 TypeScript 桥接、页面离开后拒收截图和 IPC 白名单。Windows GDI 截图模块分别以 x86_64-pc-windows-msvc、aarch64-pc-windows-msvc 目标交叉类型检查；Windows 系统授权窗口和显示器仍待实机验证。
 ## 2026-11-15 兼容版桌宠外观（0.2.165）
 
 - 外观、聊天与语音针对性测试：指定本地独立网页的 `desktop_pet_controller.js`、`desktop_pet_audio.js` 后，`cef-pet-art.test.cjs`、`cef-pet-chat.test.cjs`、`cef-pet-audio.test.cjs` 共 34 项通过，无跳过。覆盖图集裁切、旧网页无素材、坏图与超限回退、文档 / 会话切换、迟到结果、超时取消，以及素材与普通状态分开传输。

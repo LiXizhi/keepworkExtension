@@ -41,6 +41,35 @@ static bool remoteHomeEvent(CGEventRef event) {
     return sender && keepwork_remote_home_sender(sender);
 }
 
+// The global tap has first refusal for a visible pet or an active voice call.
+// The local monitor handles only an identified remote Return in the chat window.
+static bool consumeMainNarrationOK(CGEventRef source, bool down, bool repeat, bool chatKeyWindow,
+    bool modified, bool *held, bool (*pause)(void)) {
+    if (!source || !remoteHomeEvent(source)) return false;
+    if (!down) {
+        bool consumed = *held;
+        *held = false;
+        return consumed;
+    }
+    if (repeat) return *held;
+    *held = chatKeyWindow && !modified && pause();
+    return *held;
+}
+
+void keepwork_watch_main_narration_ok(void *rawWindow, bool (*handler)(void)) {
+    __weak NSWindow *main = (__bridge NSWindow *)rawWindow;
+    __block bool held = false;
+    [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp)
+        handler:^NSEvent *(NSEvent *event) {
+        if (event.keyCode != 36 && event.keyCode != 76) return event;
+        bool chat = main && main.isKeyWindow && event.window == main && !main.attachedSheet;
+        bool modified = (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+            NSEventModifierFlagOption | NSEventModifierFlagShift)) != 0;
+        return consumeMainNarrationOK(event.CGEvent, event.type == NSEventTypeKeyDown, event.isARepeat,
+            chat, modified, &held, handler) ? nil : event;
+    }];
+}
+
 static CGEventRef voiceKey(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *raw) {
     (void)proxy;
     KeepworkVoiceTap *tap = raw;

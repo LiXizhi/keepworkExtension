@@ -38,6 +38,7 @@ Node 列表示共享 Node MCP 的参考行为，不承诺每台机器的外部 C
 | 桌面安装包自更新 | 已实现 | 已实现；下载摘要、离线 stale 缓存、显式确认安装 | 独立兼容 feed，不替换外层启动器 | 包存在/CDN校验不代表安装、系统提示或数据恢复通过 |
 | 原生网页浏览 surface / 固定视口 / 等比缩放 | iframe 路径 | 仅 macOS 声明三项 `browserSurface*Version`；Windows/Linux 仍走能力降级 | 原有普通子框架导航 | macOS 隔离 WKWebView 与实际输入记录；未声称 Windows 原生 surface 已完成 |
 | HTTPS 页面访问本机 MCP | 浏览器引擎路径 | macOS 受限原生 fetch 通道；可信顶层+精确8089+真实 Origin，保留 auth/owner，不自动重发 | 网页自身连接能力 | 真实 WKWebView 隔离夹具覆盖 SSE/NDJSON/Abort；真实登录整窗仍需验收 |
+| 主屏截图 | 本机 MCP 可请求 Electron 截图 | 可信主文档协商 `desktopScreenshotVersion: 1`，macOS / Windows 由 Rust 宿主返回有界 JPEG；宠物与主聊天共用可撤销截图授权 | 无此桌面能力 | macOS 原生隐藏主窗审批、取消及测试图像编码已验证；Windows x64/ARM64 已交叉类型检查，实机待验 |
 | 宠物后台听写 / 通话采集 | 原路径 | 可选音频租约协商；macOS 有原生可见性/播音记录，首次系统授权照常出现 | 无 | 模拟音轨不等于真人麦克风和云端 ASR；混合DPI、失焦、睡眠/唤醒另验 |
 | 小米遥控器输入/清除/发送 | 无对应原生模块 | macOS/Windows 原生实现；Windows 物理返回键不映射，保留语音清除；Linux 不支持 | 无 | 协议、WebSocket、原生输入隔离夹具；真实设备/权限/目标应用提交必须独立回执 |
 | Windows 无 WebView2 兼容启动 | Electron 独立产品路径 | 常规安装保持 Tauri/WebView2 | 预览：云端聊天/登录，下载校验缓存；不承诺与正常桌面等价 | [CEF 边界](../apps/aichat-rust/docs/windows-cef.md)；Windows/Win7真实安装与账号测试未由源码检查证明 |

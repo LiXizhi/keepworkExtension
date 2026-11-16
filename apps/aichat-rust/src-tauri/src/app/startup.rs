@@ -327,6 +327,7 @@ pub fn run() {
         local_model_supervisor,
         updates,
         pet: Arc::new(PetController::new(pet_prefs_path)),
+        pet_approval_return: Mutex::new(None),
         pet_audio: Arc::new(pet_audio::PetAudioRelay::default()),
         remote_voice: Arc::new(crate::remote_voice::RemoteVoice::new(&profile_dir)),
         pet_menu: pet_menu::Session::default(),
@@ -366,6 +367,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::clone(&core))
+        .manage(super::screenshot::ScreenshotAccess::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
 
@@ -527,6 +529,7 @@ pub fn run() {
                 if payload.event() == PageLoadEvent::Started {
                     core_for_page_load.remote_voice.dialogue.exit("navigation");
                     super::remote_phone_view::sync(window.app_handle());
+                    core_for_page_load.pet_approval_return.lock().unwrap().take();
                     core_for_page_load.launch_intents.lock().unwrap().invalidate_document();
                     #[cfg(any(target_os = "macos", windows))]
                     super::browser_surface::reset(&window);
@@ -579,6 +582,9 @@ pub fn run() {
                 error
             });
             let main_win = main_win?;
+            super::pet_approval::observe_main(&main_win, Arc::clone(&core_for_setup));
+            #[cfg(target_os = "macos")]
+            super::pet_host::watch_main_narration_ok(&main_win)?;
             main_window::observe_main_minimize(&main_win)?;
             #[cfg(target_os = "macos")]
             crate::navigation::install_frame_navigation(&main_win, &entry_target)?;
@@ -709,6 +715,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             super::browser_surface::desktop_browser_surface,
+            super::screenshot::desktop_capture_screenshot,
+            super::screenshot::desktop_get_screenshot_permission,
+            super::screenshot::desktop_set_screenshot_permission,
+            super::pet_approval::desktop_return_to_pet_after_approval,
+            super::pet_approval::desktop_reveal_pet_approval,
             main_window::desktop_page_connection_status,
             main_window::desktop_retry_page_connection,
             main_window::desktop_page_connection_attempt,

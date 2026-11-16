@@ -45,7 +45,19 @@ for (const implementation of ['injected', 'typescript']) {
     const bridge = fixture.window.aichatDesktop;
     assert.equal(bridge.version, 1);
     assert.equal(bridge.capabilities.launchIntents, true);
+    assert.equal(bridge.capabilities.petApprovalRevealVersion, 1);
+    assert.equal(bridge.capabilities.petApprovalReturnVersion, 1);
     assert.ok(Object.isFrozen(bridge));
+    await bridge.revealPetApproval();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls.at(-1))), {
+      command: 'desktop_reveal_pet_approval', args: { document: documentId, token: 'fixture-launch-token' }
+    });
+    await bridge.revealPetApproval({ returnToPet: true });
+    assert.equal(fixture.calls.at(-1).args.returnToPet, true);
+    await bridge.returnToPetAfterApproval();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls.at(-1))), {
+      command: 'desktop_return_to_pet_after_approval', args: { document: documentId, token: 'fixture-launch-token' }
+    });
     assert.equal(fixture.calls.filter(call => call.command.includes('launch_intent')).length, 0);
     await bridge.getLaunchIntent();
     await bridge.acknowledgeLaunchIntent('ticket');
@@ -75,7 +87,28 @@ for (const implementation of ['injected', 'typescript']) {
     else fixture.pagehide();
     await assert.rejects(bridge.acknowledgeLaunchIntent('late-ticket'), /no longer active/);
     await assert.rejects(bridge.getLaunchIntent(), /no longer active/);
+    await assert.rejects(bridge.revealPetApproval(), /no longer active/);
     assert.equal(fixture.calls.length, callsBeforePagehide);
+  });
+
+  test(`${implementation} screenshot bridge binds the action and settings to the active document`, async () => {
+    const fixture = implementation === 'injected'
+      ? renderer('rust', 'darwin', false, false, { crypto, entryUrl })
+      : typescriptBridge();
+    const bridge = fixture.window.aichatDesktop;
+    assert.equal(bridge.capabilities.desktopScreenshotVersion, 1);
+    await bridge.getScreenshotPermission();
+    await bridge.setScreenshotPermission(false);
+    const pending = bridge.captureScreenshot();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls.slice(-3))), [
+      { command: 'desktop_get_screenshot_permission', args: { document: documentId, token: 'fixture-launch-token' } },
+      { command: 'desktop_set_screenshot_permission', args: { document: documentId, token: 'fixture-launch-token', enabled: false } },
+      { command: 'desktop_capture_screenshot', args: { document: documentId, token: 'fixture-launch-token' } },
+    ]);
+    if (implementation === 'injected') fixture.fire(fixture.window, 'pagehide');
+    else fixture.pagehide();
+    await assert.rejects(pending, /no longer active/);
+    await assert.rejects(bridge.captureScreenshot(), /no longer active/);
   });
 
   test(`${implementation} connection pages and subframes receive no launch-intent capability`, () => {
@@ -84,6 +117,10 @@ for (const implementation of ['injected', 'typescript']) {
       : typescriptBridge({ shell: true });
     assert.equal(shell.window.aichatDesktop.capabilities.launchIntents, undefined);
     assert.equal(shell.window.aichatDesktop.getLaunchIntent, undefined);
+    assert.equal(shell.window.aichatDesktop.capabilities.desktopScreenshotVersion, undefined);
+    assert.equal(shell.window.aichatDesktop.captureScreenshot, undefined);
+    assert.equal(shell.window.aichatDesktop.capabilities.petApprovalRevealVersion, undefined);
+    assert.equal(shell.window.aichatDesktop.revealPetApproval, undefined);
     const frame = implementation === 'injected'
       ? renderer('rust', 'darwin', true, false, { crypto, entryUrl })
       : typescriptBridge({ subframe: true });
@@ -95,6 +132,8 @@ for (const implementation of ['injected', 'typescript']) {
       ? renderer('rust', 'darwin', false, false, { crypto, entryUrl, launchCapability: '' })
       : typescriptBridge({ capability: '' });
     assert.equal(fixture.window.aichatDesktop.capabilities.launchIntents, undefined);
+    assert.equal(fixture.window.aichatDesktop.capabilities.petApprovalRevealVersion, undefined);
+    assert.equal(fixture.window.aichatDesktop.revealPetApproval, undefined);
     assert.equal(fixture.window.aichatDesktop.getLaunchIntent, undefined);
     assert.equal(fixture.window.aichatDesktop.capabilities.files, true);
   });
@@ -103,6 +142,8 @@ for (const implementation of ['injected', 'typescript']) {
 test('unrelated top-level documents cannot advertise launch-intent access', () => {
   const fixture = typescriptBridge({ url: 'http://localhost:57175/tool.html' });
   assert.equal(fixture.window.aichatDesktop.capabilities.launchIntents, undefined);
+  assert.equal(fixture.window.aichatDesktop.capabilities.petApprovalRevealVersion, undefined);
+  assert.equal(fixture.window.aichatDesktop.revealPetApproval, undefined);
   assert.equal(fixture.window.aichatDesktop.acknowledgeLaunchIntent, undefined);
 });
 

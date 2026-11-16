@@ -1,4 +1,4 @@
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden;font:13px system-ui,sans-serif;color:#23312a}button,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:9px;background:#e8f3ec;color:inherit;padding:7px 10px}button:hover{background:#d5e9dc}button:focus-visible,textarea:focus-visible{outline:2px solid #3b875b;outline-offset:1px}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}#pet{position:absolute;right:8px;bottom:8px;width:112px;height:128px;background:transparent;padding:0;touch-action:none;user-select:none}#art{display:block;width:112px;height:112px;background-repeat:no-repeat;font-size:72px;line-height:112px;filter:drop-shadow(0 3px 3px #0003)}#badge{position:absolute;right:8px;top:8px;color:#e7772c;font-size:20px}#panel{position:absolute;inset:6px 6px 140px;display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:18px;background:#f7fbf8f7;border:1px solid #bed5c7;box-shadow:0 3px 8px #0002}header{display:flex;align-items:center;gap:8px}header strong{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}#messages{flex:1;min-height:40px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}.message{margin:4px 0;padding:6px 8px;border-radius:8px;background:#ebf2ed}.message.user{background:#d9eddf;margin-left:20px}#status,#error{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:48px;overflow:auto}#error{color:#a52a23}#draft{width:100%;resize:none;border:1px solid #bed5c7;border-radius:9px;padding:8px;background:#fff;color:#23312a}.actions{display:flex;gap:5px;flex-wrap:wrap}.actions button{padding:6px 8px}#send{margin-left:auto;background:#347f54;color:white}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden;font:13px system-ui,sans-serif;color:#23312a}button,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:9px;background:#e8f3ec;color:inherit;padding:7px 10px}button:hover{background:#d5e9dc}button:focus-visible,textarea:focus-visible{outline:2px solid #3b875b;outline-offset:1px}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}#pet{position:absolute;right:8px;bottom:8px;width:112px;height:128px;background:transparent;padding:0;touch-action:none;user-select:none}#art{display:block;width:112px;height:112px;background-repeat:no-repeat;font-size:72px;line-height:112px;filter:drop-shadow(0 3px 3px #0003)}#badge{position:absolute;right:8px;top:8px;color:#e7772c;font-size:20px}#panel{position:absolute;inset:6px 6px 140px;display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:18px;background:#f7fbf8f7;border:1px solid #bed5c7;box-shadow:0 3px 8px #0002}header{display:flex;align-items:center;gap:8px}header strong{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}#messages{flex:1;min-height:40px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}.message{margin:4px 0;padding:6px 8px;border-radius:8px;background:#ebf2ed}.message.user{background:#d9eddf;margin-left:20px}#status,#error{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:48px;overflow:auto}#error{color:#a52a23}#draft{width:100%;resize:none;border:1px solid #bed5c7;border-radius:9px;padding:8px;background:#fff;color:#23312a}.actions{display:flex;gap:5px;flex-wrap:wrap}.actions button{padding:6px 8px}
 #stack{position:absolute;left:6px;right:6px;bottom:140px;max-height:calc(100% - 146px);display:flex;flex-direction:column;gap:10px}#panel{position:relative;inset:auto;flex:none;gap:6px}header{justify-content:flex-end;column-gap:0;margin-right:-12px}#bubble{position:relative;min-height:0;padding:12px;border-radius:18px;background:#f7fbf8fa;border:1px solid #bed5c7;box-shadow:0 3px 8px #0002}#bubble:after{content:"";position:absolute;right:43px;bottom:-8px;width:14px;height:14px;transform:rotate(45deg);background:#f7fbf8;border-right:1px solid #bed5c7;border-bottom:1px solid #bed5c7}#reply{white-space:pre-wrap;overflow-wrap:anywhere;line-height:20px;max-height:200px;overflow-y:auto;cursor:pointer;scrollbar-width:thin}#reply:focus-visible{outline:2px solid #3b875b}#bubble.thinking #reply{max-height:60px;color:#637268}#options{display:flex;flex-wrap:wrap;gap:6px;max-height:90px;overflow-y:auto;margin-top:8px}#options:empty{display:none}#options button{text-align:left;overflow-wrap:anywhere;max-width:100%}#status:empty,#error:empty{display:none}#stack #bubble{flex:0 1 auto;overflow-y:auto}#draft{min-height:48px}
 #stack #bubble{display:flex;flex-direction:column;overflow:visible}#reply{flex:0 1 auto;min-height:0}#options{flex:none}
 
@@ -45,7 +45,7 @@ body.dragging #art{filter:none}
 #target[data-kind="persona"] .session { display: none; }
 #remote-voice-label,
 #panel.remote-voice-station .target-text,
-#panel.remote-voice-station .action-label {
+#panel .action-label {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -53,31 +53,33 @@ body.dragging #art{filter:none}
   clip-path: inset(50%);
   white-space: nowrap;
 }
-#panel .actions svg { display: none; }
 #panel.remote-voice-station #draft::placeholder { opacity: 0; }
-#panel.remote-voice-station .actions button {
+#panel .actions { justify-content: flex-end; gap: 6px; }
+#panel .actions button {
   position: relative;
   display: inline-grid;
   place-items: center;
-  min-width: 36px;
-  height: 32px;
-  padding: 5px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid #d4e1ed;
+  border-radius: 50%;
+  background: #edf4fb;
+  color: #40566c;
 }
-#panel.remote-voice-station .actions svg {
-  display: block;
-  width: 19px;
-  height: 19px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-#panel .actions svg .alternate,
-#panel .actions .alternate-action svg .normal { display: none; }
-#panel .actions .alternate-action svg .alternate { display: inline; }
+#panel .actions button:hover:enabled { border-color: #2563a8; color: #1d4f87; }
+#panel .actions button:focus-visible { outline-color: #2563a8; }
+#panel #send { border: 0; border-radius: 10px; background: #2563a8; color: white; }
+#panel #send:hover:enabled { opacity: .85; }
+#panel #send.alternate-action, #panel #call.alternate-action { background: #ef4444; color: white; }
+#panel #dictation.alternate-action { background: #fce8e8; border-color: #ef4444; color: #b42323; }
+#panel .actions svg { display: block; width: 14px; height: 14px; }
+#panel .actions .alternate,
+#panel .actions .alternate-action .normal { display: none; }
+#panel .actions .alternate-action .alternate { display: inline; }
 #remote-voice-indicator,
 #remote-voice-preview,
+#dialogue-caption.voice-input-preview,
 #draft.dictating {
   background: #181818;
   color: #fff;
@@ -117,13 +119,29 @@ body.dragging #art{filter:none}
 #pet{right:auto;bottom:auto}
 #exit-bubble{position:relative;min-height:0;padding:14px;border:1px solid #bed5c7;border-radius:18px;background:#f7fbf8fc;box-shadow:0 3px 8px #0002;overflow-y:auto}#exit-bubble p{margin:10px 0;line-height:1.5}#exit-personas{padding-left:20px;max-height:160px;overflow-y:auto;overflow-wrap:anywhere}#exit-personas:empty{display:none}#exit-confirm{margin-left:auto;background:#a63630;color:white}#exit-status{font-size:12px;color:#637268}
 
-#target{flex:1;min-width:0;text-align:left;background:transparent;padding:4px 6px}#target-title,#target-detail{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#target-title{font-weight:600}#target-detail{font-size:11px;color:#637268;margin-top:3px}#open,#collapse{align-self:flex-start;flex:none;display:grid;place-items:center;width:36px;height:28px;margin-top:-12px;padding:0;border-radius:0;background:transparent;font-size:16px;line-height:1}
-#open{border-top-right-radius:17px}
-#open:hover,#collapse:hover{background:#d5e9dc}
-#open:focus-visible,#collapse:focus-visible{outline-offset:-2px}
+#target{flex:1;min-width:0;text-align:left;background:transparent;padding:4px 6px}#target-title,#target-detail{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#target-title{font-weight:600}#target-detail{font-size:11px;color:#637268;margin-top:3px}
+.window-control {
+  align-self: flex-start;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 28px;
+  margin-top: -12px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+}
+#collapse { border-top-right-radius: 17px; }
+.window-control:hover { background: #d5e9dc; }
+.window-control:focus-visible { outline-offset: -2px; }
 
 #permission-bubble{background:#fff;color:#202838;border:1px solid #becce0;border-radius:16px;padding:16px;box-shadow:0 6px 24px #0003;pointer-events:auto}#permission-bubble p{font-size:14px;line-height:1.5;overflow-wrap:anywhere}#permission-bubble .actions{flex-wrap:wrap}#permission-bubble button{min-height:36px}
 
+#dialogue-caption,
+#dialogue-status,
 #compact-status {
   align-self: flex-end;
   max-width: min(100%, 230px);
@@ -134,6 +152,37 @@ body.dragging #art{filter:none}
   font-size: 12px;
   overflow-wrap: anywhere;
   pointer-events: none;
+}
+
+#dialogue-caption {
+  max-width: 100%;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  max-height: 6em;
+  overflow: hidden;
+}
+
+#dialogue-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #285d76;
+  font-weight: 600;
+  line-height: 18px;
+}
+#dialogue-status[data-state="listening"]::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  background:
+    linear-gradient(currentColor, currentColor) left center / 2px 6px,
+    linear-gradient(currentColor, currentColor) center / 2px 12px,
+    linear-gradient(currentColor, currentColor) right center / 2px 8px;
+  background-repeat: no-repeat;
+}
+@media (prefers-reduced-motion: no-preference) {
+  #dialogue-status[data-state="listening"]::before { animation: remote-wave .8s ease-in-out infinite alternate; }
 }
 
 #thinking { color: #53675a; line-height: 20px; }
@@ -153,14 +202,21 @@ body.dragging #art{filter:none}
   overflow-wrap: anywhere;
 }
 
+/* The button stays inside the pet's native click region as the sprite moves. */
 #dialogue-icon {
-  position: absolute; top: 3px; left: 2px;
-  display: grid; place-items: center;
-  width: 26px; height: 26px;
-  border: 1px solid #a6c6b3; border-radius: 50%;
-  background: #eff9f2; color: #286740;
-  font: 17px/1 system-ui, sans-serif;
-  pointer-events: none;
+  position: absolute;
+  top: 3px;
+  left: 2px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #fff;
+  border-radius: 50%;
+  background: #dc2626;
+  color: white;
 }
-#dialogue-icon[data-state="speaking"] { border-color: #c2b5de; background: #f4effb; color: #60408d; }
-#dialogue-icon[data-state="paused"] { background: #f1f2f3; color: #59636a; }
+#dialogue-icon svg { width: 20px; height: 20px; }
+#dialogue-icon:hover:enabled { background: #b91c1c; }
+#dialogue-icon:disabled { opacity: 1; cursor: default; }

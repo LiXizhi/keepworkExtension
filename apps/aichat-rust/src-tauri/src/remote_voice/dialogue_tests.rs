@@ -59,11 +59,16 @@ async fn remote_dialogue_buttons_and_late_start_acknowledgments_stay_with_their_
         assert!(take_ok());
         assert!(!take_ok(), "key repeat cannot exit a second dialogue");
     }
-    assert!(dialogue.exit("ok"));
+    dialogue.record("ok");
+    let (label, action, id, reason, answer) = received.recv().await.unwrap();
+    assert_eq!((label, action.as_str(), id.as_str(), reason.as_str()), ("pet", "record", first.as_str(), "ok"));
+    answer.send(true).unwrap(); // Speaking page paused and kept listening.
+    assert!(dialogue.active());
+    assert!(dialogue.exit("back"));
     let (label, action, id, reason, _) = received.recv().await.unwrap();
     assert_eq!(
         (label, action.as_str(), id.as_str(), reason.as_str()),
-        ("pet", "exit", first.as_str(), "ok")
+        ("pet", "exit", first.as_str(), "back")
     );
     #[cfg(target_os = "macos")]
     {
@@ -84,18 +89,20 @@ async fn remote_dialogue_buttons_and_late_start_acknowledgments_stay_with_their_
     late.send(false).unwrap();
     assert!(!dialogue.closed("pet", &first));
     *surface.lock().unwrap() = "pet";
-    dialogue.record();
+    dialogue.record("record");
     let (label, action, id, _, response) = received.recv().await.unwrap();
     assert_eq!(
         (label, action.as_str(), id.as_str()),
         ("main", "record", second.as_str())
     );
     response.send(true).unwrap();
-    assert!(dialogue.exit("back"));
+    assert!(!dialogue.exit_matching(Some(&first), "pet"));
+    assert!(dialogue.active());
+    assert!(dialogue.exit_matching(Some(&second), "pet"));
     let (label, action, id, reason, _) = received.recv().await.unwrap();
     assert_eq!(
         (label, action.as_str(), id.as_str(), reason.as_str()),
-        ("main", "exit", second.as_str(), "back")
+        ("main", "exit", second.as_str(), "pet")
     );
     assert!(!dialogue.exit("back"));
     assert!(!dialogue.active());

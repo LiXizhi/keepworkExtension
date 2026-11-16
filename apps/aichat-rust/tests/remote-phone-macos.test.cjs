@@ -30,6 +30,20 @@ test('macOS main phone acquires mock audio in pet mode without navigating or sho
       : `<!doctype html><title>main</title><script>
         window.sessionMarker = crypto.randomUUID();
         window.phoneStarts = 0;
+        window.reacquireMic = async () => {
+          window.track.stop();
+          const fresh = await navigator.mediaDevices.getUserMedia({audio:{sampleRate:16000,channelCount:1}});
+          window.track = fresh.getAudioTracks()[0];
+          window.ctx = new AudioContext({sampleRate:16000});
+          window.source = ctx.createMediaStreamSource(fresh);
+          window.processor = ctx.createScriptProcessor(4096,1,1);
+          window.samples = 0;
+          processor.onaudioprocess = event => {
+            if (event.inputBuffer.getChannelData(0).some(sample => Math.abs(sample) > .001)) window.samples++;
+          };
+          source.connect(processor); processor.connect(ctx.destination);
+          // The live S2S3 capture graph uses the 16 kHz context directly.
+        };
         window.startPhone = async () => {
           window.phoneStarts++;
           window.captureState = 'waiting';

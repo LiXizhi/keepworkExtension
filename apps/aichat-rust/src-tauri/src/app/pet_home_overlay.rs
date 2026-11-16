@@ -1,13 +1,11 @@
 //! Xiaomi Home presentation over a screen-filling macOS window.
 use super::{pet_host, state::AppCore};
 use crate::{pet::WorkArea, pet_canvas};
-use std::{ffi::c_void, ptr, sync::Arc};
+use std::{ffi::c_void, sync::Arc};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 extern "C" {
     fn keepwork_pet_overlay_target(
-        main: *mut c_void,
-        pet: *mut c_void,
         x: *mut i32,
         y: *mut i32,
         width: *mut i32,
@@ -47,9 +45,6 @@ fn dismiss(pet: &WebviewWindow, core: &AppCore) {
 /// Called on the main thread. Once we recognize a screen-filling window,
 /// consume Home even if AppKit cannot show the overlay in this Space.
 pub(super) fn handle_home(app: &AppHandle, core: &Arc<AppCore>, main: &WebviewWindow) -> bool {
-    let Ok(main_window) = main.ns_window() else {
-        return false;
-    };
     let pet = app.get_webview_window("pet");
     let presented = *core.pet_home_overlay.lock().unwrap();
     if let Some(window) = pet.as_ref() {
@@ -58,15 +53,9 @@ pub(super) fn handle_home(app: &AppHandle, core: &Arc<AppCore>, main: &WebviewWi
             return true;
         }
     }
-    let pet_window = pet
-        .as_ref()
-        .and_then(|w| w.ns_window().ok())
-        .unwrap_or(ptr::null_mut());
     let mut area = WorkArea::default();
     if !unsafe {
         keepwork_pet_overlay_target(
-            main_window,
-            pet_window,
             &mut area.x,
             &mut area.y,
             &mut area.width,
@@ -95,6 +84,12 @@ pub(super) fn handle_home(app: &AppHandle, core: &Arc<AppCore>, main: &WebviewWi
     };
     if let Err(error) = pet_canvas::sync_pet_canvas(&window, area) {
         eprintln!("[desktop] Cannot position the Home pet: {error}");
+        return true;
+    }
+    // The overlay can span Spaces and displays. Retire the chat even if it
+    // currently sits behind the presentation, so switching apps cannot expose both.
+    super::main_window::hide_main_window(app, core);
+    if main.is_visible().unwrap_or(true) && !main.is_minimized().unwrap_or(false) {
         return true;
     }
     if unsafe { keepwork_pet_overlay_show(native) } {

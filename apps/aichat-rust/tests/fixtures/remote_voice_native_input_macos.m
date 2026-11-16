@@ -298,6 +298,29 @@ static void home_does_not_type_into_the_foreground_app(void) {
     }
 }
 
+static bool hasNarration;
+static int narrationKeys;
+static bool pauseChatNarration(void) {
+    if (hasNarration) narrationKeys++;
+    return hasNarration;
+}
+static void main_narration_ok_only_owns_verified_remote_down_and_up(void) {
+    bool held = false;
+    CGEventRef e = fixtureCreateKeyboardEvent(NULL, 36, true);
+    hasNarration = true;
+    for (fixtureSender = 0; fixtureSender <= 7; fixtureSender += 7)
+        assert(!consumeMainNarrationOK(e, true, false, true, false, &held, pauseChatNarration));
+    fixtureSender = 42;
+    assert(!consumeMainNarrationOK(e, true, false, false, false, &held, pauseChatNarration));
+    assert(!consumeMainNarrationOK(e, true, false, true, true, &held, pauseChatNarration));
+    assert(consumeMainNarrationOK(e, true, false, true, false, &held, pauseChatNarration));
+    assert(consumeMainNarrationOK(e, true, true, true, false, &held, pauseChatNarration));
+    hasNarration = false;
+    assert(consumeMainNarrationOK(e, false, false, false, false, &held, pauseChatNarration));
+    assert(!consumeMainNarrationOK(e, true, false, true, false, &held, pauseChatNarration));
+    assert(narrationKeys == 1);
+    CFRelease(e);
+}
 static void remote_ok_routes_only_the_active_dialogue_without_an_extra_enter(void) {
     KeepworkVoiceTap tap = {0};
     atomic_init(&tap.enabled, true);
@@ -365,6 +388,7 @@ static void fixturePostToPid(pid_t pid, CGEventRef event) {
 int main(void) {
     @autoreleasepool {
         home_does_not_type_into_the_foreground_app();
+        main_narration_ok_only_owns_verified_remote_down_and_up();
         remote_ok_routes_only_the_active_dialogue_without_an_extra_enter();
         trusted = false;
         assert(keepwork_voice_input_permissions(false) == 1);

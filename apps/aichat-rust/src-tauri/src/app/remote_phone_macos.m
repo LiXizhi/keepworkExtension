@@ -4,7 +4,7 @@
 #import <objc/runtime.h>
 
 // WebKit defers getUserMedia until its document has a visible window. During
-// phone startup the pet presents the same WKWebView behind its status display.
+// a pet call the pet presents the same WKWebView behind its status display.
 // WebKit still owns the origin, the permission prompt and the microphone.
 @interface KeepworkPhoneHost : NSView
 @property(nonatomic, strong) WKWebView *phone;

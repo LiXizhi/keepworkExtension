@@ -5,6 +5,8 @@ import type {
   BrainFolderResult,
   DesktopCapabilities,
   DesktopStatus,
+  DesktopScreenshot,
+  ScreenshotPermission,
   GitInstallResult,
   GitStatus,
   LaunchIntent,
@@ -79,9 +81,11 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     floatingPet: true,
     petReplyPresentationVersion: 1,
     petStreamingSpeechVersion: 1,
+    ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { remoteNarrationPauseVersion: 1 as const } : {}),
     startupSignIn: true,
-    ...(launchEnabled ? { launchIntents: true as const } : {}),
-    ...(["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { browserSurfaceVersion: 1 as const, remoteDialogueVersion: 1 as const, remotePhoneVersion: 1 as const } : {}),
+    ...(launchEnabled && ["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { desktopScreenshotVersion: 1 as const } : {}),
+    ...(launchEnabled ? { launchIntents: true as const, petApprovalRevealVersion: 1 as const, petApprovalReturnVersion: 1 as const } : {}),
+    ...(["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { browserSurfaceVersion: 1 as const, remoteDialogueVersion: 1 as const, remotePhoneVersion: 1 as const, remotePhoneCaptionVersion: 1 as const, remotePhoneActivityVersion: 1 as const } : {}),
     ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
   });
 
@@ -150,7 +154,19 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
   const bridge: AIChatDesktopBridge = Object.freeze({
     version: 1,
     capabilities,
+    ...(capabilities.desktopScreenshotVersion === 1 ? {
+      captureScreenshot: async (): Promise<DesktopScreenshot> => {
+        const shot = await invokeLaunch<DesktopScreenshot>("desktop_capture_screenshot");
+        if (!launchLive) throw new Error("Screenshot document is no longer active");
+        return shot;
+      },
+      getScreenshotPermission: (): Promise<ScreenshotPermission> => invokeLaunch("desktop_get_screenshot_permission"),
+      setScreenshotPermission: (enabled: boolean): Promise<ScreenshotPermission> => invokeLaunch("desktop_set_screenshot_permission", { enabled }),
+    } : {}),
     ...(launchEnabled ? {
+      revealPetApproval: (options?: { returnToPet?: boolean }): Promise<boolean> =>
+        invokeLaunch("desktop_reveal_pet_approval", options?.returnToPet === true ? { returnToPet: true } : {}),
+      returnToPetAfterApproval: (): Promise<boolean> => invokeLaunch("desktop_return_to_pet_after_approval"),
       getLaunchIntent: (): Promise<LaunchIntent | null> => invokeLaunch("desktop_get_launch_intent"),
       acknowledgeLaunchIntent: (id: string): Promise<boolean> => invokeLaunch("desktop_acknowledge_launch_intent", { id: String(id || "") }),
       onLaunchIntent: (callback: () => void): (() => void) => {

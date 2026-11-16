@@ -1,4 +1,4 @@
-#include "desktop_pet.h"
+#include "window_frame.h"
 #include "pet_chat_panel.h"
 #include <cstdlib>
 #include <iostream>
@@ -80,6 +80,15 @@ static bool IsAbove(HWND upper, HWND lower) {
   return false;
 }
 
+static BOOL CALLBACK FindFixturePet(HWND candidate, LPARAM result) {
+  wchar_t name[64]{};
+  if (GetClassNameW(candidate, name, ARRAYSIZE(name)) && wcscmp(name, L"KeepworkCefDesktopPet") == 0) {
+    *reinterpret_cast<HWND*>(result) = candidate;
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static void NativeTests() {
   using namespace keepwork_cef;
   FixtureCleanup cleanup;
@@ -87,14 +96,18 @@ static void NativeTests() {
   std::vector<PetChatAction> actions;
   std::vector<std::wstring> edits;
   const auto instance = GetModuleHandleW(nullptr);
-  Check(panel.Create(instance, [&](PetChatAction action) { actions.push_back(action); },
+  DesktopPet pet;
+  Check(panel.Create(instance, [&](PetChatAction action) {
+    actions.push_back(action);
+    if (action == PetChatAction::HidePet) pet.Hide();
+  },
     [&](std::wstring text) { edits.push_back(std::move(text)); }), "native panel creates real EDIT and BUTTON controls");
   Check(edits.empty(), "control initialization cannot overwrite the page draft through an empty edit callback");
   const HWND window = panel.window();
   const HWND draft = GetDlgItem(window, PetChatPanel::draft_id);
   Check(draft != nullptr, "draft uses one persistent native EDIT");
   PetChatView view;
-  view.ready = true; view.can_switch = true; view.title = L"现有网页对话";
+  view.ready = true; view.title = L"现有网页对话";
   view.transcript = L"用户：测试\n助手：回复";
   panel.Update(view);
   panel.SetDraft(L"第一行\n第二行");
@@ -205,16 +218,14 @@ static void NativeTests() {
   Click(panel, PetChatPanel::stop_id);
   Check(actions.size() == 2 && actions.back() == PetChatAction::Stop, "Stop targets the existing busy conversation");
   view.busy = false; view.ready = false; panel.Update(view);
-  Check(IsWindowEnabled(GetDlgItem(window, PetChatPanel::target_id)), "unready default target does not trap target switching");
+  const HWND target = GetDlgItem(window, PetChatPanel::target_id);
+  wchar_t class_name[32]{}, current_title[128]{};
+  GetClassNameW(target, class_name, ARRAYSIZE(class_name));
+  GetWindowTextW(target, current_title, ARRAYSIZE(current_title));
+  Check(_wcsicmp(class_name, L"STATIC") == 0 && !(GetWindowLongPtrW(target, GWL_STYLE) & WS_TABSTOP) &&
+    view.title == current_title, "the current conversation is an accessible read-only title");
   Click(panel, PetChatPanel::target_id);
-  Check(actions.back() == PetChatAction::ToggleTarget, "switching remains an explicit owner action while current target is unready");
-  view.unsynced = true; panel.Update(view);
-  const auto before_unsynced = actions.size();
-  Check(!IsWindowEnabled(GetDlgItem(window, PetChatPanel::target_id)),
-    "unsynced native draft disables target switching instead of discarding visible text");
-  Click(panel, PetChatPanel::target_id);
-  Check(actions.size() == before_unsynced, "raw switch commands cannot bypass the unsynced draft guard");
-  view.unsynced = false;
+  Check(actions.size() == 2, "clicking the title cannot change the current conversation");
   view.ready = true; view.rich_draft = true; panel.Update(view);
   Check((GetWindowLongPtrW(draft, GWL_STYLE) & ES_READONLY) && !IsWindowEnabled(GetDlgItem(window, PetChatPanel::send_id)),
     "rich drafts stay protected instead of being silently converted to plain text");
@@ -231,6 +242,8 @@ static void NativeTests() {
   Click(panel, PetChatPanel::stop_id);
   Check(actions.back() == PetChatAction::Stop,
     "an explicit Stop remains available for a busy conversation while Send is locked by unknown delivery");
+  Click(panel, PetChatPanel::open_id);
+  Check(actions.back() == PetChatAction::OpenMain, "maximize requests the existing main window");
   SendMessageW(window, WM_CLOSE, 0, 0);
   Check(!panel.visible() && actions.back() == PetChatAction::Collapse && panel.Draft() == L"准备发送",
     "closing collapses the native panel while preserving its draft");
@@ -242,7 +255,6 @@ static void NativeTests() {
     GetTempFileNameW(temporary, L"kwp", 0, profile) != 0, "isolated pet settings path is available");
   Check(DeleteFileW(profile) && CreateDirectoryW(profile, nullptr), "isolated pet settings directory creates");
   cleanup.profile = profile;
-  DesktopPet pet;
   int opened = 0, toggled = 0, hidden = 0, moved = 0;
   RECT moved_bounds{};
   Check(pet.Create(instance, profile, [&] { ++opened; }, [] {}, [&] { ++toggled; }, [&] { ++hidden; panel.Hide(); },
@@ -251,6 +263,10 @@ static void NativeTests() {
   Check(pet.Show(), "isolated native pet becomes visible");
   const auto bounds = pet.bounds();
   Check(moved > 0 && EqualRect(&moved_bounds, &bounds), "the movement callback reports the painted pet's actual screen bounds");
+  panel.Show(bounds);
+  Click(panel, PetChatPanel::collapse_id);
+  Check(!panel.visible() && pet.visible() && actions.back() == PetChatAction::Collapse && panel.Draft() == L"准备发送",
+    "the close button dismisses only the panel and keeps its draft");
   panel.Show(bounds);
   const HWND raised_focus = GetFocus();
   pet.Raise();
@@ -293,13 +309,59 @@ static void NativeTests() {
   Check(toggled == 1 && opened == 1, "dragging cannot leave a delayed chat or main-window action");
   SendMessageW(pet_window, WM_LBUTTONDOWN, MK_LBUTTON, 0);
   SendMessageW(pet_window, WM_LBUTTONUP, 0, 0);
-  pet.Hide();
+  Click(panel, PetChatPanel::minimize_id);
   SendMessageW(pet_window, WM_TIMER, 2, 0);
-  Check(toggled == 1 && hidden > 0 && !panel.visible(), "hiding cancels pending clicks and collapses the pet's chat");
+  Check(actions.back() == PetChatAction::HidePet && !pet.visible() && pet.enabled() &&
+      toggled == 1 && hidden > 0 && !panel.visible() && panel.Draft() == drag_draft,
+    "minimize hides the pet and panel, cancels pending clicks and preserves the draft and pet preference");
   Check(pet.Show() && !panel.visible(), "showing or repositioning the pet leaves a collapsed chat hidden");
   pet.Destroy();
   panel.Destroy(); panel.Destroy();
   Check(!IsWindow(window), "panel teardown releases native windows and is idempotent");
+  WindowFrame frame;
+  Check(frame.Create(), "fixture can create the real native main window");
+  frame.Attach(nullptr, [] { return false; }, [] {}, [] {}, [](WindowCommand) {}, true, profile);
+  if (!IsWindowVisible(frame.window())) { // Pet mode requires a registered native tray.
+    HWND sprite = nullptr;
+    EnumThreadWindows(GetCurrentThreadId(), FindFixturePet, reinterpret_cast<LPARAM>(&sprite));
+    Check(sprite && IsWindowVisible(sprite), "the native pet starts visible when the frame is hidden");
+    frame.SetupPetChat([](PetChatAction) {}, [](std::wstring) {}, [] {}, [] {});
+    RECT sprite_bounds{}; GetWindowRect(sprite, &sprite_bounds);
+    frame.pet_chat().Show(sprite_bounds);
+    ShowWindow(frame.window(), SW_SHOWNOACTIVATE);
+    Check(IsWindowVisible(frame.window()) && !IsWindowVisible(sprite) && !frame.pet_chat().visible(),
+      "showing the frame through Windows directly dismisses both standalone pet windows");
+    SendMessageW(frame.window(), WM_CLOSE, 0, 0);
+    Check(!IsWindowVisible(frame.window()) && IsWindowVisible(sprite),
+      "returning to pet mode after the native restore keeps the pet preference");
+    EnableWindow(frame.window(), FALSE);
+    Check(!frame.RevealPetApproval("page", false) && !IsWindowVisible(frame.window()),
+      "a native modal retains control while the page requests attention");
+    EnableWindow(frame.window(), TRUE);
+    Check(frame.RevealPetApproval("page", false) && IsWindowVisible(frame.window()) && !IsIconic(frame.window()),
+      "a page confirmation reveals the existing full window from pet mode");
+    Check(!frame.ReturnToPetAfterApproval("page"), "ordinary confirmation does not arm a screenshot return");
+    SendMessageW(frame.window(), WM_CLOSE, 0, 0);
+    Check(frame.RevealPetApproval("page", true) && !frame.ReturnToPetAfterApproval("other-document") &&
+        frame.ReturnToPetAfterApproval("page") && !IsWindowVisible(frame.window()) && !frame.ReturnToPetAfterApproval("page"),
+      "a screenshot reveal permits one return to pet mode from the same document before capture");
+    Check(frame.RevealPetApproval("page", true), "the next screenshot can reveal the window again");
+    frame.Show();
+    Check(!frame.ReturnToPetAfterApproval("page") && IsWindowVisible(frame.window()),
+      "explicitly reopening the main window supersedes a screenshot return");
+    Check(!frame.RevealPetApproval("page", false), "another confirmation cannot steal focus in ordinary main mode");
+    SendMessageW(frame.window(), WM_CLOSE, 0, 0);
+    frame.TemporarilyHidePet();
+    Check(IsIconic(frame.window()) && IsWindowVisible(frame.window()) && !frame.RevealPetApproval("page", false),
+      "temporary pet minimization keeps the taskbar entry without revealing an unrelated confirmation");
+    SendMessageW(frame.window(), WM_SYSCOMMAND, SC_RESTORE, 0);
+    Check(IsWindowVisible(frame.window()) && !IsIconic(frame.window()),
+      "the standard taskbar restore action opens the retained main window");
+  } else {
+    Check(!frame.RevealPetApproval("page", false), "a missing tray leaves ordinary main mode undisturbed");
+    std::cout << "Native tray unavailable; pet-to-main window transitions skipped\n";
+  }
+  frame.Destroy();
   std::cout << "Native pet chat panel and click adapter passed\n";
 }
 

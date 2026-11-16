@@ -8,6 +8,14 @@ static void KeepworkSmokeNoActivation(id application, SEL selector, BOOL ignore)
     (void)application; (void)selector; (void)ignore;
 }
 
+// This process deliberately stays in the background. Model its own normal-size
+// main window as the Home target, regardless of the user's foreground application.
+static NSRunningApplication *KeepworkSmokeFrontmostApplication(id workspace, SEL selector) {
+    (void)workspace; (void)selector;
+    return NSRunningApplication.currentApplication;
+}
+static Method KeepworkSmokeFrontmostMethod;
+static IMP KeepworkSmokeOriginalFrontmost;
 static Class KeepworkSmokeApplication;
 static IMP KeepworkSmokeOriginalActivation;
 static const char *KeepworkSmokeActivationType;
@@ -23,6 +31,37 @@ static NSView *KeepworkSmokeFindWebView(NSView *view) {
         if (found) return found;
     }
     return nil;
+}
+
+static NSButton *KeepworkSmokeButtonWithTitle(NSView *view, NSString *title) {
+    if ([view isKindOfClass:NSButton.class] && [((NSButton *)view).title isEqualToString:title]) {
+        return (NSButton *)view;
+    }
+    for (NSView *child in view.subviews) {
+        NSButton *button = KeepworkSmokeButtonWithTitle(child, title);
+        if (button) return button;
+    }
+    return nil;
+}
+
+// Only operate on this process's screenshot dialog. A modal-mode timer runs
+// while NSAlert.runModal owns the main loop and the fixture webview stays hidden.
+void keepwork_startup_smoke_cancel_screenshot_alert(void) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:7];
+    NSTimer *timer = [NSTimer timerWithTimeInterval:0.03 repeats:YES block:^(NSTimer *probe) {
+        NSWindow *modal = NSApp.modalWindow;
+        if (modal.visible && !modal.sheetParent && !KeepworkSmokeMain.visible
+            && KeepworkSmokeButtonWithTitle(modal.contentView, @"始终允许此来源截图")) {
+            NSButton *cancel = KeepworkSmokeButtonWithTitle(modal.contentView, @"取消");
+            if (cancel.enabled) {
+                [probe invalidate];
+                [cancel performClick:nil];
+            }
+        }
+        if (deadline.timeIntervalSinceNow < 0) [probe invalidate];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSDefaultRunLoopMode];
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSModalPanelRunLoopMode];
 }
 
 bool keepwork_startup_smoke_capture_main(void *rawWindow) {
@@ -42,15 +81,19 @@ bool keepwork_startup_smoke_main_intact(void *rawWindow) {
         && KeepworkSmokeFindWebView(window.contentView) == KeepworkSmokeWebView;
 }
 
-// Override only this process's activation selector, retaining Tao's original
-// object class and ivar layout. Prohibited policy prevents real windows from
+// Override activation and foreground lookup only in this test process, retaining
+// Tao's original object class and ivar layout. Prohibited policy prevents real windows from
 // becoming visible and cannot verify the production show/hide path.
 bool keepwork_startup_smoke_passive_application(void) {
     if (![NSThread isMainThread]) return false;
     Class original = object_getClass(NSApp);
     SEL activate = NSSelectorFromString(@"activateIgnoringOtherApps:");
     Method method = class_getInstanceMethod(original, activate);
-    if (!method) return false;
+    KeepworkSmokeFrontmostMethod = class_getInstanceMethod(
+        object_getClass(NSWorkspace.sharedWorkspace), @selector(frontmostApplication));
+    if (!method || !KeepworkSmokeFrontmostMethod) return false;
+    KeepworkSmokeOriginalFrontmost = method_setImplementation(
+        KeepworkSmokeFrontmostMethod, (IMP)KeepworkSmokeFrontmostApplication);
     KeepworkSmokeApplication = original;
     KeepworkSmokeOriginalActivation = method_getImplementation(method);
     KeepworkSmokeActivationType = method_getTypeEncoding(method);
@@ -79,6 +122,9 @@ bool keepwork_startup_smoke_dock_reopen(bool expectedVisible) {
 }
 
 void keepwork_startup_smoke_restore_application(void) {
+    if (KeepworkSmokeOriginalFrontmost) {
+        method_setImplementation(KeepworkSmokeFrontmostMethod, KeepworkSmokeOriginalFrontmost);
+    }
     if (KeepworkSmokeApplication && KeepworkSmokeOriginalActivation) {
         class_replaceMethod(KeepworkSmokeApplication, NSSelectorFromString(@"activateIgnoringOtherApps:"),
             KeepworkSmokeOriginalActivation, KeepworkSmokeActivationType);

@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <windowsx.h>
+#include <dwmapi.h>
 #include <commctrl.h>
 #include <cstring>
 #include <functional>
@@ -69,13 +70,40 @@ class WindowFrame {
     UpdateWindow(window_);
   }
   void Show() {
+    CancelApprovalReturn();
     if (!window_) return;
-    if (pet_open_main_) pet_open_main_();
-    pet_chat_.Hide(); pet_.Hide();
-    lifecycle_.Show();
+    LeavePetMode();
     ShowWindow(window_, IsIconic(window_) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(window_);
     if (focus_) focus_();
+  }
+  void CancelApprovalReturn() { approval_return_document_.clear(); }
+  bool RevealPetApproval(const std::string& document, bool return_to_pet) {
+    CancelApprovalReturn();
+    if (!window_ || !IsWindowEnabled(window_) || !lifecycle_.pet_visible() || !pet_.visible() ||
+        IsWindowVisible(window_)) return false;
+    Show();
+    if (!IsWindowVisible(window_) || IsIconic(window_)) return false;
+    if (return_to_pet) approval_return_document_ = document;
+    return true;
+  }
+  bool ReturnToPetAfterApproval(const std::string& document) {
+    if (document.empty() || approval_return_document_ != document) return false;
+    CancelApprovalReturn();
+    if (!window_ || !IsWindowVisible(window_) || IsIconic(window_) || !IsWindowEnabled(window_) ||
+        !pet_.enabled() || lifecycle_.Close() != CloseAction::hide) return false;
+    ShowWindow(window_, SW_HIDE);
+    ShowPet(); // Nonactivating; the underlying application remains available for capture.
+    DwmFlush(); // Let the compositor remove the approval window before acknowledging.
+    return !IsWindowVisible(window_) && pet_.visible();
+  }
+  void TemporarilyHidePet() {
+    if (!window_ || !pet_.visible()) return;
+    pet_.Hide(); // Also dismisses the panel and ends pet capture.
+    lifecycle_.Show();
+    // A close-to-tray window has no taskbar button. Expose it minimized
+    // without taking focus. Windows restores the same frame on taskbar click.
+    if (!IsWindowVisible(window_)) ShowWindow(window_, SW_SHOWMINNOACTIVE);
   }
   void Quit() {
     // Make beforeunload prompts visible. A canceled request never changes
@@ -83,7 +111,7 @@ class WindowFrame {
     Show();
     CloseBrowser();
   }
-  void BrowserClosing() { pet_chat_.Hide(); pet_.Hide(); lifecycle_.BrowserClosing(); }
+  void BrowserClosing() { CancelApprovalReturn(); pet_chat_.Hide(); pet_.Hide(); lifecycle_.BrowserClosing(); }
   void SetupPetChat(std::function<void(PetChatAction)> action,
       std::function<void(std::wstring)> edit, std::function<void()> tick, std::function<void()> open_main,
       std::function<void()> hide = {}) {
@@ -226,6 +254,7 @@ class WindowFrame {
   }
  public:
   void ToggleFullscreen() {
+    CancelApprovalReturn();
     if (!fullscreen_) {
       placement_.length = sizeof(placement_);
       if (!GetWindowPlacement(window_, &placement_)) return;
@@ -262,6 +291,7 @@ class WindowFrame {
   TrayIcon tray_;
   TrayLifecycle lifecycle_;
   DesktopPet pet_;
+  std::string approval_return_document_;
   PetChatPanel pet_chat_;
   std::function<void()> pet_tick_;
   std::function<void()> maintenance_tick_;
@@ -320,9 +350,15 @@ class WindowFrame {
       SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
     }
   }
+  void LeavePetMode() {
+    lifecycle_.Show();
+    if (pet_open_main_) pet_open_main_();
+    pet_chat_.Hide();
+    pet_.Hide();
+  }
   void ShowPet() {
     lifecycle_.SetPetVisible(false);
-    if (!pet_.enabled()) return;
+    if (!lifecycle_.hidden() || IsWindowVisible(window_) || !pet_.enabled()) return;
     if (pet_.Show()) { lifecycle_.SetPetVisible(true); return; }
     Show();
     MessageBoxW(window_, L"桌面宠物暂时无法显示，聊天窗口已保留。请从托盘重新打开，或完全退出后重试。",
@@ -605,14 +641,21 @@ class WindowFrame {
         if (self->title_font_) { DeleteObject(self->title_font_); self->title_font_ = nullptr; }
         self->Resize(); return 0;
       }
-      case WM_SIZE: self->Resize(); return 0;
+      case WM_ENTERSIZEMOVE: self->CancelApprovalReturn(); break;
+      case WM_WINDOWPOSCHANGED:
+        // Windows may reveal the main HWND directly, bypassing the tray or pet Open command.
+        if (self->lifecycle_.hidden() && IsWindowVisible(window) && !IsIconic(window))
+          self->LeavePetMode();
+        break;
+      case WM_SIZE: self->CancelApprovalReturn(); self->Resize(); return 0;
       case WM_ACTIVATEAPP: if (!w) self->ClearHover(); break;
-      case WM_SHOWWINDOW: if (!w) self->ClearHover(); break;
+      case WM_SHOWWINDOW: if (!w) { self->CancelApprovalReturn(); self->ClearHover(); } break;
       case WM_MOVE:
       case WM_MOVING:
       case WM_SIZING: if (self->move_) self->move_(); break;
       case WM_SETFOCUS: if (self->focus_) self->focus_(); return 0;
       case WM_CLOSE: {
+        self->CancelApprovalReturn();
         if (self->lifecycle_.Close() == CloseAction::hide) {
           ShowWindow(window, SW_HIDE);
           self->ShowPet();

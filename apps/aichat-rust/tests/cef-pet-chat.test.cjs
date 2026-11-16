@@ -15,7 +15,7 @@ function install() {
     },
     addEventListener(type, listener) { events.set(type, listener); },
   };
-  vm.runInNewContext(script, { window });
+  vm.runInNewContext(script, { window, setTimeout, clearTimeout });
   return { window, bridge: window.aichatDesktop, calls, dispatch: (...args) => dispatch(...args),
     dispose: () => events.get('pagehide')() };
 }
@@ -24,11 +24,10 @@ test('CEF pet projection requires document connection and a real command subscri
   const pet = install();
   assert.equal(pet.window.__keepworkPetTransport, undefined);
   assert.equal(Object.isFrozen(pet.bridge), true);
-  assert.deepEqual(Object.keys(pet.bridge).sort(), ['capabilities', 'onPetAudio', 'onPetCommand', 'petAudio', 'petResult', 'pickFolder', 'publishPetState', 'version']);
+  assert.deepEqual(Object.keys(pet.bridge).sort(), ['capabilities', 'onPetAudio', 'onPetCommand', 'petAudio', 'petResult', 'pickFolder', 'publishPetState', 'returnToPetAfterApproval', 'revealPetApproval', 'version']);
   assert.deepEqual(JSON.parse(JSON.stringify(pet.bridge.capabilities)), {
     floatingPet: true, petTextChatVersion: 1, petMediaChatVersion: 1,
-    petDictationAudioVersion: 1, petVoiceAudioVersion: 1,
-    nativeFolderPickerVersion: 1,
+    petDictationAudioVersion: 1, petVoiceAudioVersion: 1, nativeFolderPickerVersion: 1, petApprovalRevealVersion: 1, petApprovalReturnVersion: 1,
   });
   await pet.bridge.publishPetState(value({ pet: { imageData: 'large private image' }, voice: { secret: 'omit' }, files: 'omit' }));
   assert.deepEqual(pet.calls, []);
@@ -41,6 +40,33 @@ test('CEF pet projection requires document connection and a real command subscri
   assert.equal(state.voice?.secret, undefined);
   off(); await pet.bridge.publishPetState(value({ draft: 'local draft' }));
   assert.equal(pet.calls.filter(c => c.kind === 'state').length, 1);
+});
+test('CEF confirmation reveal waits for its own document-bound presentation result without sending a decision', async () => {
+  const pet = install();
+  const waiting = pet.bridge.revealPetApproval();
+  assert.deepEqual(pet.calls, []);
+  pet.dispatch('connect', 'challenge');
+  const first = pet.calls.at(-1);
+  assert.equal(first.kind, 'reveal-approval');
+  assert.match(first.payload, /^[0-9]+$/);
+  pet.dispatch('approval-shown', 'stale');
+  pet.dispatch('approval-inactive', first.payload);
+  assert.equal(await waiting, false);
+  const active = pet.bridge.revealPetApproval({ returnToPet: true });
+  const second = pet.calls.at(-1);
+  assert.notEqual(second.payload, first.payload);
+  pet.dispatch('approval-inactive', first.payload);
+  pet.dispatch('approval-shown', second.payload);
+  assert.equal(await active, true);
+  const restoring = pet.bridge.returnToPetAfterApproval();
+  pet.dispatch('approval-shown', pet.calls.at(-1).payload);
+  assert.equal(await restoring, true);
+  assert.deepEqual(pet.calls.map(call => call.kind),
+    ['connect', 'reveal-approval', 'reveal-approval-for-return', 'return-after-approval']);
+  const interrupted = pet.bridge.revealPetApproval();
+  pet.dispose();
+  await assert.rejects(interrupted);
+  await assert.rejects(pet.bridge.revealPetApproval());
 });
 test('CEF pet projection bounds text, rejects unrelated commands and removes listeners on navigation', async () => {
   const pet = install(), commands = [];
@@ -64,6 +90,17 @@ test('CEF pet projection bounds text, rejects unrelated commands and removes lis
   await pet.bridge.petResult({ requestId: 'request-1', ok: true });
   await assert.rejects(pet.bridge.publishPetState(value()));
   assert.equal(commands.length, 1); assert.equal(pet.calls.length, count);
+});
+test('CEF projects the current session without assuming a missing target is a persona', async () => {
+  const pet = install();
+  pet.bridge.onPetCommand(() => {}); pet.dispatch('connect', 'challenge');
+  for (const [target, expected] of [['session', 'chat'], ['chat', 'chat'], [undefined, 'chat'], ['persona', 'persona']]) {
+    await pet.bridge.publishPetState(value({ target, context: 'page-context', title: 'Selected' }));
+    const state = JSON.parse(pet.calls.at(-1).payload);
+    assert.equal(state.target, expected);
+    assert.equal(state.context, 'page-context');
+    assert.equal(state.title, 'Selected');
+  }
 });
 test('CEF media projection carries only bounded status and capability fields, never recording data or credentials', async () => {
   const pet = install();
@@ -137,12 +174,11 @@ test('CEF pet dispatcher rechecks its latest published draft before consuming a 
 test('CEF adapter interoperates with the existing AIChat controller acceptance/error/context contract', {
   skip: !process.env.AICHAT_WEB_PET_CONTROLLER,
 }, async () => {
-  const source = fs.readFileSync(process.env.AICHAT_WEB_PET_CONTROLLER, 'utf8').replaceAll('export function ', 'function ');
+  const { pathToFileURL } = require('node:url');
+  const { createDesktopPetController } = await import(pathToFileURL(process.env.AICHAT_WEB_PET_CONTROLLER).href);
   const pet = install();
-  const scope = { crypto: require('node:crypto').webcrypto };
-  vm.createContext(scope); vm.runInContext(source + '\nthis.createController = createDesktopPetController;', scope);
   let owner = 'alice', draft = '', busy = false, sent = 0;
-  const controller = scope.createController(pet.bridge, {
+  const controller = createDesktopPetController(pet.bridge, {
     read: () => ({ owner, ready: true, target: 'chat', draft, busy, messages: [] }),
     input: text => { draft = text; },
     send: () => { sent++; busy = true; return Promise.resolve({ ok: false, error: 'fixture offline' }); },

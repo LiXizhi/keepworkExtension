@@ -217,7 +217,7 @@ class RendererApp final : public CefApp, public CefRenderProcessHandler {
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
       CefProcessId source, CefRefPtr<CefProcessMessage> message) override {
     if (message->GetName() != keepwork_cef::kPetConnect && message->GetName() != keepwork_cef::kPetCommand &&
-        message->GetName() != keepwork_cef::kFolderPicked) return false;
+        message->GetName() != keepwork_cef::kFolderPicked && message->GetName() != keepwork_cef::kPetApprovalRevealed) return false;
     if (source != PID_BROWSER || !keepwork_cef::PetFrame(browser, frame)) return true;
     const auto entry = documents_.find(browser->GetIdentifier());
     if (entry != documents_.end()) entry->second->Receive(frame, message);
@@ -275,9 +275,11 @@ class Client final : public CefClient,
       PickFolder(browser, frame, message); return true;
     }
     if (message->GetName() == keepwork_cef::kPetConnected || message->GetName() == keepwork_cef::kPetState ||
-        message->GetName() == keepwork_cef::kPetResult || message->GetName() == keepwork_cef::kPetArtwork) {
+        message->GetName() == keepwork_cef::kPetResult || message->GetName() == keepwork_cef::kPetArtwork ||
+        message->GetName() == keepwork_cef::kPetApprovalReveal ||
+        message->GetName() == keepwork_cef::kPetApprovalRevealForReturn || message->GetName() == keepwork_cef::kPetApprovalReturn) {
       if (source_process != PID_RENDERER || browser->GetIdentifier() != main_id_ || !keepwork_cef::PetFrame(browser, frame)) return true;
-      ReceivePet(message); return true;
+      ReceivePet(frame, message); return true;
     }
     if (message->GetName() != kThemeMessage) return false;
     if (source_process != PID_RENDERER || browser->GetIdentifier() != main_id_ || !frame ||
@@ -572,6 +574,7 @@ class Client final : public CefClient,
   }
   bool folder_pending_ = false;
   void ResetPet() {
+    window_frame_.CancelApprovalReturn();
     pet_binding_.Reset(keepwork_cef::PetToken());
     window_frame_.SetPetArtwork({}, {});
     pet_deadline_ = 0; pet_state_.ResetDocument(); UpdatePet();
@@ -627,7 +630,7 @@ class Client final : public CefClient,
     }
     return true;
   }
-  void ReceivePet(CefRefPtr<CefProcessMessage> message) {
+  void ReceivePet(CefRefPtr<CefFrame> frame, CefRefPtr<CefProcessMessage> message) {
     const auto args = message->GetArgumentList();
     const bool connected = message->GetName() == keepwork_cef::kPetConnected;
     if (args->GetSize() != (connected ? 2 : 3) || args->GetType(0) != VTYPE_STRING || args->GetType(1) != VTYPE_STRING ||
@@ -638,6 +641,21 @@ class Client final : public CefClient,
       return;
     }
     if (!pet_binding_.Matches(document, args->GetString(1).ToString()) || args->GetType(2) != VTYPE_STRING || args->GetString(2).length() > 196608) return;
+    if (message->GetName() == keepwork_cef::kPetApprovalReveal || message->GetName() == keepwork_cef::kPetApprovalRevealForReturn ||
+        message->GetName() == keepwork_cef::kPetApprovalReturn) {
+      if (args->GetString(2).empty() || args->GetString(2).length() > 20) return;
+      const auto reply = CefProcessMessage::Create(keepwork_cef::kPetApprovalRevealed);
+      const auto response = reply->GetArgumentList();
+      response->SetString(0, document);
+      response->SetString(1, args->GetString(1));
+      response->SetString(2, args->GetString(2));
+      const bool changed = message->GetName() == keepwork_cef::kPetApprovalReturn
+        ? window_frame_.ReturnToPetAfterApproval(document)
+        : window_frame_.RevealPetApproval(document, message->GetName() == keepwork_cef::kPetApprovalRevealForReturn);
+      response->SetBool(3, changed);
+      frame->SendProcessMessage(PID_RENDERER, reply);
+      return;
+    }
     const auto json = CefParseJSON(args->GetString(2), JSON_PARSER_RFC);
     if (!json || json->GetType() != VTYPE_DICTIONARY) return;
     const auto object = json->GetDictionary();
@@ -703,12 +721,13 @@ class Client final : public CefClient,
   }
   void PetAction(keepwork_cef::PetChatAction action) {
     using Action = keepwork_cef::PetChatAction;
+    if (action == Action::HidePet) { window_frame_.TemporarilyHidePet(); return; }
     if (action == Action::OpenMain) { window_frame_.Show(); return; }
     if (action == Action::Collapse) { StopPetCapture(); window_frame_.pet_chat().Hide(); return; }
     if (action == Action::AcknowledgeUnknown) pet_state_.AcknowledgeUnknown();
     else {
       const std::string name = action == Action::Send ? "send" : action == Action::Stop ? "stop" :
-        action == Action::Dictation ? "dictation" : action == Action::Call ? "call" : action == Action::Mute ? "mute" : "toggle-target";
+        action == Action::Dictation ? "dictation" : action == Action::Call ? "call" : "mute";
       const auto command = pet_state_.Begin(name, keepwork_cef::PetToken(), GetTickCount64());
       if (command) SendPet(*command);
     }
@@ -726,7 +745,7 @@ class Client final : public CefClient,
   void UpdatePet() {
     const auto& state = pet_state_.snapshot();
     keepwork_cef::PetChatView view;
-    view.title = (state.target == "chat" ? L"当前会话 · " : L"我的分身 · ") + state.title;
+    view.title = (state.target == "persona" ? L"我的分身 · " : L"当前会话 · ") + state.title;
     view.transcript = state.messages;
     if (!state.reply.empty() && view.transcript.find(state.reply) == std::wstring::npos)
       view.transcript += L"助手：" + state.reply;
@@ -734,8 +753,7 @@ class Client final : public CefClient,
     view.rich_draft = state.rich_draft; view.dictating = state.dictating;
     view.can_dictate = state.can_dictate; view.can_call = state.can_call;
     view.calling = state.calling; view.muted = state.muted;
-    view.can_switch = state.can_switch; view.pending = pet_state_.pending(); view.uncertain = pet_state_.unknown();
-    view.unsynced = pet_state_.dirty() && pet_state_.draft() != state.draft;
+    view.pending = pet_state_.pending(); view.uncertain = pet_state_.unknown();
     view.error = pet_state_.error();
     if (view.error.empty()) view.error = state.error;
     if (state.context.empty()) view.status = pet_deadline_ ? L"正在连接 AIChat…" : L"网页尚未提供宠物对话，请打开 AIChat 登录或刷新后重试。";
@@ -753,10 +771,8 @@ class Client final : public CefClient,
     }
     else if (pet_state_.pending()) view.status = L"正在确认操作…";
     else if (state.busy) view.status = L"正在回复…";
-    else if (view.unsynced) view.status = state.draft.empty()
-      ? L"有未同步的草稿，发送或清空后再切换目标。"
-      : L"有未同步的草稿，请先发送或恢复为主窗口草稿后再切换。";
-    else if (!state.ready) view.status = L"当前目标尚未就绪，可切换目标或打开 AIChat。";
+    else if (pet_state_.dirty() && pet_state_.draft() != state.draft) view.status = L"有未同步的草稿。";
+    else if (!state.ready) view.status = L"当前对话尚未就绪，请打开 AIChat。";
     else view.status.clear();
     window_frame_.pet_chat().Update(view);
     const auto owner = pet_binding_.document() + "|" + state.context;

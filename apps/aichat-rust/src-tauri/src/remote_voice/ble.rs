@@ -449,7 +449,7 @@ fn handle_record_control(
         Edge::Down(press) => match press {
             Press::DialogueRecord => {
                 *recognition = None;
-                dialogue.record();
+                dialogue.record("record");
                 return Ok(ptt.discard_press(data));
             }
             Press::Second => {
@@ -561,7 +561,7 @@ async fn connection(
     let mut cleared_at = None;
     loop {
         service.dispatch_home(generation);
-        if super::dialogue::take_ok() { service.dialogue.exit("ok"); }
+        if super::dialogue::take_ok() { service.dialogue.record("ok"); }
         if service.poll_clear(generation) {
             cleared_at = Some(Instant::now());
             startup_target.take();

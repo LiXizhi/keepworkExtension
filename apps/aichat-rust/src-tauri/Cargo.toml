@@ -1,6 +1,6 @@
 [package]
 name = "aichat-rust"
-version = "0.2.168"
+version = "0.2.180"
 description = "KeepWork 第二大脑 (AIChat Desktop) — Rust + Tauri 2 native desktop application"
 authors = ["Keepwork"]
 edition = "2021"
@@ -84,12 +84,14 @@ sha2 = "0.10"
 flate2 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
@@ -102,6 +104,8 @@ libc = "0.2"
 gtk = "0.18"
 
 [target.'cfg(windows)'.dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
 # Match Windows browser connectivity while retaining WebPKI roots and TLS verification.
 reqwest = { version = "0.12", default-features = false, features = ["system-proxy", "rustls-tls-native-roots"] }
 junction = "1"

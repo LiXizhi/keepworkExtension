@@ -98,8 +98,14 @@ impl Dialogue {
         true
     }
     pub fn exit(&self, reason: &str) -> bool {
+        self.exit_matching(None, reason)
+    }
+    pub fn exit_matching(&self, expected_id: Option<&str>, reason: &str) -> bool {
         let owner = {
             let mut slot = self.owner.lock().unwrap();
+            if expected_id.is_some_and(|id| !slot.as_ref().is_some_and(|owner| owner.id == id)) {
+                return false;
+            }
             let Some(owner) = slot.take() else {
                 return false;
             };
@@ -127,12 +133,12 @@ impl Dialogue {
             OK_PRESSED.store(false, Ordering::Release);
             CONTROLS.store(true, Ordering::Release);
         }
-        self.send_owned(&owner, "enter");
+        self.send_owned(&owner, "enter", "");
     }
-    pub fn record(self: &Arc<Self>) {
+    pub fn record(self: &Arc<Self>, reason: &str) {
         let owner = self.owner.lock().unwrap().clone();
         if let Some(owner) = owner {
-            self.send_owned(&owner, "record");
+            self.send_owned(&owner, "record", reason);
         }
     }
     pub fn interrupt(&self) {
@@ -140,8 +146,8 @@ impl Dialogue {
             let _ = (surface.send)("interrupt", "", "");
         }
     }
-    fn send_owned(self: &Arc<Self>, owner: &Arc<Owner>, action: &str) {
-        let reply = (owner.surface.send)(action, &owner.id, "");
+    fn send_owned(self: &Arc<Self>, owner: &Arc<Owner>, action: &str, reason: &str) {
+        let reply = (owner.surface.send)(action, &owner.id, reason);
         let service = self.clone();
         let owner = owner.clone();
         tauri::async_runtime::spawn(async move {

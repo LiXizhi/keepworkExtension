@@ -42,6 +42,8 @@ interface PetSpeech {
   text?: string;
 }
 
+type PhoneCaption = { role: "user" | "assistant"; text: string };
+
 interface PetSnapshot {
   version?: number;
   context?: string;
@@ -66,7 +68,6 @@ interface PetSnapshot {
   title?: string;
   folder?: string;
   skill?: string;
-  canSwitchTarget?: boolean;
   dictating?: boolean;
   voice?: { active?: boolean; muted?: boolean; state?: string };
   busy?: boolean;
@@ -80,8 +81,11 @@ interface PetSnapshot {
   petReplyPresentationVersion?: number;
   petStreamingSpeechVersion?: number;
   petSpeech?: PetSpeech | null;
-  remoteDialogue?: { state?: string } | null;
+  remoteDialogue?: { id?: string; state?: string; caption?: PhoneCaption } | null;
+  phoneCaption?: PhoneCaption | null;
+  petStopOnlyCallVersion?: number;
   phoneState?: string;
+  phoneActivity?: "tool";
   phoneError?: string;
   sentRequestId?: string;
   exitPrompt?: PetExitPrompt | null;
@@ -133,6 +137,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
   let state: PetSnapshot = {};
   let expanded = false;
+  let pendingHangup: object | null = null;
   let edits = 0;
   let draftRevision = 0;
   let unsynced = false;
@@ -158,6 +163,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let releasedTap = false;
   let firstTap = false;
   let renderedMessages = "";
+  let renderedChoices = "";
   let shownReply: PetReply | null = null;
   let previousReply = "";
   const recentReplies = new Set<string>();
@@ -193,7 +199,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let jelly: Animation | undefined;
   const artStyle: Record<string, string> = {};
   const hitSurfaceIds = ["pet", "panel", "bubble", "exit-bubble", "permission-bubble"];
-  const hitSurfaceSelector = hitSurfaceIds.map((id) => `#${id}`).join(", ");
+  const hitSurfaceSelector = [...hitSurfaceIds, "dialogue-icon"].map((id) => `#${id}`).join(", ");
 
   function scheduleHitRegions(): void {
     if (hitRegionsQueued) return;
@@ -230,7 +236,9 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     // Composite the moving sprite with a transform; changing left/top plus the
     // drop-shadow filter on every pointermove leaves visible ghost trails in
     // WKWebView.
-    $("pet").style.transform = `translate3d(${state.petLeft}px, ${state.petTop}px, 0)`;
+    const transform = `translate3d(${state.petLeft}px, ${state.petTop}px, 0)`;
+    $("pet").style.transform = transform;
+    $("dialogue-icon").style.transform = transform;
     const stack = $("stack");
     const width = Math.min(348, window.innerWidth - 12);
     const above = Math.max(0, state.petTop - 12);
@@ -280,28 +288,74 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     return waiting?.streaming && waiting.requestId ? waiting.earlySpeech.get(waiting.requestId) : undefined;
   }
 
+  function callPhase(snapshot = state): string {
+    return snapshot.phoneState || snapshot.remoteDialogue?.state ||
+      (snapshot.voice?.active ? snapshot.voice.state || "listening" : "");
+  }
+
+  const callStatusLabels = new Map([
+    ["starting", "正在连接…"],
+    ["listening", "聆听中"],
+    ["muted", "已静音"],
+    ["thinking", "正在思考"],
+    ["tool", "正在调用工具…"],
+    ["speaking", "正在说话"],
+    ["discussing", "学生讨论中…"],
+    ["paused", "已暂停"],
+    ["stopping", "正在结束…"],
+  ]);
+
+  function hangupAction(): string {
+    if (state.remoteDialogue?.id) return "hangup";
+    if (!state.ready) return "open";
+    if (state.compactVoice) return "voice-stop";
+    if (state.petStopOnlyCallVersion === 1 && state.voice?.active) return "call";
+    return "open";
+  }
+
   function paintBubble(): void {
     const speech = currentSpeech();
     const thinking = (!!waiting && !shownReply?.text && speech?.state !== "ended" &&
       (!waiting.timedOut || !!state.busy)) || !!shownReply?.thinking;
     const textVisible = !thinking && !textExpired && !!shownReply?.text;
-    const desktopPhone = state.phoneState || state.remoteDialogue?.state;
-    const phoneState = desktopPhone || (state.voice?.active ? state.voice.state || "listening" : "");
-    const phoneIcon = $("dialogue-icon");
-    const phoneLabels: Record<string, string> = {
-      starting: "正在连接", listening: "聆听中", thinking: "正在思考", speaking: "正在说话",
-      paused: "已暂停", stopping: "正在结束", discussing: "讨论中",
-    };
-    phoneIcon.hidden = !phoneState || document.hidden;
+    const phoneState = callPhase();
+    const phoneIcon = $<HTMLButtonElement>("dialogue-icon");
+    const showCall = !!phoneState && !document.hidden && !state.exitPrompt && !state.permission;
+    phoneIcon.hidden = !showCall;
+    phoneIcon.disabled = !!pendingHangup || phoneState === "stopping";
     phoneIcon.dataset.state = phoneState;
-    phoneIcon.title = phoneLabels[phoneState] ? `语音通话 · ${phoneLabels[phoneState]}` : "语音通话";
+    phoneIcon.title = hangupAction() === "open" ? "打开 AIChat 结束通话" : "挂断通话";
     phoneIcon.setAttribute("aria-label", phoneIcon.title);
+
+    // Older phone snapshots fold discussion into listening. The active voice
+    // session still reports the precise phase and microphone state.
+    let statusPhase = phoneState;
+    if (phoneState === "thinking" && state.phoneActivity === "tool") statusPhase = "tool";
+    if (phoneState === "listening") {
+      if (state.voice?.active && state.voice.state === "discussing") statusPhase = "discussing";
+      else if (state.voice?.muted) statusPhase = "muted";
+    }
+    const status = $("dialogue-status");
+    const label = showCall ? callStatusLabels.get(statusPhase) || "" : "";
+    status.dataset.state = statusPhase;
+    status.hidden = !label;
+    if (status.textContent !== label) status.textContent = label;
+
+    const caption = state.remoteDialogue ? state.remoteDialogue.caption : state.phoneCaption;
+    const dialogueCaption = $("dialogue-caption");
+    const text = showCall && caption?.text ? (caption.role === "user" ? caption.text : `AI：${caption.text}`) : "";
+    dialogueCaption.classList.toggle("voice-input-preview", !!text && caption?.role === "user");
+    dialogueCaption.hidden = !text;
+    if (dialogueCaption.textContent !== text) {
+      dialogueCaption.textContent = text;
+      dialogueCaption.scrollTop = dialogueCaption.scrollHeight;
+    }
     const errorButton = $("phone-error");
     const collapsedError = !expanded && !phoneState && state.phoneError;
     errorButton.hidden = !collapsedError;
     errorButton.textContent = collapsedError ? `${collapsedError} · 打开 AIChat` : "";
-    $("bubble").hidden = !!state.exitPrompt || !!state.permission || !!desktopPhone ||
-      !(collapsedError || thinking || textVisible || shownReply?.options?.length);
+    $("bubble").hidden = !!state.exitPrompt || !!state.permission || !!phoneState ||
+      !(collapsedError || thinking || textVisible);
     $("bubble").classList.toggle("thinking", thinking);
     $("thinking").hidden = !thinking;
     const reply = $("reply");
@@ -444,7 +498,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const reply = state.reply || null;
     const signature = replySignature(reply);
     const turn = waiting;
-    if (document.hidden || state.exitPrompt || state.permission || state.phoneState || state.remoteDialogue?.state ||
+    if (document.hidden || state.exitPrompt || state.permission || callPhase() ||
         (turn?.streaming && state.petStreamingSpeechVersion !== 1) ||
         ((turn || narration) && (!state.ready || state.voice?.active || state.dictating))) {
       dismissPresentation();
@@ -489,11 +543,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       // Opening a draft (including a remote paste) is not a new assistant turn.
       const hasDraft = !!state.draft || unsynced || !!state.dictating || !!activeRemotePress;
       if (restored || expanded || hasDraft) {
-        const choices = !hasDraft && !reply?.requestId && reply?.options?.length;
-        if (restored || signature !== previousReply || shownReply?.text || shownReply?.thinking ||
-            (!choices && shownReply)) {
-          showReply(choices ? { options: reply.options, immediate: reply.immediate } : null, false);
-        }
+        if (shownReply) showReply(null, false);
       } else if (signature !== previousReply && !reply?.requestId) {
         if (!reply || reply.thinking) {
           if (!pinnedReply) showReply(reply, false);
@@ -539,13 +589,16 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       localError = "";
       draftEl.value = next.draft || "";
     }
+    if (!callPhase(next) || next.context !== state.context || next.remoteDialogue?.id !== state.remoteDialogue?.id) {
+      pendingHangup = null;
+    }
     state = next;
     if (typeof next.expanded === "boolean") {
       if (!next.expanded) optimisticCollapse = false;
       expanded = next.expanded && !optimisticCollapse;
-      $("panel").hidden = !expanded;
-      if (!expanded) $("panel").classList.remove("remote-voice-open");
     }
+    $("panel").hidden = !expanded || !!callPhase();
+    if ($("panel").hidden) $("panel").classList.remove("remote-voice-open");
     const pet = state.preferences?.appearance === "dragon" ? {} : state.pet || {};
     if ($("art").textContent !== "") $("art").textContent = "";
     const image = pet.imageData || pet.sheetUrl;
@@ -556,22 +609,20 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     $("pet").title = `${pet.name || "宠物"}${localError ? ` · ${localError}` : ""} · 单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动`;
 
     const title = state.target === "persona" ? state.title || "我的分身" : `会话 · ${state.title || "AIChat"}`;
-    $("target-title").textContent = `${title} ⇄`;
+    $("target-title").textContent = title;
     const folderName = (state.folder || "").split(/[\\/]/).filter(Boolean).pop() || state.folder || "";
     $("target-detail").textContent =
       state.target === "persona"
         ? folderName || "第二大脑"
         : `技能：${state.skill || "无"} · 文件夹：${folderName || "未绑定"}`;
-    const targetBtn = $<HTMLButtonElement>("target");
-    targetBtn.dataset.kind = state.target === "persona" ? "persona" : "session";
-    targetBtn.dataset.hint = `${$("target-title").textContent}\n${$("target-detail").textContent}${
+    const target = $("target");
+    target.dataset.kind = state.target === "persona" ? "persona" : "session";
+    target.dataset.hint = `${$("target-title").textContent}\n${$("target-detail").textContent}${
       state.folder ? `\n${state.folder}` : ""
-    }\n点击切换到${state.target === "persona" ? "聊天会话" : "我的分身"}`;
-    targetBtn.setAttribute("aria-description", targetBtn.dataset.hint);
-    targetBtn.disabled =
-      !state.canSwitchTarget || !!state.dictating || !!state.voice?.active || !!edits || unsynced;
-    $("badge").hidden = !!state.phoneState || !!state.remoteDialogue?.state ||
-      !(state.busy || state.voice?.active || state.attention || state.error || localError);
+    }`;
+    target.setAttribute("aria-description", target.dataset.hint);
+    $("badge").hidden = !!callPhase() ||
+      !(state.busy || state.attention || state.error || localError);
 
     if (!edits && !unsynced) draftEl.value = state.draft || "";
     draftEl.disabled = !!state.richDraft || !!state.dictating;
@@ -591,29 +642,21 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     callBtn.classList.toggle("alternate-action", !!state.voice?.active);
     $("call-label").textContent = state.voice?.active ? "结束通话" : "通话";
     callBtn.dataset.hint =
-      state.canCall || state.voice?.active ? "实时语音对话" : "请在 AIChat 中选择实时语音模型";
-    paintStationHints();
+      state.voice?.active ? "结束通话" : state.canCall ? "实时语音对话" : "请在 AIChat 中选择实时语音模型";
     callBtn.disabled = !state.ready || (!state.canCall && !state.voice?.active) || !!state.dictating;
 
     const muteBtn = $<HTMLButtonElement>("mute");
     muteBtn.hidden = !state.voice?.active;
     muteBtn.classList.toggle("alternate-action", !!state.voice?.muted);
     $("mute-label").textContent = state.voice?.muted ? "取消静音" : "静音";
+    paintStationHints();
 
-    const voiceLabelMap: Record<string, string> = {
-      starting: "连接中",
-      listening: "聆听中",
-      thinking: "思考中",
-      speaking: "说话中",
-      stopping: "结束中",
-      discussing: "讨论中",
-    };
     $("status").textContent =
       state.attention ||
       (state.richDraft
         ? "含附件或文件引用，请在 AIChat 中编辑。"
         : state.voice?.active
-          ? `语音：${state.voice.muted ? "已静音" : voiceLabelMap[state.voice.state || ""] || "通话中"}`
+          ? `语音：${state.voice.muted ? "已静音" : callStatusLabels.get(state.voice.state || "") || "通话中"}`
           : state.busy
             ? "正在回复…"
             : "");
@@ -635,14 +678,24 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       log.dataset.thinking = String(!!reply?.thinking);
       if (wasThinking && !reply?.thinking) log.scrollTop = 0;
       else if (atBottom && state.busy) log.scrollTop = log.scrollHeight;
+    }
+
+    // Suggestions belong to the composer; their lifetime is independent of the answer bubble.
+    const choices = state.reply;
+    const options = $("options");
+    options.hidden = !!state.draft || unsynced || !!state.dictating || !!activeRemotePress ||
+      !!callPhase();
+    const choicesKey = JSON.stringify([state.context, choices?.options, choices?.immediate]);
+    if (choicesKey !== renderedChoices) {
+      renderedChoices = choicesKey;
       const context = state.context;
-      $("options").replaceChildren(
-        ...(reply?.options || []).map((option) => {
+      options.replaceChildren(
+        ...(choices?.options || []).map((option) => {
           const button = document.createElement("button");
           button.textContent = [option.icon, option.text].filter(Boolean).join(" ");
           button.onclick = async () => {
             if (
-              choosing ||
+              choosing || !expanded || options.hidden ||
               context !== state.context ||
               state.busy ||
               state.richDraft ||
@@ -657,7 +710,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
             render(state as unknown as Record<string, unknown>);
             try {
               if ((await action("input", { text: option.text })) && context === state.context) {
-                if (reply?.immediate !== false) await action("send");
+                if (choices?.immediate !== false) await action("send");
                 else await expand(true);
               }
             } finally {
@@ -669,7 +722,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
         })
       );
     }
-    for (const child of Array.from($("options").children)) {
+    for (const child of Array.from(options.children)) {
       (child as HTMLButtonElement).disabled =
         choosing ||
         !state.ready ||
@@ -739,7 +792,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
         : recPhaseMap[rec?.phase || ""] || "");
 
     compactStatus.hidden = !compactStatus.textContent || expanded || !!exit || !!permission ||
-      !!state.phoneState || !!state.remoteDialogue?.state || !state.compactVoice;
+      !!callPhase() || !state.compactVoice;
 
     syncReadiness();
     adoptNativeDrag(next);
@@ -798,8 +851,8 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     return queue;
   }
 
-  async function expand(value: boolean): Promise<void> {
-    if (state.exitPrompt || state.permission) return;
+  async function expand(value: boolean, context?: string): Promise<void> {
+    if (state.exitPrompt || state.permission || callPhase()) return;
     optimisticCollapse = false;
     if (waiting) waiting.reopen = false;
     const opening = value && !expanded;
@@ -826,7 +879,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const draftEl = $<HTMLTextAreaElement>("draft");
     if (expanded && !draftEl.disabled) draftEl.focus();
     syncReadiness();
-    await api.action("expand", { expanded: value });
+    await api.action("expand", { expanded: value, ...(context && { context }) });
   }
 
   const draftEl = $<HTMLTextAreaElement>("draft");
@@ -861,13 +914,16 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
 
   function paintStationHints(): void {
     const showHints = !panel.classList.contains("remote-voice-station");
-    for (const id of ["target", "call", "collapse", "open"]) {
+    for (const id of ["dictation", "send", "mute"]) {
+      $(id).title = showHints ? $(id + "-label").textContent || "" : "";
+    }
+    for (const id of ["target", "call", "minimize", "open", "collapse"]) {
       const button = $(id);
       button.title = showHints ? button.dataset.hint || "" : "";
     }
   }
   // The static chrome buttons use their original tooltips outside voice input.
-  for (const id of ["collapse", "open"]) $(id).dataset.hint = $(id).title;
+  for (const id of ["minimize", "open", "collapse"]) $(id).dataset.hint = $(id).title;
 
   function paintVoiceIndicator(): void {
     const phase = noAudioPress ? "retry" : activeRemotePress ? pressPhase : readiness;
@@ -927,7 +983,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
   });
   window.addEventListener("aichat:remote-voice-focus", (event) => {
-    if (state.remoteDialogue?.state || !state.version || state.exitPrompt || state.permission || draftEl.disabled) return;
+    if (callPhase() || !state.version || state.exitPrompt || state.permission || draftEl.disabled) return;
     const id = (event as CustomEvent<number>).detail;
     if (id !== undefined) {
       if (!Number.isSafeInteger(id) || id <= lastRemotePress) return;
@@ -1038,8 +1094,16 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   window.addEventListener("aichat:remote-ok", (event) => {
     const context = (event as CustomEvent<{ context?: string }>).detail?.context;
     if (!context || context !== state.context || document.hidden || state.permission || state.exitPrompt ||
-        activeRemotePress || state.remoteDialogue?.state || state.voice?.active || state.phoneState ||
-        draftEl.disabled || state.busy || !draftEl.value.trim()) return;
+        activeRemotePress || callPhase()) return;
+    if (controlNarration(false) || draftEl.disabled) return;
+    if (!draftEl.value.trim()) {
+      // A prompt or conversation change can supersede this press in the host.
+      void expand(!expanded, context)
+        .catch(() => api.action("state").then(render))
+        .catch(() => {});
+      return;
+    }
+    if (state.busy) return;
     const send = $<HTMLButtonElement>("send");
     if (!send.disabled) send.click();
   });
@@ -1103,33 +1167,46 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     };
   }
 
-  $("target").onclick = async () => {
-    await queue;
-    if (!edits && !unsynced) await action("toggle-target");
+  $("minimize").onclick = () => {
+    const context = state.context;
+    // Window controls stay responsive while the chat page acknowledges draft edits.
+    void api.action("hide-temporarily", { context, expanded: true }).catch((error: unknown) => {
+      if (context !== state.context || panel.hidden || document.hidden) return;
+      localError = error instanceof Error ? error.message : String(error);
+      $("error").textContent = localError;
+    });
   };
 
   $("open").onclick = () => {
     void api.action("open");
   };
 
-  function activateReply(): void {
-    if (window.getSelection()?.toString()) return;
+  // A physical OK during playback owns this press, including repeats while the
+  // pause acknowledgement is pending. Only the visible reply control resumes.
+  function controlNarration(toggle: boolean): boolean {
     const turn = waiting;
     const speech = currentSpeech();
     if (turn && speech && !["ended", "unavailable"].includes(speech.state)) {
-      if (turn.speechControlPending) return;
+      if (turn.speechControlPending || (!toggle && speech.state === "paused")) return true;
       turn.speechControlPending = true;
       const name = speech.state === "paused" ? "resume-speech" : "pause-speech";
       void action(name, { speechRequestId: speech.requestId }, () => waiting === turn)
         .finally(() => { turn.speechControlPending = false; });
     } else if (narration) {
+      if (!toggle && paused) return true;
       paused = !paused;
       if (paused) narration.pause();
       else narration.resume();
       paintBubble();
-    } else if (!textExpired && shownReply?.text) {
-      void api.action("open");
+    } else {
+      return false;
     }
+    return true;
+  }
+
+  function activateReply(): void {
+    if (window.getSelection()?.toString() || controlNarration(true)) return;
+    if (!textExpired && shownReply?.text) void api.action("open");
   }
 
   $("reply").onclick = activateReply;
@@ -1138,6 +1215,36 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       event.preventDefault();
       if (!event.repeat) activateReply();
     }
+  };
+  $("dialogue-icon").onclick = async () => {
+    if (pendingHangup || !callPhase() || callPhase() === "stopping" ||
+        document.hidden || state.permission || state.exitPrompt) return;
+    const pending = pendingHangup = {};
+    const name = hangupAction();
+    const dialogueId = state.remoteDialogue?.id;
+    const args = name === "hangup" ? { dialogueId } : name === "call" ? { stopOnly: true } : {};
+    paintBubble();
+    // The page publishes the current call. A delayed command reply can describe
+    // an earlier call, even when both calls belong to the same conversation.
+    let accepted = false;
+    try {
+      await api.action(name, { ...args, context: state.context });
+      accepted = true;
+    } catch (error) {
+      if (pendingHangup === pending) {
+        localError = error instanceof Error ? error.message : String(error);
+        $("error").textContent = localError;
+      }
+    }
+    // Some pages acknowledge before their microphone has finished stopping.
+    // Keep a second click from acting on that stale state, while allowing retry.
+    const unlock = () => {
+      if (pendingHangup !== pending) return;
+      pendingHangup = null;
+      paintBubble();
+    };
+    if (accepted && pendingHangup === pending) window.setTimeout(unlock, 1500);
+    else unlock();
   };
   $("phone-error").onclick = () => { void api.action("open"); };
   window.addEventListener("aichat:pet-hidden", dismissPresentation);

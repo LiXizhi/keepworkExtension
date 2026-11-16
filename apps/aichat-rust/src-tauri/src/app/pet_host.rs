@@ -336,12 +336,45 @@ fn route_pet_button(app: &AppHandle, event: &'static str) -> Result<bool, String
     crate::security::assert_sender(pet.label(), "pet", true, url.as_str(), core.current_dev_url().as_deref())?;
     let snapshot = core.pet.snapshot();
     if snapshot["permission"].is_null() && snapshot["exitPrompt"].is_null() {
+        #[cfg(target_os = "macos")]
+        if event == "aichat:remote-ok"
+            && !matches!(snapshot["petSpeech"]["state"].as_str(), Some("waiting" | "speaking" | "paused"))
+            && route_main_narration_ok(app, &snapshot)
+        {
+            return Ok(true);
+        }
         let detail = json!({"context": snapshot["context"]});
         let page = json!(url.as_str());
         pet.eval(format!("if (window === window.top && location.href === {page}) window.dispatchEvent(new CustomEvent('{event}', {{detail:{detail},cancelable:true}}))"))
             .map_err(|e| e.to_string())?;
     }
     Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn route_main_narration_ok(app: &AppHandle, snapshot: &Value) -> bool {
+    let Some(token) = snapshot["remoteNarrationToken"].as_str() else { return false; };
+    let Some(main) = app.get_webview_window("main") else { return false; };
+    if verify_main_sender(&main, &app.state::<Arc<AppCore>>()).is_err() { return false; }
+    let detail = json!({ "token": token });
+    main.eval(format!("if (window === window.top) window.dispatchEvent(new CustomEvent('aichat:remote-narration-ok', {{detail:{detail}}}))")).is_ok()
+}
+
+// Local AppKit monitor: a non-pet OK is eligible only in our own key window.
+// Other apps, keyboards and unpublished/older documents retain native Return.
+#[cfg(target_os = "macos")]
+pub(super) fn watch_main_narration_ok(window: &WebviewWindow) -> tauri::Result<()> {
+    static HOST: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+    extern "C" fn deliver() -> bool {
+        HOST.get().is_some_and(|app| {
+            let core = app.state::<Arc<AppCore>>();
+            !core.remote_voice.dialogue.active() && route_main_narration_ok(app, &core.pet.snapshot())
+        })
+    }
+    extern "C" { fn keepwork_watch_main_narration_ok(window: *mut std::ffi::c_void, handler: extern "C" fn() -> bool); }
+    let _ = HOST.get_or_init(|| window.app_handle().clone());
+    unsafe { keepwork_watch_main_narration_ok(window.ns_window()?, deliver); }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -452,6 +485,25 @@ pub(super) fn focus_pet_for_remote_voice(
 }
 
 pub fn ensure_pet_window(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
+    let handle = app.clone();
+    let core = Arc::clone(core);
+    let _ = super::main_window::run_on_window_thread(app, move || {
+        if core.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        if show_now && (!core.settings().pet_visible
+            || core.page_connection.lock().unwrap().wants_foreground()
+            || handle.get_webview_window("main").is_some_and(|main| {
+                main.is_visible().unwrap_or(true) && !main.is_minimized().unwrap_or(false)
+            }))
+        {
+            return;
+        }
+        ensure_pet_window_on_ui(&handle, &core, show_now);
+    });
+}
+
+fn ensure_pet_window_on_ui(app: &AppHandle, core: &Arc<AppCore>, show_now: bool) {
     if let Some(existing) = app.get_webview_window("pet") {
         if show_now {
             #[cfg(target_os = "macos")]
@@ -535,9 +587,9 @@ pub(super) fn desktop_publish_pet_state(
     let persona_audio = incoming["target"].as_str() == Some("persona")
         && incoming["petVoiceAudioVersion"].as_u64() == Some(pet_audio::VERSION);
     let supports_audio = incoming["ready"].as_bool() == Some(true) && (dictation_audio || persona_audio);
-    let previous_start = state_mgr.pet.starting_phone_id();
+    let previous_phone = state_mgr.pet.active_phone_id();
     let snapshot = state_mgr.pet.update_raw_state(incoming);
-    if previous_start != state_mgr.pet.starting_phone_id() {
+    if previous_phone != state_mgr.pet.active_phone_id() {
         super::remote_phone_view::sync(&app);
     }
     let context = snapshot["context"]
@@ -581,14 +633,14 @@ pub(super) fn desktop_pet_result(
 
 /// Browser-owned capture needs a visible permission UI on Windows as well as
 /// macOS. Negotiated pet capture owns its own microphone and keeps main hidden.
-fn prepare_legacy_media_owner(
+async fn prepare_legacy_media_owner<F: std::future::Future<Output = Result<(), String>>>(
     snapshot: &Value,
     name: &str,
     pet_capture: bool,
-    prepare: impl FnOnce() -> Result<(), String>,
+    prepare: impl FnOnce() -> F,
 ) -> Result<(), String> {
     if !pet_capture && pet::starts_media_capture(snapshot, name) {
-        prepare()?;
+        prepare().await?;
     }
     Ok(())
 }
@@ -620,7 +672,10 @@ async fn request_pet_command(
             return Ok(stopped);
         }
     }
-    let pet_capture = pet::uses_pet_audio(&snapshot, name) && core.pet_audio.supported(context);
+    // An explicit hangup must never prepare a microphone, even if the call
+    // ended between the renderer snapshot and command dispatch.
+    let media_action = if name == "call" && args["stopOnly"] == true { "voice-stop" } else { name };
+    let pet_capture = pet::uses_pet_audio(&snapshot, media_action) && core.pet_audio.supported(context);
     let capture_id = if pet_capture {
         let (id, replaced) = match core.pet_audio.issue(context, &request_id) {
             Ok(capture) => capture,
@@ -639,18 +694,24 @@ async fn request_pet_command(
     } else {
         None
     };
-    // A pet click does not reveal the retained main webview or its browser
-    // permission UI. Prepare it before dispatching a legacy media start on
-    // every platform; keep the pet and its Stop control available.
-    if let Err(error) = prepare_legacy_media_owner(&snapshot, name, pet_capture, || {
-        let main = app
-            .get_webview_window("main")
-            .ok_or_else(|| "无法打开录音页面，请重新打开 AIChat 主窗口后重试。".to_string())?;
-        main.unminimize()
-            .and_then(|_| main.show())
-            .and_then(|_| main.set_focus())
-            .map_err(|_| "无法显示录音页面，请打开 AIChat 主窗口后重试。".to_string())
-    }) {
+    // Browser-owned capture needs the retained document visible for its permission UI.
+    if let Err(error) = prepare_legacy_media_owner(&snapshot, media_action, pet_capture, || async {
+        let handle = app.clone();
+        let (done, visible) = tokio::sync::oneshot::channel();
+        super::main_window::run_on_window_thread(app, move || {
+            let core = handle.state::<Arc<AppCore>>();
+            show_main_window(&handle, &core);
+            let presented = handle.get_webview_window("main").is_some_and(|main| {
+                main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(true)
+            });
+            let _ = done.send(presented);
+        }).map_err(|e| e.to_string())?;
+        if visible.await.unwrap_or(false) {
+            Ok(())
+        } else {
+            Err("无法显示录音页面，请打开 AIChat 主窗口后重试。".into())
+        }
+    }).await {
         core.pet
             .resolve_command(&json!({ "requestId": request_id, "ok": false, "error": error }));
         return Err(error);
@@ -754,12 +815,13 @@ pub(super) fn temporarily_hide_pet(
     app: &AppHandle,
     core: &AppCore,
     context: &Value,
+    expected_expanded: bool,
 ) -> Result<(), String> {
     let window = app.get_webview_window("pet").ok_or("桌宠窗口不可用")?;
     let pet = core.pet.snapshot();
     if !pet_is_active(&window).map_err(|e| e.to_string())?
         || !pet_back_context_matches(&pet, context)
-        || pet["expanded"] != false
+        || pet["expanded"] != expected_expanded
     {
         return Err("桌宠状态已改变。".into());
     }
@@ -843,6 +905,15 @@ pub(super) async fn desktop_pet_action(
     verify_pet_sender(&window, &state)?;
     match name.as_str() {
         "state" => Ok(state.pet.snapshot()),
+        "hangup" => {
+            let snapshot = state.pet.snapshot();
+            let id = args["dialogueId"].as_str().ok_or("缺少通话标识。")?;
+            if args["context"] == snapshot["context"] && snapshot["remoteDialogue"]["id"] == id
+                && state.remote_voice.dialogue.exit_matching(Some(id), "pet") {
+                super::remote_phone_view::sync(&app);
+            }
+            Ok(state.pet.snapshot())
+        }
         "remote-voice-readiness" => Ok(json!({"readiness": state.remote_voice.pet_readiness()})),
         "menu" => {
             let menu = pet_menu::build(&app, &state.pet.preferences(), &state.pet.snapshot())
@@ -872,11 +943,16 @@ pub(super) async fn desktop_pet_action(
             Ok(snap)
         }
         "hide-temporarily" => {
+            // Remote Back omits this field and may hide only a collapsed pet.
+            let expected_expanded = match args.get("expanded") {
+                None => false,
+                Some(value) => value.as_bool().ok_or("桌宠面板状态无效。")?,
+            };
             let handle = app.clone();
             let (done, result) = tokio::sync::oneshot::channel();
             super::main_window::run_on_window_thread(&app, move || {
                 let core = handle.state::<Arc<AppCore>>();
-                let _ = done.send(temporarily_hide_pet(&handle, &core, &args["context"]));
+                let _ = done.send(temporarily_hide_pet(&handle, &core, &args["context"], expected_expanded));
             }).map_err(|e| e.to_string())?;
             result.await.map_err(|e| e.to_string())??;
             Ok(state.pet.snapshot())
@@ -979,8 +1055,8 @@ pub(super) async fn desktop_pet_action(
 mod pet_drag_host_tests {
     use serde_json::json;
 
-    #[test]
-    fn legacy_microphone_starts_prepare_the_owner_on_all_platforms() {
+    #[tokio::test]
+    async fn legacy_microphone_starts_prepare_the_owner_on_all_platforms() {
         let ready = json!({
             "ready": true, "canCall": true, "compactVoice": true,
             "classroomRecording": { "enabled": false }
@@ -994,23 +1070,23 @@ mod pet_drag_host_tests {
                 let mut prepared = 0;
                 super::prepare_legacy_media_owner(&snapshot, action, false, || {
                     prepared += 1;
-                    Ok(())
+                    std::future::ready(Ok(()))
                 })
-                .unwrap();
+                .await.unwrap();
                 assert_eq!(prepared, 1, "{action}");
             }
         }
     }
 
-    #[test]
-    fn pet_capture_and_non_start_commands_never_reveal_main() {
+    #[tokio::test]
+    async fn pet_capture_and_non_start_commands_never_reveal_main() {
         let ready = json!({
             "ready": true, "canCall": true, "compactVoice": true,
             "classroomRecording": { "enabled": false }
         });
-        let must_stay_hidden = || -> Result<(), String> { panic!("main must stay hidden") };
+        let must_stay_hidden = || async { panic!("main must stay hidden") };
         for action in ["dictation", "call", "voice-start", "record-start"] {
-            super::prepare_legacy_media_owner(&ready, action, true, must_stay_hidden).unwrap();
+            super::prepare_legacy_media_owner(&ready, action, true, must_stay_hidden).await.unwrap();
             for (key, value) in [
                 ("ready", json!(false)),
                 ("dictating", json!(true)),
@@ -1019,7 +1095,7 @@ mod pet_drag_host_tests {
                 let mut unavailable = ready.clone();
                 unavailable[key] = value;
                 super::prepare_legacy_media_owner(&unavailable, action, false, must_stay_hidden)
-                    .unwrap();
+                    .await.unwrap();
             }
         }
         for action in [
@@ -1031,7 +1107,7 @@ mod pet_drag_host_tests {
             "record-stop",
             "toggle-target",
         ] {
-            super::prepare_legacy_media_owner(&ready, action, false, must_stay_hidden).unwrap();
+            super::prepare_legacy_media_owner(&ready, action, false, must_stay_hidden).await.unwrap();
         }
         super::prepare_legacy_media_owner(
             &json!({ "ready": true }),
@@ -1039,11 +1115,11 @@ mod pet_drag_host_tests {
             false,
             must_stay_hidden,
         )
-        .unwrap();
+        .await.unwrap();
     }
 
-    #[test]
-    fn failed_owner_preparation_returns_the_error_without_retry() {
+    #[tokio::test]
+    async fn failed_owner_preparation_returns_the_error_without_retry() {
         let mut attempts = 0;
         let error = super::prepare_legacy_media_owner(
             &json!({ "ready": true }),
@@ -1051,10 +1127,10 @@ mod pet_drag_host_tests {
             false,
             || {
                 attempts += 1;
-                Err("Cannot reveal the microphone permission UI".to_string())
+                std::future::ready(Err("Cannot reveal the microphone permission UI".to_string()))
             },
         )
-        .unwrap_err();
+        .await.unwrap_err();
         assert_eq!(attempts, 1);
         assert_eq!(error, "Cannot reveal the microphone permission UI");
     }

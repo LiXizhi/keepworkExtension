@@ -100,7 +100,7 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
           setPointerCapture(id) { captures.push(id); },
           releasePointerCapture(id) { releasedCaptures.push(id); },
           focus() { document.activeElement = this; },
-          click() { if (!this.disabled) return this.onclick?.({}); },
+          click() { if (!this.disabled) return this.onclick?.({ preventDefault() {}, stopPropagation() {} }); },
           fire(type, event = {}) { return dispatch(listeners, type, { target: this, ...event }); },
           getBoundingClientRect() {
             return { ...this.rect, x: this.rect.left, y: this.rect.top,
@@ -282,13 +282,19 @@ const finalPetReply = (text, extra = {}) => ({
   reply: { requestId: "pet-turn-1", thinking: false, text, speechText: text, options: [], ...extra },
 });
 
-test("opening the pet composer keeps a restored conversation reply out of the bubble", async () => {
+test("restored quick replies stay in the composer and leave the collapsed pet alone", async () => {
   const speech = speechBrowser();
-  const reply = { text: "An answer from before this pet session." };
+  const reply = { text: "An answer from before this pet session.", options: [{ icon: "🆕", text: "从零制作" }] };
   const pet = await renderer(petTurn({ expanded: false, draft: "", reply }), { speech });
+  assert.equal(pet.element("bubble").hidden, true);
+  assert.deepEqual(surfaceIds(pet), []);
   pet.publish({ expanded: true, reply });
   assert.equal(pet.element("panel").hidden, false);
   assert.equal(pet.element("bubble").hidden, true);
+  assert.equal(pet.element("options").children[0].textContent, "🆕 从零制作");
+  pet.publish({ expanded: false });
+  await pet.flushLayout();
+  assert.deepEqual(surfaceIds(pet), []);
   assert.deepEqual(speech.utterances, []);
   assert.equal(pet.calls.some(call => call.name === "send"), false);
 });
@@ -397,7 +403,7 @@ test("pet reply narrates matched final prose once, pauses and resumes on click, 
   assert.equal(speech.utterances.length, 1);
 });
 
-test("pet reply without narration expires by text length and preserves quick reply options", async t => {
+test("pet reply expiry clears the bubble even when the answer offers quick replies", async t => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   async function timedReply(text, options = []) {
     const pet = await renderer(petTurn());
@@ -419,7 +425,10 @@ test("pet reply without narration expires by text length and preserves quick rep
   }
   assert.ok(shortExpiry >= 2 && shortExpiry < longExpiry && longExpiry <= 20,
     `expected short then long expiry, got ${shortExpiry}s and ${longExpiry}s`);
-  assert.equal(long.element("bubble").hidden, false);
+  assert.equal(long.element("bubble").hidden, true);
+  await long.flushLayout();
+  assert.deepEqual(surfaceIds(long), []);
+  long.publish({ expanded: true });
   assert.equal(long.element("options").children[0].disabled, false);
 });
 
@@ -493,7 +502,6 @@ test("pet reply shows untagged coalesced or external answers silently without re
   const external = { text: "What next?", options: [{ text: "Continue" }] };
   pet.publish({ reply: external });
   assert.equal(pet.element("reply").textContent, external.text);
-  assert.equal(pet.element("options").children[0].disabled, false);
   pet.publish({ reply: first });
   assert.ok(pet.element("reply").hidden || pet.element("reply").textContent !== first.text);
   assert.deepEqual(speech.utterances, []);
@@ -517,10 +525,16 @@ test("pet send failure restores the composer and draft without speaking or retry
   assert.equal(pet.calls.filter(call => call.name === "send").length, 1);
 });
 
-test("pet quick reply sends immediately or opens the editable composer as requested", async () => {
+test("the open pet composer supports both immediate and editable quick replies", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "../pet.html"), "utf8");
+  const panel = html.match(/<section id="panel"[^>]*>([\s\S]*?)<\/section>/)?.[1];
+  assert.match(panel || "", /id="options"/, "the choices must be reachable inside the composer");
   for (const immediate of [true, false]) {
     const initial = petTurn({ expanded: false, draft: "", reply: { text: "Choose", immediate, options: [{ text: "Continue" }] } });
     const pet = await renderer(initial);
+    pet.publish({ expanded: true });
+    assert.equal(pet.element("bubble").hidden, true);
+    assert.equal(pet.element("options").children[0].disabled, false);
     await pet.element("options").children[0].onclick();
     await settle();
     assert.deepEqual(pet.calls.filter(call => ["input", "send"].includes(call.name)).map(call => call.name),
@@ -598,6 +612,23 @@ test("shared pet speech displays live prose before the final reply and controls 
   pet.publish({ petSpeech: sharedSpeech("ended", more) });
   assert.equal(pet.element("bubble").hidden, true);
   assert.deepEqual(system.utterances, [], "shared SDK speech must never be replayed through the system voice");
+});
+
+test("remote OK pauses a busy narrated reply without submitting, resuming or opening chat", async () => {
+  const { pet } = await sharedPet();
+  const ok = context => pet.windowEvent("aichat:remote-ok", { detail: { context } });
+  pet.publish({ busy: true, draft: "retain", petSpeech: sharedSpeech("speaking", "讲解内容") });
+  ok("old"); ok("session:fixture"); ok("session:fixture");
+  await settle();
+  pet.publish({ busy: false, draft: "retain", petSpeech: sharedSpeech("paused", "讲解内容") });
+  ok("session:fixture");
+  await settle();
+  assert.deepEqual(pet.calls.filter(call => ["pause-speech", "resume-speech", "open", "send", "stop"].includes(call.name))
+    .map(call => call.name), ["send", "pause-speech"]);
+  assert.equal(pet.calls.find(call => call.name === "pause-speech").args.speechRequestId, "pet-turn-1");
+  pet.element("reply").click();
+  await settle();
+  assert.equal(pet.calls.at(-1).name, "resume-speech");
 });
 
 test("shared pet speech binds pre-ack snapshots to the originating request and ignores foreign IDs", async () => {
@@ -1069,26 +1100,86 @@ function remoteEdit(pet, press, action, text = "", context = "persona:alice") {
   return accepted;
 }
 
-test("physical remote OK sends only the ready pet draft and leaves another app's focus alone", async () => {
-  const ok = (pet, context = "persona:alice") => pet.windowEvent("aichat:remote-ok", { detail: { context } });
+function remoteOK(pet, context = "persona:alice") {
+  pet.windowEvent("aichat:remote-ok", { detail: { context } });
+}
+
+test("remote OK toggles the empty pet composer for each press and preserves whitespace", async () => {
+  for (const draft of ["", "  \t　\n"]) {
+    const pet = await renderer(snapshot({ ready: true, expanded: false, draft }));
+    remoteOK(pet, "stale-context");
+    assert.equal(pet.element("panel").hidden, true);
+    for (const expanded of [true, false, true]) {
+      remoteOK(pet);
+      await settle();
+      assert.equal(pet.element("panel").hidden, !expanded);
+      assert.equal(pet.element("draft").value, draft);
+    }
+    assert.deepEqual(pet.calls, [true, false, true].map(expanded => ({
+      name: "expand", args: { expanded, context: "persona:alice" },
+    })));
+  }
+});
+
+test("a busy or offline pet toggles its empty editor but leaves a nonempty draft alone", async () => {
+  for (const state of [{ ready: false }, { ready: true, busy: true }]) {
+    const pet = await renderer(snapshot({ ...state, expanded: false }));
+    remoteOK(pet);
+    await settle();
+    assert.equal(pet.element("panel").hidden, false);
+    pet.publish({ draft: "保留草稿" });
+    remoteOK(pet);
+    await settle();
+    assert.equal(pet.element("panel").hidden, false);
+    assert.equal(pet.element("draft").value, "保留草稿");
+    assert.deepEqual(pet.calls.map(call => call.name), ["expand"]);
+  }
+});
+
+test("call, dictation, read-only draft and modal states keep both empty and nonempty OK presses out of the editor", async () => {
+  for (const draft of ["", "正在编辑"]) {
+    for (const protectedState of [{ richDraft: true }, { dictating: true }, { voice: { active: true } },
+      { remoteDialogue: { state: "listening" } }, { phoneState: "listening" },
+      { permission: { id: "p" } }, { exitPrompt: { id: "e", personas: [] } }]) {
+      const pet = await renderer(snapshot({ expanded: false, ready: true, draft, ...protectedState }));
+      remoteOK(pet);
+      await settle();
+      assert.equal(pet.element("panel").hidden, true);
+      assert.deepEqual(pet.calls, []);
+    }
+    const pet = await renderer(snapshot({ ready: true, expanded: false, draft }));
+    pet.setHidden(true);
+    remoteOK(pet);
+    await settle();
+    assert.deepEqual(pet.calls, []);
+  }
+});
+
+test("pending narrated speech claims remote OK even when the editor is empty", async () => {
+  const { pet } = await sharedPet();
+  pet.publish({ expanded: false, busy: false, draft: "", petSpeech: sharedSpeech("waiting") });
+  remoteOK(pet, "session:fixture");
+  remoteOK(pet, "session:fixture");
+  await settle();
+  pet.publish({ busy: false, draft: "", petSpeech: sharedSpeech("paused") });
+  remoteOK(pet, "session:fixture");
+  await settle();
+  assert.deepEqual(pet.calls.map(call => call.name), ["send", "pause-speech"]);
+  assert.equal(pet.element("panel").hidden, true);
+});
+
+test("physical remote OK submits a ready text draft and leaves a recording alone", async () => {
   const pet = await renderer(snapshot({ ready: true, expanded: false, draft: "ready" }));
-  ok(pet, "old-context");
+  remoteOK(pet, "old-context");
   await settle();
   assert.deepEqual(pet.calls, []);
-  ok(pet);
+  remoteOK(pet);
   await settle();
   assert.deepEqual(pet.calls.map(call => call.name), ["send"]);
 
-  for (const state of [{ draft: "" }, { busy: true }, { ready: false }, { dictating: true },
-                       { phoneState: "listening" }, { remoteDialogue: { state: "listening" } }]) {
-    const blocked = await renderer(snapshot({ ready: true, draft: "pending", ...state }));
-    ok(blocked);
-    await settle();
-    assert.deepEqual(blocked.calls, []);
-  }
   const recording = await renderer(snapshot({ ready: true, draft: "before" }));
   assert.equal(remoteVoiceFocus(recording, 17), true);
-  ok(recording);
+  remoteOK(recording);
   await settle();
   assert.deepEqual(recording.calls, []);
 });
@@ -1102,14 +1193,14 @@ test("a visible background pet applies dictation to its draft selection and hand
     this.selectionStart = this.selectionEnd = start + text.length;
   };
   assert.equal(remoteVoiceFocus(pet, 11), true);
-  pet.element("target").focus();
+  pet.element("open").focus();
   draft.selectionStart = 4;
   draft.selectionEnd = 7;
   assert.equal(remoteEdit(pet, 11, "insert", "二"), true);
   await settle();
   assert.equal(draft.value, "one 二 three");
   assert.deepEqual([draft.selectionStart, draft.selectionEnd], [5,5]);
-  assert.equal(pet.focusedId(), "target");
+  assert.equal(pet.focusedId(), "open");
   assert.deepEqual(pet.calls.at(-1), { name: "input", args: { context: "persona:alice", text: "one 二 three" } });
   assert.equal(remoteEdit(pet, 11, "clear"), true);
   await settle();
@@ -1163,38 +1254,285 @@ test("physical Record interrupts an older page's ongoing system narration before
   assert.equal(speech.utterances.length, 1);
 });
 
-test("the pet displays the main phone phase without claiming audio or opening the composer", async () => {
-  for (const source of ["desktop", "remote"]) {
-    const pet = await renderer(petTurn({ expanded: false, ready: false, context: "persona:alice" }));
+test("the pet keeps the entire composer hidden during each phone phase, regardless of the saved panel state", async () => {
+  for (const source of ["desktop", "remote", "voice"]) {
+    const pet = await renderer(petTurn({ expanded: true }));
     const icon = pet.element("dialogue-icon");
+    const phase = pet.element("dialogue-status");
     assert.equal(icon.hidden, true);
-    for (const state of ["starting", "listening", "thinking", "speaking", "paused"]) {
-      const status = source === "desktop" ? { phoneState: state } : { remoteDialogue: { id: remoteDialogueId, state } };
-      pet.publish({ ...status, reply: { text: "Call transcript." }, attention: "Speaking", compactVoice: true });
-      assert.equal(pet.element("panel").hidden, true);
+    assert.equal(phase.hidden, true);
+    assert.equal(pet.element("panel").hidden, false);
+    for (const state of ["starting", "listening", "thinking", "speaking", "paused", "discussing", "stopping"]) {
+      const status = source === "desktop" ? { phoneState: state } :
+        source === "remote" ? { remoteDialogue: { id: remoteDialogueId, state } } : { voice: { active: true, state } };
+      pet.publish({ ...status, expanded: true, reply: { text: "Earlier reply" }, attention: "Speaking", compactVoice: true });
+      assert.equal(pet.element("panel").hidden, true, source + ": " + state);
       assert.equal(pet.element("bubble").hidden, true);
-      assert.equal(icon.hidden, false);
-      assert.equal(icon.dataset.state, state);
+      assert.equal(pet.element("dialogue-caption").hidden, true);
+      const labels = { starting: "正在连接…", listening: "聆听中", thinking: "正在思考", speaking: "正在说话",
+        paused: "已暂停", discussing: "学生讨论中…", stopping: "正在结束…" };
+      assert.equal(phase.hidden, false, source + ": " + state);
+      assert.equal(phase.textContent, labels[state]);
       assert.equal(pet.element("badge").hidden, true);
-      assert.match(icon.title, /语音通话 · /);
+      assert.equal(icon.hidden, false);
+      assert.match(icon["aria-label"], /挂断|结束通话/);
+      await pet.flushLayout();
+      assert.equal(surfaceIds(pet).includes("panel"), false);
     }
     for (const action of ["enter", "record", "exit"]) assert.equal(physicalDialogue(pet, action), undefined);
     pet.windowEvent("aichat:pet-hidden");
     pet.setHidden(true);
     assert.equal(icon.hidden, true);
+    assert.equal(phase.hidden, true);
     pet.setHidden(false);
     assert.equal(icon.hidden, false);
-    pet.windowEvent("pagehide");
-    pet.publish({ context: "session:next" });
-    assert.equal(icon.hidden, false);
-    pet.publish({ phoneState: "", remoteDialogue: null });
+    pet.publish({ phoneState: "", remoteDialogue: null, voice: { active: false } });
     assert.equal(icon.hidden, true);
-    assert.equal(pet.element("bubble").hidden, true);
+    assert.equal(phase.hidden, true);
+    assert.equal(pet.element("panel").hidden, false);
     assert.deepEqual(pet.calls, []);
     assert.deepEqual(pet.nativeCalls, []);
   }
   const html = fs.readFileSync(path.join(__dirname, "../pet.html"), "utf8");
-  assert.match(html, /<[^>]+id="dialogue-icon"[^>]*>\s*(?:☎|&#9742;|&#x260[eE];)/u);
+  assert.match(html, /<button\b[^>]*\bid="dialogue-icon"/);
+});
+
+test("both speakers' captions appear by the pet, and a committed utterance clears without touching the draft", async () => {
+  const pet = await renderer(petTurn({ expanded: true, draft: "写到一半的草稿" }));
+  const bubble = pet.element("dialogue-caption");
+  const phase = pet.element("dialogue-status");
+  const draft = pet.element("draft");
+  draft.selectionStart = 1;
+  draft.selectionEnd = 4;
+  const update = (state, caption) => pet.publish({ remoteDialogue: { id: remoteDialogueId, state, caption } });
+
+  update("listening", undefined);
+  assert.equal(bubble.hidden, true);
+  assert.equal(phase.hidden, false);
+  assert.equal(phase.textContent, "聆听中");
+  for (const text of ["屏幕", "屏幕上的 <公式> 是什么意思？"]) {
+    update("listening", { role: "user", text });
+    assert.equal(pet.element("panel").hidden, true);
+    assert.equal(bubble.hidden, false);
+    assert.equal(phase.hidden, false);
+    assert.equal(phase.textContent, "聆听中");
+    assert.equal(bubble.textContent, text);
+    assert.equal(bubble.classList.contains("voice-input-preview"), true);
+    assert.equal(draft.value, "写到一半的草稿");
+  }
+  update("listening", undefined);
+  assert.equal(bubble.hidden, true);
+  assert.equal(phase.hidden, false);
+  assert.equal(phase.textContent, "聆听中");
+  assert.equal(bubble.textContent, "");
+  update("speaking", { role: "assistant", text: "我来讲解这个公式。" });
+  assert.equal(bubble.hidden, false);
+  assert.match(bubble.textContent, /我来讲解这个公式。/);
+  assert.equal(bubble.classList.contains("voice-input-preview"), false);
+  assert.equal(phase.hidden, false);
+  assert.equal(phase.textContent, "正在说话");
+  // A retained assistant transcript must not mask the fact that the mic is ready for the next turn.
+  update("listening", { role: "assistant", text: "我来讲解这个公式。" });
+  assert.equal(phase.hidden, false);
+  assert.equal(phase.textContent, "聆听中");
+  update("listening", undefined);
+  assert.equal(bubble.hidden, true);
+  assert.equal(bubble.textContent, "");
+  assert.equal(phase.hidden, false);
+  assert.equal(phase.textContent, "聆听中");
+  pet.publish({ remoteDialogue: null });
+  assert.equal(bubble.hidden, true);
+  assert.equal(bubble.textContent, "");
+  assert.equal(pet.element("panel").hidden, false);
+  assert.equal(phase.hidden, true);
+  assert.equal(draft.value, "写到一半的草稿");
+  assert.deepEqual([draft.selectionStart, draft.selectionEnd], [1, 4]);
+  await settle();
+  assert.deepEqual(pet.calls, [], "voice previews must never issue an input or send command");
+});
+
+test("a manually started phone call displays top-level user and assistant captions without the panel", async () => {
+  const pet = await renderer(petTurn({ expanded: true }));
+  const bubble = pet.element("dialogue-caption");
+  for (const role of ["user", "assistant"]) {
+    const text = role === "user" ? "先讲第一段" : "我们从第一段开始。";
+    pet.publish({ voice: { active: true }, phoneState: role === "user" ? "listening" : "speaking",
+      phoneCaption: { role, text } });
+    assert.equal(pet.element("panel").hidden, true);
+    assert.equal(bubble.hidden, false);
+    assert.ok(bubble.textContent.includes(text));
+    assert.equal(bubble.classList.contains("voice-input-preview"), role === "user");
+  }
+  pet.publish({ phoneState: "", voice: { active: false }, phoneCaption: null });
+  assert.equal(pet.element("panel").hidden, false);
+  assert.equal(bubble.hidden, true);
+  assert.deepEqual(pet.calls, []);
+});
+
+test("muted calls, prompts, hidden windows and unknown phases never claim the microphone is listening", async () => {
+  const pet = await renderer(petTurn({ expanded: false, phoneState: "listening", voice: { active: true, muted: true } }));
+  const phase = pet.element("dialogue-status");
+  assert.equal(phase.hidden, false);
+  assert.equal(phase.textContent, "已静音");
+  pet.publish({ voice: { active: true, muted: false } });
+  assert.equal(phase.textContent, "聆听中");
+  for (const prompt of [{ permission: { id: "p" } }, { exitPrompt: { id: "e", personas: [] } }]) {
+    pet.publish(prompt);
+    assert.equal(phase.hidden, true);
+    pet.publish({ permission: null, exitPrompt: null });
+    assert.equal(phase.hidden, false);
+  }
+  pet.setHidden(true);
+  assert.equal(phase.hidden, true);
+  pet.setHidden(false);
+  assert.equal(phase.hidden, false);
+  pet.publish({ phoneState: "future-phase" });
+  assert.equal(phase.hidden, true);
+  pet.publish({ phoneState: "", voice: { active: false } });
+  assert.equal(phase.hidden, true);
+  assert.deepEqual(pet.calls, []);
+});
+
+test("thinking remains the fallback while a current tool call has its own pet status", async () => {
+  const pet = await renderer(petTurn({ expanded: true, phoneState: "thinking" }));
+  const phase = pet.element("dialogue-status");
+  assert.equal(phase.textContent, "正在思考");
+
+  pet.publish({ phoneActivity: "tool", phoneCaption: { role: "user", text: "看一下我的屏幕" } });
+  assert.equal(phase.hidden, false);
+  assert.equal(phase.textContent, "正在调用工具…");
+  assert.equal(pet.element("panel").hidden, true);
+  assert.equal(pet.element("dialogue-caption").textContent, "看一下我的屏幕");
+  for (const prompt of [{ permission: { id: "permission" } }, { exitPrompt: { id: "exit", personas: [] } }]) {
+    pet.publish(prompt);
+    assert.equal(phase.hidden, true);
+    pet.publish({ permission: null, exitPrompt: null });
+    assert.equal(phase.hidden, false);
+    assert.equal(phase.textContent, "正在调用工具…");
+  }
+  for (const phaseName of ["speaking", "listening", "stopping"]) {
+    pet.publish({ phoneState: phaseName });
+    assert.notEqual(phase.textContent, "正在调用工具…");
+    if (phaseName === "speaking") assert.equal(phase.textContent, "正在说话");
+  }
+  for (const activity of [null, "unknown"]) {
+    pet.publish({ phoneState: "thinking", phoneActivity: activity });
+    assert.equal(phase.textContent, "正在思考");
+  }
+  pet.publish({ phoneState: "thinking", phoneActivity: "tool" });
+  pet.setHidden(true);
+  assert.equal(phase.hidden, true);
+  pet.publish({ phoneState: "", voice: { active: false } });
+  pet.setHidden(false);
+  assert.equal(phase.hidden, true);
+  assert.deepEqual(pet.calls, []);
+});
+
+test("subtitle updates leave the live region untouched until the call phase changes", async () => {
+  const pet = await renderer(petTurn({ expanded: false, phoneState: "listening" }));
+  const phase = pet.element("dialogue-status");
+  let current = phase.textContent;
+  const writes = [];
+  Object.defineProperty(phase, "textContent", {
+    get: () => current,
+    set(value) { writes.push(value); current = value; },
+  });
+  for (const text of ["你好", "你好，帮我看看"]) {
+    pet.publish({ phoneCaption: { role: "user", text } });
+    assert.equal(pet.element("dialogue-caption").textContent, text);
+  }
+  assert.deepEqual(writes, []);
+  pet.publish({ phoneState: "thinking", phoneCaption: null });
+  assert.deepEqual(writes, ["正在思考"]);
+  const html = fs.readFileSync(path.join(__dirname, "../pet.html"), "utf8");
+  const status = html.match(/<[^>]+\bid="dialogue-status"[^>]*>/)?.[0] || "";
+  assert.match(status, /role="status"|aria-live="polite"|^<output\b/);
+});
+
+test("new pet snapshots and remote focus events cannot reopen the call's composer or carry captions across owners", async () => {
+  const pet = await renderer(petTurn({ expanded: false }));
+  const bubble = pet.element("dialogue-caption");
+  const panel = pet.element("panel");
+  const text = "这一页是讲什么的？";
+  pet.publish({ remoteDialogue: { id: remoteDialogueId, state: "listening", caption: { role: "user", text } } });
+  let press = 7;
+  for (const expanded of [false, true, false]) {
+    pet.publish({ expanded });
+    assert.equal(remoteVoiceFocus(pet, ++press), false);
+    assert.equal(panel.hidden, true);
+    assert.equal(bubble.hidden, false);
+    assert.equal(bubble.textContent, text);
+  }
+  for (const prompt of [{ permission: { id: "permission-1", client: "QA" } }, { exitPrompt: { id: "exit-1", personas: [] } }]) {
+    pet.publish(prompt);
+    assert.equal(bubble.hidden, true);
+    assert.equal(panel.hidden, true);
+    pet.publish({ permission: null, exitPrompt: null });
+    assert.equal(bubble.hidden, false);
+  }
+  pet.publish({ context: "session:next", expanded: false, draft: "新对话草稿",
+    remoteDialogue: { id: "new-call", state: "starting" } });
+  assert.equal(bubble.hidden, true);
+  assert.equal(bubble.textContent, "");
+  pet.publish({ remoteDialogue: null });
+  assert.equal(panel.hidden, true);
+  assert.equal(pet.element("draft").value, "新对话草稿");
+  await settle();
+  assert.deepEqual(pet.calls, []);
+});
+
+test("the on-pet hang-up button ends its current call and safely opens older persona calls", async () => {
+  for (const [state, expected] of [
+    [{ remoteDialogue: { id: remoteDialogueId, state: "listening" } }, "hangup"],
+    [{ compactVoice: true, voice: { active: true, state: "speaking" } }, "voice-stop"],
+    [{ petStopOnlyCallVersion: 1, compactVoice: false, target: "persona", voice: { active: true, state: "speaking" } }, "call"],
+    [{ compactVoice: false, target: "persona", voice: { active: true, state: "speaking" } }, "open"],
+    [{ phoneState: "listening", ready: false }, "open"],
+  ]) {
+    const pet = await renderer(petTurn({ expanded: true, ...state }));
+    const button = pet.element("dialogue-icon");
+    assert.equal(pet.element("panel").hidden, true);
+    assert.equal(button.hidden, false);
+    assert.equal(button.disabled, false);
+    let finish;
+    pet.handle(() => new Promise(resolve => { finish = resolve; }));
+    button.click();
+    button.click();
+    await settle();
+    assert.deepEqual(pet.calls.map(call => call.name), [expected], "repeat clicks should issue one stop");
+    if (expected === "hangup") assert.equal(pet.calls[0].args.dialogueId, remoteDialogueId);
+    if (expected === "call") assert.equal(pet.calls[0].args.stopOnly, true);
+    const idle = petTurn({ expanded: true, voice: { active: false }, remoteDialogue: null, phoneState: "" });
+    pet.publish(idle);
+    finish(idle);
+    await settle();
+    assert.equal(button.hidden, true);
+    assert.equal(pet.element("panel").hidden, false);
+    button.click();
+    await settle();
+    assert.deepEqual(pet.calls.map(call => call.name), [expected], "a stale click must never start a new call");
+  }
+});
+
+test("an old hang-up acknowledgment cannot remove the next call's captions or button", async () => {
+  const first = { id: remoteDialogueId, state: "speaking" };
+  const pet = await renderer(petTurn({ remoteDialogue: first }));
+  const button = pet.element("dialogue-icon");
+  let finish;
+  pet.handle(() => new Promise(resolve => { finish = resolve; }));
+  button.click();
+  await settle();
+  assert.equal(pet.calls[0].args.dialogueId, first.id);
+
+  const next = { id: "c0f81140-8579-446d-b190-a483e7ef4613", state: "listening", caption: { role: "user", text: "新的通话" } };
+  pet.publish({ remoteDialogue: next });
+  finish(petTurn({ remoteDialogue: null }));
+  await settle();
+  assert.equal(button.hidden, false);
+  assert.equal(button.disabled, false);
+  assert.equal(pet.element("panel").hidden, true);
+  assert.equal(pet.element("dialogue-caption").textContent, next.caption.text);
+  assert.equal(pet.calls.length, 1);
 });
 
 test("phone start errors offer to open the desktop while the pet is collapsed", async () => {
@@ -1240,13 +1578,11 @@ test("a collapsed pet has no recording or call toolbar even when both features a
   assert.equal(pet.element("dialogue-icon").hidden, false);
   pet.publish({ expanded: true });
   assert.equal(status.hidden, true);
-  assert.equal(pet.element("panel").hidden, false);
-  assert.equal(pet.element("call").disabled, false);
-  pet.element("call").click();
-  await settle();
-  assert.deepEqual(pet.calls.map(call => call.name), ["call"]);
+  assert.equal(pet.element("panel").hidden, true);
   pet.publish({ voice: { active: false } });
   assert.equal(pet.element("dialogue-icon").hidden, true);
+  assert.equal(pet.element("panel").hidden, false);
+  assert.deepEqual(pet.calls, []);
 });
 
 test("partial remote dictation previews replace one another without entering the pet draft", async () => {
@@ -1261,7 +1597,7 @@ test("partial remote dictation previews replace one another without entering the
   phase("recording", 31);
   draft.selectionStart = 1;
   draft.selectionEnd = 3;
-  pet.element("target").focus();
+  pet.element("open").focus();
   const first = "第一句话。";
   const second = first + "第二句话包含小于号 <示例>。";
   show(31, first);
@@ -1274,7 +1610,7 @@ test("partial remote dictation previews replace one another without entering the
   assert.equal(preview.hidden, false);
   assert.equal(draft.value, "已有的草稿");
   assert.deepEqual([draft.selectionStart, draft.selectionEnd], [1, 3]);
-  assert.equal(pet.focusedId(), "target");
+  assert.equal(pet.focusedId(), "open");
   phase("transcribing", 31);
   phase("end", 31);
   show(31, "迟到的结果");
@@ -1308,9 +1644,9 @@ test("remote PTT opens and focuses the editable pet draft without changing its t
     await pet.flushLayout();
     assert.ok(surfaceIds(pet).includes("panel"), "expanded panel must accept pointer input");
 
-    pet.element("target").focus();
+    pet.element("open").focus();
     pet.publish({ expanded: true });
-    assert.equal(pet.focusedId(), "target", "updates after the press must not reclaim focus");
+    assert.equal(pet.focusedId(), "open", "updates after the press must not reclaim focus");
     assert.deepEqual(pet.calls, [], "native PTT must not start webpage dictation, sync or send a draft");
   }
 });
@@ -1333,11 +1669,11 @@ test("PTT shows the red recording state immediately and clears it synchronously 
   pet.input("已有的文字加上未同步编辑");
   draft.selectionStart = 2;
   draft.selectionEnd = 5;
-  pet.element("target").focus();
+  pet.element("open").focus();
   pet.publish({ expanded: true, attention: "普通状态刷新" });
   assert.equal(panel.classList.contains("remote-recording"), true);
   assert.equal(status.hidden, false);
-  assert.equal(pet.focusedId(), "target");
+  assert.equal(pet.focusedId(), "open");
   pet.windowEvent("aichat:remote-voice-end", { detail: 17 });
   assert.equal(panel.classList.contains("remote-recording"), false);
   assert.equal(status.hidden, true);
@@ -1345,7 +1681,7 @@ test("PTT shows the red recording state immediately and clears it synchronously 
   assert.equal(draft.disabled, false);
   assert.equal(draft.value, "已有的文字加上未同步编辑");
   assert.deepEqual([draft.selectionStart, draft.selectionEnd], [2, 5]);
-  assert.equal(pet.focusedId(), "target");
+  assert.equal(pet.focusedId(), "open");
   await settle();
   assert.deepEqual(pet.calls, []);
 });
@@ -1401,6 +1737,80 @@ test("the visible pet shows remote setup, preserves an empty-press notice, and i
   assert.deepEqual(pet.calls, []);
 });
 
+test("pet dialog buttons hide the pet temporarily, open AIChat, or close only the dialog", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "../pet.html"), "utf8");
+  const header = html.match(/<section id="panel"[^>]*>\s*<header>([\s\S]*?)<\/header>/)?.[1] || "";
+  const buttons = [...header.matchAll(/<button\b([^>]+)>/g)].map(([, attrs]) => {
+    assert.match(attrs, /aria-label="[^"]+"/);
+    return attrs.match(/\bid="([^"]+)"/)?.[1];
+  });
+  assert.deepEqual(buttons, ["minimize", "open", "collapse"]);
+
+  for (const [id, command] of [
+    ["minimize", { name: "hide-temporarily", args: { context: "persona:alice", expanded: true } }],
+    ["open", { name: "open", args: {} }],
+    ["collapse", { name: "expand", args: { expanded: false } }],
+  ]) {
+    const pet = await renderer(snapshot({ ready: false }));
+    pet.input("Unsent draft");
+    await pet.element(id).click();
+    await settle();
+    assert.deepEqual(pet.calls, [command], id);
+    assert.equal(pet.element("draft").value, "Unsent draft", id);
+    if (id === "collapse") {
+      assert.equal(pet.element("panel").hidden, true);
+      assert.equal(pet.element("pet").hidden, false);
+      pet.element("pet").fire("click", { detail: 0 });
+      await settle();
+      assert.equal(pet.element("panel").hidden, false);
+      assert.equal(pet.element("draft").value, "Unsent draft");
+    }
+  }
+});
+
+test("minimizing the pet reaches the host while its draft edit is awaiting acknowledgement", async () => {
+  const pet = await renderer(snapshot({ ready: true }));
+  let acknowledge;
+  pet.handle((name, args) => {
+    if (name === "input") return new Promise(resolve => {
+      acknowledge = () => resolve(snapshot({ ready: true, draft: args.text }));
+    });
+    return {};
+  });
+
+  pet.input("Still typing");
+  await settle();
+  assert.equal(typeof acknowledge, "function");
+  pet.element("minimize").click();
+  await settle();
+  const expected = [
+    { name: "input", args: { text: "Still typing", context: "persona:alice" } },
+    { name: "hide-temporarily", args: { expanded: true, context: "persona:alice" } },
+  ];
+  assert.deepEqual(pet.calls, expected);
+  assert.equal(pet.element("draft").value, "Still typing");
+
+  acknowledge();
+  await settle();
+  assert.deepEqual(pet.calls, expected);
+  assert.equal(pet.element("draft").value, "Still typing");
+});
+
+test("the pet header displays page context without offering to change it", async () => {
+  const html = fs.readFileSync(path.join(__dirname, "../pet.html"), "utf8");
+  assert.match(html, /<div id="target" role="group" aria-labelledby="target-title">/);
+  const pet = await renderer(snapshot({ canSwitchTarget: true, target: "session", title: "Lesson", skill: "Teacher" }));
+  const header = pet.element("target");
+  assert.equal(pet.element("target-title").textContent, "会话 · Lesson");
+  assert.match(header["aria-description"], /Teacher/);
+  assert.doesNotMatch(header.title, /切换|⇄/);
+  await header.click();
+  pet.publish({ context: "legacy-persona", target: "persona", title: "Tutor" });
+  assert.equal(pet.element("target-title").textContent, "Tutor");
+  await header.click();
+  assert.deepEqual(pet.calls, []);
+});
+
 test("live voice switches the target to its persona or session icon, keeping the target metadata accessible", async () => {
   for (const kind of ["persona", "session"]) {
     const pet = await renderer(snapshot({
@@ -1442,14 +1852,14 @@ test("only the released press shows recognition dots and leaves the draft and fo
   pet.input("已有草稿继续编辑");
   draft.selectionStart = 1;
   draft.selectionEnd = 3;
-  pet.element("target").focus();
+  pet.element("open").focus();
   phase("transcribing", 18);
   phase("recording", 18); // A late notification must not restore the red recording cue.
   assert.equal(panel.classList.contains("remote-recording"), false);
   assert.equal(icon.dataset.icon, "transcribe");
   phase("end", 17);
   assert.equal(icon.dataset.icon, "transcribe");
-  assert.equal(pet.focusedId(), "target");
+  assert.equal(pet.focusedId(), "open");
   assert.equal(draft.value, "已有草稿继续编辑");
   assert.deepEqual([draft.selectionStart, draft.selectionEnd], [1, 3]);
   phase("end", 18);
@@ -1512,10 +1922,10 @@ test("remote PTT declines before pet initialization and in modal or read-only st
 
 test("remote PTT declines if the pet webview cannot focus the draft", async () => {
   const pet = await renderer(snapshot({ expanded: true }));
-  pet.element("target").focus();
+  pet.element("open").focus();
   pet.element("draft").focus = () => {};
   assert.equal(remoteVoiceFocus(pet), false);
-  assert.equal(pet.focusedId(), "target");
+  assert.equal(pet.focusedId(), "open");
   assert.deepEqual(pet.calls, []);
 });
 

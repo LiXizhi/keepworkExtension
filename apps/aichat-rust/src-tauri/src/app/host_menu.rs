@@ -162,6 +162,7 @@ pub async fn execute_host_command(
         "reload" => reload_main_window(app, core),
         "remote-voice" => super::remote_voice_host::open_remote_voice_window(app),
         "fullscreen" => {
+            core.pet_approval_return.lock().unwrap().take();
             if let Some(win) = app.get_webview_window("main") {
                 let cur = win.is_fullscreen().unwrap_or(false);
                 let _ = win.set_fullscreen(!cur);
@@ -171,6 +172,7 @@ pub async fn execute_host_command(
         "zoom-out" => step_zoom(app, core, 1.0 / 1.1)?,
         "zoom-reset" => reset_zoom(app, core)?,
         "toggle-pet" => {
+            core.pet_approval_return.lock().unwrap().take();
             let next = core.update_settings(|s| {
                 s.pet_visible = !s.pet_visible;
             });

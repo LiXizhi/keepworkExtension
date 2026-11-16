@@ -53,9 +53,11 @@ addEventListener('aichat:remote-phone', ({ detail }) => {
   if (detail.action === 'enter' && detail.surface === 'pet') {
     detail.status = 'active';
     detail.liveVersion = 1;
-    window.__TAURI_INTERNALS__.invoke('desktop_publish_pet_state', {state:{
-      remotePhoneVersion:1, remoteDialogue:{id:detail.id, state:'starting'}
+    const publish = state => window.__TAURI_INTERNALS__.invoke('desktop_publish_pet_state', {state:{
+      remotePhoneVersion:1, remoteDialogue:{id:detail.id, state}
     }});
+    // Once listening, WebKit must still be able to acquire a fresh microphone.
+    publish('starting').then(() => publish('listening'));
   }
 });
 addEventListener('pagehide', () => clearInterval(poll), { once: true });
@@ -85,6 +87,9 @@ struct FixtureState {
     statuses: AtomicUsize,
     retries: AtomicUsize,
     dock_reopens: AtomicUsize,
+    approval_presented: AtomicUsize,
+    approval_returned: AtomicUsize,
+    screenshot_checks: AtomicUsize,
     unexpected: AtomicUsize,
     stopped: AtomicBool,
 }
@@ -147,6 +152,18 @@ impl Fixture {
                     }
                     "/status-confirmed" => {
                         server.statuses.fetch_add(1, Ordering::Relaxed);
+                        (200, "text/plain", "ok".into())
+                    }
+                    "/screenshot-checked" => {
+                        server.screenshot_checks.fetch_add(1, Ordering::Relaxed);
+                        (200, "text/plain", "ok".into())
+                    }
+                    "/approval-returned" => {
+                        server.approval_returned.fetch_add(1, Ordering::Relaxed);
+                        (200, "text/plain", "ok".into())
+                    }
+                    "/approval-presented" => {
+                        server.approval_presented.fetch_add(1, Ordering::Relaxed);
                         (200, "text/plain", "ok".into())
                     }
                     "/retry-confirmed" => {
@@ -240,6 +257,7 @@ fn core(profile: &Path, fixture: &Fixture) -> Result<Arc<AppCore>, String> {
             None,
         )),
         pet: Arc::new(PetController::new(profile.join("pet.json"))),
+        pet_approval_return: Mutex::new(None),
         pet_audio: Arc::new(crate::pet_audio::PetAudioRelay::default()),
         remote_voice: Arc::new(crate::remote_voice::RemoteVoice::new(profile)),
         pet_menu: crate::pet_menu::Session::default(),
@@ -417,6 +435,7 @@ async fn wait_count(counter: &AtomicUsize, expected: usize, label: &str) -> Resu
 
 extern "C" {
     fn keepwork_startup_smoke_passive_application() -> bool;
+    fn keepwork_startup_smoke_cancel_screenshot_alert();
     fn keepwork_startup_smoke_restore_application();
     fn keepwork_startup_smoke_dock_reopen(expected_visible: bool) -> bool;
     fn keepwork_startup_smoke_capture_main(window: *mut std::ffi::c_void) -> bool;
@@ -473,17 +492,20 @@ fn check_temporary_pet_hide(app: &AppHandle, core: &AppCore) -> Result<(), Strin
         return Err("A visible pet did not consume Back".into());
     }
     core.pet.set_expanded(true);
-    if pet_host::temporarily_hide_pet(app, core, &context).is_ok() {
-        return Err("An expanded pet accepted temporary hide".into());
+    if pet_host::temporarily_hide_pet(app, core, &context, false).is_ok() {
+        return Err("An expanded pet accepted a collapsed-pet Back request".into());
     }
     core.pet.set_expanded(false);
-    if pet_host::temporarily_hide_pet(app, core, &json!("stale-pet-context")).is_ok()
+    if pet_host::temporarily_hide_pet(app, core, &context, true).is_ok() {
+        return Err("A collapsed pet accepted a stale panel minimize request".into());
+    }
+    if pet_host::temporarily_hide_pet(app, core, &json!("stale-pet-context"), false).is_ok()
         || !pet.is_visible().map_err(|e| e.to_string())?
     {
         return Err("Stale pet context was allowed to hide the window".into());
     }
 
-    pet_host::temporarily_hide_pet(app, core, &context)?;
+    pet_host::temporarily_hide_pet(app, core, &context, false)?;
     if pet_host::route_remote_back(app)? {
         return Err("A temporarily hidden pet consumed Back".into());
     }
@@ -530,15 +552,16 @@ async fn exercise_pet_phone_start(app: &AppHandle) -> Result<(), String> {
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let attached = ui(app, |app, _| {
+            let (attached, listening) = ui(app, |app, core| {
                 let main = app.get_webview_window("main").ok_or("Missing phone owner")?;
                 let native = main.ns_window().map_err(|e| e.to_string())?;
                 if main.is_visible().map_err(|e| e.to_string())? {
                     return Err("Pet phone opened the full window".into());
                 }
-                Ok(!unsafe { keepwork_startup_smoke_main_intact(native) })
+                Ok((!unsafe { keepwork_startup_smoke_main_intact(native) },
+                    core.pet.snapshot()["remoteDialogue"]["state"] == "listening"))
             }).await?;
-            if attached == expected_attached { break; }
+            if attached == expected_attached && listening { break; }
             if Instant::now() >= deadline { return Err(format!("Pet phone view did not reach attached={expected_attached}")); }
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
@@ -656,16 +679,54 @@ async fn minimize_to_pet(app: &AppHandle, fixture: &FixtureState) -> Result<(), 
 
 async fn dock_reopen(app: &AppHandle, fixture: &FixtureState) -> Result<(), String> {
     let entries = fixture.entries.load(Ordering::Relaxed);
+    // A queued pet-show request can arrive after Home has already restored chat.
+    remote_ui(app, |app, core| {
+        core.update_settings(|s| s.pet_visible = true);
+        pet_host::ensure_pet_window(app, core, true);
+        let snapshot = core.pet.set_expanded(true);
+        if pet_host::temporarily_hide_pet(app, core, &snapshot["context"], true).is_ok() {
+            return Err("A delayed pet show made the pet actionable over the restored chat".into());
+        }
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
+        if pet.is_visible().map_err(|e| e.to_string())?
+            || !main.is_visible().map_err(|e| e.to_string())?
+            || main.is_minimized().map_err(|e| e.to_string())?
+            || core.page_connection.lock().unwrap().presentation() != Presentation::Main
+            || !core.settings().pet_visible
+        {
+            return Err("A delayed pet show changed the visible main window or saved preference".into());
+        }
+        Ok(())
+    }).await?;
+    println!("{}", json!({"case":"late-pet-show-after-main-restore"}));
+
     for (pet_enabled, temporary_hide) in [(true, true), (true, false), (false, false)] {
-        remote_ui(app, move |app, core| {
+        remote_ui(app, move |_, core| {
             core.update_settings(|s| s.pet_visible = pet_enabled);
-            main_window::toggle_remote_home(app);
-            if temporary_hide {
-                let context = core.pet.snapshot()["context"].clone();
-                pet_host::temporarily_hide_pet(app, core, &context)?;
-            }
             Ok(())
         }).await?;
+        native_action(app, 3).await?;
+        if pet_enabled {
+            // Wait until native minimization actually switched to pet mode.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if ui(app, |app, _| {
+                    let main = app.get_webview_window("main").ok_or("Missing main window")?;
+                    let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
+                    Ok(!main.is_visible().map_err(|e| e.to_string())?
+                        && pet_host::pet_is_active(&pet).map_err(|e| e.to_string())?)
+                }).await? { break; }
+                if Instant::now() >= deadline { return Err("The pet never became clickable".into()); }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        }
+        if temporary_hide {
+            remote_ui(app, |app, core| {
+                let snapshot = core.pet.set_expanded(true);
+                pet_host::temporarily_hide_pet(app, core, &snapshot["context"], true)
+            }).await?;
+        }
         for repeat in [false, true] {
             let expected_event = fixture.dock_reopens.load(Ordering::Relaxed) + 1;
             let has_visible_windows = repeat || (pet_enabled && !temporary_hide);
@@ -714,6 +775,126 @@ async fn dock_reopen(app: &AppHandle, fixture: &FixtureState) -> Result<(), Stri
     Ok(())
 }
 
+async fn pet_approval(app: &AppHandle, fixture: &FixtureState) -> Result<(), String> {
+    const DOCUMENT: &str = "8a73e312-c3a0-47a3-b074-a09dd7bf25c1";
+    let entries = fixture.entries.load(Ordering::Relaxed);
+    remote_ui(app, |app, core| {
+        core.update_settings(|s| s.pet_visible = true);
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        let token = core.launch_intents.lock().unwrap().capability().to_owned();
+        if super::pet_approval::reveal(app, &main, core, DOCUMENT, false)? {
+            return Err("An approval outside pet mode stole focus".into());
+        }
+        main_window::dismiss_main_window(app, core, main_window::DismissAction::Close);
+        let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
+        if super::pet_approval::authenticate(&pet, core, DOCUMENT, &token).is_ok()
+            || super::pet_approval::authenticate(&main, core, DOCUMENT, "").is_ok()
+            || main.is_visible().map_err(|e| e.to_string())?
+        {
+            return Err("An unauthorized approval presenter was accepted".into());
+        }
+        // Mirror the page contract: open the choice before requesting its window.
+        main.eval(format!(r#"(() => {{
+            const dialog = document.createElement('dialog');
+            dialog.innerHTML = '<button>Cancel</button><button>Allow</button>';
+            const args = {{token:{token}, document:{document}}};
+            dialog.addEventListener('click', async () => {{
+                dialog.close();
+                if (await window.__TAURI_INTERNALS__.invoke('desktop_return_to_pet_after_approval', args))
+                    fetch('/approval-returned');
+            }});
+            document.body.append(dialog);
+            dialog.showModal();
+            window.__TAURI_INTERNALS__.invoke('desktop_reveal_pet_approval', {{...args, returnToPet:true}})
+                .then(shown => {{ if (shown && dialog.open) fetch('/approval-presented'); }});
+        }})()"#, token = json!(token), document = json!(DOCUMENT))).map_err(|e| e.to_string())
+    }).await?;
+    wait_count(&fixture.approval_presented, 1, "pending pet approval reveal").await?;
+    remote_ui(app, |app, core| {
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
+        let native = main.ns_window().map_err(|e| e.to_string())?;
+        if !main.is_visible().map_err(|e| e.to_string())?
+            || main.is_minimized().map_err(|e| e.to_string())?
+            || pet.is_visible().map_err(|e| e.to_string())?
+            || !core.settings().pet_visible
+            || !unsafe { keepwork_startup_smoke_main_intact(native) }
+            || !unsafe { keepwork_startup_smoke_document_focused(native) }
+        {
+            return Err("The retained document with the pending approval was not focused".into());
+        }
+        if super::pet_approval::return_to_pet(app, &main, core, "other-document")? {
+            return Err("Another document consumed the screenshot return".into());
+        }
+        main.eval("document.querySelector('dialog[open] button').click()").map_err(|e| e.to_string())
+    }).await?;
+    wait_count(&fixture.approval_returned, 1, "owned screenshot return").await?;
+    remote_ui(app, |app, core| {
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
+        if main.is_visible().map_err(|e| e.to_string())? || !pet.is_visible().map_err(|e| e.to_string())?
+            || super::pet_approval::return_to_pet(app, &main, core, DOCUMENT)?
+        {
+            return Err("Screenshot did not return to pet mode exactly once".into());
+        }
+        if !super::pet_approval::reveal(app, &main, core, DOCUMENT, true)? {
+            return Err("Second screenshot did not acquire a temporary presentation".into());
+        }
+        main_window::show_main_window(app, core);
+        if super::pet_approval::return_to_pet(app, &main, core, DOCUMENT)? || !main.is_visible().map_err(|e| e.to_string())? {
+            return Err("Stale screenshot return overrode an explicit main-window reopen".into());
+        }
+        Ok(())
+    }).await?;
+    if fixture.entries.load(Ordering::Relaxed) != entries {
+        return Err("Approval presentation reloaded the document".into());
+    }
+    println!("{}", json!({"case":"pending-pet-tool-approval"}));
+    Ok(())
+}
+
+// Each probe is installed into a fresh, private WKWebView document. The positive
+// path cancels the permission settings dialog and never requests any pixels.
+async fn check_screenshot_bridge(
+    app: &AppHandle, fixture: &FixtureState, authorized: bool,
+) -> Result<(), String> {
+    let prior = fixture.screenshot_checks.load(Ordering::Relaxed);
+    let label = if authorized { "native-screenshot-cancel-with-main-hidden" } else { "native-screenshot-rejects-foreign-credential" };
+    remote_ui(app, move |app, core| {
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        let (token, check) = if authorized {
+            let token = core.launch_intents.lock().unwrap().capability().to_owned();
+            unsafe { keepwork_startup_smoke_cancel_screenshot_alert(); }
+            (token, r#"
+                const initial = await bridge.getScreenshotPermission();
+                try { await bridge.setScreenshotPermission(true); return false; }
+                catch (error) { if (!String(error).includes('桌面截图请求已取消')) return false; }
+                const afterCancel = await bridge.getScreenshotPermission();
+                const revoked = await bridge.setScreenshotPermission(false);
+                return [initial, afterCancel, revoked].every(status => status.alwaysAllowScreenshots === false && status.pending === false);
+            "#)
+        } else {
+            ("unrelated-smoke-credential".to_owned(), r#"
+                try { await bridge.captureScreenshot(); return false; }
+                catch (error) { return String(error).includes('Unauthorized launch document'); }
+            "#)
+        };
+        let script = crate::bridge::build_main_window_init_script_with_launch_capability(
+            "darwin", "", &main_window::current_entry_url(core), &token,
+        );
+        main.eval(format!(r#"{script}
+            (async () => {{
+                const bridge = window.aichatDesktop;
+                if (bridge?.capabilities?.desktopScreenshotVersion !== 1) return false;
+                {check}
+            }})().then(passed => {{ if (passed) fetch('/screenshot-checked'); }});"#))
+            .map_err(|e| e.to_string())
+    }).await?;
+    wait_count(&fixture.screenshot_checks, prior + 1, label).await?;
+    println!("{}", json!({"case":label}));
+    Ok(())
+}
+
 async fn check_focused_composer_back(app: &AppHandle) -> Result<(), String> {
     let main = app.get_webview_window("main").ok_or("Missing main window")?;
     let evaluate = |script: &'static str| {
@@ -743,6 +924,38 @@ async fn check_focused_composer_back(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+async fn check_home_windows(app: &AppHandle, enabled: bool, returning_to_main: bool) -> Result<(), String> {
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let actual = ui(app, |app, core| {
+            let main = app.get_webview_window("main").ok_or("Missing main window")?;
+            let pet = app.get_webview_window("pet");
+            let pet_visible = pet.map(|w| w.is_visible()).transpose().map_err(|e| e.to_string())?.unwrap_or(false);
+            let minimized = main.is_minimized().map_err(|e| e.to_string())?;
+            let main_visible = main.is_visible().map_err(|e| e.to_string())? && !minimized;
+            if main_visible && pet_visible {
+                return Err("Home presented the standalone pet over the full chat window".into());
+            }
+            if core.pet_home_overlay.lock().unwrap().is_some() {
+                return Err("Home treated its own chat window as an external overlay target".into());
+            }
+            if !unsafe { keepwork_startup_smoke_main_intact(main.ns_window().map_err(|e| e.to_string())?) } {
+                return Err("Home replaced the chat document".into());
+            }
+            Ok((main_visible, minimized, pet_visible, core.settings().pet_visible))
+        }).await?;
+        let (main, minimized, pet, setting) = actual;
+        if main == returning_to_main && pet == (enabled && !returning_to_main)
+            && (returning_to_main || enabled || minimized) && setting == enabled {
+            return Ok(());
+        }
+        if Instant::now() >= until {
+            return Err(format!("Unexpected Home presentation: pet enabled={enabled}, restoring={returning_to_main}, state={actual:?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
 // Opt-in foreground scenario. Only this isolated application is activated and zoomed.
 async fn zoomed_home(app: &AppHandle, fixture: &FixtureState) -> Result<(), String> {
     let entries = fixture.entries.load(Ordering::Relaxed);
@@ -761,34 +974,44 @@ async fn zoomed_home(app: &AppHandle, fixture: &FixtureState) -> Result<(), Stri
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
     check_focused_composer_back(app).await?;
-    for enabled in [false, true, false] {
-        for press in 1..=2 {
-            remote_ui(app, move |app, core| {
-                core.update_settings(|s| s.pet_visible = enabled);
+    for enabled in [true, false, true] {
+        remote_ui(app, move |_, core| {
+            core.update_settings(|s| s.pet_visible = enabled);
+            Ok(())
+        }).await?;
+        for returning_to_main in [false, true] {
+            remote_ui(app, |app, _| {
                 main_window::toggle_remote_home(app);
                 Ok(())
             }).await?;
-            // Read state in a later window turn, after any queued native minimize/hide.
-            remote_ui(app, move |app, core| {
-                let main = app.get_webview_window("main").ok_or("Missing main window")?;
-                let pet = app.get_webview_window("pet");
-                let visible = pet.map(|w| w.is_visible()).transpose().map_err(|e| e.to_string())?.unwrap_or(false);
-                let overlay = core.pet_home_overlay.lock().unwrap().is_some();
-                let expected = enabled && press == 1;
-                if visible != expected || overlay != expected || pet_host::route_remote_back(app)? != expected ||
-                    !main.is_visible().map_err(|e| e.to_string())? || main.is_minimized().map_err(|e| e.to_string())? ||
-                    !main.is_maximized().map_err(|e| e.to_string())? ||
-                    core.settings().pet_visible != enabled ||
-                    core.page_connection.lock().unwrap().presentation() != Presentation::Main ||
-                    !unsafe { keepwork_startup_smoke_main_intact(main.ns_window().map_err(|e| e.to_string())?) }
-                {
-                    return Err(format!("Zoomed main changed on Home: enabled={enabled}, press={press}, pet={visible}, overlay={overlay}"));
-                }
-                Ok(())
-            }).await?;
+            check_home_windows(app, enabled, returning_to_main).await?;
         }
-        println!("{}", json!({"case":"zoomed-main-home-overlay","petEnabled":enabled,"consecutiveHomePresses":2}));
+        println!("{}", json!({"case":"zoomed-main-home-exclusive","petEnabled":enabled}));
     }
+    remote_ui(app, |app, _| {
+        app.get_webview_window("main").ok_or("Missing main window")?
+            .set_fullscreen(true).map_err(|e| e.to_string())
+    }).await?;
+    let until = Instant::now() + Duration::from_secs(6);
+    loop {
+        if ui(app, |app, _| {
+            let main = app.get_webview_window("main").ok_or("Missing main window")?;
+            Ok(main.is_fullscreen().map_err(|e| e.to_string())? && main.is_focused().map_err(|e| e.to_string())?)
+        }).await? { break; }
+        if Instant::now() >= until { return Err("Cannot enter native full-screen chat".into()); }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    remote_ui(app, |app, _| {
+        main_window::toggle_remote_home(app);
+        Ok(())
+    }).await?;
+    check_home_windows(app, true, false).await?;
+    remote_ui(app, |app, core| {
+        main_window::show_main_window(app, core);
+        Ok(())
+    }).await?;
+    check_home_windows(app, true, true).await?;
+    println!("{}", json!({"case":"native-fullscreen-home-and-open-exclusive"}));
     if fixture.entries.load(Ordering::Relaxed) != entries { return Err("Home reloaded the retained main document".into()); }
     println!("startup-smoke: OK (real zoomed Tauri main, remote Home dispatch)");
     Ok(())
@@ -861,6 +1084,7 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>, home_overlay: bool
     loading_stays_hidden(&app, &fixture, "background-loading-shell-hidden").await?;
     fixture.ready.store(true, Ordering::Relaxed);
     wait_view(&app, "background-ready", Phase::Ready, false, None, 8).await?;
+    check_screenshot_bridge(&app, &fixture, true).await?;
     ui(&app, |app, core| {
         main_window::show_main_window(app, core);
         Ok(())
@@ -951,6 +1175,8 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>, home_overlay: bool
     wait_view(&app, "native-retry-ready", Phase::Ready, true, Some(false), 8).await?;
     minimize_to_pet(&app, &fixture).await?;
     dock_reopen(&app, &fixture).await?;
+    pet_approval(&app, &fixture).await?;
+    check_screenshot_bridge(&app, &fixture, false).await?;
     if fixture.unexpected.load(Ordering::Relaxed) != 0 {
         return Err(
             "Unexpected IPC failure, runtime probe, or network path reached the fixture".into(),
@@ -1016,8 +1242,14 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
             .activate_ignoring_other_apps(home_overlay)
             .enable_macos_default_menu(false)
             .manage(core)
+            .manage(super::screenshot::ScreenshotAccess::default())
             .invoke_handler(tauri::generate_handler![
+                super::screenshot::desktop_capture_screenshot,
+                super::screenshot::desktop_get_screenshot_permission,
+                super::screenshot::desktop_set_screenshot_permission,
                 pet_host::desktop_publish_pet_state,
+                super::pet_approval::desktop_return_to_pet_after_approval,
+                super::pet_approval::desktop_reveal_pet_approval,
                 main_window::desktop_page_connection_status,
                 main_window::desktop_retry_page_connection,
                 main_window::desktop_page_connection_attempt,
@@ -1055,6 +1287,7 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                         );
                     })
                     .build()?;
+                super::pet_approval::observe_main(&main, Arc::clone(&setup_core));
                 main_window::observe_main_minimize(&main)?;
                 main.set_focusable(home_overlay)?;
                 main.set_ignore_cursor_events(true)?;

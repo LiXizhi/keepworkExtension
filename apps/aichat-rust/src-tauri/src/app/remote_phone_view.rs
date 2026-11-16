@@ -1,5 +1,5 @@
-//! Present the retained WebKit document to its microphone permission UI during
-//! an explicitly requested pet call. Other platforms use the retained page directly.
+//! Present the retained WebKit document to its microphone permission UI throughout
+//! an explicitly requested pet call, including microphone reacquisition. Other platforms use the retained page directly.
 #[cfg(target_os = "macos")]
 use super::{
     sender::{verify_main_sender, verify_pet_sender},
@@ -33,7 +33,7 @@ pub(super) fn sync(app: &AppHandle) {
             return;
         };
         let core = handle.state::<Arc<AppCore>>();
-        let id = core.pet.starting_phone_id();
+        let id = core.pet.active_phone_id();
         let pet = handle.get_webview_window("pet").filter(|pet| {
             id.as_deref()
                 .is_some_and(|id| core.remote_voice.dialogue.owns("main", id))
