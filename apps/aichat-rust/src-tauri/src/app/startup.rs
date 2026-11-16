@@ -459,8 +459,12 @@ pub fn run() {
                 super::remote_voice_host::deliver_main_composer(&delivery_app, generation, text)
             });
             let voice_app = app_handle.clone();
+            let voice_foreground_app = app_handle.clone();
             core_for_setup.remote_voice.start_automatic(move || {
                 super::remote_voice_host::show_voice_setup_if_focused(&voice_app)
+            }, move || {
+                voice_foreground_app.get_webview_window("main")
+                    .is_some_and(|window| window.is_focused().unwrap_or(false))
             });
 
             // Configure main window navigation guard, close-to-tray, and initialization script

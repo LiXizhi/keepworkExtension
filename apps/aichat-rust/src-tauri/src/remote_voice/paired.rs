@@ -148,6 +148,7 @@ pub(super) enum Probe {
     Waiting,
     Retry(String),
     NeedsPermission(&'static str),
+    NeedsBluetoothPermission,
     Available(String),
 }
 
@@ -177,7 +178,9 @@ pub(super) async fn paired_remote(config_device: &str) -> Result<Probe, String> 
             Ok(inventory) => inventory,
             Err(error) => return error.probe(),
         };
-        admit_macos(inventory.candidates, config_device, inventory.bluetooth_allowed, super::native_input::missing_permission)
+        probe_macos(inventory.candidates, config_device, inventory.bluetooth_allowed,
+            inventory.bluetooth_not_determined, super::ble::saved_remote(config_device.trim()),
+            super::native_input::missing_permission).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -190,22 +193,50 @@ pub(super) async fn paired_remote(config_device: &str) -> Result<Probe, String> 
 }
 
 #[cfg(target_os = "macos")]
+async fn probe_macos(
+    candidates: Vec<PairedRemote>, config_device: &str, bluetooth_allowed: bool, bluetooth_not_determined: bool,
+    saved_remote: impl std::future::Future<Output = Result<Probe, String>>,
+    input_permission: impl FnOnce() -> Option<&'static str>,
+) -> Result<Probe, String> {
+    if !config_device.trim().is_empty() {
+        uuid::Uuid::parse_str(config_device.trim())
+            .map_err(|_| "macOS 蓝牙设备 ID 必须是系统 CoreBluetooth UUID。")?;
+        if bluetooth_allowed {
+            // Pairing addresses cannot prove a CoreBluetooth UUID. Retrieve
+            // exactly the saved, system-known target without guessing a MAC.
+            return match saved_remote.await? {
+                Probe::Available(device) => Ok(input_admission(device, input_permission)),
+                probe => Ok(probe),
+            };
+        }
+    }
+    admit_macos(candidates, config_device, bluetooth_allowed, bluetooth_not_determined, input_permission)
+}
+
+#[cfg(target_os = "macos")]
 fn admit_macos(
     candidates: Vec<PairedRemote>,
     config_device: &str,
     bluetooth_allowed: bool,
+    bluetooth_not_determined: bool,
     input_permission: impl FnOnce() -> Option<&'static str>,
 ) -> Result<Probe, String> {
-    let Some(device) = select_paired(candidates, config_device)? else {
+    let Some(device) = select_paired(candidates, if bluetooth_allowed { config_device } else { "" })? else {
         return Ok(Probe::Waiting);
     };
     if !bluetooth_allowed {
+        if bluetooth_not_determined { return Ok(Probe::NeedsBluetoothPermission); }
         return Ok(Probe::NeedsPermission("已检测到小米遥控器。请点「启动语音输入」，按系统提示依次授权。若曾拒绝蓝牙访问，请到系统设置 → 隐私与安全性 → 蓝牙中授权。通过编辑器或终端启动时，系统可能显示该应用的名称。"));
     }
-    Ok(match input_permission() {
+    Ok(input_admission(device, input_permission))
+}
+
+#[cfg(target_os = "macos")]
+fn input_admission(device: String, input_permission: impl FnOnce() -> Option<&'static str>) -> Probe {
+    match input_permission() {
         Some(reason) => Probe::NeedsPermission(reason),
         None => Probe::Available(device),
-    })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -220,6 +251,8 @@ mod platform {
         pub candidates: Vec<PairedRemote>,
         #[serde(default)]
         pub bluetooth_allowed: bool,
+        #[serde(default)]
+        pub bluetooth_not_determined: bool,
         error: Option<String>,
         #[serde(default)]
         retry: bool,
@@ -438,28 +471,62 @@ mod tests {
         let device = remote(None, Some("hid:one"));
         let skip = || panic!("input preflight precedes device selection or Bluetooth consent");
         assert_eq!(
-            admit_macos(vec![], "", false, skip).unwrap(),
+            admit_macos(vec![], "", false, true, skip).unwrap(),
             Probe::Waiting
         );
         assert!(admit_macos(
             vec![device.clone(), remote(None, Some("hid:two"))],
             "",
             false,
+            true,
             skip
         )
         .is_err());
         assert!(matches!(
-            admit_macos(vec![device.clone()], "", false, skip),
+            admit_macos(vec![device.clone()], "", false, false, skip),
             Ok(Probe::NeedsPermission(_))
         ));
         assert_eq!(
-            admit_macos(vec![device.clone()], "", true, || Some("Input Monitoring")).unwrap(),
+            admit_macos(vec![device.clone()], "", false, true, skip).unwrap(),
+            Probe::NeedsBluetoothPermission
+        );
+        assert_eq!(
+            admit_macos(vec![device.clone()], "12345678-1234-5678-1234-567812345678", false, true, skip).unwrap(),
+            Probe::NeedsBluetoothPermission
+        );
+        assert_eq!(
+            admit_macos(vec![device.clone()], "", true, false, || Some("Input Monitoring")).unwrap(),
             Probe::NeedsPermission("Input Monitoring")
         );
         assert_eq!(
-            admit_macos(vec![device], "", true, || None).unwrap(),
+            admit_macos(vec![device], "", true, false, || None).unwrap(),
             Probe::Available(String::new())
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn bluetooth_consent_is_followed_by_automatic_admission_without_another_start() {
+        let inventory = vec![remote(None, Some("hid:one"))];
+        let no_lookup = || async { panic!("an unspecified target cannot retrieve a UUID") };
+        let no_input = || panic!("undecided Bluetooth must precede input preflight");
+        assert_eq!(probe_macos(inventory.clone(), "", false, true, no_lookup(), no_input).await.unwrap(), Probe::NeedsBluetoothPermission);
+        assert!(matches!(probe_macos(inventory.clone(), "", false, false, no_lookup(), no_input).await.unwrap(), Probe::NeedsPermission(_)));
+        assert_eq!(probe_macos(inventory.clone(), "", true, false, no_lookup(), || Some("Input Monitoring")).await.unwrap(), Probe::NeedsPermission("Input Monitoring"));
+        assert_eq!(probe_macos(inventory, "", true, false, no_lookup(), || None).await.unwrap(), Probe::Available(String::new()));
+        assert_eq!(probe_macos(vec![], "", false, true, no_lookup(), no_input).await.unwrap(), Probe::Waiting);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn explicit_uuid_uses_authorized_system_retrieval_instead_of_mac_pairing_guesses() {
+        let uuid = "12345678-1234-5678-1234-567812345678";
+        let mac_only = vec![remote(None, Some("mac:AA:BB:CC:DD:EE:FF"))];
+        assert_eq!(probe_macos(mac_only.clone(), uuid, true, false, async { Ok(Probe::Available(uuid.into())) }, || None).await.unwrap(), Probe::Available(uuid.into()));
+        assert_eq!(probe_macos(mac_only.clone(), uuid, true, false, async { Ok(Probe::Waiting) }, || panic!("no target, no input preflight")).await.unwrap(), Probe::Waiting);
+        assert_eq!(probe_macos(mac_only.clone(), uuid, true, false, async { Ok(Probe::Retry("not known yet".into())) }, || None).await.unwrap(), Probe::Retry("not known yet".into()));
+        assert_eq!(probe_macos(mac_only.clone(), uuid, false, true, async { panic!("unauthorized retrieval") }, || None).await.unwrap(), Probe::NeedsBluetoothPermission);
+        assert!(probe_macos(mac_only, "AA:BB:CC:DD:EE:FF", true, false, async { panic!("MAC cannot retrieve a UUID") }, || None).await.is_err());
     }
 
     #[test]

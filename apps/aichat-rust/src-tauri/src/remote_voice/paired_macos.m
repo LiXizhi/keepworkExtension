@@ -79,17 +79,20 @@ static NSDictionary *pairedInventory(void) {
     // HID registry properties are available even on first launch. Keep the
     // Bluetooth inventory behind consent; neither path prompts or connects.
     BOOL allowed = NO;
+    BOOL notDetermined = NO;
     if (@available(macOS 10.15, *)) {
-        allowed = CBManager.authorization == CBManagerAuthorizationAllowedAlways;
+        CBManagerAuthorization access = CBManager.authorization;
+        allowed = access == CBManagerAuthorizationAllowedAlways;
+        notDetermined = access == CBManagerAuthorizationNotDetermined;
     }
     NSMutableArray *candidates = [NSMutableArray new];
     NSArray *paired = nil;
     if (allowed) {
         IOBluetoothHostController *controller = IOBluetoothHostController.defaultController;
-        if (!controller || controller.powerState == kBluetoothHCIPowerStateOFF) {
-            return @{@"candidates":@[], @"bluetoothAllowed":@YES};
-        }
-        paired = [IOBluetoothDevice pairedDevices];
+        // A missing/off classic controller must not hide an already connected
+        // Low Energy HID remote. Query that independent inventory below too.
+        if (controller && controller.powerState != kBluetoothHCIPowerStateOFF)
+            paired = [IOBluetoothDevice pairedDevices];
     }
     if (paired.count > 256) return @{@"error":@"已配对设备过多，请在设置中指定遥控器设备 ID。"};
     for (IOBluetoothDevice *device in paired) {
@@ -128,7 +131,7 @@ static NSDictionary *pairedInventory(void) {
     IOObjectRelease(iterator);
     // Registry addresses are not CoreBluetooth UUIDs. identifiers intentionally
     // remain absent so selection cannot pretend an explicit UUID was verified.
-    return @{@"candidates":candidates, @"bluetoothAllowed":@(allowed)};
+    return @{@"candidates":candidates, @"bluetoothAllowed":@(allowed), @"bluetoothNotDetermined":@(notDetermined)};
 }
 
 char *keepwork_paired_remotes_json(void) {

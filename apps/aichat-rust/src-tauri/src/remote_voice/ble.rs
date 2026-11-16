@@ -218,6 +218,47 @@ async fn adapters() -> Result<Vec<Adapter>, Failure> {
     result
 }
 
+/// Creating the shared central triggers the OS dialog only after the caller
+/// has admitted a remote, an undecided grant, and a foreground startup intent.
+#[cfg(target_os = "macos")]
+pub(super) async fn prepare_bluetooth() {
+    let _ = timeout(Duration::from_secs(8), adapters()).await;
+}
+
+#[cfg(target_os = "macos")]
+fn saved_remote_matches(requested: &PeripheralId, actual: &PeripheralId, name: Option<&str>, services: &[Uuid]) -> bool {
+    requested == actual && (services.contains(&SERVICE) || name.is_some_and(super::paired::known_remote_name))
+}
+
+/// Read-only recovery of an explicit target, including a sleeping peripheral.
+/// Retrieval proves the system knows this UUID, not that it is currently paired.
+#[cfg(target_os = "macos")]
+pub(super) async fn saved_remote(device: &str) -> Result<super::paired::Probe, String> {
+    use super::paired::Probe;
+    let result: Result<Probe, Failure> = async {
+        let requested = requested_id(device)?;
+        let (_sender, cancel) = watch::channel(false);
+        let adapter = powered_adapter(&cancel).await?;
+        let known = operation(&cancel, adapter.retrieve_peripherals(RetrievePeripheralsOptions {
+            identifiers: Some(vec![requested.clone()]), services: None,
+        }), 5).await?;
+        for peripheral in known {
+            if peripheral.id() != requested { continue; }
+            if let Some(properties) = operation(&cancel, peripheral.properties(), 2).await? {
+                if saved_remote_matches(&requested, &peripheral.id(), properties.local_name.as_deref(), &properties.services) {
+                    return Ok(Probe::Available(peripheral.id().to_string()));
+                }
+            }
+        }
+        Ok(Probe::Retry("系统尚未找到保存的指定遥控器，请检查设备 ID 并按键唤醒；不会改连其他设备。".into()))
+    }.await;
+    match result {
+        Ok(probe) => Ok(probe),
+        Err(error) if error.retry => Ok(Probe::Retry(error.message)),
+        Err(error) => Err(error.message),
+    }
+}
+
 #[cfg(windows)]
 async fn adapters() -> Result<Vec<Adapter>, Failure> {
     let manager = Manager::new().await.map_err(bluetooth_error)?;
@@ -871,6 +912,20 @@ mod tests {
             assert!(radio_unavailable(absent, false).retry);
             assert!(!radio_unavailable(absent, true).retry);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn saved_uuid_requires_exact_identity_and_remote_evidence_without_a_connection() {
+        let requested = requested_id("12345678-1234-5678-1234-567812345678").unwrap();
+        let other = requested_id("12345678-1234-5678-1234-567812345679").unwrap();
+        assert!(saved_remote_matches(&requested, &requested, Some("小米蓝牙语音遥控器"), &[]));
+        assert!(saved_remote_matches(&requested, &requested, None, &[SERVICE]));
+        for name in [None, Some("Xiaomi"), Some("Bluetooth Remote"), Some("Xiaomi Keyboard"), Some("Xiaomi Headphones")] {
+            assert!(!saved_remote_matches(&requested, &requested, name, &[]));
+        }
+        assert!(!saved_remote_matches(&requested, &other, Some("RC003"), &[SERVICE]));
+        assert!(requested_id("AA:BB:CC:DD:EE:FF").is_err());
     }
 
     #[test]

@@ -71,7 +71,7 @@ fn run(profile: std::path::PathBuf) -> Result<(), String> {
     let _entered = runtime.enter();
     let voice = Arc::new(RemoteVoice::new(&profile));
     // Setup UI belongs to the parent CEF process; this companion opens none.
-    voice.start_automatic(|| false);
+    voice.start_automatic(|| false, || false);
     let input = io::stdin();
     let mut input = input.lock();
     let output = io::stdout();

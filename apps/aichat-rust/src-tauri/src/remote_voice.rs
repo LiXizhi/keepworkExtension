@@ -352,7 +352,8 @@ impl RemoteVoice {
 
     /// Passive inventory only until a paired remote is confirmed. The monitor
     /// never creates a voice session after Stop/Off/manual Start/Exit wins.
-    pub fn start_automatic(self: &Arc<Self>, show_setup: impl Fn() -> bool + Send + 'static) {
+    pub fn start_automatic(self: &Arc<Self>, show_setup: impl Fn() -> bool + Send + 'static,
+        foreground: impl Fn() -> bool + Send + 'static) {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             power::observe(self);
@@ -387,8 +388,26 @@ impl RemoteVoice {
                             result=tokio::time::timeout(std::time::Duration::from_secs(10), paired::paired_remote(&config.device))=>result.unwrap_or_else(|_| Ok(paired::Probe::Retry("检查已配对遥控器超时，正在等待重试。".into()))),
                         };
                         if let Some(service) = weak.upgrade() {
+                            let bluetooth_permission = matches!(&result, Ok(paired::Probe::NeedsBluetoothPermission));
                             let needs_permission = service.apply_auto_probe(revision, result);
-                            if needs_permission && !setup_shown { setup_shown = show_setup(); }
+                            if bluetooth_permission {
+                                let request = {
+                                    let focused = foreground();
+                                    let mut inner = service.inner.lock().unwrap();
+                                    let enabled = inner.snapshot.config.auto_start;
+                                    let running = inner.snapshot.running;
+                                    inner.automatic.request_bluetooth(revision, enabled, running, focused)
+                                };
+                                if request {
+                                    drop(service);
+                                    #[cfg(target_os = "macos")]
+                                    tokio::select! {
+                                        biased;
+                                        _ = changes.changed() => continue,
+                                        _ = ble::prepare_bluetooth() => {},
+                                    }
+                                }
+                            } else if needs_permission && !setup_shown { setup_shown = show_setup(); }
                         }
                     }
                     tokio::select! {
@@ -415,6 +434,11 @@ impl RemoteVoice {
             Ok(paired::Probe::NeedsPermission(message)) => {
                 inner.snapshot.state = "needs-permission".into();
                 inner.snapshot.error = message.into();
+                return true;
+            }
+            Ok(paired::Probe::NeedsBluetoothPermission) => {
+                inner.snapshot.state = "needs-permission".into();
+                inner.snapshot.error = "已检测到遥控器。请在 Keepwork 位于前台时允许系统蓝牙授权；授权后将自动继续连接。".into();
                 return true;
             }
             Ok(paired::Probe::Available(device)) => {
