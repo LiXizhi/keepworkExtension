@@ -6,6 +6,15 @@
   <string>Keepwork</string>
   <key>CFBundleDisplayName</key>
   <string>Keepwork</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>Keepwork Second Brain</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>keepwork-secondbrain</string></array>
+    </dict>
+  </array>
   <key>NSMicrophoneUsageDescription</key>
   <string>KeepWork 第二大脑需要访问麦克风以用于语音输入、实时通话和课堂录音。</string>
   <key>NSBluetoothAlwaysUsageDescription</key>

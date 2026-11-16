@@ -12,7 +12,7 @@ use tokio::time::{sleep_until, timeout, Instant};
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 
 const ENDPOINT: &str = "wss://speechrtc.keepwork.com/speech?asr_format=pcm&asr_rate=16000";
-const MAX_SAMPLES: usize = 16000 * 60;
+const MAX_SAMPLES: usize = 16_000 * 600;
 const CHUNK_SAMPLES: usize = 3200;
 const MAX_TEXT: usize = 16000;
 const MAX_MESSAGES: usize = 4096;
@@ -87,29 +87,102 @@ fn event(message: Message) -> Result<Event, String> {
     }
 }
 
-/// Transcribe one released PTT recording. Failed/uncertain uploads are never
-/// retried. Cancellation drops the socket and cannot return a late transcript.
-pub async fn transcribe(pcm: &[i16], cancel: watch::Receiver<bool>) -> Result<String, String> {
-    transcribe_to(pcm, cancel, ENDPOINT, Deadlines::default()).await
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+struct Connected {
+    socket: Socket,
+    opened: Instant,
 }
 
-// Private endpoint injection exists only so offline fixtures exercise the same
-// handshake and streaming code. No renderer or persisted setting selects it.
-async fn transcribe_to(
-    pcm: &[i16],
-    mut cancel: watch::Receiver<bool>,
-    endpoint: &str,
-    deadlines: Deadlines,
-) -> Result<String, String> {
-    if *cancel.borrow() || cancel.has_changed().is_err() {
-        return Err(CANCELLED.into());
+// Same idle and lifetime defaults as keepworksdk SpeechRTC.transport.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_LIFETIME: Duration = Duration::from_secs(600);
+type Checkout = tokio::sync::oneshot::Sender<Connected>;
+
+#[derive(Default)]
+pub(super) struct SpeechConnection {
+    // A physical remote has one active utterance. No other press can borrow its connection.
+    active: tokio::sync::Mutex<()>,
+    idle: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Checkout>>>,
+}
+
+impl SpeechConnection {
+    pub(super) async fn transcribe(
+        &self,
+        audio: tokio::sync::mpsc::Receiver<Vec<i16>>,
+        cancel: watch::Receiver<bool>,
+        preview: impl FnMut(&str),
+    ) -> Result<String, String> {
+        self.transcribe_to(audio, cancel, preview, ENDPOINT, Deadlines::default())
+            .await
     }
-    if pcm.len() > MAX_SAMPLES {
-        return Err("单次遥控器语音输入不能超过 60 秒。".into());
+
+    async fn transcribe_to(
+        &self,
+        audio: tokio::sync::mpsc::Receiver<Vec<i16>>,
+        mut cancel: watch::Receiver<bool>,
+        preview: impl FnMut(&str),
+        endpoint: &str,
+        deadlines: Deadlines,
+    ) -> Result<String, String> {
+        let _active = self
+            .active
+            .try_lock()
+            .map_err(|_| "遥控器语音识别正在进行。".to_owned())?;
+        let work = async {
+            let mut connected = match self.take_idle().await {
+                Some(connection) => connection,
+                None => connect_ready(endpoint, deadlines).await?,
+            };
+            let text = stream_press(&mut connected.socket, audio, preview, deadlines).await?;
+            // Only a completed asr_end/done round trip may re-enter the pool.
+            self.park(connected);
+            Ok(text)
+        };
+        tokio::select! {
+            biased;
+            _ = cancelled(&mut cancel) => Err(CANCELLED.into()),
+            result = work => result,
+        }
     }
-    if pcm.is_empty() {
-        return Ok(String::new());
+
+    async fn take_idle(&self) -> Option<Connected> {
+        let checkout = self.idle.lock().unwrap().take()?;
+        let (reply, socket) = tokio::sync::oneshot::channel();
+        checkout.send(reply).ok()?;
+        socket.await.ok()
     }
+
+    fn park(&self, mut connection: Connected) {
+        let expires = (connection.opened + MAX_LIFETIME).min(Instant::now() + IDLE_TIMEOUT);
+        if expires <= Instant::now() {
+            return;
+        }
+        let (checkout, mut request) = tokio::sync::oneshot::channel::<Checkout>();
+        *self.idle.lock().unwrap() = Some(checkout);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = sleep_until(expires) => break,
+                    // Consume a queued peer close or stale ASR before another press gets this socket.
+                    incoming = connection.socket.next() => {
+                        let Some(Ok(message)) = incoming else { break; };
+                        if !matches!(event(message), Ok(Event::Other)) { break; }
+                    },
+                    checkout = &mut request => {
+                        if let Ok(reply) = checkout { let _ = reply.send(connection); }
+                        return;
+                    }
+                }
+            }
+            let _ = timeout(Duration::from_secs(1), connection.socket.close(None)).await;
+        });
+    }
+}
+
+async fn connect_ready(endpoint: &str, deadlines: Deadlines) -> Result<Connected, String> {
     let config = WebSocketConfig {
         write_buffer_size: 8192,
         max_write_buffer_size: 65536,
@@ -117,85 +190,94 @@ async fn transcribe_to(
         max_frame_size: Some(65536),
         ..Default::default()
     };
-    let connect = timeout(
+    let (mut socket, _) = timeout(
         deadlines.connect,
-        tokio_tungstenite::connect_async_with_config(endpoint, Some(config), false),
-    );
-    let (mut socket, _) = tokio::select! {
-        biased;
-        _ = cancelled(&mut cancel) => return Err(CANCELLED.into()),
-        result = connect => result
-            .map_err(|_| "连接云端语音服务超时，请检查网络后重试。".to_string())?
-            .map_err(|_| "无法连接 Keepwork 云端语音服务，请检查网络后重试。".to_string())?,
+        tokio_tungstenite::connect_async_with_config(endpoint, Some(config), true),
+    )
+    .await
+    .map_err(|_| "连接云端语音服务超时，请检查网络后重试。".to_string())?
+    .map_err(|_| "无法连接 Keepwork 云端语音服务，请检查网络后重试。".to_string())?;
+    let opened = Instant::now();
+    let ready = async {
+        for _ in 0..MAX_MESSAGES {
+            let message = socket
+                .next()
+                .await
+                .ok_or_else(|| CLOSED.to_string())?
+                .map_err(|_| CLOSED.to_string())?;
+            match event(message)? {
+                Event::Ready => return Ok(Connected { socket, opened }),
+                Event::Other => {}
+                Event::Asr { .. } => return Err("云端语音服务尚未就绪便返回了识别结果。".into()),
+            }
+        }
+        Err("云端语音响应数量超出限制。".into())
     };
-    let ready_deadline = sleep_until(Instant::now() + deadlines.ready);
-    tokio::pin!(ready_deadline);
-    let mut messages = 0;
-    loop {
-        let incoming = tokio::select! {
-            biased;
-            _ = cancelled(&mut cancel) => return Err(CANCELLED.into()),
-            _ = &mut ready_deadline => return Err("云端语音服务未及时就绪，请稍后重试。".into()),
-            message = socket.next() => message.ok_or_else(|| CLOSED.to_string())?
-                .map_err(|_| CLOSED.to_string())?,
-        };
-        messages += 1;
-        if messages > MAX_MESSAGES {
-            return Err("云端语音响应数量超出限制。".into());
-        }
-        match event(incoming)? {
-            Event::Ready => break,
-            Event::Asr { .. } => return Err("云端语音服务尚未就绪便返回了识别结果。".into()),
-            Event::Other => {}
-        }
-    }
+    timeout(deadlines.ready, ready)
+        .await
+        .map_err(|_| "云端语音服务未及时就绪，请稍后重试。".to_owned())?
+}
+
+async fn stream_press(
+    socket: &mut Socket,
+    mut audio: tokio::sync::mpsc::Receiver<Vec<i16>>,
+    mut preview: impl FnMut(&str),
+    deadlines: Deadlines,
+) -> Result<String, String> {
     let (mut output, mut input) = socket.split();
     let upload = async {
-        for chunk in pcm.chunks(CHUNK_SAMPLES) {
-            let bytes: Vec<u8> = chunk
-                .iter()
-                .flat_map(|sample| sample.to_le_bytes())
-                .collect();
-            output
-                .send(Message::Binary(bytes))
-                .await
-                .map_err(|_| CLOSED.to_string())?;
+        let mut samples = 0;
+        while let Some(frame) = audio.recv().await {
+            samples += frame.len();
+            if samples > MAX_SAMPLES {
+                return Err("单次遥控器语音输入不能超过 10 分钟。".to_owned());
+            }
+            for chunk in frame.chunks(CHUNK_SAMPLES) {
+                let bytes = chunk
+                    .iter()
+                    .flat_map(|sample| sample.to_le_bytes())
+                    .collect();
+                timeout(deadlines.upload, output.send(Message::Binary(bytes)))
+                    .await
+                    .map_err(|_| "语音上传超时；本次录音不会自动重传。".to_owned())?
+                    .map_err(|_| CLOSED.to_owned())?;
+            }
         }
-        output
-            .send(Message::Text(r#"{"type":"asr_end"}"#.into()))
-            .await
-            .map_err(|_| CLOSED.to_string())
+        timeout(
+            deadlines.upload,
+            output.send(Message::Text(r#"{"type":"asr_end"}"#.into())),
+        )
+        .await
+        .map_err(|_| "语音上传超时；本次录音不会自动重传。".to_owned())?
+        .map_err(|_| CLOSED.to_owned())
     };
     tokio::pin!(upload);
-    let deadline = sleep_until(Instant::now() + deadlines.upload);
+    let deadline = tokio::time::sleep(deadlines.result);
     tokio::pin!(deadline);
-    let mut uploaded = false;
+    let mut ended = false;
     let mut transcript = String::new();
+    let mut messages = 0;
     loop {
         tokio::select! {
             biased;
-            _ = cancelled(&mut cancel) => return Err(CANCELLED.into()),
-            _ = &mut deadline => return Err(if uploaded {
-                "云端语音识别结果等待超时；本段录音不会自动重传，请重新按住语音键。"
-            } else {
-                "语音上传超时；本段录音不会自动重传，请重新按住语音键。"
-            }.into()),
-            result = &mut upload, if !uploaded => {
+            _ = &mut deadline, if ended => return Err("云端语音识别结果等待超时；本次录音不会自动重传。".into()),
+            result = &mut upload, if !ended => {
                 result?;
-                uploaded = true;
+                ended = true;
                 deadline.as_mut().reset(Instant::now() + deadlines.result);
             }
             incoming = input.next() => {
-                let incoming = incoming.ok_or_else(|| CLOSED.to_string())?.map_err(|_| CLOSED.to_string())?;
                 messages += 1;
                 if messages > MAX_MESSAGES { return Err("云端语音响应数量超出限制。".into()); }
-                if let Event::Asr { text, done } = event(incoming)? {
-                    // Keepwork sends the latest cumulative text, not a delta.
-                    if let Some(text) = text { transcript = text; }
+                let message = incoming.ok_or_else(|| CLOSED.to_string())?.map_err(|_| CLOSED.to_string())?;
+                if let Event::Asr { text, done } = event(message)? {
+                    if let Some(text) = text {
+                        if !done && text != transcript { preview(&text); }
+                        transcript = text;
+                    }
                     if done {
-                        if !uploaded { return Err("云端语音服务提前结束，录音未完整上传；不会自动重传。".into()); }
-                        if *cancel.borrow() || cancel.has_changed().is_err() { return Err(CANCELLED.into()); }
-                        return Ok(transcript.trim().to_string());
+                        if !ended { return Err("云端语音服务提前结束，录音未完整上传；不会自动重传。".into()); }
+                        return Ok(transcript.trim().to_owned());
                     }
                 }
             }
@@ -203,14 +285,46 @@ async fn transcribe_to(
     }
 }
 
+// Feed an already captured fixture into the same live transport used by the BLE receiver.
+#[cfg(test)]
+async fn transcribe_to(
+    pcm: &[i16],
+    cancel: watch::Receiver<bool>,
+    endpoint: &str,
+    deadlines: Deadlines,
+) -> Result<String, String> {
+    if pcm.is_empty() {
+        return Ok(String::new());
+    }
+    if pcm.len() > MAX_SAMPLES {
+        return Err("单次遥控器语音输入不能超过 10 分钟。".into());
+    }
+    let (send, audio) = tokio::sync::mpsc::channel(1);
+    send.try_send(pcm.to_vec()).unwrap();
+    drop(send);
+    SpeechConnection::default()
+        .transcribe_to(audio, cancel, |_| {}, endpoint, deadlines)
+        .await
+}
+
 #[cfg(test)]
 pub(super) async fn transcribe_fixture(
-    pcm: &[i16], cancel: watch::Receiver<bool>, endpoint: &str,
+    pcm: &[i16],
+    cancel: watch::Receiver<bool>,
+    endpoint: &str,
 ) -> Result<String, String> {
-    transcribe_to(pcm, cancel, endpoint, Deadlines {
-        connect: Duration::from_secs(2), ready: Duration::from_secs(2),
-        upload: Duration::from_secs(2), result: Duration::from_secs(2),
-    }).await
+    transcribe_to(
+        pcm,
+        cancel,
+        endpoint,
+        Deadlines {
+            connect: Duration::from_secs(2),
+            ready: Duration::from_secs(2),
+            upload: Duration::from_secs(2),
+            result: Duration::from_secs(2),
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -256,6 +370,181 @@ mod tests {
             }
         }
         panic!("client closed before asr_end")
+    }
+
+    #[tokio::test]
+    async fn keydown_connects_and_two_presses_stream_partials_on_one_socket() {
+        let (listener, endpoint) = fixture().await;
+        let (ready, first_ready) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(tcp).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"type":"ready"}"#.into()))
+                .await
+                .unwrap();
+            ready.send(()).unwrap();
+            for word in ["first", "second"] {
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap(),
+                    Message::Binary(vec![7, 0])
+                );
+                for text in [word, "", word] {
+                    socket
+                        .send(Message::Text(
+                            serde_json::json!({"type":"asr","text":text}).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(receive_audio_end(&mut socket).await, vec![8, 0]);
+                socket
+                    .send(Message::Text(r#"{"type":"asr","event":"done"}"#.into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let connection = SpeechConnection::default();
+        let (_owner, cancel) = watch::channel(false);
+        let mut first_ready = Some(first_ready);
+        for word in ["first", "second"] {
+            let (send, pcm) = tokio::sync::mpsc::channel(2);
+            let (partial, mut revisions) = tokio::sync::mpsc::unbounded_channel();
+            let input = async {
+                if let Some(first) = first_ready.take() {
+                    first.await.unwrap();
+                }
+                send.send(vec![7]).await.unwrap();
+                for expected in [word, "", word] {
+                    assert_eq!(revisions.recv().await.as_deref(), Some(expected));
+                }
+                send.send(vec![8]).await.unwrap();
+                drop(send);
+            };
+            let (text, ()) = timeout(Duration::from_secs(3), async {
+                tokio::join!(
+                    connection.transcribe_to(
+                        pcm,
+                        cancel.clone(),
+                        |s| partial.send(s.to_owned()).unwrap(),
+                        &endpoint,
+                        short_deadlines()
+                    ),
+                    input
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(text.unwrap(), word);
+        }
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_utterance_peer_closing_after_done_reconnects_on_next_press() {
+        let (listener, endpoint) = fixture().await;
+        let connection = SpeechConnection::default();
+        let (_owner, cancel) = watch::channel(false);
+        let (retired, closed) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let mut retired = Some(retired);
+            for expected in [1, 2] {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(tcp).await.unwrap();
+                socket
+                    .send(Message::Text(r#"{"type":"ready"}"#.into()))
+                    .await
+                    .unwrap();
+                assert_eq!(receive_audio_end(&mut socket).await, vec![expected, 0]);
+                socket
+                    .send(Message::Text(
+                        r#"{"type":"asr","event":"done","text":"ok"}"#.into(),
+                    ))
+                    .await
+                    .unwrap();
+                socket.close(None).await.unwrap();
+                if let Some(retired) = retired.take() {
+                    // The idle monitor consumes the peer close with no physical press active.
+                    let _ = timeout(Duration::from_secs(2), socket.next())
+                        .await
+                        .unwrap();
+                    retired.send(()).unwrap();
+                }
+            }
+        });
+        let mut closed = Some(closed);
+        for sample in [1, 2] {
+            let (send, audio) = tokio::sync::mpsc::channel(1);
+            send.send(vec![sample]).await.unwrap();
+            drop(send);
+            assert_eq!(
+                connection
+                    .transcribe_to(audio, cancel.clone(), |_| {}, &endpoint, short_deadlines())
+                    .await
+                    .unwrap(),
+                "ok"
+            );
+            if let Some(closed) = closed.take() {
+                closed.await.unwrap();
+            }
+        }
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn early_done_revokes_socket_without_delivering_or_replaying_audio() {
+        let (listener, endpoint) = fixture().await;
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(tcp).await.unwrap();
+            first
+                .send(Message::Text(r#"{"type":"ready"}"#.into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                first.next().await.unwrap().unwrap(),
+                Message::Binary(vec![5, 0])
+            );
+            first
+                .send(Message::Text(
+                    r#"{"type":"asr","event":"done","text":"stale"}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut second = accept_async(tcp).await.unwrap();
+            second
+                .send(Message::Text(r#"{"type":"ready"}"#.into()))
+                .await
+                .unwrap();
+            assert_eq!(receive_audio_end(&mut second).await, vec![9, 0]);
+            second
+                .send(Message::Text(
+                    r#"{"type":"asr","event":"done","text":"fresh"}"#.into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let connection = SpeechConnection::default();
+        let (_owner, cancel) = watch::channel(false);
+        let (held, pcm) = tokio::sync::mpsc::channel(1);
+        held.send(vec![5]).await.unwrap();
+        let result = connection
+            .transcribe_to(pcm, cancel.clone(), |_| {}, &endpoint, short_deadlines())
+            .await;
+        assert!(result.unwrap_err().contains("提前结束"));
+        drop(held);
+        let (send, pcm) = tokio::sync::mpsc::channel(1);
+        send.send(vec![9]).await.unwrap();
+        drop(send);
+        assert_eq!(
+            connection
+                .transcribe_to(pcm, cancel, |_| {}, &endpoint, short_deadlines())
+                .await
+                .unwrap(),
+            "fresh"
+        );
+        peer.await.unwrap();
     }
 
     #[tokio::test]
@@ -464,7 +753,7 @@ mod tests {
         )
         .await
         .unwrap_err()
-        .contains("60 秒"));
+        .contains("10 分钟"));
         let (owner, cancel) = watch::channel(false);
         owner.send(true).unwrap();
         assert_eq!(
@@ -490,7 +779,7 @@ mod tests {
         // No microphone, Bluetooth device, user text, key or audio file is read.
         // Success proves TLS + ready + PCM + asr_end + done. Empty text is valid.
         let silence = vec![0i16; 8000];
-        let text = transcribe(&silence, cancel)
+        let text = transcribe_to(&silence, cancel, ENDPOINT, Deadlines::default())
             .await
             .expect("live Keepwork ASR smoke failed");
         assert!(text.chars().count() <= MAX_TEXT);

@@ -1,5 +1,467 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
+## 2026-11-16 多只已配对遥控器时的启动自动连接（0.2.183）
+
+- 实机复现：系统同时配对两只「小米蓝牙语音遥控器」（E8:55:40:EE:4D:D9 已连接，E8:55:40:E1:39:03 未连接）。在 VS Code 启动的 `tauri dev` 开发版中加临时诊断日志，旧实现启动后自动检测返回「发现多只已配对遥控器…」并暂停本进程自动连接，只能手动启动（手动启动只取已连接外设，因此能成功）。
+- 修复：未指定设备 ID 且有多只候选时，只有一只已连接即选中它；全部未连接时返回可重试的等待提示并继续轮询，不再暂停自动连接；多只同时已连接仍要求指定设备 ID。指定设备 ID 的行为不变。
+- 同一实机修复后冷启动：自动检测 `Available` → `scanning` → `connecting` → `ready` 约 0.4 秒，未点击启动。临时诊断代码已移除。
+- 新增 Rust 回归：已连接优先、多只已连接仍报错、全部休眠为可重试等待、macOS 准入选中唯一已连接遥控器。
+- 四处桌面版本同步为 **0.2.183**。未发布安装包；已签名 Keepwork.app 与 Windows 实机待验证。
+
+## 2026-11-16 遥控器启动连接与首次蓝牙授权（0.2.182）
+
+- 确认并修复三条启动阻断路径：首次蓝牙授权未决定时只等待手工启动，无法进入系统授权；保存的 CoreBluetooth UUID 无法通过只含 MAC 的配对记录验证，进而永久暂停本进程的自动连接；经典蓝牙控制器关闭或不存在时提前返回，漏掉独立的已连接 BLE HID 遥控器。首次蓝牙授权改为自动开启、唯一受支持候选且主窗口在前台时，每进程请求一次系统授权；允许后继续自动检测，拒绝或受限时不重弹。辅助功能与输入监控仍通过设置中的手工启动申请。
+- 指定 UUID 在已授权后只读找回完全相同、名称或 ATVV 服务受支持的系统已知遥控器，允许对暂未连接的目标定向重试，不从 MAC 猜测 UUID，也不改连其他设备。该找回结果不宣称证明设备当前仍已配对。空设备 ID 保留唯一配对/连接证据门槛。Stop、关闭偏好、休眠及退出继续撤销过期结果；关闭偏好跨重启保留。
+- 本机两个既有 profile 的 `autoStart` 为 true、设备 ID 为空。只读系统 HID 查询发现一只受支持的小米遥控器；隔离工具调用生产配对查询时能发现该已连接候选，但蓝牙授权尚未允许。此授权结果只属于工具的启动上下文，不能据此推断已签名 Keepwork.app 的授权状态或认定用户实机故障已完整复现。
+- 新增原生隔离库存夹具，覆盖首次、拒绝、受限、允许四种授权状态、未授权时不读取蓝牙配对库、经典控制器关闭/缺失仍保留 BLE HID、重复来源、非目标 HID 及临时/永久错误。对旧实现运行同夹具，首次授权字段与控制器关闭场景均失败。Rust 回归另覆盖一次前台授权、过期意图、授权后继续准入，以及指定 UUID 的授权门槛、目标证据与无替代设备行为；测试没有触发真实蓝牙授权、连接或输入监听。
+- `PYTHON=/opt/homebrew/bin/python3.12 CARGO_NET_OFFLINE=true pnpm --prefix apps/aichat-rust check` 退出码 0：类型检查与前端构建通过，Rust **320 通过 / 3 忽略**，Node **654 通过 / 22 跳过 / 0 失败**。首轮受沙箱禁止回环监听影响，允许隔离本机 HTTP/WebSocket 测试服务后完整重跑通过。日志：`/private/tmp/keepwork-remote-startup-check.log`。独立自动启动 Node **7/7**、CEF 语音组件契约 **3/3** 通过；Windows helper 的真实共享模块分别通过 x64、ARM64 离线 `cargo check`。
+- 四处桌面版本同步为 **0.2.182**。未发布安装包；已签名 macOS 应用与实体遥控器的冷启动、系统允许/拒绝窗口、真实听写，以及 Windows 实机 BLE 连接仍待验证。此功能在原生客户端内部，不修改网页/MCP 协议或要求其更新。以上首次蓝牙授权约定替代历史条目中的仅手工触发蓝牙授权约定。
+
+## 2026-11-16 主聊天听写直接编辑与交付确认（0.2.181，本地测试）
+
+- 用户明确目标为 Keepwork 第二大脑主聊天框，反馈前几轮本地测试仍没有文字。真实设置状态曾报告「文字已输入 · 可按 OK 发送」，而页面未见文字；已有 native 路径在系统按键投递成功后即报告 `Pasted`，无法确认目标页面实际收到了文字。本轮确认的是交付确认缺口，尚未完整复现或定位用户实际硬件链路中丢失文字的原因，不把前轮事件路由猜测视为已确认根因。
+- 本轮基于 `68d44ad` / 0.2.180，在 `/private/tmp/keepwork-voice-main-investigation` 隔离 worktree 中修改并准备 0.2.181 本地应用，开发期间避免反复触发原开发进程热重启；验证通过后一次性同步回原工作区。当前只修 macOS 主聊天普通文字交付；其他系统保留 native 输入路径，不引入网页或 MCP 版本依赖。
+- 识别结果最终交付时，先验证会话有效、真实修饰键已松开、前台主窗口与原生文档归属、实际已加载的顶层可信页面、当前可见且可编辑的已知消息输入框。其他明确输入框、iframe、原生控件和外部应用只有在主聊天路径尚未修改任何目标且明确不适用时才能继续 native 输入。阻断、回调丢失、超时或结果未知均不得重新投递粘贴或改写另一个目标。
+- 普通文字通过 JSON 作为字面内容传给编辑命令。富文本与 textarea 均先转义全部 HTML 元字符，保留规范化后的原始 LF 换行，再执行 `insertHTML`；真实 AIChat 的多行纯文本粘贴同样采用 `insertHTML(escapeHtml(text))`，并不将换行替换为 `<br>`。不接受外部 HTML，该方式也避免 WebKit 的 `insertText` 智能引号改变原文。仅已知 `_fileMentionAdapter` 的语义空单个 BR 使用原生、纳入 Undo 历史的 ZWSP 编辑，确认仍仅为本次临时标记后选中并用已转义正文替换。成功后无临时标记、无 DIV 包装，后来添加的附件仍位于编辑器顶层；未知 adapter 保持原状。只读、失焦、目标替换或内容改变时不碰新目标；恢复后的已知唯一空光标标记可由后续原生编辑替换，不把未知状态当作可重放。
+- 首次编辑必须观察至少一个本次可信 input，且所有观察到的事件均属于普通插入白名单；一次编辑命令在 textarea 中可能产生多个可信 `insertText` / `insertParagraph` 等事件，不以事件数恰好为一作为验收要求。精确验证正文、引号、空格、换行、选区替换、已有附件引用，以及听写后再添加附件时的 `.value` / `[#ref]` 发送序列化。独立单次插入和独立单次清空均验证 Undo；连续操作允许 WebKit 原生历史合组，多步 Undo / Redo 须保持占位、正文与附件语义，不强制每次操作对应固定的历史步数。16 毫秒后仅做只读复核，要求仍为同一请求、页面、输入框、焦点及预期 DOM / 草稿读回，才报告 `Pasted`。完整识别结果中的精确清除与发送口令继续走既有 native 确认和安全保护，不把部分识别或普通文句误当作命令。
+- QA 的真实 WKWebView 交付与分阶段历史回归 2/2 稳定通过，覆盖空框、多行字面内容、后续附件序列化及中断保护。隐藏 WebKit 的 JavaScript 定时器曾把 18 毫秒复核拖延至约 983 毫秒，导致夹具请求过期；夹具改用原生 18 毫秒调度桥，生产的一秒请求期限不变。独立真实 Tauri 主窗口对 rich composer 与 textarea 各执行三轮交付回归，全部通过；核对确认 smoke 源码与执行二进制一致。这些检查未使用实体遥控器，不替代用户当前会话的完整录音与输入验收。
+- RemoteVoice 定向 Rust 单元测试 17 项通过。首次完整检查因隔离环境缺少 mcp-runtime、node_modules 与 extract-zip 资源受阻，补齐所需链接后继续；首次完整 Node 结果为 652 通过 / 1 失败 / 22 跳过，失败来自系统 Python 3.9。补齐隔离依赖并选择现有 Python 3.12 后，`PYTHON=/opt/homebrew/bin/python3.12 CARGO_NET_OFFLINE=true pnpm --prefix apps/aichat-rust check` 最终退出码 0：类型检查及前端构建通过，Rust 315 通过 / 3 忽略，Node 653 通过 / 0 失败 / 22 跳过。日志 `/private/tmp/keepwork-main-composer-final-check.log`。
+- 已完成 0.2.181 本地 debug 应用打包与签名验证：`/private/tmp/keepwork-main-input-0.2.181.wOc0UO/Keepwork.app`，可执行文件 SHA-256 为 `cdd32e3c884c874918efc406dc203ad2de5d67ba6b17de5a736a17423a6043f4`。本轮只交付本地测试应用，未发布；实体蓝牙遥控器在用户当前会话中的录音、识别、文字交付与实体返回键清空仍待用户验证。
+
+## 2026-11-16 遥控器暂停讲解与免提通话字幕（0.2.175）
+
+- macOS 独立 WKWebView 用模拟麦克风验证桌宠隐藏主窗口时仍能采到非零的 16 kHz 音频。通过应用锁定版本的 KeepworkSDK、合成输入和模拟语音网关验证了 PCM 上行、双方字幕，以及返回的 Opus 音频在 WebKit 播放器中走到结尾。
+- 隔离的 Tauri 原生窗口验证通话进入聆听后仍由可见桌宠承载同一通话页面，挂断即归还。Chrome 验证两方字幕、主聊天记录、通话归属及旧桌面只接收状态。
+- 播放器、遥控输入路由与课堂续讲回归覆盖朗读期间按确定键后暂停、保留通话及阻止迟到完成信号自动翻页。未使用用户的麦克风、实体遥控器或线上语音账户。
+
+## 2026-11-16 主聊天与独立桌宠互斥（0.2.174）
+
+- macOS 0.2.173 可在最大化聊天中按 Home 复现两个窗口同时可见。新版原生窗口回归检查普通、最大化及全屏聊天、快速连按 Home、程序坞恢复和延迟到达的桌宠显示请求，并核对恢复时仍是同一个聊天文档。
+- 两个独立 AppKit 进程验证外部应用最大化和原生全屏时，桌宠仍可显示和收起，外部应用保持前台。测试通过生产 Home 处理函数触发，未使用实体遥控器。
+- Windows CEF 的原生显示和恢复路径增加 HWND 用例，覆盖已展开的桌宠面板。x64 交叉编译通过，Windows 图形环境待实测。
+
+## 2026-11-16 原生主屏截图（0.2.173）
+
+- `cargo test --offline --manifest-path src-tauri/Cargo.toml --features dev-bins --lib app::screenshot` 通过。自建 32×24 像素 CGImage 经生产图像处理路径缩放、JPEG 编码并组装为 MCP 响应，解码后校验 16×12 尺寸及中心像素。授权测试覆盖按来源记忆、撤销和拒收迟到结果。
+- 独立 macOS WKWebView 验证受信任页面调用截图设置、主窗隐藏时点击独立 NSAlert 的“取消”、授权仍关闭，以及非授权文档凭据遭拒绝。测试未授权系统屏幕录制或捕获用户屏幕。
+- `tests/launch-intents.test.cjs` 和 `tests/native-clipboard-acl.test.cjs` 验证注入与 TypeScript 桥接、页面离开后拒收截图和 IPC 白名单。Windows GDI 截图模块分别以 x86_64-pc-windows-msvc、aarch64-pc-windows-msvc 目标交叉类型检查；Windows 系统授权窗口和显示器仍待实机验证。
+## 2026-11-15 兼容版桌宠外观（0.2.165）
+
+- 外观、聊天与语音针对性测试：指定本地独立网页的 `desktop_pet_controller.js`、`desktop_pet_audio.js` 后，`cef-pet-art.test.cjs`、`cef-pet-chat.test.cjs`、`cef-pet-audio.test.cjs` 共 34 项通过，无跳过。覆盖图集裁切、旧网页无素材、坏图与超限回退、文档 / 会话切换、迟到结果、超时取消，以及素材与普通状态分开传输。
+- `cef-menu.test.cjs` 构建并运行真实可移植 C++，包括外观值和 PNG 签名、头部、尺寸、字节上限检查。实际 `main.cpp` 连同生成脚本通过 CEF109 与现代 CEF 的 Windows x64 `clang-cl /Zs` 语法和类型检查。
+- 隔离无头 Chrome 使用真实 WebP 解码、Canvas 裁切与 PNG 编码：4×4 图集的右下绿色单元格输出为 256×256 PNG，中心像素 `[0,255,1,255]`，数据 URL 长度 5194，小于传输上限。浏览器和原生检查均未使用真实账号或云端会话。
+- `pnpm --prefix apps/aichat-rust check` 完整通过：类型检查、前端构建、Rust 主测试集 297 通过 / 3 忽略，Node 623 通过 / 18 跳过 / 0 失败。首轮受沙盒回环端口限制，允许本机监听后重跑通过。
+- `npm run check:shared`、`npm run compile:only --prefix apps/vscode-extension` 通过。Windows 原生外观菜单点击、GDI+ 显示和重启持久化仍待实机验证；本轮未生成或发布安装包。
+
+## 2026-11-15 兼容版系统文件夹选择器（0.2.164）
+
+- `KEEPWORK_CEF_BROWSER_TESTS=1 node --test apps/aichat-rust/tests/cef-folder-picker.test.cjs apps/aichat-rust/tests/cef-pet-chat.test.cjs apps/aichat-rust/tests/cef-pet-audio.test.cjs`：36 项中 34 通过、2 跳过、0 失败。Chrome 的 11 个 DOM 子用例全部通过，覆盖真实用户点击、确认、取消、失败重试、模拟 MCP 验证失败、面板关闭重开、编辑目标改变、输入变化、控件替换、文档离开及未知布局回退；未声明完整 `files` 能力。两个跳过项为需另行指定网页源码的宠物协议夹具。
+- 浏览器夹具使用与现有网页相同的控件结构和模拟路径验证处理器，验证成功后才修改工作空间，失败提示保持可见；不代表真实 MCP 服务或 Windows 系统对话框实测。
+- `pnpm --prefix apps/aichat-rust check`：类型检查、前端构建、Rust 测试（297 通过、3 忽略）及 Node 测试（623 通过、18 跳过、0 失败）通过。当前工作区四个应用版本文件均为 `0.2.165`。
+- 使用 Windows SDK 和 CEF109 SDK / 现代 CEF 头文件，对实际 `main.cpp` 及生成的嵌入脚本执行 Windows x64 `clang-cl /Zs` 语法与类型检查，均通过。未生成或发布本轮安装包；Windows 7 / 8 / 8.1 及现代 Windows 的真实系统文件夹选择器显示、父窗口归属和选择交互仍待实机验证。
+
+## 2026-11-15 macOS 听写后直接按返回键（0.2.166）
+
+- 0.2.165 的旧测试先点选输入框，再对预置草稿按返回。新增用例先以键盘或程序聚焦编辑器，投递原生粘贴事件，接着触发返回，全程不点击输入框。
+- 在独立 WKWebView 中验证 AIChat 聊天输入框的清除、input 事件和撤销。测试使用临时窗口和固定的听写文字。独立 Rust/Tauri 进程另行通过了 `startup-smoke --home-overlay` 的主窗口输入框路由检查。
+- Electron 富文本草稿覆盖正常键盘焦点、应用辅助功能仍返回窗口容器，以及投递粘贴后立即按返回三种情况。
+
+## 2026-11-15 macOS 桌宠优先与外部编辑框清除（0.2.165）
+
+- 在独立 Chrome 进程中复现 0.2.164 的问题：返回键报告成功，可编辑区域的文字消失，但应用准备发送的草稿仍保留原文。
+- 运行 `AICHAT_TEST_MACOS_REMOTE_BACK=1 node --test tests/remote-voice-native-input.test.cjs`。独立的 Chrome 和 Electron 窗口从两段文字中的部分选区开始，清除操作同步更新了可编辑区域和应用草稿，一次撤销可恢复原文。同组测试也覆盖原生 NSTextField、WKWebView textarea，以及首次启用辅助功能的 Electron 进程。在空编辑框中再次按返回不会产生编辑事件。
+- 桌宠渲染器测试覆盖替换选中文字、清除、发送，以及隐藏桌宠或切换会话后的迟到识别。原生 `startup-native-smoke.cjs` 验证可见桌宠接收返回键，临时隐藏后下一次返回键交给前台应用。独立窗口测试在最大化和原生全屏时验证了可见桌宠接收定向 OK 事件并保留原应用的前台焦点。
+- 实体 RC003 已枚举到对应的返回键 HID 描述符。上述测试通过程序触发，使用独立编辑框，未在用户正在使用的 Codex 对话中清除文字。
+
+## 2026-11-15 macOS 遥控器返回键清空外部输入框（0.2.164）
+
+- 运行 `AICHAT_TEST_MACOS_REMOTE_BACK=1 node --test tests/remote-voice-native-input.test.cjs`。独立进程分别聚焦真实 NSTextField 和 WKWebView 的 textarea，首次调用原生返回键处理即清空整个字段；网页收到 input 事件，原应用保留焦点，可见桌宠保留草稿。
+- 隔离测试覆盖密码框、只读控件、失去焦点、修饰键、辅助功能权限、辅助功能树加载期间切换窗口和用户按键，以及一次写入失败后不重试。测试调用生产代码，未使用实体小米遥控器。
+
+## 2026-11-15 macOS 全屏窗口上的桌宠（0.2.163）
+
+- 在 macOS 26.6.2 上运行 `AICHAT_TEST_MACOS_HOME_OVERLAY=1 node --test tests/pet-home-overlay-macos.test.cjs`。独立编辑器进程分别执行 Zoom 和原生全屏，WindowServer 确认同一个宠物窗口排在编辑器上方，编辑器保留前台，聊天窗口保持隐藏。每种模式均验证两次显示和收起。
+- 使用隔离的 `startup-smoke --home-overlay` 检查 Rust 主页键回调。桌宠设置依次关闭、打开、关闭，每种状态按两次。在最大化的主窗口中，启用时第一次仅显示桌宠，第二次仅收起桌宠，主窗口大小、网页实例和会话保持不变。本轮通过程序调用主页键回调，未使用实体遥控器。
+
+## 2026-11-15 桌宠草稿与历史回复（0.2.162）
+
+- 在修改前复现了打开输入框、键盘输入、遥控器听写时弹出历史回答。回归覆盖恢复历史、带请求 ID 的回答重新以历史消息出现、未发送草稿及发送后显示对应回答。
+- 在浏览器中用模拟桌宠状态和遥控器事件验证：历史回答在转写、落入草稿和同步期间保持隐藏，点击发送前发送次数为零，点击后显示本轮回答。
+
+## 2026-11-15 遥控器听写状态图标（0.2.161）
+
+- 桌宠使用模拟按键检查连接、就绪、准备、录音、识别、重试以及状态恢复。浏览器检查覆盖普通动画、减少动态效果和实时转写文本。
+- macOS AppKit 浮层使用隔离的输入框元数据检查图标、实时字幕、过期回调、非激活窗口与收尾清理。Windows x64、ARM64 检查浮层模块和测试的交叉编译。Windows 图形显示与实体遥控器仍需实机验证。
+
+## 2026-11-15 遥控器首次按住语音键（0.2.160）
+
+- 蓝牙回归使用模拟的 RC001 / RC003 协议数据，覆盖按键、音频、松手早于能力响应，以及 GATT 写确认早于或晚于能力响应。检查解码后样本的顺序、单次结束、原始按键时间、缓存上限、清除和重连隔离。
+- 桌宠页面使用模拟事件检查连接、就绪、准备麦克风、开始录音及松手后重试提示，并确认草稿保持完整。真实遥控器从休眠唤醒、第一次长按到实际文字输入仍需 macOS / Windows 实机验收。
+
+## 2026-11-15 桌宠复用主窗口电话（0.2.141）
+
+- 独立 AppKit/Tauri 冒烟从桌宠模式模拟双击语音键。通过真实主页面 IPC 切换同一个 WKWebView 的显示位置，主窗口保持隐藏。结束后原页面回到原窗口，Dock 与 Home 仍可正常切换。
+- 原生 WebKit 夹具覆盖允许和拒绝麦克风权限，使用 WebKit 的模拟音频设备。桌宠仍可点击，主窗口维持原始页面、会话和视口。授权后，即使页面已回到隐藏的主窗口，MediaRecorder 仍能录到音频。锁屏时夹具模拟桌宠窗口未被遮挡。
+- Chrome 夹具覆盖主聊天和桌宠双击、打断、挂断、拒绝权限后重试、通话中的窗口切换。使用原版 KeepworkSDK 和模拟网关验证 Pro 预设发出模型标识 `1.2.6.1`。本轮使用模拟按键和音频。
+
+## 2026-11-15 双击进入豆包实时通话（0.2.140）
+
+- 在 Chrome 中使用真实 SDK 会话和模拟语音网关，检查双击选择的预设、发出的模型标识和主窗口的电话状态。普通对话保留原有模型选择。
+- 加载已打包的桌宠 HTML，在收起输入框的状态下依次投递连接、聆听、思考、说话和暂停状态。五个阶段的 ☎ 均在宠物按钮的可见范围内，结束后图标消失。
+
+## 2026-11-15 小米遥控器连续对话（0.2.139）
+
+- ATVV 包夹具验证了双击、长按听写和朗读中按下语音键。双击会丢弃两次短按的识别结果。macOS 按键夹具覆盖已识别遥控器的 OK、返回以及普通键盘回车。
+- Chrome 中的主聊天与桌宠分身分别完成两轮自动发送和朗读打断。桌宠复用同一次麦克风授权；退出后采集停止，两种界面的原草稿均保留。测试使用模拟音频和模型服务。
+- Mac 已识别固件 2671 的小米遥控器。实体按键和真实云端对话仍待实测；Windows 的退出操作使用语音键。
+
+## 2026-11-15 电脑睡眠后恢复遥控器连接（0.2.136）
+
+- 在独立 AppKit 进程内，向 `NSWorkspace` 的通知中心模拟两轮系统睡眠和唤醒。原生监听器重复注册后仍只收到四次回调，顺序正确。仅关闭或唤醒显示器时未触发重连。测试输出不包含蓝牙设备标识。
+- Rust 遥控器测试共 82 项通过，1 项实连测试默认忽略。覆盖唤醒先于或晚于旧连接清理、只恢复原有遥控器、丢弃旧配对检查结果，以及停止、关闭自动开启、权限阻止和退出。19 项遥控器相关 Node 用例通过，包含 macOS 原生通知和重复唤醒的 Rust 策略测试。
+- Windows 电源通知模块在 x64 和 ARM64 目标上通过独立编译检查。本轮未让电脑实际睡眠，也未验证合盖后通过实体遥控器录音。
+
+## 2026-11-14 同一连接连续两次实时听写（0.2.132）
+
+- 隔离测试将系统合成的中文语音编码成 ATVV 帧，以 15 毫秒间隔输入生产解码器。同一 `SpeechConnection` 连续处理 30 秒和 60 秒两次按键，每次向真实 Keepwork 服务发送一个识别请求。跨越两次按键的 41 次系统 TCP 观测均显示同一条连接；另一次直接协议测试也在一次 WebSocket 握手后，观察到两次各自独立的开始和结束。
+- 30 秒样本含 6 句、480,000 个采样。按下后 0.76 秒出现首个文字预览，本次共收到 40 次非空文字更新，松手后约 0.14 秒收到完整结果。60 秒样本含 12 句、960,000 个采样，首个预览耗时 0.77 秒，共收到 85 次非空文字更新，松手后约 0.15 秒得到完整结果。两次结果的句子顺序与末句正确，第二次没有混入第一次的末句。时间仅代表本次网络环境。
+- 17 项遥控器相关 Node 用例通过。此次实连验证使用合成按键和合成语音；未使用真人录音、系统剪贴板或真实应用输入框。
+
+## 2026-11-14 小米遥控器多句听写与录音中预览（0.2.131）
+
+- 用 macOS 系统音色合成两段中文，分别包含 6 句（30 秒）和 12 句（60 秒），并以每 15 毫秒一帧的速度输入 120 字节 ATVV 音频。隔离夹具使用生产解码器、分段识别任务与真实 Keepwork ASR。旧版需要松手后才开始识别，本次旧版 60 秒样本收到云端错误。
+- 修复后两次测试分别在按下后 5.60 秒和 5.66 秒出现首个预览，在松手后 1.56 秒和 1.73 秒得到一次完整结果。解码出的 480,000 和 960,000 个采样均有去向，两次末尾的“晚风吹过蓝色的大海”均保留，未发现整句重复或遗漏。识别仍有同音字误差，例如“图书馆里”被写作“图书管理”。这些时间为本次网络环境下的实测值。
+- 桌宠渲染和 AppKit 浮层回归覆盖中文预览更新、现有草稿及选区保留、取消后的迟到结果与快速重按。AppKit 浮层未取得键盘焦点，并允许鼠标穿透。Windows 浮层与测试已通过 x64 和 ARM64 编译检查。实体遥控器长按口述和 Windows 桌面显示仍待实测。
+
+## 2026-11-14 主窗口语音输入时聚焦消息输入框（0.2.130）
+
+- 在真实 AIChat 页面中分别点工具栏和聊天历史，再模拟转写文字粘贴。macOS WKWebView 和 Chromium 中的富文本消息框均保留已有草稿并接收了新增文字。测试使用隔离的 SDK 和模拟文本，未发送消息。
+- WKWebView 回归覆盖富文本引用和选区、旧版 textarea、可见的分身和多媒体输入框、弹窗、工具 iframe 和后台文档。Rust 回归覆盖前台目标确认、失焦、超时以及外部应用的普通系统粘贴路径。实体遥控器端到端口述仍待实测。
+
+## 2026-11-14 外部 Codex 消息输入框的识别提示（0.2.129）
+
+- 在前台 Codex 桌面客户端（`com.openai.codex`）的真实消息输入框上模拟松键进入识别。该输入框为 712 × 40 点；WindowServer 连续四帧报告 44 × 22 点的三点提示位于输入框左上方，提示窗口没有键盘焦点。测试只捕获提示窗口，未向会话输入或发送文字。
+- 即使外部编辑器没有提供输入框位置，识别阶段也能先在鼠标旁显示提示。macOS 回归覆盖定位查询延迟、大编辑区、活动屏幕的工作区边缘，以及松手后动画与辅助功能查询独立运行。
+- 桌面完整检查通过（Rust 主测试集 275 通过、3 忽略；Node 491 通过、8 跳过）。调整 Codex 位置后又运行了 3 项 macOS 原生输入回归，全部通过。Windows x64、ARM64 已进行独立编译检查；本轮未使用实体遥控器完成口述，也未在 Windows 桌面上检查渲染。
+
+## 2026-11-14 松手后的识别提示（0.2.128）
+
+- 录音红框已调为约半透明的细线。确认有音频可识别后，普通输入框和桌宠会显示三个点，直到粘贴操作完成或本次识别终止。启用减少动画时，保留静态三点。
+- 使用模拟遥控器事件在 macOS 的原生输入框和 WKWebView 验证淡红框、三个点、焦点保留及结束清理。AppKit 像素测试检查了边框透明度和三点绘制。Rust 回归验证等待期间取消会清除提示并丢弃迟到结果。
+- Windows 版通过 x64 和 ARM64 交叉编译检查；Windows 实机显示和本轮遥控器实体按键全流程仍待实测。
+
+## 2026-11-14 普通听写高亮当前输入框（0.2.127）
+
+- macOS 跨进程测试使用一个临时前台应用。按下事件触发后，红框覆盖原生 NSTextField，切换到 NSSecureTextField 后隐藏，再切换到 WKWebView 的网页输入框时跟随新位置。红框窗口没有取得键盘焦点。此项测试使用合成按键事件。
+- 独立测试配置下，默认启动的 Chrome 网页文本框和 VS Code 的查找输入框均显示了对应位置的红框。测试通过运行中应用的辅助功能接口获取位置。
+- AppKit 回归测试覆盖点击穿透、多屏坐标、不可编辑控件和旧按键的延迟释放。Rust 回归验证松手时清除普通高亮，随后识别继续使用原有的当前焦点粘贴流程。桌面完整检查通过，Rust 主测试集 275 项通过、3 项忽略，Node 490 项通过、8 项跳过。
+- Windows 实现和相关测试在隔离工程通过 x64、ARM64 编译检查，坐标裁剪和快速连续按键的回归测试在本机通过。Windows 实机显示效果仍待验证。
+
+## 2026-11-14 桌宠语音按键反馈（macOS，0.2.126）
+
+- 在隔离的 macOS WKWebView 中触发按键事件后，同一轮 JavaScript 执行内即可读到红色输入框边框、“语音键已按下”和已展开的面板。模拟采音开始后显示“录音中”，释放后恢复原有边框，保留中文草稿、光标选区和焦点。
+- 桌宠渲染测试 48 项通过。原生语音测试覆盖按键先于音频流、直接开始传输、重复开始、超时和结束清理。物理按键到屏幕首次显示红框的耗时仍待实机测量。
+
+## 2026-11-14 桌宠模式下按小米遥控器语音键（macOS，0.2.125）
+
+- 新增桌宠渲染回归。旧实现未能在录音开始时展开并聚焦输入框，修复后 46 项桌宠渲染测试通过。在 macOS WKWebView 中模拟录音开始事件，确认头顶输入框展开并保留中文草稿和光标选区。
+- 完整桌面检查通过。Rust 主测试集 272 项通过、3 项忽略，Node 487 项通过、8 项跳过。
+- 真机验收时，先进入桌宠模式，再点另一个应用。按住实体语音键时应看到宠物头顶输入框展开并获得焦点，松开后应在框内看到识别文字。跨应用切换焦点并写入真实遥控器语音的完整操作仍待实测。
+
+## 2026-11-14 小米遥控器实体语音键（macOS，0.2.124）
+
+本机系统列出了已连接的小米蓝牙语音遥控器。旧开发版通过 Cursor 启动，系统日志显示蓝牙及输入监控授权未决定，客户端启动时仅查询了权限。IORegistry 中该设备的传输名称为 `Bluetooth Low Energy`。修复后，配对检测能识别这条 HID 记录，并与同地址的已配对记录合并。缺少权限时，唯一设备可触发设置提示，用户点击启动后进入系统授权流程。
+
+- 实机通过 btleplug 订阅两个 ATVV 特征，获得 v1.0、16 kHz、120 字节的能力响应。独立的 Rust ASR 请求使用合成中文语音，真实服务返回对应文字。
+- macOS 设置窗渲染和状态机覆盖了无音频、录音过短和低音量。实机监听窗口内没有收到物理按键事件；真人按住说话、松手、文字出现在光标处的完整流程仍待验证。
+- 在仓库根目录用 Python 3.12 运行 `npm --prefix apps/aichat-rust run check`。Rust 主测试集 269 项通过、3 项忽略；Node 484 项通过、8 项跳过。macOS 开发可执行程序构建通过。
+
+## 2026-11-15：兼容版本地完整测试包（0.2.154）
+
+本地实际打包发现 `remote_voice_controller.h` 的 `RtlGetVersion` 函数指针转换在 CEF 默认 `/W4 /WX` 构建中触发错误；改用仓库既有的地址尺寸断言与 `memcpy` 动态装载方式，保留版本查询失败禁用、Win10 1703（15063）门槛及旧系统不导入现代 BLE API 的边界。四处桌面版本同步为 **0.2.154**，未抑制该警告的完整 CEF / 遥控器组件及原生 Launcher 构建通过。
+
+完整本地预览安装包位于 `.tmp/win7-win8-0.2.154/Keepwork_Win7_Win8_0.2.154_x64-setup.exe`，大小 **123,457,863 字节**，SHA-256 为 `c632dc315552be7a309dadc85cc81d283a421d9cd7ee0e8b9244a36c699a08f0`。包内置 CEF109 与源码指纹、提交均匹配当前树的 Win7/Win8 Rust MCP **0.2.69**（含固定 WinPTY）；使用隔离预览 RSA 清单签名，没有 Authenticode 代码签名，未上传或发布。
+
+独立验证恢复全部 **14 个 NSIS 安装载荷文件**，CRC 及原样字节通过；内置 **76 个 CEF 成员**逐项匹配签名清单，当前语音 Bridge 和按钮文案确实进入新宿主。CEF 必需 **8 个 PE**、Launcher/MCP/WinPTY **4 个 PE**通过 Win7 导入检查，遥控器单独记录为 Win10 可选组件；**123 项源码指纹**匹配。语音及打包定向测试 **57 通过 / 1 Windows 平台跳过 / 0 失败**，TypeScript 与可移植原生菜单 / 权限 / 输入策略测试通过；Windows HWND 面板和窗口夹具完成实际 CMake 交叉编译与链接，尚未运行。完整记录在产物 `build-scope.json` 与 `verification/qa-independent-package.json`。
+
+构建机为 macOS，未执行 Windows 安装器、麦克风、通话、蓝牙或旧系统 UI 实测；报告保留 `installerExecuted: false`、`nativeLegacyVerified: false` 和 `cefUiVerified: false`，编译及验包通过不代表真机功能已验收。
+
+## 2026-11-15：CEF 宠物语音与回车发送（0.2.153）
+
+兼容宿主补齐语音输入、通话 / 结束通话、静音与状态投影；沿用主网页账号、草稿、ASR 与通话服务。新版页面通过当前文档 / 会话绑定的 `petAudio` 采集意图使用主页麦克风；旧页面保留主窗口语音路径。未同步草稿先确认输入，切换上下文或收起宠物后停止本次采集，迟到结果不进入新会话。仅可信主 `/chat` Frame 的单独麦克风请求可经原生显式同意，摄像头、屏幕、子 Frame 和弹窗继续拒绝。Enter 发送一次，生成中 Enter 停止，Shift+Enter 换行；IME 确认和重复键不额外发送。
+
+CEF 的遥控器组件直接复用原版 ATVV、云端 ASR、配对、自动开启、当前焦点输入及发送 / 清除口令模块，独立于网页和 MCP。原生设置仅通过父进程继承管道通信。该 BLE 实现只在 Windows 10 1703（15063）及以上 / Windows 11 启动，Windows 7/8/8.1 明确显示不支持，不将普通麦克风输入等同于遥控器能力。
+
+实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **268 通过 / 3 忽略 / 0 失败**，Node **556 通过 / 17 环境跳过 / 0 失败**。日志 `/private/tmp/keepwork-153-final-check-verified.log`。首次沙箱内执行受 loopback `EPERM` 等环境限制，解除测试所需限制后重跑通过。
+- 设置 `AICHAT_WEB_PET_CONTROLLER`、`AICHAT_WEB_PET_AUDIO` 指向本地独立 AIChat 生产模块后运行 `cef-pet-chat.test.cjs`、`cef-pet-audio.test.cjs`、`cef-menu.test.cjs`：**20/20 通过**。覆盖旧字段缺失、当前控制器与真实音频协议、草稿屏障、权限、PCM 重采样 / 序号 / 背压、音频暂停、取消 / 迟到回调、导航与 Enter 策略；麦克风与云服务为隔离夹具。
+- Windows x64 CEF109 的生产 `main.cpp` 与真实 HWND `pet_chat_panel_test.cpp` 使用 Windows SDK 交叉编译通过；遥控器 companion 完成 Windows x64 release PE 构建 / 链接。companion 私有管道命令与 EOF / 长度边界的本机 Rust 测试 **2/2 通过**。
+- 遥控器打包、签名清单、Win7 PE 边界及 redist 定向测试 **20 通过 / 1 Windows 平台跳过 / 0 失败**。只有固定声明的遥控器组件单独记录 Windows 10 1703 最低系统；兼容主程序及其他必需二进制继续执行完整 Win7 静态和延迟导入校验。
+
+四处桌面版本同步为 **0.2.153**。真实 Windows CEF 麦克风、隐藏页面通话播放、IME 候选交互及 RC001 / RC003 蓝牙与跨应用输入仍待真机验证；不将交叉编译或假麦克风结果记为硬件验收，未发布安装包。
+
+## 2026-11-13：Windows 原生浏览器 v1（0.2.117，Windows 实机待验收）
+
+本轮桌面版本 `0.2.117` 已同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 与 `src-tauri/tauri.conf.json`，补齐正常 Windows Tauri / WebView2 路径的基础 `browserSurfaceVersion: 1`。跨平台完整检查、网页宿主契约及隔离 Windows API 类型检查的实际结果如下；尚无 Windows 实机验证，不宣称其原生绘制、输入或安装包已验收，也未发布网页或桌面安装包。
+
+本次只读排查确认两个独立问题：桌面此前仅在 macOS 声明并实现原生浏览器，其他平台直接返回不支持；当时线上 `/chat` 指向 AIChat release `b05d609fb478`，实际菜单脚本仅有文件、工具、终端。本地 AIChat 源码已包含不按操作系统隐藏的「打开浏览器」入口。桌面能力修复与网页入口发布需分别验收：本轮桌面修改不会替换线上网页菜单，网页也不要求与 MCP 同步发布。
+
+实现与兼容边界：
+
+- Windows 只声明基础 surface-v1，沿用 `open` / `navigate` / `back` / `forward` / `reload` / `bounds` / `hide` / `close` 及 `loading` / `loaded` / `title` / `error` 事件合同。自适应视图不声明可选 viewport-v1 或 scale-v1；直接请求 `viewport` 或缩放语义必须明确失败，网页现有能力检测继续禁用固定尺寸预设。macOS 的完整视口与缩放合同保持原样，Linux 与 CEF 兼容宿主不宣称支持。
+- Windows 平台实现在 `src-tauri/src/browser_surface_windows.rs`，通过现有 WebView2 environment 创建独立的原生 controller，每个视图采用随机 profile 名并强制 InPrivate 模式。外站不注册为 Tauri WebView，不注入 AIChat 桌面初始化脚本、Bridge 或 IPC，不共享主页面 cookies / localStorage；关闭 host objects / web message，拒绝原生权限请求和下载。旧 WebView2 缺少私密 profile 支持时返回浏览器功能错误，不回退到共享主页面 profile。主窗口外链与登录弹窗继续沿用原策略。
+- 命令继续验证可信主窗口发送者、受控实例 ID、URL、数量及边界；外站导航仅允许既有 HTTP(S) / 空白页策略，拒绝带用户名或密码的 URL。事件只回给所属主文档与实例，URL 敏感参数脱敏、移除片段，回传字段保持长度上限。
+- 工具切页、遮挡和隐藏时收起原生视图，恢复显示不重放导航；关闭工具或主文档重新加载时销毁旧视图。异步创建和迟到事件不能复活已关闭或失效的主文档实例。
+- 新网页与新宿主使用原生视图；旧网页与新宿主继续按既有功能运行；新网页与缺少能力的旧宿主继续使用 iframe，并保留外站嵌入结果未知的提示。缺少或未知可选字段不影响普通聊天、登录、文件和终端。
+
+实际验证：
+
+- `pnpm --prefix apps/aichat-rust check` 在允许测试监听 loopback 的授权环境完整通过：TypeScript、前端构建通过；Rust **263 通过 / 0 失败 / 3 忽略**，Node **482 通过 / 0 失败 / 8 平台或环境跳过**，其中 Windows 原生夹具在当前 macOS 环境跳过。macOS 原生浏览器实际夹具执行通过，不能据此推断 Windows 绘制或输入通过。
+- `node --test /Users/chenliao/CODE/apps/official/apps/tools/AIChat/tests/unit/browser_surface_host.test.mjs`：网页宿主契约 **11/11 通过**。
+- Windows x64 / ARM64 隔离 crate 直接引用生产 `security`、浏览器策略和 Windows 实现模块及新增原生 smoke 源码，`cargo check --offline --target <target>` 通过；这是生产模块和 smoke 的 API 类型检查，不是完整 Windows 应用构建、链接或运行。完整应用 Windows 交叉检查在 `ring` 的 C 编译阶段被本机缺少 Windows SDK `assert.h` 阻断，未报告为通过。
+- 首次受限沙箱内的 `pnpm ... check` 记录 **197 通过 / 66 失败**，出现 loopback `EPERM` 等环境限制；允许临时本地测试服务后完整重跑得到上述通过结果。保留首次失败事实，不将其计入最终通过结果。
+
+仍待在 Windows 实机验证 XFO DENY / CSP frame-ancestors none 页面绘制、前进后退刷新、原生点击与键盘输入、缩放 / DPI 与边界、遮挡隐藏恢复、下载和外部协议阻止、权限与网站数据隔离，以及最终 Windows 安装包。跨平台契约、macOS 原生夹具和隔离类型检查不能代替这些原生交互验收。线上浏览器入口仍需独立网页发布验收；本轮未发布网页或桌面安装包。
+
+## 2026-11-13：目录授权事务与原生会话终态保存恢复（本轮验收范围）
+
+本轮目标为桌面 `0.2.103` / Rust MCP `0.2.52`。产品、程序员与测试 Agent 分别确认合同、执行最小修复并使用隔离故障注入验证；本段记录本轮范围，不预填最终完整检查或冒烟通过数。保留下方已有记录及未提交的历史验证文字，不改写旧失败。
+
+桌面 `NativeFiles::grant/revoke` 旧实现先修改内存授权列表再落盘。保存失败后，grant可能在下一次请求直接返回未持久化的已有授权；revoke可能使内存和磁盘分歧，后续变成false且重启恢复旧授权。现在先构造候选列表、保存成功后再替换内存。失败返回明确错误，原roots、已成功授权的opaque IDs和磁盘基线保持一致，存储恢复后可显式重试；成功撤销继续沿原 `removed=true` 路径关闭桌面终端，不扩大或改变PTY、路径、软链、Bridge v1合同。未知ID撤销保持无副作用的false，已持久化的重复授权保留原ID。
+
+Rust MCP的另一个缺陷由本轮新故障注入定位：在明确观察到自有CLI结束后阻断registry/sidecar提交，旧事件处理忽略保存错误、将内存终态回滚为running，而native run已经移除。它与上轮Claude输出上限的历史5秒未知失败是不同证据，不能互相作为根因。
+
+修复保留已观察的真实native状态、items及原request/turn身份。存储未确认时，旧客户端快照在已知终态上显示既有 `error` 状态和 `NATIVE_STATE_PERSIST_FAILED`，明确“结果未持久确认、不可自动重放”；native仍活跃时保留active状态并阻止重复运行。私有恢复标记不成为新的必需API字段。已退出harness即使保存失败也应detach，并清除失效pending；旧turn的迟到finish不修改新turn，也不为无变化事件落盘。
+
+恢复仅重试本地文件提交：owned session GET可以补存已知结果，成功后清理私有错误标记、发布新cursor，恢复原先真实completed等终态。局部history损坏只修复当前changed session，其他session仍可正常提交；持久化行以旧客户端可读的错误状态及私有observed metadata保存待恢复结果，重启后仅能从确已落盘且身份匹配的metadata恢复，不能从已丢失的纯RAM或旧running猜测成功。普通用户intent/edit仍保持原事务回滚与“先持久化再派发”；重复nonce只返回原receipt，存储未恢复不派发新turn，恢复后用户可明确提交新nonce，不自动重放旧请求。
+
+验收包括：临时授权store确定性保存失败后的多root/ID/磁盘一致性、拒绝未提交新授权、重试/重启与原撤权终端顺序；真实fake CLI终止屏障之后的registry与局部history写入故障、watch可观察错误/新cursor、重复nonce派发一次、其它session继续、恢复后精确已知completed及重新读取/重启一致，以及stale finish不覆盖新turn。故障只注入临时store，不使用磁盘耗尽、真实账号或用户目录；原生执行和普通intent保存失败分别验证，不放宽安全边界。
+
+本轮证据根为 `.tmp/rust-terminal-recovery-20261113/`，修前红灯、修后定向与最终检查/冒烟分别留存新日志及源码身份。最终计数由冻结源码上的实际执行另行填写。Windows原生交互、真实账号、系统权限提示及最终安装升级继续独立待验；未据此宣称共享8089已变更或已发布。
+
+## 2026-11-13：首屏完成后显示与本地资源条件缓存（0.2.102）
+
+修复 `#app` 刚出现子元素就提前显示的问题：实际 AIChat 在 `renderShell()` 后仍初始化配置、会话和工作台。现在正常 Idle / Connecting 保持同一主窗口隐藏，优先等待网页已有的 `data-workbench-ready` 与启动进度条移除，再等待当前适用的 CSS、首屏字体及布局计算；先移除原生层，再一次显示工作台，不依赖隐藏 WebView 可能暂停的动画帧。失败或真实 20 秒页面期限到达后，在同一窗口显示恢复操作；重试再次隐藏。旧网页保留有效内容回退，登录和回放等可操作提示允许显示，不要求在隐藏窗口完成交互，不等待 MCP、图片、工具 iframe 或全部后台请求。账号、前后台意图、旧尝试身份与不重放规则保持原样。
+
+缓存审计确认：主窗口唤回复用已有文档，不重新导航；正常 WebView 不开启隐私模式或清空持久网站数据。完全退出后仍需重新执行网页初始化。实际只读 HEAD 确认公开 SDK 与 Tailwind 静态资源响应包含 `public, max-age=31536000` 及 ETag；`/chat` 拒绝该 HEAD 请求（403），未验证其入口响应缓存，也未测量用户 WebView 的实际缓存命中率。网页包配置使用 `no-cache` 可验证后复用，部分皮肤请求显式 `no-store` 仍会读取，本轮没有修改外部 AIChat 仓库或账号数据缓存。
+
+本地源码 / 离线包服务器原来对全部文件 `no-store`；现在成功静态响应使用 `private, no-cache` 与内容 SHA-256 ETag。路径、实际文件及字节验证先于条件命中，未改返回无正文 304，同大小修改立即 200，删除与链接逃逸仍拒绝并 no-store。条件头只在 HTTP 头区域解析，GET 正文不能伪装校验头；保留 HEAD、弱 ETag / 列表 / 通配符语义，不长期无条件缓存入口或清单，不修改 MCP/API 响应。
+
+最终实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建通过；Rust **234 通过 / 2 忽略 / 0 失败**，Node **440 通过 / 5 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-ready-cache-check-final.log`。
+- `pnpm --prefix apps/aichat-rust smoke`：5 套核心冒烟通过；真实 Tauri / AppKit / WKWebView 启动 **27 阶段通过**。首屏预先存在 loading 子元素，实际脚本持续运行时保持隐藏；完成标记与正文已就绪但关键 CSS 延迟 500ms 时仍隐藏，样式完成后显示。还覆盖后台、原生失败界面关闭 / Esc、后台迟到 ready、真实 20 秒超时、原生重试重新隐藏及成功显示。日志 `/private/tmp/keepwork-ready-cache-smoke-final.log`。
+- `node --test apps/aichat-rust/tests/page-connection.test.cjs apps/aichat-rust/tests/native-startup.test.cjs`：定向 **42/42 通过**，覆盖新旧标志、忙碌外壳、CSS / 字体、可见与隐藏交互提示、pagehide / URL 变化 / 迟到 ticket、监听清理及既有恢复调度。
+- 缓存真实 HTTP 回归包含 200 → 304、弱 / 多标签 / 通配符、HEAD、同大小编辑、删除、词法越界、已缓存链接转向根外，以及 GET 正文中的伪条件头；这些用例在最终完整检查中通过。Windows / Linux 原生显示和持久缓存命中未实机验证，旧网页兼容使用隔离夹具，不声称所有线上配对已验证。
+
+四处桌面版本同步 **0.2.102**，`git diff --check` 通过。原生场景使用测试专属临时配置 / 非持久 WebView / 私有随机 Loopback，不连接共享 8089。没有重启用户现有桌面进程、修改其缓存或发布安装包；运行新构建后生效。
+
+## 2026-11-13：初始化与工作台共用主窗口（0.2.101）
+
+启动改为在既有 `main` 窗口内显示原生加载层，就绪后原位移除；不创建独立 `startup` 窗口，也不替换主窗口或 WebView。初始化、失败提示和重试保持窗口位置与尺寸；关闭、稍后、后台启动及迟到就绪继续遵循原有隐藏意图。保留可信主文档回执、20 秒超时、自动重试上限与旧网页兼容规则，无需同时更新 AIChat 网页或 MCP。
+
+macOS 加载层绘制不透明且随主题变化的背景，移除后将键盘焦点交回实际 WKWebView；Win32 加载层随父窗口缩放和 DPI 变化更新，保留窗口操作并修复原生类名字节的生命周期；GTK 使用同窗覆盖层，快捷键随加载控件销毁，不在就绪后继续拦截。README 已统一为单窗口描述。
+
+实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建通过；Rust **232 通过 / 2 忽略 / 0 失败**；Node **431 通过 / 5 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-single-window-check-final.log`。
+- `pnpm --prefix apps/aichat-rust smoke`：5 套核心冒烟通过；真实 Tauri / AppKit / WKWebView 启动冒烟 **15 阶段通过**，包括同一主窗口及 WebView 身份、不透明覆盖、就绪文档焦点、后台隐藏、关闭 / Esc 后迟到就绪、真实 20 秒失败及原生重试。使用隔离配置档、非持久 WebView 与随机私有 Loopback，不连接共享 8089。日志 `/private/tmp/keepwork-single-window-smoke.log`。
+- `node --test apps/aichat-rust/tests/native-startup.test.cjs`：**4/4 通过**，包括真实离屏 AppKit / WKWebView、亮暗布局、不透明像素、窗口缩放、焦点恢复及加载层回调释放。
+- Windows `x86_64-pc-windows-msvc` 隔离 API 类型检查通过、零警告：使用真实 `windows-sys` 与最小 Tauri host stub，日志 `/private/tmp/keepwork-startup-wincheck.jV38Wu/check.log`。此检查不代表完整 Windows 构建或实机交互通过。Linux 仅静态复核。
+
+最初沙箱内完整检查因本地监听被禁止而失败；保留日志 `/private/tmp/keepwork-single-window-check.log`。允许测试创建临时本地服务后重新执行通过，没有修改监听策略或跳过失败测试。四处桌面产品版本同步为 **0.2.101**，`git diff --check` 通过。本轮未发布安装包或重启用户现有桌面进程；已安装包冷启动、真实用户焦点切换以及 Windows / Linux 窗口交互仍需单独验收。
+
+## 2026-11-13：原生剪贴板 ACL 与验证源码范围（本轮验收范围）
+
+本轮目标为桌面 `0.2.100` / Rust MCP `0.2.51`，按三角色流程处理原生剪贴板JS授权、共用证据脚本的生成目录误收及音频取消夹具的时序竞态。本段记录最小合同及回归范围，不预填最终完整检查或冒烟通过数，也不重写下方历史失败。
+
+Rust旧默认capability向main、pet、updates及配置的remote来源授予原生插件 `read-text`、`write-text`、`write-image`。这些插件命令直接操作原生剪贴板，不经过 `MediaGrants`；`withGlobalTauri:false` 也不等于阻止内部invoke。Electron参考没有向网页开放原生读取API。本轮撤销这三项未使用的JS allow，保留现有window/URL范围、Bridge v1方法及宿主插件注册，不扩大IPC或权限范围。
+
+验收要求：
+
+- 使用真实Tauri ACL resolver核对main/pet/updates以及既有本地/远程来源的插件读写请求被拒绝，并通过fake clipboard backend spy断言拒绝发生在实际后端访问之前；测试不读取、覆盖或清空用户真实系统剪贴板。
+- 旧/新网页均不能经插件命令绕过权限；普通网页 `navigator.clipboard`、操作系统允许的手动复制/粘贴，以及遥控器原生系统输入继续遵循各自已有规则。撤销未使用插件授权不代表已实现完整WebView媒体/剪贴板持久授权，也不能用单测代替真人复制验收。
+- 共用证据脚本只精确排除 `apps/aichat-rust/releases/` 生成目录；其中历史.app/DMG的增删改不改变相同源码的sourceHash。真实源码、配置、测试及其它属于源码的同名目录仍受指纹保护，最终安装包继续单独核对artifact大小与SHA-256。
+
+后续完整桌面检查实际暴露 `pet-audio-capture` 取消用例失败：旧夹具设置20ms的resume超时，却在Stop之前经过5次真实 `setImmediate`，不能保证Stop先于deadline。受控旧顺序驱动在先处理timeout时复现同一错误，属于合法超时先发生后被误断言为应无错误。测试改为每个夹具独立VM、手动timer和resume-entered屏障，分别验证Stop先发生时无错误、timeout先发生时一次错误，以及late resolve/reject、重复Stop、旧deadline不影响replacement。生产音频源码、resume超时与硬件输入策略未修改，不通过增加等待、放宽期限或忽略测试掩盖竞态。修前源码、旧顺序驱动及修后定向日志存入新证据根的 `regressions/`；最终完整检查仍待单独记录。
+
+MCP首次完整wire曾报告Claude累计输出上限用例在原5秒窗口仍running。恢复环境后，保持原25×100k输入、原期限和生产代码：新的idle observer观测约514ms进入failed、子进程退出、重复request未重放；原单用例约658ms结束，并覆盖其它session继续可用。这些是新身份与新回执下的独立诊断，未证明原完整失败属于生产缺陷或确定由负载导致，也不取代原失败。没有修改MCP源码、累计上限、原fixture或单用例期限；最终完整wire计划在大编译结束后使用 `--test-concurrency=1` 新执行，保留用例内部的并发断言。
+
+本轮新证据根为 `.tmp/rust-clipboard-recovery-20261113/`。原 `.test-runtime/rust-agents-clipboard-20261113/` 等目录在并行工作期间被未知来源清理，部分raw日志与原报告已无法取得；不再声称旧报告仍完整保存，也不对首次失败的未采信息补造归因。已从仍可取得的 `/private/tmp` 日志恢复桌面失败等证据，并在新根的 `regressions/`、`mcp-diagnostic/` 及incident记录中区分恢复件、缺失件和新诊断receipt；指纹红绿证据也按实际可恢复内容记录。新完整检查与冒烟需生成新源码指纹和独立回执，不将丢失、失败或pending结果重新标为通过。真实账号、Windows原生交互、系统权限提示与最终安装升级仍独立待验，本段不作共享8089已变更或已发布声明。
+
+## 2026-11-13：Bridge 桌面安装语义与构建身份回归（本轮验收范围）
+
+本轮按产品、程序员与测试 Agent 流程处理两个已定位问题，目标版本为桌面 `0.2.98` / Rust MCP `0.2.49`；本段记录合同与待执行验收，不预填最终全量通过数。旧失败、既有版本与真实原生检查记录继续保留，不将早前通过结果移作本轮结果。
+
+`window.aichatDesktop.installUpdate()` 保持 Bridge v1、原有参数和 Rust 返回形状，只处理桌面安装，遵循 Electron 的共享语义。Rust 旧实现优先处理 `mcp.can_apply`，会把网页“安装客户端更新”变成未经过 MCP 专属确认的服务重启；本轮移除这条错误分派。MCP 更新继续通过独立更新窗口中的明确确认入口，保留所有权、候选身份与不重放边界。
+
+验收要求：
+
+- **四象限**：桌面/MCP均未就绪，或仅MCP就绪时，Bridge调用返回当前 `UpdatesSnapshot`，不弹安装确认、不启动安装器、不退出、不应用MCP；桌面单独就绪或两者均就绪时，只处理桌面确认和安装，MCP pending保持不变。
+- **取消与失败**：取消桌面确认返回当前快照，保留草稿、缓存与pending；准备、完整性校验或安装器启动失败继续返回原错误，不设置退出状态、不退出、不改走MCP。后续明确操作可重试，不自动重试不确定的安装动作。
+- **并发**：Bridge与更新窗口的桌面安装入口共用单次执行保护；已有动作进行中时，第二次调用返回当前快照，不重复弹框或启动安装器。取消/失败释放保护，成功仍沿用 `{ok:true,restarting:true}` 和原桌面退出流程。确认前的busy状态不得冒充应用已退出。
+- **兼容与隔离**：旧网页不需更改方法名、参数或Bridge版本；MCP专属更新按钮保留明确确认及外部owner保护，桌面安装缺失不影响普通聊天、文件或终端。夹具使用假确认、假安装器和隔离状态，不运行真实安装或共享服务。
+
+另一修复涉及 Rust MCP 构建脚本在搬迁/复用 Cargo cache 后从旧路径读取构建身份；验收需复用已编译build-script，在新目录修改源码/commit后确认 `--build-info` 来自新目录，且旧目录后续变化不会影响新构建。同字节源码搬迁保持相同sourceHash；没有Git元数据时保持未知，不借旧工作树commit填充。详细规则见 MCP README 的构建身份段。
+
+`0.2.97` 的完整检查真实失败于 `dev_server::tests::restarting_same_source_preserves_origin`：停止后重绑保存的 `127.0.0.1:21129` 返回 `EADDRINUSE`。当时没有采集端口持有者，不能追溯宣称初次失败一定由fork、某个外部进程或生产stop缺陷导致。原始完整检查日志与失败回执保留在本轮证据目录的 `desktop/`，不改成通过，也不由后续专项结果覆盖。
+
+后续受控实验让测试自有fork子进程保留真实DevServer监听socket：父进程stop已join接受线程时，同saved origin仍稳定拒绝重绑；释放并回收该子进程后，同origin立即重绑成功。这验证了继承socket可以延长端口占用的机制，与首次21129失败的实际持有者未知分别记录。最小修复仅作用于 `#[cfg(test)]` 夹具：由生产start直接分配并持有首个listener，消除探测后释放的空窗；生命周期用例通过独立exact单测子进程隔离同测试进程内的并行fork。仍实际执行stop、二次绑定原origin及HTTP可服务检查，并覆盖子进程持有期间明确失败且registry不变。没有修改生产监听/停止策略，没有重试、切换saved origin、终止未知监听器或删除实际用户profile。定向结果与受控证据见 `regressions/dev-server-after.log`；后续 `0.2.98` 完整检查与冒烟使用新的 `desktop-final/` 证据目录，不复用 `.97` 全量结论。
+
+本轮原始命令、日志、修前失败及最终回执计划统一保存在 `.test-runtime/rust-agents-build-install-20261113/`，由最终检查写入实际版本、源码指纹与计数。真实账号、Windows原生运行、平台注册以及最终安装包的真实安装/升级仍独立待验；本段不作已发布、已接管共享8089或完整业务通过声明。
+
+## 2026-11-13：原生启动内容组居中（0.2.96）
+
+按图标、间距和两行文字的实际宽度计算整个内容组的水平位置；正常态同时校正垂直重心，文字内部仍左对齐。失败态按钮位置、窗口尺寸和生命周期不变。已有 AppKit 夹具增加组中心与内容区中心偏差不超过 1pt 的断言，浅色 / 深色真实离屏预览已复核。
+
+- `node --test apps/aichat-rust/tests/native-startup.test.cjs`：**4/4 通过**，包括原生布局、键盘与回调生命周期。
+- `node apps/aichat-rust/scripts/startup-native-smoke.cjs`：编译 `0.2.96`，真实 Tauri / AppKit / WKWebView **14 阶段全部通过**，含 20 秒超时、原生重试、关闭 / Esc 后迟到就绪与后台隐藏。日志 `.test-runtime/native-startup-centered/smoke.log`。
+- 四处产品版本同步 `0.2.96`，`git diff --check` 通过。本轮只调整 macOS 布局，未重跑与本变更无关的运行时选版矩阵；沿用上述隔离原生冒烟的验证边界。
+
+## 2026-11-13：紧凑原生启动与 AGENTS 冒烟闭环（0.2.95）
+
+本轮由产品 Agent 确认前后台、失败恢复、旧网页及运行时兼容契约，程序员修复后由测试 Agent 验证。原生启动采用 360×176 紧凑布局；主 WebView 在可信文档就绪前隐藏。启动可见性在单实例监听前初始化，避免后台启动期间收到的用户唤起被后续 setup 覆盖；关闭、Esc 和稍后保留隐藏意图，迟到就绪不反弹。
+
+运行时检查覆盖正常启动防降级、同版本重打包仅显式应用、按选定引擎比较缓存、缺失对端元数据保持未知等规则。补齐外部 VS Code / Local Helper 所有权保护；二次探测的 PID、owner 或身份变化时停止接管并报告最新状态，不继续启动第二个实例。无本地基线时允许合法 feed 下载暂存，下载不等于激活。标准冒烟曾遇到并行提取启动函数后遗留的 `arch` 作用域编译错误，已修复；失败原始日志保留。
+
+最终在 **macOS 15.7.9 / arm64** 执行：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript、前端构建通过；Rust **220 通过 / 2 条件忽略 / 0 失败**，Node **424 通过 / 5 Windows 平台跳过 / 0 失败**。Rust 忽略项分别需要物理鼠标状态和实际联网 ASR，不计为已实测。
+- `pnpm --prefix apps/aichat-rust smoke`：一次 Cargo 构建全部相关二进制，从 `compiler-artifact.executable` 获取实际路径，再执行 **desktop / runtime / PTY / pet / updates 五套核心冒烟，全部通过**；随后运行同次构建的 macOS 原生启动冒烟，**14 个阶段全部通过**。最终构建日志报告 `aichat-rust v0.2.95`，四处版本同步。
+- 原生冒烟使用真实 Tauri 事件循环、AppKit Window、WKWebView、现有私密 IPC 和生产窗口生命周期函数。实际观测原生窗及主窗 `is_visible`，覆盖前台 pending → ready、后台始终隐藏、准备期间原生 Close / Esc 后迟到 ready、真实 **20 秒**超时失败及点击原生 Retry 后恢复；Idle 状态唤起后开始导航不丢失前台意图。
+
+原始证据存放于仓库 `.test-runtime/native-startup-agents/`：`check-final.log`、`smoke-final.log` 及单独原生干跑 `native-startup-smoke-final.log`。此前 Prohibited 策略禁止测试窗显示、测试动态子类与 Tao 派发冲突，以及作用域编译失败，分别保存在 `native-startup-smoke-prohibited-failed.log`、`native-startup-smoke-passive-subclass-failed.log`、`smoke-compile-scope-failed.log`，没有将这些失败计为通过。`git diff --check` 通过。
+
+原生夹具仅在 `dev-bins` 编译，使用随机私有 Loopback 服务和临时配置 / 非持久 WebView 存储，未启动共享 daemon 或账号流程。为避免影响用户键盘焦点，夹具采用不可聚焦测试窗口，并只在本测试进程临时抑制应用激活、退出后恢复；因此本轮不证明生产焦点恢复、已安装包冷启动、真实账号、遥控器、麦克风或 Windows / Linux 实机行为。冒烟的一次构建避免逐域重新编译，但共享 Cargo target 不构成不可变发布快照，本轮不作发布验收结论。
+
+## 2026-11-13：自动更新的运行时所有权与冒烟修复（0.2.95）
+
+按 AGENTS 三角色流程继续处理下方 `0.2.86` 完整检查失败，不把原有失败记录改成通过。兼容的 VS Code / Local Helper 服务即使早于本机捆绑版本，也保持原 PID 和所有权；桌面仅附加并显示实际观测到的运行版本、引擎、commit 和构建时间，缺失字段保持未知。桌面与 MCP 的更新检查继续独立，外部服务不被自动更新、重启或退出流程误杀。
+
+替换桌面自有旧服务前复验 PID、owner、引擎、版本及 commit；身份变化、服务已升级或元数据变为未知时保留实际服务，不沿用第一次探测作停止决定。停止后仍有监听者时明确提示未启动替换服务。HTTP 健康失败不能证明端口空闲：首次启动和失败回滚的通用启动入口都要求 TCP 明确拒绝连接，端口仍占用或状态无法确认时保留监听者并报告冲突，不启动第二个候选。
+
+端口守卫拒绝与候选实际启动失败分别处理；候选从未尝试，或竞争监听者使验证结果不确定时，保留 pending/current，不把包误标失败或伪报激活成功。只有候选经实际存活子进程、PID 与健康身份核验后才提升 current；确认失败且端口空闲时继续回退已验证版本。不会自动重放结果未知的工具调用或用户任务。
+
+本轮回归使用临时配置档、随机回环端口、可控健康响应及测试自建子进程，覆盖外部 owner、复验期间身份变化、停止后监听仍在、HTTP 非成功或无效响应、候选与回滚受竞争监听阻断、pending 保留及正常启动/激活。五项桌面冒烟覆盖 desktop、runtime、PTY、pet 和 updates；更新冒烟仅下载并准备合成安装包，不启动安装器。额外真实 AppKit / WKWebView 冒烟验证原生启动窗口、前后台就绪、关闭 / Esc 后迟到就绪不弹窗，以及实际 20 秒失败后重试。
+
+继续修复过程中保留两类失败：原生冒烟的测试专用 NSApp 子类导致 Tao `sendEvent` 递归并栈溢出，改为仅替换测试进程的 activation selector；隔离网页入口的就绪回执同时绑定实际 source / entry，旧二进制结果不代替重新构建后的整套验证。`0.2.90` 完整检查还暴露 source server 文件服务 / 路径遍历夹具的端口探测后释放竞态。`0.2.91` 由该夹具直接绑定 `127.0.0.1:0`，将原 listener 交给私有 `serve_listener`，不释放后重绑；生产路径仍经过 `source_identity`、`bind_source_origin` 和注册表，来源稳定、范围耗尽、端口冲突及路径隔离规则保持原样。
+
+最终 `0.2.95` 实际验证：
+
+- `pnpm --prefix apps/aichat-rust check`：退出码 0，TypeScript 与前端构建通过，Rust **220 通过 / 0 失败 / 2 忽略**，Node **424 通过 / 0 失败 / 5 跳过**。两个 Rust 忽略项分别要求真实鼠标已松开和线上 ASR，不计作本轮通过。日志 `/tmp/keepwork-update-0.2.95-check.log`。
+- `pnpm --prefix apps/aichat-rust smoke`：退出码 0，重新构建后 desktop、runtime、PTY、pet、updates **五项全部通过**；真实 AppKit / WKWebView **14 个状态检查全部通过**，含实际 20 秒超时及原生按钮重试。日志 `/tmp/keepwork-update-0.2.95-smoke.log`。
+- 检查及冒烟前后的 **155 项源码 / 构建输入摘要完全一致**：`/tmp/keepwork-update-current-source.json` 与 `/tmp/keepwork-update-final-source.json` 比较 `changed=[]`。旧 `verified-source.json` 属于更早版本，不作为最终验证依据；本轮没有以旧二进制或早前通过结果代替重新构建验证。
+
+四处桌面版本同步 **0.2.95**。本轮未操作共享 8089、真实账号或硬件，未发布 CDN 或替换用户安装，不据此宣称 Windows / macOS 真实安装升级已验收；旧 Rust 客户端仍需先安装包含修复的新版，才能接回后续自动更新。
+
+## 2026-11-13：AGENTS 三角色复核与冒烟修复
+
+完整检查曾实际触发 `primary_button_is_up_without_a_held_click`：该旧用例直接读取真人鼠标状态，却未控制“左键已松开”的前提。首轮失败及执行期间源码漂移保留在 `.test-runtime/rust-agents-final/desktop/`。经产品/QA确认，常规CI改为两项可控macOS/Windows掩码解析回归，并复用现有拖动/释放状态机；真实系统采样断言保留为显式ignored，须在解锁桌面且主键松开时单独执行。OS调用、fallback与生产拖动策略不变，不以重跑碰巧通过代替稳定修复；后续完整检查使用新的 `desktop-r2` 证据目录。
+
+并行任务持续写入版本和构建输入后，最终验证移到字节核对一致的隔离源码副本及独立编译缓存。隔离检查又复现浏览器超时夹具的空PID文件竞态：旧shell可能在重定向建文件后、写入PID前被正确超时终止。现将原等待循环拆为接收自有Child的helper，生产spawn/期限/kill/wait行为不变；测试直接以Child.id验证同一进程的超时、退出和已回收状态，无额外等待、重试或忽略。失败记录与修前源码保留。`desktop-snapshot-r2` 中 CEF 测试选中 Xcode Python 3.9 的环境失败也保留，后续完整检查显式使用已安装的 Python 3.12，不放宽归档安全过滤。
+
+产品 Agent 与 QA 重新确认兼容契约后，程序员 Agent 修复启动选择与身份显示：同一引擎启动按已验证 current/bundled 的最高版本选择，不自动采用较旧或同版不同 commit 的 pending；显式 Node 不被历史 Rust cache 选回。附加服务的缺失版本、commit、构建时间和引擎保持未知，重连不继承上一实例身份。已验证 Node 候选的旧健康响应可省略 engine，但仅限本次存活 Child、匹配 PID 和正确服务身份；Rust v2 不放宽其明确引擎合同。
+
+本轮先保留定向复现失败，再修复并执行完整 `pnpm --prefix apps/aichat-rust check`、五组桌面 smoke，以及 MCP 的单元/契约/构建、双引擎 wire、已提取 v2 包的真实二进制 smoke。MCP 冒烟脚本本身增加逐次 POST 的身份/所有权验证和有界清理回归。最终命令、计数、跳过及源码指纹以 `.test-runtime/rust-agents-final/` 与本轮 MCP 回执为准，旧版本通过记录不代替本轮。
+
+共享 TypeScript/布局/固定 vendor 与已提交 canonical 快照分别核验。初次默认 auto/canonical 检查因相邻 AIChat 四个模块的进行中修改失败，保留该结果；同期任务提交并同步 vendor 后，最终 `npm run check:shared` 已通过。此复核未提交或同步外部进行中的工作。
+
+最终文档与四处桌面版本同步为 **0.2.96**，在独立源码/编译缓存副本重新执行完整检查后再执行冒烟。桌面可核验回执位于 `.test-runtime/rust-agents-final/desktop-0.2.96/report.json`，MCP **0.2.48** 位于 `mcp-snapshot/report.json`；日志保留源码指纹、命令、摘要和平台跳过，不将失败回执覆盖成通过。Windows 干净机、真实平台协议注册、账号和硬件不从本机夹具结果推定通过；未触碰共享 8089 或发布清单。
+
+## 2026-11-13：恢复桌面自动更新发布契约
+
+根因是 Rust 发布器仅上传版本化安装包并写入 GitHub 下载链接，没有刷新客户端仍订阅的 `aichat-desktop/<target>/latest-client.json`；旧清单的顶层 ZIP 也不能由 Rust 的 EXE / DMG 安装路径直接使用。保留启动后 15 秒及每 6 小时检查，桌面与 MCP 改为并行检查，桌面包下载并通过完整性校验后通知，安装仍须用户确认。
+
+发布契约：先上传并校验全部版本化安装包，再更新 Windows x64 / ARM64 与 macOS arm64 / x64 四个清单并验证 CDN 结果。已有清单顶层 legacy ZIP 字段全部保留，追加独立版本与发布日期的 `installer`；没有旧清单时顶层描述原生安装包。拒绝清单倒退或同版本不同安装包，不修改 Launcher 的签名 `stable.json`。新版 Rust 优先读取 `installer`，旧格式原生安装包保持可用；坏清单或下载失败保留缓存与实际错误，不能把不支持的 ZIP 宣称为可安装。旧 Rust 不识别 `installer`，须先手动安装本修复版才能接回后续自动更新，不宣称旧客户端可自动自救。
+
+验收覆盖：四平台清单、legacy 字段保留、版本与包身份防回退、发布顺序及各阶段失败阻断；客户端新旧清单、无更新、包大小 / 摘要失败、离线缓存，以及 MCP 检查阻塞时桌面仍完成检查。自动化使用本地清单与随机回环服务；结果以本轮实际测试回执为准。本段不表示已发布 CDN、已替换用户应用，或已完成 Windows / macOS 真实安装升级。
+
+本轮 `0.2.86` 实际验证：
+
+- `pnpm --prefix apps/aichat-rust typecheck` 与 `pnpm --prefix apps/aichat-rust build` 通过。
+- `cargo test --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins updates::tests --lib`：6 项通过，覆盖原生 / 历史 / 独立版本清单、ZIP 不支持、坏清单、下载失败缓存身份及 MCP 响应延迟时桌面仍下载完成。
+- `cargo run --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins --bin updates-smoke`：通过；仅准备隔离测试包，不启动真实安装。
+- `node --test apps/aichat-rust/tests/*.test.cjs`：424 项通过、5 项跳过；发布与更新定向 68 项全部通过。`node --test scripts/rust-validation-workflows.test.cjs`：4 项通过。
+- 完整 `pnpm --prefix apps/aichat-rust check` 未全通过：最新运行的 Rust 测试 202 项通过、1 项忽略，`runtime::update_tests::older_vscode_and_local_helper_peers_keep_ownership_even_when_a_newer_bundle_exists` 失败（预期 attached，实际 error）。该失败位于工作区原有运行时改动，本次未修改其实现；不可据此宣称完整应用检查通过。
+
+## 2026-11-13：Rust 产品优化、兼容检查与证据留存
+
+本轮增加可选 Bridge v1 `launchIntents`：严格系统协议、单实例转发、可信主文档私密能力票、pending/ack 和首次引导标记。Rust MCP 使用独立 `mcp-stable-rs` v2 feed；Node v1 保留。下载只暂存，应用更新及后续宿主启动沿用激活流程，候选健康通过后才提交 current；普通重启保留 previous，失败优先回退上一个已验证运行时。缺失/过期候选、较新实时服务、外部 owner 及 Local Model 无 PID 的旧健康接口分别有隔离回归；ZIP 提供条目和展开大小上限。
+
+PR 校验加入 Windows/macOS 原生回归、强制 Node/Rust 对照、真实二进制 target 的本地 v2 产物与失败日志。`rust-validation-evidence.cjs run/collect/verify` 保存源码指纹、命令、日志摘要与未执行 gate；源码变化和日志被改写会拒绝复用回执。最终执行结果保存在仓库 `.test-runtime/rust-optimization-final/`，按产品独立收集。完整执行入口与证据层级见 [Rust 发布验收清单](../../docs/acceptance/rust-desktop-release.md)。
+
+本机验证命令：
+
+```sh
+pnpm --prefix apps/aichat-rust check
+pnpm --prefix apps/aichat-rust smoke
+node --test scripts/rust-validation-workflows.test.cjs scripts/rust-validation-evidence.test.cjs
+node scripts/sync-aichat-runtime.cjs --check --mode packaged
+node scripts/build-node-reference.cjs
+KEEPWORK_MCP_REQUIRE_NODE_REFERENCE=1 node --test scripts/contract/*.test.cjs
+```
+
+所有本轮自动化使用隔离 profile、测试子进程或随机回环端口，不操作共享 8089、真实渠道或用户账号。不把 macOS 夹具扩展成 Windows 干净机、系统协议实际注册、官网唤起、真实模型首问、遥控器或麦克风验收。相邻 AIChat 的 canonical `text_tool_calls.mjs` 与已打包副本不同；显式 packaged 检查及对照构建不会修改 vendor，canonical 检查继续报告真实差异。未上传或提升任何 CDN 清单。
+
+## 2026-11-13：macOS 发布页连接本机 MCP 与分身（0.2.82）
+
+用户提供的同页对比中，Chrome 能显示三个分身，已安装桌面 `0.2.78` 没有显示；本机内置 Rust MCP `0.2.44` 健康并声明 `personasApi`，但没有 AIChat presence。隔离实测确认：macOS 15.7.9 的 WKWebView 在 HTTPS 页面访问 HTTP loopback 时，在请求抵达服务器前失败。同一自有 HTML 改为 HTTP 来源即可访问；精确 ATS 例外及 WebContent ATS 例外均不能解决。没有采用关闭 WebKit 安全检查或迁移分身 owner 的方案。
+
+主窗口现在安装受限 `WKScriptMessageHandlerWithReply`；HTTPS 可信顶层页的既有 `fetch` 在访问精确 `localhost:8089` / `127.0.0.1:8089` 时使用该通道。原生独立核对实际 WebView、主框架 URL 与 securityOrigin，强制真实 Origin、固定回环目标、保留 Bearer 与 owner，拒绝 Cookie、代理、重定向及非法头；其他请求仍由原浏览器执行。响应按消费拉取，每块最多 64 KiB、缓冲最多 1 MiB、最多 32 个请求，请求体最多 32 MiB。取消不重发，导航开始和提交均清理旧请求。Basic / Digest / NTLM 认证挑战明确返回 `MCP_HTTP_AUTH_CHALLENGE_UNSUPPORTED`，避免 Foundation 自动重新发送请求；Bearer 401 保留原始 HTTP 状态和正文。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check` 最终通过：TypeScript、前端构建，Rust **168 通过 / 1 默认忽略**，Node **384 通过 / 4 平台跳过 / 0 失败**。日志 `/tmp/keepwork-macos-mcp-check.log`。初次沙盒运行禁止回环夹具；放行隔离测试后的一次运行遇到既有鼠标按键采样测试，最终重跑通过。
+- 新增 JS 合同测试 **10/10**；真实 WKWebView 夹具 **1/1**，实际加载生产 JS shim 与原生实现，仅在测试副本替换随机端口。覆盖旧 health 的可选字段缺失、旧 MCP initialize/session、分身列表、二进制、SSE/NDJSON、Abort、标准 Response 读取及 iframe/来源/端口/头部/重定向隔离。Bearer 401 与 Basic / Digest / NTLM 场景均断言每个 POST 只收到一次。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过；日志 `/tmp/keepwork-macos-mcp-build.log`。`git diff --check` 通过。
+
+所有自动回归使用自有 HTML、临时配置和随机回环 mock，未替换已安装应用或改变真实分身数据；尚未对登录账号执行修复版整窗验收。四处桌面版本同步 **0.2.82**；网页和 MCP 服务不要求同步升级。安装包发布使用 `aichat-rust-v0.2.82` 标签及 `AIChat Rust release packages` 工作流，三个平台的安装包完成 CDN 大小与 SHA-256 校验后才公开 GitHub Release；完整下载地址写入 Release 正文及 Actions 发布摘要，沿用按版本禁止覆盖的 CDN 路径。
+
+## 2026-11-13：聊天页面等待 SDK 时的真实首屏（0.2.81）
+
+用户截图的黑色画布来自已进入 `localhost:3001` 的 AIChat 文档：`startup-progress` 已出现，但 `initTheme` 仍在等待包初始化、Tailwind、SDK 和工作台模块，因此基础 CSS 的默认深色先绘制。前两轮仅覆盖本地连接页及已应用主题的页面，遗漏了此阶段。
+
+AIChat 源码现在在样式表之前只读解析 URL、手动偏好或本地 07:00–19:00 调度，以临时根标记提供首帧颜色；body 初始化后立即接管并移除标记，运行时首次选色采用相同规则。桌面同时对已配置、受信任 AIChat 顶层入口注入一次性预主题，兼容旧网页；菜单切换入口时复用现有有效页面票据，在文档仍有效、URL 未变化且工作台未接管时补齐，不新增 IPC 或放宽 URL 校验。根标记、临时样式和观察器及时撤销，后续用户/宿主切换与皮肤正常接管。bootstrap 入口只含 origin/path，不暴露 query、fragment 或凭据。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **168 通过 / 1 实连默认忽略**，Node **373 通过 / 4 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-real-startup-check.log`。桌面专项 **127/127** 是完整检查的子集，涵盖预主题、作用范围、单次执行、有效/拒绝/迟到票据及入口隐私。
+- AIChat 真实 HTML/CSS 浏览器启动回归 **28/28**：挂起真实包模块或 SDK 请求，在只有原始进度条、空工作台时采样实际背景和标题栏颜色。覆盖新网页独立运行、新桌面注入新网页、新桌面注入旧缓存页面，手动亮暗、自动时段边界、URL/query/hash 优先及不可读存储。日志 `/private/tmp/keepwork-real-startup-final.log`，截图 `AIChat/.test-runtime/screenshots/startup-theme-rust-manual-{light,dark}.png`；亮暗截图已视觉复核。
+- 保存的真实修复前 HTML/CSS 在 `web startup manual-light` 场景确定失败，日志 `/private/tmp/keepwork-real-startup-before/result.log`；这是工作树源码对照，不是历史版本实连。现有工作台主题调度浏览器回归最终 **2/2**，日志 `/private/tmp/keepwork-real-startup-schedule-tap.log`；首次报告异常失败已保留说明，不计为通过。
+- Web 主题源码行为测试 **17/17**，包组成/契约/资源检查 **32/32**；库存检查通过（91 个源包、3 个配置）。JavaScript 语法、JSON 与两仓差异检查通过。未运行 AIChat 的 Vite、构建、部署或发布命令。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，日志 `/private/tmp/keepwork-real-startup-native-build.log`，本地开发程序已重新编译。
+
+本轮使用隔离 SDK/网络夹具，没有真实账号或模型请求；不把 Chrome 注入脚本验证等同原生 macOS/Windows 整窗实测。修改源于 `apps/official/apps/tools/AIChat` 与本仓桌面，各自独立生效，无需更新 MCP。四处桌面版本同步 **0.2.81**。
+
+## 2026-11-13：亮色启动主题记忆（0.2.80）
+
+修正上一轮启动页按系统外观取色的规则：现在启动和连接恢复使用本配置档最近一次受信任聊天页的亮暗模式，无有效记录时默认亮色；系统深色不再覆盖应用亮色。主题独立保存至 `desktop-theme.json`，不修改旧 `settings.json` 或网页 origin 的偏好。原生窗口显示前设置主题与不透明背景；本地页面在当前状态快照返回前保持透明且不绘制正文/标题栏，随后统一应用 `status.theme`，避免恢复时使用过期启动缓存。
+
+宿主按已验证主窗口 URL 区分 shell，启动/恢复页的主题报告不改写记忆；无 CSS 主题信号的 `confirmed:false` 报告同样不覆盖，旧调用省略该字段保持有效。状态字段 `theme` 为可选新增字段，旧宿主缺失或返回未知值时本地页默认亮色。主题写盘失败仍保留本进程最新外观，不阻断聊天或恢复。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **167 通过 / 1 实连默认忽略**，Node **337 通过 / 4 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-light-startup-check.log`。
+- 标题栏、连接页和菜单专项 **91/91**；`cargo test --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins theme::tests` **6/6**。覆盖快照等待时不报告系统猜测、保存主题压过系统、无记录默认亮色、聊天主题接管、同进程恢复/下次启动、配置档隔离、旧设置不变及写入失败后保留内存主题。
+- Chrome 隔离页面 **8 个启动组合**通过：TypeScript / Rust 注入两条路径分别验证保存亮色+系统深色、保存暗色+系统亮色、无记录+系统深色、未知字段+系统深色；检查快照前透明且正文/标题栏隐藏、首个可见背景/标题栏颜色、系统变化不覆盖，以及失败恢复读取最新快照。脚本 `/private/tmp/keepwork-startup-preference-smoke.cjs`，日志 `/private/tmp/keepwork-startup-preference-smoke.log`；亮色对照截图 `/private/tmp/keepwork-preference-rust-init-script-light-os-dark.png`。两套真实脚本的页面深浅切换、body CSS 变量、混合色与延迟皮肤另已回归通过，日志 `/private/tmp/keepwork-startup-page-colors-smoke.log`。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，本地开发程序已重新编译，日志 `/private/tmp/keepwork-light-startup-build.log`；`git diff --check` 通过。
+
+上述浏览器测试使用隔离状态夹具，Rust 持久化测试使用临时配置档；未访问真实账号、迁移网页设置或发布安装包。原生 macOS / Windows 整窗首帧尚未实机验收。四处版本同步 **0.2.80**，本轮规则取代下方 0.2.79 的“跟随系统”约定。
+
+## 2026-11-13：启动画面与深色顶部栏（0.2.79）
+
+正常启动显示居中品牌、加载提示和轻量进度动画，跟随系统深浅色并支持减少动态效果；连接失败后才显示恢复按钮，诊断默认折叠。保留同一 WebView、20 秒超时、5/15/30 秒退避重试和旧宿主手动重载。标题栏的 TypeScript 与 Rust 注入路径共用 `src/chromeTheme.js`，监听 document 非冒泡主题事件、原有 window 事件、样式表加载与主题属性变化，并在页面 CSS 上下文解析变量和混合颜色。
+
+已执行验证：
+
+- `pnpm --prefix apps/aichat-rust check`：TypeScript 与前端构建通过；Rust **161 通过 / 1 实连默认忽略**，Node **329 通过 / 4 平台跳过 / 0 失败**。日志 `/private/tmp/keepwork-startup-theme-check.log`。初次沙盒运行因禁止回环监听失败，允许隔离 HTTP/WebSocket 夹具监听后完整重跑通过。
+- `node --test --test-reporter=dot apps/aichat-rust/tests/titlebar.test.cjs apps/aichat-rust/tests/page-connection.test.cjs apps/aichat-rust/tests/menuChrome.test.cjs`：**83/83**。覆盖两套标题栏、默认深色无 `.dark`、`body.light` 切换、非冒泡事件、延迟样式、系统偏好、重复同步去重，以及正常启动隐藏恢复入口、失败/重试状态、旧宿主、超时退避和防并发。
+- Chrome 无头隔离页面验证两套实际脚本的可见颜色：深浅切换、body 局部 CSS 变量、`color-mix()` 和延迟皮肤加载均通过。加载构建后的入口验证明暗启动居中、640×480 无横向溢出、减少动态效果、失败后显示恢复操作、折叠详情及点击重试均通过。临时验证脚本 `/private/tmp/keepwork-chrome-browser-smoke.cjs`，日志 `/private/tmp/keepwork-chrome-browser-smoke.log`，截图 `/private/tmp/keepwork-startup-{light,dark}.png` 和 `/private/tmp/keepwork-recovery-{light,dark}.png`。未加载真实账号或连接线上聊天/MCP。
+- `cargo build --offline --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，日志 `/private/tmp/keepwork-startup-theme-build.log`。四处产品版本同步 **0.2.79**，`git diff --check` 通过。
+
+浏览器夹具不等同 macOS WKWebView / Windows WebView2 原生窗口实测；本轮未发布安装包，已编译本地开发程序，需重启客户端生效。
+
 ## 2026-11-12：已配对遥控器默认自动开启（0.2.76）
 
 按照用户最新要求，`autoStart` 默认为 true；有效旧配置省略字段时同样开启，未知旧字段继续忽略，损坏配置则关闭自动开启、保留原文件并显示错误。启动及后台定时检测只使用系统已配对/已连接证据，唯一匹配才启动现有 BLE 会话；无设备时不主动扫描、不拦截 F5、不弹窗或抢焦点。多设备歧义、指定 ID 不匹配、配对证据不足及权限问题均给出明确状态，不任意选设备或反复弹出授权。
@@ -288,7 +750,7 @@ macOS Control点按和右键不会进入左键拖动/展开路径；菜单显示
 1. **失焦后的首次点击宠物**：切到另一个应用并确认其已获得焦点，再将光标移到宠物上，单击一次。预期这一次点击即可展开面板，不穿透到底层，也不需要先在宠物上移动鼠标或补点一次。收起后重复，并覆盖快速移入后点击。
 2. **失焦后的首次点击输入框**：展开面板，输入一段草稿；切到另一个应用，再直接单击宠物输入框并输入文字。预期首次点击即可定位光标、继续编辑，原草稿保留，文字不会进入底层应用。重复检查面板按钮与可见回复泡、退出泡/权限泡中的按钮；确认类测试使用取消操作结束。
 3. **透明画布与控件间空隙**：在宠物、面板和回复泡以外的透明区域，以及 `stack` 中两个可见区块之间的空隙，单击底层应用的按钮或输入框。预期底层应用立即收到点击，宠物不响应。收起面板、关闭泡后，检查原控件所在区域已恢复穿透；拖拽释放后也应立即可点击透明区域，无整屏拦截宽限。
-4. **悬停不抢焦点**：在底层应用输入框中输入文字，把光标移入宠物、面板或回复泡但不点击，再继续键入。预期焦点仍在底层应用，主窗口不会被唤出或前置。紧凑语音控件另在演示/全屏应用前测试，检查悬停和控件操作不将 AIChat 主窗口切到前台；主动点击聊天输入框时应能正常编辑。
+4. **悬停不抢焦点**：在底层应用输入框中输入文字，把光标移入宠物、面板或回复泡但不点击，再继续键入。预期焦点仍在底层应用，主窗口不会被唤出或前置。收起面板并关闭回复泡后，点击宠物上方原录音和语音按钮的位置，确认底层应用收到点击。展开面板后，点击聊天输入框应能正常编辑。
 5. **缩放与布局变化**：分别使用 `0.5×`、`1×`、`2×`、`4×`，展开/收起面板，并让回复泡高度变化；将宠物移到屏幕上方和下方，使面板重新布局。预期可见控件的首次点击持续有效，旧位置不残留不可穿透区域，隐藏控件与容器空隙不会挡住底层。隐藏再显示宠物后重复首次点击。
 6. **跨屏拖动与混合 DPI（待真人验证）**：在缩放比例不同、包含左侧或上方负坐标布局的两块显示器之间拖动宠物，覆盖缓慢跨界和跨界后立即松手。预期宠物随光标落在正确屏幕，保持单屏画布，无拖影或残留命中区；松手后单击宠物、输入框和透明空隙分别正常。保留现有 4px 点击/拖动阈值，复查单击、双击打开主窗口和右键菜单。
 

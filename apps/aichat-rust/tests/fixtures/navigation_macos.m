@@ -4,6 +4,8 @@
 #include <stdio.h>
 
 extern bool keepwork_install_frame_navigation(void *rawWebview);
+// This fixture only links the frame adapter, without a local MCP transport.
+void keepwork_reset_local_mcp(void *webview) { (void)webview; }
 
 static NSUInteger subframeDecisions = 0;
 

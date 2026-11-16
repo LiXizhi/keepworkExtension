@@ -24,6 +24,11 @@ fn extract_zip_central_directory(bytes: &[u8], dest_dir: &Path) -> Result<(), St
     let canonical_root = dunce::canonicalize(dest_dir).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| format!("Failed to read ZIP central directory: {e}"))?;
+    const MAX_EXPANDED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    if archive.len() > 10_000 {
+        return Err("ZIP archive contains too many entries".into());
+    }
+    let mut expanded_bytes = 0u64;
     let mut extracted_any = false;
     for index in 0..archive.len() {
         let mut entry = archive
@@ -66,9 +71,18 @@ fn extract_zip_central_directory(bytes: &[u8], dest_dir: &Path) -> Result<(), St
             return Err("ZIP output cannot replace a symbolic link".into());
         }
         let mut decompressed = Vec::new();
-        entry
+        let remaining = MAX_EXPANDED_BYTES - expanded_bytes;
+        if entry.size() > remaining {
+            return Err("ZIP archive exceeds the expanded size limit".into());
+        }
+        (&mut entry)
+            .take(remaining + 1)
             .read_to_end(&mut decompressed)
             .map_err(|e| format!("ZIP entry decompression failed: {e}"))?;
+        expanded_bytes += decompressed.len() as u64;
+        if expanded_bytes > MAX_EXPANDED_BYTES {
+            return Err("ZIP archive exceeds the expanded size limit".into());
+        }
         fs::write(&out_path, &decompressed)
             .map_err(|e| format!("Failed to write extracted file: {e}"))?;
         #[cfg(unix)]

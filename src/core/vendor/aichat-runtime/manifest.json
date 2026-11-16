@@ -7,8 +7,8 @@
       "output": "90e88f0f46e49385abf925082b11c8bddba157c40c53d7206efad40f1b029cd6"
     },
     "completion.mjs": {
-      "source": "8b6295feb94adbdb1c63987896032dae1927ae83c693f376b9dac700ac0d82e1",
-      "output": "5f76f5eda979e92ee319b84d40fcbfef7263881efc3bf9e98b5efd472124c6fd"
+      "source": "541a2455647275198426d7269a675cf66fdadff5305c7e988a7ecc74e236301d",
+      "output": "b172337fde42b5595eb63431e0a030dc93c6558d7fd7128b3007a29d61b158b8"
     },
     "context.mjs": {
       "source": "d053875cb9316780e76ad483c57e694b5bdc567391839f3102a10244fde57f6d",
@@ -23,12 +23,12 @@
       "output": "f3d34e80d4bf409518a1d97d7677e580a2e85553e50126ca94f27dadeab2371c"
     },
     "model_service_adapter.mjs": {
-      "source": "b57415a13a30b8bd01c0c4713469b1a66513f8aac75702377603eaaf103b3042",
-      "output": "2b42e01fda2bcc9aba8c7fba5cf7bbf50f4b55bde3c9cef68fd8cc2df9b4bf1d"
+      "source": "a16ad7b6ca9dc5a222f0bc51f0bee12bb0ceb7cd1643a63ae05a4f1719a68afc",
+      "output": "5927124916a1e64ee3ea4e1167ddc1c9cdfdb0baf3c9a04697fef70feedecd8b"
     },
     "package_registry.mjs": {
-      "source": "15bfb6eff54eae0200ba55c4102f6b5e45e8afd0c2e52d1364a2227ff91aabd6",
-      "output": "56351f381518b25c17534be3c99859a805816064b1340b765f908f62cbbb9595"
+      "source": "63c8717de9cad20341a19ba30be7d69d1e7fb9f994d01f9678e46797974c381f",
+      "output": "11b40e4823f1a3aab4813b9ecfdef8f7ba108ce75304a417d793cd5b0e82a1cf"
     },
     "package_schema.mjs": {
       "source": "ef27f0d8504d494c2084ad9d46d6427105c2034c4a35125f8c41816a9c57c291",
@@ -55,8 +55,8 @@
       "output": "eb5ec17715a2875561b4f4ecc365f9409d21bea580b2902baae133939ebf548f"
     },
     "sdk_adapter.mjs": {
-      "source": "f3f68f3c4a2357512e097e3117059754fc544524d00e375b766332495fe354ed",
-      "output": "f7d11a475b756ed1d45e29d9e4814cd594a1800c79e5122475cc727e4e2af510"
+      "source": "fe2af4728fe9cd179bfcc351f5d7ddcb825f57d4fe5280e17ed8a6c0f855be87",
+      "output": "b930519305b1f4a9e4b5aa79004c43b4e72378c2d30e3c33c74a5137c214a745"
     },
     "service_contracts.mjs": {
       "source": "b6c0a58fddc6218baac68227b8d8d709a8db85abd8056b8289b78396b88a477b",
@@ -65,10 +65,14 @@
     "skills.mjs": {
       "source": "81609a4343770eef88ac6cdaf5294ed6b9b7f9cdcea10873599a25efe58a3c8d",
       "output": "28386ec30681641cc4024fff98140679a8716a85fc94e750227d63a25ae047f3"
+    },
+    "text_tool_calls.mjs": {
+      "source": "af77de4187595822872e2ccec556990fa53c426091f1c079d952f8f73882cbfd",
+      "output": "72438a2a34e4ed0ea103c6451143a78b94a9347b62eaad205155339ece95a22b"
     }
   },
   "sourceRevision": {
-    "commit": "bb0e3b1409a41df2104ff50d3d421626fad15841",
+    "commit": "990824245fd7008a0a3c0cc4c3b13f63caf9d8f2",
     "dirty": false
   }
 }

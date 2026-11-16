@@ -7,9 +7,25 @@ export interface DesktopCapabilities {
   readonly defaultBrainFolder: true;
   readonly gitSetup: true;
   readonly floatingPet: true;
+  readonly petApprovalReturnVersion?: 1;
+  readonly desktopScreenshotVersion?: 1;
+  readonly petApprovalRevealVersion?: 1;
+  readonly petReplyPresentationVersion?: 1;
+  readonly petStreamingSpeechVersion?: 1;
+  readonly remoteNarrationPauseVersion?: 1;
+  readonly remoteDialogueVersion?: 1;
+  readonly remotePhoneVersion?: 1;
+  readonly remotePhoneCaptionVersion?: 1;
+  readonly remotePhoneActivityVersion?: 1;
   readonly petDictationAudioVersion?: 1;
   readonly petVoiceAudioVersion?: 1;
   readonly startupSignIn: true;
+  readonly launchIntents?: true;
+}
+
+export interface LaunchIntent {
+  id: string;
+  kind: "first-launch" | "onboarding";
 }
 
 export interface RootGrant {
@@ -42,6 +58,7 @@ export interface GitInstallResult {
 }
 
 export interface RuntimeStatusSnapshot {
+  engine?: string;
   id: string;
   port: number;
   state: "starting" | "running" | "attached" | "conflict" | "stopped" | "error";
@@ -83,6 +100,7 @@ export interface UpdatesSnapshot {
 }
 
 export interface DesktopStatus {
+  readonly theme?: "light" | "dark";
   version: string;
   platform: string;
   arch: string;
@@ -108,7 +126,16 @@ export interface AIChatDesktopBridge {
   onBrowserSurface(callback: (payload: Record<string, unknown>) => void): () => void;
   readonly version: 1;
   readonly capabilities: DesktopCapabilities;
+  getLaunchIntent?(): Promise<LaunchIntent | null>;
+  acknowledgeLaunchIntent?(id: string): Promise<boolean>;
+  onLaunchIntent?(callback: () => void): () => void;
   reportStartupSignIn(signedIn: boolean): Promise<boolean>;
+  closeRemoteDialogue?(id: string): Promise<boolean>;
+  captureScreenshot?(): Promise<DesktopScreenshot>;
+  getScreenshotPermission?(): Promise<ScreenshotPermission>;
+  setScreenshotPermission?(enabled: boolean): Promise<ScreenshotPermission>;
+  revealPetApproval?(options?: { returnToPet?: boolean }): Promise<boolean>;
+  returnToPetAfterApproval?(): Promise<boolean>;
   publishPetState(state: Record<string, unknown>): Promise<boolean>;
   petResult(result: Record<string, unknown>): Promise<boolean>;
   petAudio?(op: "start" | "activate" | "stop" | "ack", id: string, seq?: number): Promise<Record<string, unknown>>;
@@ -158,6 +185,15 @@ declare global {
       menus: Array<{ id: string; label: string }>;
       hostCommands: string[];
       pageCommands?: string[];
+      entryUrl?: string;
     };
   }
+}
+
+export interface DesktopScreenshot {
+  content: [{type: "text"; text: string}, {type: "image"; mimeType: "image/jpeg"; data: string}];
+}
+export interface ScreenshotPermission {
+  alwaysAllowScreenshots: boolean;
+  pending: boolean;
 }

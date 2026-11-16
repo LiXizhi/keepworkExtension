@@ -156,14 +156,23 @@ test('the dedicated image route accepts a 2 MiB raster while the legacy body lim
   const session = await create('deepseek', 'image-body-limit');
   const large = 'data:image/png;base64,' + Buffer.alloc(2 * 1024 * 1024, 2).toString('base64');
   const input = { requestId: 'large-image', text: 'Large image fixture', images: [large] };
+  const count = promptRows().length;
   const rejected = await request(`/sessions/${session.id}/turns`, input);
   assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
   assert.match(rejected.body.error, /too large/i);
+  assert.equal(rejected.body.acceptanceUnknown, false);
+  assert.equal(promptRows().length, count, 'a rejected legacy upload must never reach native stdin');
+  const untouched = await request('/sessions/' + session.id);
+  assert.deepEqual(untouched.body.items, []);
+  assert.equal(untouched.body.lastSubmission, null);
   assert.equal((await request(`/sessions/${session.id}/image-turns`, input)).status, 200);
   await completed(session);
+  assert.equal(promptRows().length, count + 1, 'the explicit image-route submission must dispatch exactly once');
   const huge = await request(`/sessions/${session.id}/image-turns`, { requestId: 'huge-body', text: 'x'.repeat(7_000_000) });
   assert.equal(huge.status, 400);
   assert.match(huge.body.error, /too large/i);
+  assert.equal(huge.body.acceptanceUnknown, false);
+  assert.equal(promptRows().length, count + 1);
 });
 
 test('image-turn routes preserve Origin and owner confinement', async () => {

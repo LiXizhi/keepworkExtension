@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[path = "src/build_timestamp.rs"]
+mod build_timestamp;
 
 fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).expect("read Rust sources") {
@@ -14,7 +16,23 @@ fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn main() {
-    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Compilation clock precedes Unix epoch")
+        .as_secs();
+    let source_date_epoch = match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("Invalid SOURCE_DATE_EPOCH: {error}"),
+    };
+    let (built_at_unix, built_at_source) =
+        build_timestamp::select_timestamp(source_date_epoch.as_deref(), now)
+            .expect("Invalid build timestamp");
+    // Cargo can reuse this executable after a checkout/cache has moved. Resolve
+    // inputs from the current invocation rather than its compilation directory.
+    let crate_dir =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let workspace = crate_dir.join("../..");
     let mut files = Vec::new();
     source_files(&crate_dir.join("src"), &mut files);
@@ -24,7 +42,7 @@ fn main() {
         .map(|path| {
             let name = format!(
                 "crate/{}",
-                path.strip_prefix(crate_dir)
+                path.strip_prefix(&crate_dir)
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/")
@@ -53,7 +71,7 @@ fn main() {
     let git_path = |name: &str| {
         Command::new("git")
             .args(["rev-parse", "--git-path", name])
-            .current_dir(crate_dir)
+            .current_dir(&crate_dir)
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -75,7 +93,7 @@ fn main() {
     }
     let commit = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(&crate_dir)
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -85,10 +103,18 @@ fn main() {
     if let Some(commit) = &commit {
         println!("cargo:rustc-env=KEEPWORK_MCP_BUILD_COMMIT={commit}");
     }
+    let target = std::env::var("TARGET").unwrap();
+    let legacy = target == "x86_64-win7-windows-msvc"
+        || std::env::var_os("CARGO_FEATURE_WIN7_COMPAT").is_some();
+    let variant = if legacy {
+        "\"variant\":\"win7-win8\",\"minWindows\":[6,1,7601],"
+    } else {
+        ""
+    };
     let document = format!(
-        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\",\"agentImageTurnApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
+        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",{}\"builtAtUnix\":{},\"builtAtSource\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\",\"agentImageTurnApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
         std::env::var("CARGO_PKG_VERSION").unwrap(), commit.unwrap_or_default(),
-        std::env::var("TARGET").unwrap(), source_hash
+        target, source_hash, variant, built_at_unix, built_at_source
     );
     std::fs::write(
         Path::new(&std::env::var("OUT_DIR").unwrap()).join("build-info.json"),

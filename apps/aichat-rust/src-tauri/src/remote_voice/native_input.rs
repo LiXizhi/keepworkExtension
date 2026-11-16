@@ -25,6 +25,9 @@ pub(crate) trait DeliveryBackend {
 pub(crate) fn is_submit_command(text: &str) -> bool {
     is_command(text, "发送提示词")
 }
+pub(crate) fn is_clear_command(text: &str) -> bool {
+    is_command(text, "清除提示词")
+}
 fn is_command(text: &str, command: &str) -> bool {
     text.trim().trim_end_matches(|ch: char| {
         ch.is_whitespace() || matches!(ch, '。' | '．' | '.' | '！' | '!' | '？' | '?')
@@ -52,6 +55,15 @@ pub(crate) fn deliver_current(
     backend: &impl DeliveryBackend,
     text: &str,
 ) -> Result<Delivery, String> {
+    deliver_transcript(enabled, backend, text, true)
+}
+
+fn deliver_transcript(
+    enabled: &AtomicBool,
+    backend: &impl DeliveryBackend,
+    text: &str,
+    complete: bool,
+) -> Result<Delivery, String> {
     if !enabled.load(Ordering::Acquire) || text.trim().is_empty() {
         return Ok(Delivery::Cancelled);
     }
@@ -64,12 +76,12 @@ pub(crate) fn deliver_current(
     if !enabled.load(Ordering::Acquire) {
         return Ok(Delivery::Cancelled);
     }
-    if is_command(text, "清除提示词") {
+    if complete && is_clear_command(text) {
         return clear_current(enabled, backend);
     }
     // Only the complete final utterance is a command. Quotes and embedded or
     // suffixed occurrences remain ordinary dictation, without any submission.
-    if is_submit_command(text) {
+    if complete && is_submit_command(text) {
         if backend.modifiers_down() {
             return Ok(Delivery::ModifiersHeld);
         }
@@ -101,7 +113,20 @@ pub struct NativeInput {
     platform: platform::Input,
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn missing_permission() -> Option<&'static str> {
+    platform::permission(false)
+}
+
 impl NativeInput {
+    #[cfg(target_os = "macos")]
+    pub(super) fn request_permissions() -> Result<(), String> {
+        match platform::permission(true) {
+            Some(message) => Err(message.into()),
+            None => Ok(()),
+        }
+    }
+
     pub fn new() -> Result<Self, String> {
         Ok(Self {
             enabled: AtomicBool::new(false),
@@ -124,16 +149,34 @@ impl NativeInput {
     pub fn stop(&self) {
         // Revoke before acquiring the gate; a pending delivery must not begin.
         self.enabled.store(false, Ordering::Release);
+        #[cfg(target_os = "macos")]
+        platform::interrupt_back();
         if let Ok(_gate) = self.gate.lock() {
             self.enabled.store(false, Ordering::Release);
             self.platform.stop();
         }
     }
 
+    pub fn modifiers_down(&self) -> bool {
+        self.platform.modifiers_down()
+    }
     pub fn deliver(&self, text: &str) -> Result<Delivery, String> {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
         deliver_current(&self.enabled, &self.platform, text)
     }
+    pub fn deliver_literal(&self, text: &str) -> Result<Delivery, String> {
+        let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
+        deliver_transcript(&self.enabled, &self.platform, text, false)
+    }
+    #[cfg(target_os = "macos")]
+    pub fn clear_back(&self) -> Result<Delivery, String> {
+        let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(Delivery::Cancelled);
+        }
+        platform::clear_back()
+    }
+    #[cfg(not(target_os = "macos"))]
     pub fn clear(&self) -> Result<Delivery, String> {
         let _gate = self.gate.lock().map_err(|_| "系统输入状态不可用")?;
         clear_current(&self.enabled, &self.platform)
@@ -172,6 +215,7 @@ mod platform {
     #[link(name = "AppKit", kind = "framework")]
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
+        fn keepwork_voice_input_permissions(request: bool) -> i32;
         fn keepwork_voice_input_start() -> i32;
         fn keepwork_voice_input_stop();
         fn keepwork_voice_input_modifiers() -> bool;
@@ -179,6 +223,35 @@ mod platform {
         fn keepwork_voice_input_paste() -> bool;
         fn keepwork_voice_input_submit() -> bool;
         fn keepwork_voice_input_clear() -> i32;
+        fn keepwork_voice_input_clear_back() -> i32;
+        fn keepwork_voice_interrupt_back();
+    }
+
+    pub(super) fn interrupt_back() {
+        unsafe { keepwork_voice_interrupt_back() }
+    }
+    pub(super) fn clear_back() -> Result<super::Delivery, String> {
+        use super::Delivery;
+        match unsafe { keepwork_voice_input_clear_back() } {
+            0 => Ok(Delivery::Cleared),
+            1 => Ok(Delivery::NotEditable),
+            3 => Ok(Delivery::ModifiersHeld),
+            5 => Ok(Delivery::Cancelled),
+            _ => Err("无法清空当前输入框，请检查辅助功能权限或目标应用的编辑支持。".into()),
+        }
+    }
+
+    fn permission_error(code: i32) -> &'static str {
+        match code {
+            1 => "将识别文字输入当前输入框需要辅助功能权限。点击“启动语音输入”，在系统设置 → 隐私与安全性 → 辅助功能中允许系统提示的应用。从 IDE 或终端启动时，以系统显示的名称为准。按系统提示重新打开应用，再点启动。",
+            2 => "遥控器语音键需要输入监控权限。点击“启动语音输入”，在系统设置 → 隐私与安全性 → 输入监控中允许系统提示的应用。从 IDE 或终端启动时，以系统显示的名称为准。按系统提示重新打开应用，再点启动。",
+            _ => "无法检查系统输入权限，请重新启动语音输入。",
+        }
+    }
+
+    pub(super) fn permission(request: bool) -> Option<&'static str> {
+        let result = unsafe { keepwork_voice_input_permissions(request) };
+        (result != 0).then(|| permission_error(result))
     }
 
     // The native event tap is process-wide; only the owning object may stop it.
@@ -202,12 +275,10 @@ mod platform {
                 return Ok(());
             }
             Err(match result {
-                1 => "请在系统设置 → 隐私与安全性 → 辅助功能中允许 Keepwork，然后重新启动语音输入",
-                2 => "请在系统设置 → 隐私与安全性 → 输入监控中允许 Keepwork，然后重新启动语音输入",
-                3 => "另一个遥控器语音会话正在使用 F5",
-                _ => "无法启动系统语音键监听，请检查辅助功能和输入监控权限",
-            }
-            .into())
+                1 | 2 => permission_error(result).into(),
+                3 => "另一个遥控器语音会话正在使用 F5".into(),
+                _ => "无法启动系统语音键监听，请检查辅助功能和输入监控权限".into(),
+            })
         }
         pub fn stop(&self) {
             if let Ok(mut owned) = self.owned.lock() {
@@ -824,6 +895,17 @@ mod tests {
             assert_eq!(backend.paste_attempts.get(), 0);
             assert_eq!(backend.submit_attempts.get(), 1);
             assert_eq!(&*backend.submitted_to.borrow(), &[3]);
+        }
+    }
+
+    #[test]
+    fn recovered_prefix_can_only_be_pasted_even_if_it_matches_a_command() {
+        for text in ["发送提示词。", "清除提示词"] {
+            let enabled = AtomicBool::new(true);
+            let backend = FakeBackend::new(&enabled);
+            assert_eq!(deliver_transcript(&enabled, &backend, text, false).unwrap(), Delivery::Pasted);
+            assert_eq!(backend.paste_attempts.get(), 1);
+            assert_eq!(&*backend.clipboard.borrow(), &[text]);
         }
     }
 

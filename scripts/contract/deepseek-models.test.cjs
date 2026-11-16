@@ -130,9 +130,12 @@ test('DeepSeek scoped model changes remain strict while omitted legacy execution
 });
 
 test('DeepSeek scoped metadata remains strict after its native fixture process restarts', async () => {
+  const beforeCreate = rows().length;
   const created = await create('disconnected-scoped-session', { model: accountFlash });
   assert.equal(created.status, 200, JSON.stringify(created.json));
-  const started = rows().findLast((row) => row.method === 'session/new' && row.params.cwd === root);
+  const started = rows().slice(beforeCreate).findLast((row) => row.method === 'session/new');
+  assert.ok(started, 'creating the owned session must log its native session/new');
+  assert.equal(started.params.cwd, created.json.roots[0], 'the fixture must use the canonical session root');
   assert.equal(started.fixture, 'deepseek-models');
   assert.ok(Number.isInteger(started.pid) && started.pid > 1 && started.pid !== process.pid);
   const promptCount = prompts().length, changes = modelChanges().length;

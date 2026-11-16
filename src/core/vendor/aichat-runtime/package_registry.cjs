@@ -4,7 +4,10 @@ exports.compareContributionOrder = compareContributionOrder;
 exports.createRegistry = createRegistry;
 const profile_resolver_cjs_1 = require("./profile_resolver.cjs");
 function compareContributionOrder(a, b) {
-    return (Number.isFinite(a.order) ? a.order : Number.MAX_SAFE_INTEGER) - (Number.isFinite(b.order) ? b.order : Number.MAX_SAFE_INTEGER);
+    const order = (Number.isFinite(a.order) ? a.order : Number.MAX_SAFE_INTEGER) - (Number.isFinite(b.order) ? b.order : Number.MAX_SAFE_INTEGER);
+    // Equal ranks must not inherit package discovery or saved-skill order.
+    const first = String(a.id || ''), second = String(b.id || '');
+    return order || (first < second ? -1 : first > second ? 1 : 0);
 }
 function createRegistry(profile, manifests, baseURL, packageBaseURLs = {}) {
     const registry = { tools: [], skills: [], panels: [], skins: [], categories: [] };

@@ -1,0 +1,4 @@
+#pragma once
+namespace keepwork_cef {
+inline constexpr char kFolderPickerScript[] = R"KWFOLDER(@KEEPWORK_FOLDER_PICKER_SCRIPT@)KWFOLDER";
+}

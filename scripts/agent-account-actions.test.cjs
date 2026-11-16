@@ -11,6 +11,9 @@ test('account catalog keeps every provider and separates CLI input from shell co
  assert.equal(catalog.qwen.actions.login.input,'/auth');
  assert.equal(catalog.codex.actions.logout.command,"'/fixture/codex' 'logout'");
  assert.equal(catalog.claude.actions.login.command,"'/fixture/claude' 'auth' 'login'");
+ assert.equal(catalog.trae.actions.login.command,"'/fixture/trae' '--help'");
+ assert.equal(catalog.trae.actions.login.label,'配置模型提供商');
+ assert.equal(catalog.trae.actions.logout,undefined,'open-source Trae Agent has no account logout subcommand');
  assert.ok(Object.values(catalog).every(item=>item.available));
  const absent=agentAccountCatalog(()=>{throw Error('Not installed');});
  assert.equal(Object.keys(absent).length,AGENT_BACKENDS.length);

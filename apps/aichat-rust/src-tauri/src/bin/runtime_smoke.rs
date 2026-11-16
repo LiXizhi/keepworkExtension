@@ -76,6 +76,7 @@ async fn main() {
     let feed_manifest = RuntimeUpdateManifest {
         schema_version: 1,
         product: "keepwork-mcp-node-runtime".to_string(),
+        engine: None,
         platform: mcp_feed_platform().to_string(),
         arch: current_runtime_arch().to_string(),
         version: "0.2.88".to_string(),

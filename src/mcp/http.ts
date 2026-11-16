@@ -189,6 +189,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         agentSessionApi: 'v1',
         agentContextApi: 'v1',
         agentModeApi: 'v1',
+        agentApprovalApi: 'codex-v1',
         agentImageTurnApi: 'v1',
         agentInventoryApi: 'v1',
         aichatPresenceApi: 'post-sse-v1',

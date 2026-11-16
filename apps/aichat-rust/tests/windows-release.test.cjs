@@ -4,9 +4,25 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { peMachine, verify } = require('../scripts/verify-windows-release.cjs');
 
 const appRoot = path.resolve(__dirname, '..');
+
+test('packaged self-update smoke has valid PowerShell syntax', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', String.raw`
+    $parseTokens = $null; $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($env:KEEPWORK_SMOKE_PARSE_FILE, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+    if ($parseErrors.Count) { $parseErrors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+  `], {
+    env: { ...process.env, KEEPWORK_SMOKE_PARSE_FILE: path.join(appRoot, 'scripts/windows-self-update-smoke.ps1') },
+    encoding: 'utf8', windowsHide: true, timeout: 15000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
 const desktopVersion = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).version;
 const runtimeVersion = /^version\s*=\s*"([^"]+)"/m.exec(fs.readFileSync(path.join(appRoot, '../mcp-rust/crates/keepwork-mcp/Cargo.toml'), 'utf8'))[1];
 const machines = { x64: 0x8664, arm64: 0xaa64 };
@@ -23,14 +39,14 @@ function executable(arch, marker = 0) {
   return bytes;
 }
 
-function fixture(t, arch = 'x64') {
+function fixture(t, arch = 'x64', applicationName = 'Keepwork.exe') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-windows-release-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const directory = path.join(root, 'payload');
   const runtimeDirectory = path.join(directory, 'resources/mcp-runtime', arch);
   const manifestFile = path.join(runtimeDirectory, 'runtime.json');
   const runtime = path.join(runtimeDirectory, 'bin/keepwork-mcp.exe');
-  const application = path.join(directory, 'aichat-rust.exe');
+  const application = path.join(directory, applicationName);
   const binary = path.join(root, 'keepwork-mcp.exe');
   const installer = path.join(root, `Keepwork_${desktopVersion}_${arch}-setup.exe`);
   const manifest = {
@@ -65,23 +81,49 @@ function fixture(t, arch = 'x64') {
 }
 
 for (const arch of ['x64', 'arm64']) {
-  test(`verifies ${arch} payload and records the actual runtime and installer hashes`, (t) => {
-    const { options, runtime } = fixture(t, arch);
-    const result = verify(options);
-    assert.equal(result.desktopVersion, desktopVersion);
-    assert.equal(result.runtimeVersion, runtimeVersion);
-    assert.equal(result.arch, arch);
-    assert.equal(result.commit, commit);
-    assert.equal(result.engine, 'rust');
-    assert.equal(result.platform, 'windows');
-    assert.equal(result.runtimeSha256, hash(fs.readFileSync(runtime)));
-    assert.deepEqual(result.installer, {
-      name: path.basename(options.installer),
-      size: fs.statSync(options.installer).size,
-      sha256: hash(fs.readFileSync(options.installer)),
+  for (const applicationName of ['Keepwork.exe', 'aichat-rust.exe']) {
+    test(`verifies ${arch} ${applicationName} payload and records the actual runtime and installer hashes`, (t) => {
+      const { options, runtime } = fixture(t, arch, applicationName);
+      const result = verify(options);
+      assert.equal(result.desktopVersion, desktopVersion);
+      assert.equal(result.runtimeVersion, runtimeVersion);
+      assert.equal(result.arch, arch);
+      assert.equal(result.commit, commit);
+      assert.equal(result.engine, 'rust');
+      assert.equal(result.platform, 'windows');
+      assert.equal(result.runtimeSha256, hash(fs.readFileSync(runtime)));
+      assert.deepEqual(result.installer, {
+        name: path.basename(options.installer),
+        size: fs.statSync(options.installer).size,
+        sha256: hash(fs.readFileSync(options.installer)),
+      });
     });
+  }
+}
+
+for (const nested of [false, true]) {
+  test(`rejects current and legacy desktop executables together${nested ? ' in nested directories' : ''}`, (t) => {
+    const f = fixture(t);
+    const extra = path.join(f.options.directory, ...(nested ? ['legacy'] : []), 'aichat-rust.exe');
+    fs.mkdirSync(path.dirname(extra), { recursive: true });
+    fs.writeFileSync(extra, executable('x64', 3));
+    assert.throws(() => verify(f.options), /exactly one desktop executable/);
   });
 }
+
+test('rejects duplicate current desktop executables instead of selecting the first path', (t) => {
+  const f = fixture(t);
+  const extra = path.join(f.options.directory, 'duplicate', 'Keepwork.exe');
+  fs.mkdirSync(path.dirname(extra), { recursive: true });
+  fs.writeFileSync(extra, executable('x64', 3));
+  assert.throws(() => verify(f.options), /exactly one desktop executable/);
+});
+
+test('rejects an unknown executable name instead of treating any PE as the desktop application', (t) => {
+  const f = fixture(t);
+  fs.renameSync(f.application, path.join(f.options.directory, 'other-application.exe'));
+  assert.throws(() => verify(f.options), /exactly one desktop executable/);
+});
 
 test('rejects a stale runtime version even when the daemon binary matches the build output', (t) => {
   const f = fixture(t);

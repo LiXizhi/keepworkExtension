@@ -14,6 +14,8 @@ after(async () => {
   await node?.stop();
 });
 
+test('presence cross-engine comparisons have a built Node reference', h.nodeReferenceTestOptions(), () => assert.ok(node));
+
 async function both(fn) {
   const rustResult = await fn(rust);
   if (node) {

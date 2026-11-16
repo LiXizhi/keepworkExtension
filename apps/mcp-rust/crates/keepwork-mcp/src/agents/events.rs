@@ -8,26 +8,7 @@ impl AgentManager {
                 processed.notify_one();
             }
             HarnessEvent::Exit { message } => {
-                let ids = self
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|(_, s)| s.harness.as_ref().is_some_and(|h| Arc::ptr_eq(h, harness)))
-                    .map(|(id, _)| id.clone())
-                    .collect::<Vec<_>>();
-                for id in ids {
-                    let _ = self.edit(&id, |s| {
-                        s.harness = None;
-                        s.pending.clear();
-                        s.data["pending"] = json!([]);
-                        if ACTIVE.contains(&s.data["status"].as_str().unwrap_or("")) {
-                            s.data["status"] = json!("interrupted");
-                            s.data["error"] = json!(message);
-                        }
-                        Ok(())
-                    });
-                }
+                let _ = self.harness_exited(harness, &message);
             }
             HarnessEvent::Notification { method, params } => {
                 let Some(session_id) = self.find_native(harness, &params) else {
@@ -37,7 +18,7 @@ impl AgentManager {
                     self.acp_update(&session_id, &params["update"]);
                 } else if matches!(
                     harness.protocol(),
-                    Protocol::Codex | Protocol::Claude | Protocol::Antigravity
+                    Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae
                 ) {
                     self.codex_update(&session_id, &method, &params);
                 }
@@ -47,6 +28,55 @@ impl AgentManager {
             }
         }
     }
+
+    fn harness_exited(&self, harness: &Arc<Harness>, message: &str) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().expect("agent sessions");
+        // One provider can own many sessions. Commit their disconnect together:
+        // edit() would rewrite every history once per affected session.
+        let mut changed = Vec::new();
+        for (id, session) in sessions.iter_mut().filter(|(_, session)| {
+            session
+                .harness
+                .as_ref()
+                .is_some_and(|child| Arc::ptr_eq(child, harness))
+        }) {
+            changed.push(id.clone());
+            session.data["pending"] = json!([]);
+            if ACTIVE.contains(&session.data["status"].as_str().unwrap_or("")) {
+                session.data["status"] = json!("interrupted");
+                session.data["error"] = json!(message);
+            }
+            session.data["updatedAt"] = json!(now());
+            session.data["cursor"] = json!(session.data["cursor"].as_u64().unwrap_or(0) + 1);
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let affected: std::collections::HashSet<&str> =
+            changed.iter().map(String::as_str).collect();
+        let persistence_error = self
+            .persist_with_histories(&mut sessions, |id| affected.contains(id))
+            .err();
+        for id in changed {
+            let session = sessions.get_mut(&id).unwrap();
+            if let Some(error) = &persistence_error {
+                session.data[NATIVE_PERSISTENCE_ERROR] = json!(native_persistence_error(error));
+            }
+            // The provider has really exited even when the registry is
+            // unavailable. Never retain a dead harness or actionable prompts.
+            session.harness = None;
+            session.pending.clear();
+            let result = self.render(&session.data);
+            session
+                .events
+                .send_replace(json!({"cursor":result["cursor"],"session":result}));
+        }
+        match persistence_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     fn find_native(&self, harness: &Arc<Harness>, params: &Value) -> Option<String> {
         let thread = params
             .get("sessionId")
@@ -73,7 +103,7 @@ impl AgentManager {
         {
             return;
         }
-        let _ = self.edit(session_id, |s| {
+        let _ = self.edit_native(session_id, None, |s| {
             let kind = update["sessionUpdate"].as_str().unwrap_or("");
             let turn = s.data["turnId"].as_str().unwrap_or("unknown").to_string();
             if s.native["_textTurn"] != turn {
@@ -147,7 +177,7 @@ impl AgentManager {
         });
     }
     fn codex_update(&self, session_id: &str, method: &str, params: &Value) {
-        let _ = self.edit(session_id, |s| {
+        let _ = self.edit_native(session_id, None, |s| {
             match method {
                 "turn/started" => {
                     s.data["turnId"] = params["turn"]["id"].clone();
@@ -307,19 +337,7 @@ impl AgentManager {
         let read_only = params["readOnly"] == true
             || ["read", "search", "fetch"]
                 .contains(&params["toolCall"]["kind"].as_str().unwrap_or(""));
-        let automatic = if data["mode"] == "plan" && normalized != "item/tool/requestUserInput" {
-            Some(if read_only && !requires_decision {
-                "accept"
-            } else {
-                "decline"
-            })
-        } else if requires_decision {
-            None
-        } else if data["mode"] == "craft" {
-            Some("accept")
-        } else {
-            None
-        };
+        let automatic = approval::decision(&data, normalized, params, requires_decision, read_only);
         let native = json!({"method":method,"params":params,"acp":acp});
         if let Some(decision) = automatic {
             let result = permission_result(&native, &json!({"decision":decision}));
@@ -400,7 +418,8 @@ impl AgentManager {
                 return;
             }
         }
-        let automatic_offered = !requires_decision
+        let automatic_offered = data["approvalMode"].is_null()
+            && !requires_decision
             && visible["availableDecisions"]
                 .as_array()
                 .is_none_or(|options| options.iter().any(|option| option == "accept"));
@@ -621,6 +640,254 @@ fn cursor_questions(params: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exit_session(
+        directory: &std::path::Path,
+        id: &str,
+        status: &str,
+        harness: Option<Arc<Harness>>,
+    ) -> Session {
+        let data = json!({
+            "id":id,"owner":"a".repeat(64),"threadId":format!("native-{id}"),
+            "turnId":"turn","backend":"workbuddy","roots":[directory],
+            "conversationId":id,"status":status,"cursor":7,"updatedAt":1,
+            "items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"Keep this request"}]},
+                {"id":"reply","type":"agentMessage","text":"Keep this answer"}],
+            "pending":[{"id":"approval"}],"submissions":{"request":{"state":"accepted","turnId":"turn"}},
+            "lastRequestId":"request","aichatContext":false
+        });
+        let (events, _) = watch::channel(json!({"cursor":7,"session":snapshot(&data)}));
+        Session {
+            data,
+            harness,
+            native: json!({}),
+            pending: HashMap::from([("approval".into(), (json!("native-approval"), json!({})))]),
+            events,
+            viewers: Arc::new(AtomicUsize::new(0)),
+            configuration: Arc::new(AsyncMutex::new(())),
+            context_marker: None,
+            restoring: false,
+            needs_native_history: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_exit_commits_all_owned_sessions_once_and_preserves_other_generations() {
+        let source = include_str!("../../../../../../scripts/contract/fixtures/agent-cli.cjs");
+        let (exiting, _exiting_file) = harness::fixture(source, Protocol::Acp).await;
+        let (other, _other_file) = harness::fixture(source, Protocol::Acp).await;
+        let directory = std::env::temp_dir().join(format!("keepwork-provider-exit-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let registry = directory.join("sessions.json");
+        let manager = AgentManager::open(registry.clone(), 0);
+        let mut watches = vec![];
+        let mut originals = HashMap::new();
+        {
+            let mut sessions = manager.sessions.lock().unwrap();
+            for index in 0..32 {
+                let id = format!("session-{index}");
+                let status = [
+                    "running",
+                    "waiting",
+                    "completed",
+                    "starting",
+                    "uncertain",
+                    "idle",
+                ][index % 6];
+                let session = exit_session(&directory, &id, status, Some(exiting.clone()));
+                originals.insert(id.clone(), session.data.clone());
+                watches.push((id.clone(), session.events.subscribe()));
+                sessions.insert(id, session);
+            }
+            // Same backend/root with a replacement process must remain untouched.
+            for (id, child) in [("replacement", Some(other.clone())), ("detached", None)] {
+                let session = exit_session(&directory, id, "running", child);
+                originals.insert(id.into(), session.data.clone());
+                watches.push((id.into(), session.events.subscribe()));
+                sessions.insert(id.into(), session);
+            }
+            manager.persist(&mut sessions).unwrap();
+        }
+        manager.persist_calls.store(0, Ordering::Relaxed);
+        let mut events = exiting.subscribe();
+        exiting.close();
+        let event = events.recv().await.unwrap();
+        assert!(matches!(event, HarnessEvent::Exit { .. }));
+        manager.on_event(&exiting, event).await;
+        assert_eq!(
+            manager.persist_calls.load(Ordering::Relaxed),
+            1,
+            "one process exit must not rewrite all histories once per owned session"
+        );
+        {
+            let sessions = manager.sessions.lock().unwrap();
+            for (id, receiver) in &mut watches {
+                let session = &sessions[id];
+                let original = &originals[id];
+                if ["replacement", "detached"].contains(&id.as_str()) {
+                    assert_eq!(&session.data, original);
+                    assert!(!receiver.has_changed().unwrap());
+                    continue;
+                }
+                assert!(receiver.has_changed().unwrap());
+                let frame = receiver.borrow_and_update();
+                assert_eq!(frame["cursor"], 8);
+                assert_eq!(frame["session"], snapshot(&session.data));
+                assert_eq!(session.data["cursor"], 8);
+                assert!(session.data["updatedAt"].as_i64().unwrap() > 1);
+                assert!(session.harness.is_none());
+                assert!(session.pending.is_empty());
+                assert_eq!(session.data["pending"], json!([]));
+                for key in [
+                    "items",
+                    "submissions",
+                    "lastRequestId",
+                    "threadId",
+                    "turnId",
+                ] {
+                    assert_eq!(session.data[key], original[key]);
+                }
+                let active = ACTIVE.contains(&original["status"].as_str().unwrap());
+                assert_eq!(
+                    session.data["status"],
+                    if active {
+                        json!("interrupted")
+                    } else {
+                        original["status"].clone()
+                    }
+                );
+                assert_eq!(session.data["error"].is_string(), active);
+            }
+            assert!(Arc::ptr_eq(
+                sessions["replacement"].harness.as_ref().unwrap(),
+                &other
+            ));
+            assert!(other.alive());
+        }
+        let saved: Vec<Value> = serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
+        for data in saved
+            .iter()
+            .filter(|data| data["id"].as_str().unwrap().starts_with("session-"))
+        {
+            assert!(!ACTIVE.contains(&data["status"].as_str().unwrap()));
+            assert_eq!(data["pending"], json!([]));
+            assert_eq!(data["cursor"], 8);
+        }
+        let reloaded = AgentManager::open(registry, 0);
+        let completed = reloaded.view("session-2", &"a".repeat(64)).unwrap();
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["items"], originals["session-2"]["items"]);
+        assert_eq!(completed["lastSubmission"]["requestId"], "request");
+        manager
+            .on_event(
+                &exiting,
+                HarnessEvent::Exit {
+                    message: "duplicate exit".into(),
+                },
+            )
+            .await;
+        assert_eq!(manager.persist_calls.load(Ordering::Relaxed), 1);
+        for (_, receiver) in &watches {
+            assert!(!receiver.has_changed().unwrap());
+        }
+        exiting.shutdown().await;
+        other.shutdown().await;
+        drop(reloaded);
+        drop(manager);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_exit_persist_failure_publishes_error_then_recovers_observed_exit() {
+        let source = include_str!("../../../../../../scripts/contract/fixtures/agent-cli.cjs");
+        let (exiting, _file) = harness::fixture(source, Protocol::Acp).await;
+        let directory =
+            std::env::temp_dir().join(format!("keepwork-provider-exit-failure-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let registry = directory.join("sessions.json");
+        let manager = AgentManager::open(registry.clone(), 0);
+        let mut originals = HashMap::new();
+        let mut watches = vec![];
+        {
+            let mut sessions = manager.sessions.lock().unwrap();
+            for id in ["running", "waiting"] {
+                let session = exit_session(&directory, id, id, Some(exiting.clone()));
+                originals.insert(id.to_string(), session.data.clone());
+                watches.push(session.events.subscribe());
+                sessions.insert(id.into(), session);
+            }
+            manager.persist(&mut sessions).unwrap();
+        }
+        let before = std::fs::read(&registry).unwrap();
+        std::fs::create_dir(registry.with_extension("json.tmp")).unwrap();
+        manager.persist_calls.store(0, Ordering::Relaxed);
+        assert!(manager
+            .harness_exited(&exiting, "fixture disconnected")
+            .is_err());
+        assert_eq!(manager.persist_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(std::fs::read(&registry).unwrap(), before);
+        {
+            let sessions = manager.sessions.lock().unwrap();
+            for (id, data) in &originals {
+                let session = &sessions[id];
+                assert_eq!(session.data["status"], "interrupted");
+                assert_eq!(session.data["items"], data["items"]);
+                assert_eq!(session.data["submissions"], data["submissions"]);
+                assert!(session.harness.is_none());
+                assert!(session.pending.is_empty());
+                assert_eq!(snapshot(&session.data)["status"], "error");
+                assert!(snapshot(&session.data)["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("NATIVE_STATE_PERSIST_FAILED"));
+            }
+        }
+        for receiver in &mut watches {
+            assert!(receiver.has_changed().unwrap());
+            let frame = receiver.borrow_and_update();
+            assert_eq!(frame["session"]["status"], "error");
+            assert!(frame["session"].get(NATIVE_PERSISTENCE_ERROR).is_none());
+        }
+        std::fs::remove_dir(registry.with_extension("json.tmp")).unwrap();
+        let recovered = manager.view("running", &"a".repeat(64)).unwrap();
+        assert_eq!(recovered["status"], "interrupted");
+        assert_eq!(recovered["error"], "fixture disconnected");
+        let reloaded = AgentManager::open(registry.clone(), 0);
+        assert_eq!(
+            reloaded.view("running", &"a".repeat(64)).unwrap()["status"],
+            "interrupted"
+        );
+        assert_eq!(
+            reloaded.view("waiting", &"a".repeat(64)).unwrap()["status"],
+            "interrupted"
+        );
+        assert!(watches[0].has_changed().unwrap());
+        exiting.shutdown().await;
+        drop(manager);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_stale_finish_never_changes_a_new_turn_even_when_storage_is_unavailable() {
+        let directory = std::env::temp_dir().join(format!("keepwork-stale-finish-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let manager = AgentManager::open(directory.join("sessions.json"), 0);
+        let mut session = exit_session(&directory, "session", "running", None);
+        session.data["turnId"] = json!("new-turn");
+        let original = session.data.clone();
+        let watcher = session.events.subscribe();
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("session".into(), session);
+        std::fs::create_dir(manager.file.with_extension("json.tmp")).unwrap();
+        manager.finish("session", "old-turn", "completed", None);
+        assert_eq!(manager.sessions.lock().unwrap()["session"].data, original);
+        assert!(!watcher.has_changed().unwrap());
+        assert_eq!(manager.persist_calls.load(Ordering::Relaxed), 0);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn codex_reasoning_and_reply_are_visible_in_multiple_running_stream_frames() {

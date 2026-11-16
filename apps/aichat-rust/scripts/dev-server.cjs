@@ -5,6 +5,9 @@ const http = require('node:http');
 
 const HOST = '127.0.0.1';
 const PORT = 1430;
+// A busy Vite server or Windows loopback connection refusal can take longer
+// than one second. Uncertain identity still means occupied when this expires.
+const PROBE_TIMEOUT_MS = 5000;
 const IDENTITY_PATH = '/.keepwork/aichat-rust-dev.json';
 const IDENTITY_PROTOCOL = 'keepwork-aichat-rust-dev-v1';
 const appRoot = path.resolve(__dirname, '..');
@@ -33,7 +36,7 @@ function devIdentityPlugin(projectRoot) {
   };
 }
 
-function probeDevServer({ projectRoot = appRoot, port = PORT, timeoutMs = 1000 } = {}) {
+function probeDevServer({ projectRoot = appRoot, port = PORT, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
   const root = fs.realpathSync(projectRoot);
   return new Promise(resolve => {
     let settled = false;
@@ -66,7 +69,7 @@ function occupiedError(port, reason) {
   return new Error(`Port ${port} is occupied by another service or its identity could not be verified (${reason || 'unknown'}). Check the terminal running that service, or stop that service and retry. No process was stopped and no alternate port was selected.`);
 }
 
-async function ensureDevServer({ projectRoot = appRoot, port = PORT, timeoutMs = 1000, createServer } = {}) {
+async function ensureDevServer({ projectRoot = appRoot, port = PORT, timeoutMs = PROBE_TIMEOUT_MS, createServer } = {}) {
   const root = fs.realpathSync(projectRoot);
   const url = `http://${HOST}:${port}`;
   const attached = () => ({ reused: true, url, close: async () => {} });

@@ -1,10 +1,26 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.completionMetadata = completionMetadata;
 exports.throwIfAborted = throwIfAborted;
 exports.abortable = abortable;
 exports.parseArguments = parseArguments;
 exports.responseText = responseText;
 exports.runCompletion = runCompletion;
+const text_tool_calls_cjs_1 = require("./text_tool_calls.cjs");
+const unfinished = new Set(['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'error', 'cancelled', 'aborted', 'incomplete', 'failed']);
+function completionMetadata(metadata) {
+    const result = {};
+    for (const source of [metadata, metadata?.choices?.[0], metadata?.raw, metadata?.raw?.choices?.[0]]) {
+        for (const key of ['finish_reason', 'stop_reason', 'truncated', 'status', 'error']) {
+            const value = source?.[key];
+            if (value == null)
+                continue;
+            if (!(key in result) || unfinished.has(value) || (['truncated', 'error'].includes(key) && value))
+                result[key] = value;
+        }
+    }
+    return result;
+}
 /** One model/tool loop. Transports perform exactly one inference request. */
 function throwIfAborted(signal) {
     if (signal?.aborted) {
@@ -60,6 +76,85 @@ function parseArguments(raw) {
 function responseText(response) {
     return typeof response === 'string' ? response : response?.choices?.[0]?.message?.content ?? response?.result ?? response?.content ?? '';
 }
+function emptyNativePlaceholder(call) {
+    if (!call || typeof call !== 'object' || Array.isArray(call))
+        return false;
+    if (Object.keys(call).some(key => !['id', 'index', 'type', 'function'].includes(key)))
+        return false;
+    if (call.id != null && String(call.id).trim())
+        return false;
+    if (call.type != null && call.type !== 'function')
+        return false;
+    const fn = call.function;
+    if (fn == null)
+        return true;
+    if (typeof fn !== 'object' || Array.isArray(fn) || Object.keys(fn).some(key => !['name', 'arguments'].includes(key)))
+        return false;
+    return [fn.name, fn.arguments].every(value => value == null || (typeof value === 'string' && !value.trim()));
+}
+function finalizedNativeCalls(snapshots, iteration) {
+    const calls = [], ids = new Map(), indexes = new Map(), seen = new WeakSet();
+    for (const snapshot of snapshots) {
+        if (snapshot && typeof snapshot === 'object') {
+            if (seen.has(snapshot))
+                continue;
+            seen.add(snapshot);
+        }
+        if (emptyNativePlaceholder(snapshot))
+            continue;
+        const call = snapshot && typeof snapshot === 'object' ? snapshot : { function: { name: '' } };
+        let position = call.id ? ids.get(call.id) : undefined;
+        if (position === undefined && call.index !== undefined) {
+            const candidate = indexes.get(call.index), prior = calls[candidate];
+            if (prior && (!call.id || !prior.id || call.id === prior.id))
+                position = candidate;
+        }
+        if (position === undefined) {
+            position = calls.length;
+            calls.push(call);
+        }
+        else {
+            const prior = calls[position];
+            // Keep identity, but do not fill missing final arguments/name from
+            // an earlier snapshot and accidentally execute stale semantics.
+            calls[position] = { ...call, id: call.id || prior.id };
+        }
+        if (calls[position].id)
+            ids.set(calls[position].id, position);
+        if (call.index !== undefined)
+            indexes.set(call.index, position);
+    }
+    return calls.map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
+}
+function equalArguments(left, right, depth = 0) {
+    if (left === right)
+        return true;
+    if (depth > 64 || !left || !right || typeof left !== 'object' || typeof right !== 'object')
+        return false;
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+            && Object.keys(left).length === left.length && Object.keys(right).length === right.length
+            && left.every((value, index) => equalArguments(value, right[index], depth + 1));
+    }
+    if (Object.prototype.toString.call(left) !== '[object Object]' || Object.prototype.toString.call(right) !== '[object Object]')
+        return false;
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && equalArguments(left[key], right[key], depth + 1));
+}
+function mirrorsNativeCalls(textCalls, calls, tools) {
+    if (!textCalls || textCalls.errors.size || textCalls.calls.length !== calls.length)
+        return false;
+    try {
+        return calls.every((call, index) => {
+            const textCall = textCalls.calls[index], name = call.function?.name;
+            return (tools || []).some(tool => tool.function?.name === name) && name === textCall.function.name
+                && equalArguments(parseArguments(call.function?.arguments), parseArguments(textCall.function.arguments));
+        });
+    }
+    catch {
+        return false;
+    }
+}
 async function runCompletion(options, { request, execute, emit = () => { } }) {
     const messages = options.messages || [], signal = options.abortController?.signal;
     const receipts = new Map();
@@ -70,15 +165,31 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
         const finalSummary = options.reserveFinalResponse && iteration === limit - 1;
         const response = await abortable(request({ ...options, ...(finalSummary ? { tools: [] } : {}), messages, onToolCall: call => {
                 // Keep the mutable SDK snapshot until the response has completed.
-                const key = call.id || `index:${call.index ?? announced.size}`;
+                const key = call?.id || `index:${call?.index ?? announced.size}`;
                 announced.set(key, call);
             } }), signal);
         throwIfAborted(signal);
-        const rawCalls = response?.choices?.[0]?.message?.tool_calls || response?.tool_calls;
-        for (const call of rawCalls || [])
-            announced.set(call.id || `index:${call.index ?? announced.size}`, call);
-        const calls = [...announced.values()].map((call, i) => ({ ...call, id: call.id || `call-${iteration}-${i}`, type: call.type || 'function' }));
-        const content = responseText(response);
+        const rawCalls = [response?.choices?.[0]?.message?.tool_calls, response?.tool_calls].filter(Array.isArray).flat();
+        let calls = finalizedNativeCalls([...announced.values(), ...rawCalls], iteration);
+        let content = responseText(response);
+        // Native calls are authoritative. Text recovery runs only after the
+        // transport completes; partial/cancelled requests never reach execution.
+        const reasons = [response?.choices?.[0]?.finish_reason, response?.finish_reason, response?.stop_reason];
+        const incomplete = response?.truncated || response?.error
+            || reasons.some(reason => ['length', 'max_tokens', 'max_output_tokens', 'content_filter', 'error', 'cancelled', 'aborted'].includes(reason))
+            || ['incomplete', 'failed', 'cancelled'].includes(response?.status);
+        const textCalls = !incomplete ? (0, text_tool_calls_cjs_1.recoverTextToolCalls)(content, finalSummary ? [] : options.tools, iteration) : null;
+        const recovered = !calls.length ? textCalls : null;
+        const nativeMirror = calls.length && mirrorsNativeCalls(textCalls, calls, options.tools);
+        if (recovered || nativeMirror) {
+            if (recovered)
+                calls = recovered.calls;
+            content = textCalls.content;
+            options.onMessage?.(content, { result: content, tool_calls: calls, replaceContent: true });
+            if (recovered)
+                for (const call of calls)
+                    options.onToolCallChunk?.(call);
+        }
         await emit({ type: 'message', content, iteration, message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) } });
         if (!calls.length)
             return response;
@@ -94,6 +205,8 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
             try {
                 if (!(options.tools || []).some(t => t.function?.name === name))
                     throw Error(`Unavailable tool: ${name}`);
+                if (recovered?.errors.has(call.id))
+                    throw Error(recovered.errors.get(call.id));
                 const args = parseArguments(call.function?.arguments);
                 const signature = JSON.stringify([name, args]);
                 const prior = receipts.get(call.id);

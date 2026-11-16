@@ -8,14 +8,41 @@ const source = fs.readFileSync(path.join(__dirname, "../src/petAudio.ts"), "utf8
 const javascript = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const exported = {};
-vm.runInNewContext(javascript, { exports: exported, require: () => ({}), setTimeout, clearTimeout });
-const { createPetAudioCapture } = exported;
+function captureFactory(timers = { setTimeout, clearTimeout }) {
+  const exported = {};
+  vm.runInNewContext(javascript, {
+    exports: exported, require: () => ({}), setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
+  });
+  return exported.createPetAudioCapture;
+}
+const createPetAudioCapture = captureFactory();
 const settle = async () => { for (let index = 0; index < 5; index++) await new Promise(setImmediate); };
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
+function manualClock() {
+  let now = 0, sequence = 0;
+  const pending = new Map(), callbacks = [];
+  return {
+    setTimeout(callback, delay) {
+      const id = ++sequence;
+      pending.set(id, { callback, due: now + delay }); callbacks.push(callback);
+      return id;
+    },
+    clearTimeout(id) { pending.delete(id); },
+    advance(milliseconds) {
+      now += milliseconds;
+      for (const [id, task] of [...pending]) {
+        if (task.due <= now) { pending.delete(id); task.callback(); }
+      }
+    },
+    pending: () => pending.size,
+    lastCallback: () => callbacks.at(-1),
+  };
+}
+
 function fixture(t, options = {}) {
   const reports = [], contexts = [], streams = [], requests = [], order = [];
+  const resumeEntered = deferred();
   let visible = true;
   function stream() {
     const track = Object.assign(new EventTarget(), { stops: 0, stop() { this.stops++; } });
@@ -35,7 +62,7 @@ function fixture(t, options = {}) {
     destination = {};
     closes = 0;
     constructor() { contexts.push(this); }
-    async resume() { if (options.resume) await options.resume(this); this.state = "running"; }
+    async resume() { resumeEntered.resolve(); if (options.resume) await options.resume(this); this.state = "running"; }
     async close() { this.closes++; this.state = "closed"; }
     createMediaStreamSource() { return this.source = new Node(); }
     createScriptProcessor() { return this.processor = new Node(); }
@@ -44,7 +71,8 @@ function fixture(t, options = {}) {
       this.processor?.onaudioprocess?.({ inputBuffer: { getChannelData: () => new Float32Array(size).fill(value) } });
     }
   }
-  const control = createPetAudioCapture({
+  const createCapture = options.clock ? captureFactory(options.clock) : createPetAudioCapture;
+  const control = createCapture({
     report: async (id, event) => {
       reports.push({ id, event: JSON.parse(JSON.stringify(event)) }); order.push(event.type);
       if (options.report) return options.report(id, event);
@@ -59,7 +87,7 @@ function fixture(t, options = {}) {
   });
   t.after(async () => { control.dispose(); await settle(); });
   return {
-    control, reports, contexts, streams, requests, order, stream,
+    control, reports, contexts, streams, requests, order, stream, resumeEntered: resumeEntered.promise,
     visible(value) { visible = value; },
     command: (op, id = "capture-1") => control.command({ op, id }),
     audio: () => reports.filter(record => record.event.type === "audio"),
@@ -144,24 +172,61 @@ test("stop during microphone permission wait releases the late stream without cr
   assert.equal(f.reports.some(record => record.event.type === "ready"), false);
 });
 
-test("stopping an audio resume immediately releases resources and ignores late completion", async t => {
+for (const late of ["resolve", "reject"]) test(`stopping an audio resume immediately releases resources and ignores late ${late}`, async t => {
+  const clock = manualClock();
   const resumed = deferred();
-  const f = fixture(t, { state: "suspended", resume: () => resumed.promise });
-  const starting = f.command("start"); await settle();
-  await f.command("stop"); await starting;
+  let resumes = 0;
+  const f = fixture(t, { clock, state: "suspended", resume: () => resumes++ === 0 ? resumed.promise : Promise.resolve() });
+  const starting = f.command("start"); await f.resumeEntered;
+  const oldDeadline = clock.lastCallback();
+  assert.equal(typeof oldDeadline, "function", "stop must exercise an already pending resume");
+  assert.equal(clock.pending(), 1);
+  // No wall-clock wait may choose the event order: stop wins before timeout.
+  await f.command("stop"); await f.command("stop"); await starting;
+  assert.equal(clock.pending(), 0);
   assert.equal(f.streams[0].track.stops, 1);
   assert.equal(f.contexts[0].closes, 1);
-  resumed.resolve(); await settle();
   assert.equal(f.reports.some(record => record.event.type === "ready"), false);
+  await f.command("start", "replacement");
+  oldDeadline(); // A stale callback already queued before clearTimeout is safe too.
+  if (late === "resolve") resumed.resolve(); else resumed.reject(Error("Late audio rejection"));
+  clock.advance(20); await settle();
+  assert.equal(f.streams[0].track.stops, 1);
+  assert.equal(f.contexts[0].closes, 1);
+  assert.equal(f.streams[1].track.stops, 0, "old completion cannot cancel the replacement capture");
+  assert.equal(f.contexts[1].closes, 0);
+  assert.equal(f.reports.some(record => record.id === "capture-1" && record.event.type === "ready"), false);
+  assert.deepEqual(f.reports.filter(record => record.event.type === "ready").map(record => record.id), ["replacement"]);
+  assert.deepEqual(f.audio(), []);
   assert.deepEqual(f.errors(), []);
 });
 
-for (const reason of ["reject", "timeout"]) test(`audio resume ${reason} ends capture and reports a bounded error`, async t => {
-  const f = fixture(t, { state: "suspended", resume: () => reason === "reject" ? Promise.reject(Error("Audio unavailable")) : new Promise(() => {}) });
+test("audio resume reject ends capture and reports a bounded error", async t => {
+  const f = fixture(t, { state: "suspended", resume: () => Promise.reject(Error("Audio unavailable")) });
   await f.command("start"); await settle();
   assert.equal(f.streams[0].track.stops, 1);
   assert.equal(f.contexts[0].closes, 1);
   assert.equal(f.errors().length, 1);
+});
+
+for (const late of ["resolve", "reject"]) test(`audio resume timeout before stop reports one error and ignores late ${late}`, async t => {
+  const clock = manualClock(), resumed = deferred();
+  const f = fixture(t, { clock, state: "suspended", resume: () => resumed.promise });
+  const starting = f.command("start"); await f.resumeEntered;
+  clock.advance(19); await settle();
+  assert.deepEqual(f.errors(), []);
+  clock.advance(1); await starting; await settle();
+  assert.equal(f.errors().length, 1, "a timeout processed before stop is a legitimate error");
+  assert.match(f.errors()[0].event.message, /麦克风音频未能启动/);
+  await f.command("stop"); await f.command("stop");
+  if (late === "resolve") resumed.resolve(); else resumed.reject(Error("Late audio rejection"));
+  clock.advance(20); await settle();
+  assert.equal(clock.pending(), 0);
+  assert.equal(f.streams[0].track.stops, 1);
+  assert.equal(f.contexts[0].closes, 1);
+  assert.equal(f.errors().length, 1);
+  assert.equal(f.reports.some(record => record.event.type === "ready"), false);
+  assert.deepEqual(f.audio(), []);
 });
 
 test("native IPC backpressure aborts capture at the bounded queue rather than losing audio silently", async t => {

@@ -290,18 +290,6 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
         Arc::clone(&session.closed)
     };
 
-    let health = {
-        let mut caps = state.health_capabilities();
-        caps.insert("runtimeEngine".into(), json!(crate::ENGINE));
-        Value::Object(caps)
-    };
-    let frame = json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/keepwork/alive",
-        "params": { "health": health },
-    })
-    .to_string();
-
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let state_clone = Arc::clone(state);
     let session_for_task = session_id.clone();
@@ -310,7 +298,6 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
         // Persona data changes are pushed as `personas_changed`; the browser
         // client filters them by owner and re-reads the snapshot, so one frame
         // per wake-up is enough and bursts coalesce without losing the update.
-        let alive_frame = format!("event: message\ndata: {frame}\n\n");
         let changed_frame = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/keepwork/personas_changed\"}\n\n";
         let mut changes = personas.changed.subscribe();
         let mut alive = tokio::time::interval(std::time::Duration::from_secs(25));
@@ -319,20 +306,19 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
         loop {
             let push = tokio::select! {
                 _ = sender.closed() => break,
-                _ = alive.tick() => alive_frame.as_str(),
+                // Optional backends can become ready after the stream opens.
+                // A cached initial frame would keep the page's health cache
+                // stale forever, even though each heartbeat refreshes its age.
+                _ = alive.tick() => alive_frame(&state_clone),
                 received = changes.recv() => match received {
-                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => changed_frame,
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => changed_frame.to_string(),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
             };
             if closed.load(Ordering::SeqCst) {
                 break;
             }
-            if sender
-                .send(Ok(Bytes::from(push.to_string())))
-                .await
-                .is_err()
-            {
+            if sender.send(Ok(Bytes::from(push))).await.is_err() {
                 break;
             }
         }
@@ -345,6 +331,17 @@ pub fn handle_get(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
         Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver)),
         &session_id,
     )
+}
+
+fn alive_frame(state: &AppState) -> String {
+    let mut health = state.health_capabilities();
+    health.insert("runtimeEngine".into(), json!(crate::ENGINE));
+    let frame = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/keepwork/alive",
+        "params": { "health": Value::Object(health) },
+    });
+    format!("event: message\ndata: {frame}\n\n")
 }
 
 pub fn handle_delete(state: &Arc<AppState>, headers: &HeaderMap) -> Response {
@@ -551,6 +548,40 @@ pub fn prune_idle(state: &Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alive_notifications_refresh_health_instead_of_reusing_the_initial_snapshot() {
+        let directory =
+            std::env::temp_dir().join(format!("kp-alive-health-{}", uuid::Uuid::new_v4()));
+        let mut state = AppState::new_at(
+            31337,
+            directory.join("workspace"),
+            false,
+            "fixture-token".into(),
+            crate::identity::Identity::from_env(None, None),
+            directory.join("personas-v1"),
+        );
+        let decode = |frame: String| -> Value {
+            let json = frame.strip_prefix("event: message\ndata: ").unwrap().trim();
+            serde_json::from_str(json).unwrap()
+        };
+        let initial = decode(alive_frame(&state));
+        assert_eq!(initial["method"], "notifications/keepwork/alive");
+        assert_eq!(initial["params"]["health"]["requireAuth"], false);
+        // Model a capability fact changing during an already open stream.
+        // The next frame must consult AppState again, rather than refresh the
+        // browser cache's age with the obsolete initial health document.
+        state.require_auth = true;
+        let current = decode(alive_frame(&state));
+        assert_eq!(current["params"]["health"]["requireAuth"], true);
+        assert_eq!(
+            current["params"]["health"]["terminalStatus"],
+            crate::terminal::health().status
+        );
+        assert!(current["params"]["health"].get("token").is_none());
+        drop(state);
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn streamed_replies_require_version_one() {

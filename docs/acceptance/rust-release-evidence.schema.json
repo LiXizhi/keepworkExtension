@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keepwork.com/schemas/rust-release-evidence-v1.json",
+  "title": "Keepwork Rust validation evidence v1",
+  "description": "A source or fixture report may leave artifact/runtime/web null. Passing source checks never implies packaged, hardware, account or clean-machine acceptance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recordedAt", "product", "version", "commit", "platform", "arch", "artifact", "runtime", "web", "checks", "overallStatus"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "product": { "enum": ["aichat-rust", "mcp-rust"] },
+    "version": { "type": ["string", "null"], "minLength": 1 },
+    "commit": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{40}$" },
+    "sourceDirty": { "type": "boolean" },
+    "sourceHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "platform": { "enum": ["macos", "windows", "linux"] },
+    "arch": { "enum": ["arm64", "x64", "universal"] },
+    "artifact": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "size", "signing"],
+          "anyOf": [{ "required": ["path"] }, { "required": ["url"] }],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "url": { "type": "string", "format": "uri" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+            "size": { "type": "integer", "minimum": 1 },
+            "signing": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status"],
+              "properties": {
+                "status": { "enum": ["signed", "unsigned", "ad-hoc", "unknown", "not-applicable"] },
+                "publisher": { "type": "string" },
+                "notarization": { "enum": ["passed", "failed", "pending", "not-applicable"] },
+                "details": { "type": "string" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runtime": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["engine", "version", "commit", "owner", "capabilities"],
+          "properties": {
+            "engine": { "enum": ["rust", "node", "unknown"] },
+            "version": { "type": ["string", "null"] },
+            "commit": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{40}$" },
+            "owner": { "type": ["string", "null"] },
+            "capabilities": { "type": "object" },
+            "pid": { "type": ["integer", "null"], "minimum": 1 },
+            "source": { "enum": ["health", "build-info"] }
+          }
+        }
+      ]
+    },
+    "web": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["origin", "build"],
+          "properties": {
+            "origin": { "type": "string", "format": "uri" },
+            "build": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "level", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "level": { "enum": ["source", "fixture", "native", "packaged", "live"] },
+          "status": { "enum": ["passed", "failed", "pending", "blocked", "skipped"] },
+          "command": { "type": "string", "minLength": 1 },
+          "summary": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "reason": { "type": "string", "minLength": 1 },
+          "durationMs": { "type": "integer", "minimum": 0 },
+          "sourceHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "evidenceSha256": {
+            "type": "object",
+            "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          },
+          "requirements": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "enum": ["real-account", "real-hardware", "clean-machine", "network", "interactive-desktop"] }
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "passed" } } },
+            "then": { "properties": { "evidence": { "minItems": 1 } } }
+          },
+          {
+            "if": { "properties": { "status": { "enum": ["pending", "blocked", "skipped", "failed"] } } },
+            "then": { "required": ["reason"] }
+          }
+        ]
+      }
+    },
+    "overallStatus": { "enum": ["passed", "failed", "pending", "blocked"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "overallStatus": { "const": "passed" } } },
+      "then": { "properties": { "checks": { "items": { "properties": { "status": { "const": "passed" } } } } } }
+    }
+  ]
+}

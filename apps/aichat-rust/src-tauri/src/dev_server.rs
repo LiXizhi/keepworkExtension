@@ -1,5 +1,6 @@
 use crate::files::{atomic_json_write, inside, validate_relative_path};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -219,15 +220,36 @@ fn content_type_for(path: &Path) -> &'static str {
 }
 
 fn write_http_response(
-    mut stream: TcpStream,
+    stream: TcpStream,
     status: &str,
     content_type: &str,
     body: &[u8],
     head_only: bool,
 ) {
+    write_http_response_with_etag(stream, status, content_type, body, head_only, None);
+}
+
+fn write_http_response_with_etag(
+    mut stream: TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    etag: Option<&str>,
+) {
+    let cache = match etag {
+        Some(etag) => format!("Cache-Control: private, no-cache\r\nETag: {etag}\r\n"),
+        None => "Cache-Control: no-store\r\n".to_string(),
+    };
+    // 304 has no body. Omit its optional Content-Length rather than report the
+    // length of an empty body as the size of the cached representation.
+    let length = if status.starts_with("304 ") {
+        String::new()
+    } else {
+        format!("Content-Length: {}\r\n", body.len())
+    };
     let header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{length}{cache}X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
     );
     let _ = stream.write_all(header.as_bytes());
     if !head_only {
@@ -323,12 +345,35 @@ fn handle_client(mut stream: TcpStream, root_dir: &Path, entry_file: &str) {
 
     match fs::read(&real_target) {
         Ok(bytes) => {
-            write_http_response(
+            // Validate the path and read the current bytes BEFORE checking the
+            // validator. Changes (including same-size edits), deletion and
+            // symlink escapes must never resurrect a cached response.
+            let etag = format!("\"{:x}\"", Sha256::digest(&bytes));
+            let not_modified =
+                req.lines()
+                    .skip(1)
+                    .take_while(|line| !line.is_empty())
+                    .any(|line| {
+                        let Some((name, value)) = line.split_once(':') else {
+                            return false;
+                        };
+                        name.eq_ignore_ascii_case("if-none-match")
+                            && value.split(',').any(|tag| {
+                                let tag = tag.trim();
+                                tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == etag
+                            })
+                    });
+            write_http_response_with_etag(
                 stream,
-                "200 OK",
+                if not_modified {
+                    "304 Not Modified"
+                } else {
+                    "200 OK"
+                },
                 content_type_for(&real_target),
-                &bytes,
-                method == "HEAD",
+                if not_modified { &[] } else { &bytes },
+                method == "HEAD" || not_modified,
+                Some(&etag),
             );
         }
         Err(_) => {
@@ -373,6 +418,14 @@ impl DevServer {
             first_port,
             port_count,
         )?;
+        Self::serve_listener(listener, root_dir, entry_file)
+    }
+
+    fn serve_listener(
+        listener: TcpListener,
+        root_dir: PathBuf,
+        entry_file: String,
+    ) -> Result<Self, String> {
         let port = listener
             .local_addr()
             .map_err(|e| format!("Failed to query local server address: {e}"))?
@@ -485,6 +538,41 @@ mod tests {
 
     static TEST_PORT_LOCK: Mutex<()> = Mutex::new(());
 
+    fn isolated_origin_test() -> bool {
+        const CHILD_TEST: &str = "AICHAT_SOURCE_ORIGIN_TEST";
+        let thread = thread::current();
+        let name = thread.name().expect("named libtest thread");
+        if std::env::var(CHILD_TEST).as_deref() == Ok(name) {
+            return false;
+        }
+        // Other libtests spawn PTYs with fork/pre_exec. Even CLOEXEC sockets
+        // remain inherited until exec, so a concurrent child can retain our
+        // listener after stop joins its thread. Create these sockets only in a
+        // fresh, single-test process; do not retry or change a saved origin.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD_TEST, name)
+            .spawn()
+            .expect("spawn isolated origin test");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    assert!(status.success(), "isolated origin test failed: {status}");
+                    return true;
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated origin test did not finish: {result:?}");
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn registry_owner_releases_lock_while_an_inherited_descriptor_remains_open() {
@@ -517,7 +605,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn fixture() -> (PathBuf, PathBuf, u16) {
+    fn source_fixture() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("source")).unwrap();
         fs::write(
@@ -525,29 +613,42 @@ mod tests {
             "<!doctype html><title>Origin</title>",
         )
         .unwrap();
-        // Keep fixtures outside both the user's 3001 range and the OS's
-        // ephemeral client range: parallel HTTP tests may consume an ephemeral
-        // port between our availability probe and the assertion that rebinds it.
-        let first = (0..1000)
+        let registry = root.join("profile/source-ports.json");
+        (root, registry)
+    }
+
+    fn fixture() -> (PathBuf, PathBuf, u16, DevServer) {
+        let (root, registry) = source_fixture();
+        // Allocate through production code and retain its real listener. A
+        // probe followed by close leaves a race before the actual first bind.
+        let first = 20000 + (Uuid::new_v4().as_u128() % 9000) as u16;
+        let server = DevServer::start_in_port_range(
+            &root.join("source"),
+            "AIChat.html",
+            &registry,
+            first,
+            8,
+        )
+        .expect("allocate isolated source listener");
+        (root, registry, first, server)
+    }
+
+    fn occupied_port_fixture() -> (PathBuf, PathBuf, u16, TcpListener) {
+        let (root, registry) = source_fixture();
+        // Keep the occupied socket itself, rather than probing, releasing and
+        // rebinding a port another test process can claim in between.
+        let listener = (0..1000)
             .find_map(|_| {
                 let port = 20000 + (Uuid::new_v4().as_u128() % 9000) as u16;
-                let mut probes = Vec::new();
-                for next in port..port + 8 {
-                    if let Ok(probe) = TcpListener::bind(("127.0.0.1", next)) {
-                        probes.push(probe);
-                    } else {
-                        break;
-                    }
-                }
-                if probes.len() == 8 {
-                    Some(port)
-                } else {
-                    None
+                match TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(listener) => Some(listener),
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
+                    Err(error) => panic!("Cannot bind occupied-port fixture: {error}"),
                 }
             })
-            .expect("isolated test port range unavailable");
-        let registry = root.join("profile/source-ports.json");
-        (root, registry, first)
+            .expect("isolated occupied test port unavailable");
+        let port = listener.local_addr().unwrap().port();
+        (root, registry, port, listener)
     }
 
     #[test]
@@ -555,10 +656,10 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
-        let mut first =
-            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
-                .unwrap();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, mut first) = fixture();
         let original = first.url();
         first.stop();
         let mut second =
@@ -569,7 +670,134 @@ mod tests {
             original,
             "restarting must preserve the browser storage origin"
         );
+        let mut request = TcpStream::connect(("127.0.0.1", second.port)).unwrap();
+        request
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        request
+            .write_all(b"GET /AIChat.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        request.read_to_string(&mut response).unwrap();
+        assert!(response.contains("200 OK") && response.contains("<title>Origin</title>"));
         second.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_listener_conflict_preserves_origin_until_owned_child_releases_it() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let _test_ports = TEST_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, mut server) = fixture();
+        let original = server.url();
+        let before = fs::read(&registry).unwrap();
+
+        struct InheritedListener {
+            pid: libc::pid_t,
+            release: Option<fs::File>,
+        }
+        impl Drop for InheritedListener {
+            fn drop(&mut self) {
+                // Release only our child, and always reap it, including panic.
+                drop(self.release.take());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    let result =
+                        unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), libc::WNOHANG) };
+                    if result == self.pid {
+                        break;
+                    }
+                    if result < 0
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+                    {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        unsafe {
+                            libc::kill(self.pid, libc::SIGKILL);
+                            loop {
+                                let reaped = libc::waitpid(self.pid, std::ptr::null_mut(), 0);
+                                if reaped == self.pid
+                                    || std::io::Error::last_os_error().raw_os_error()
+                                        != Some(libc::EINTR)
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        let mut ready = [0; 2];
+        let mut release = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::pipe(release.as_mut_ptr()) }, 0);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", std::io::Error::last_os_error());
+        if pid == 0 {
+            // The multithreaded parent has an active accept loop. Between fork
+            // and exec only async-signal-safe libc operations are permitted.
+            unsafe {
+                libc::close(ready[0]);
+                libc::close(release[1]);
+                libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                let mut byte = 0u8;
+                libc::read(release[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(ready[1]);
+            libc::close(release[0]);
+        }
+        let mut ready_file = unsafe { fs::File::from_raw_fd(ready[0]) };
+        let inherited = InheritedListener {
+            pid,
+            release: Some(unsafe { fs::File::from_raw_fd(release[1]) }),
+        };
+        let mut poll = libc::pollfd {
+            fd: ready_file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut poll, 1, 2000) },
+            1,
+            "owned child ready barrier timed out"
+        );
+        ready_file.read_exact(&mut [0u8]).unwrap();
+        server.stop();
+        assert!(
+            server.handle.is_none(),
+            "stop joined the sole accept thread"
+        );
+        let error =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .err()
+                .unwrap();
+        assert!(error.contains("saved origin was not changed"));
+        assert_eq!(fs::read(&registry).unwrap(), before);
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            0
+        );
+        eprintln!("controlled inherited listener: child_pid={pid}, origin={original}, parent_accept_thread_joined=true, restart_error={error}");
+        drop(inherited);
+        let mut restarted =
+            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
+                .unwrap();
+        assert_eq!(restarted.url(), original);
+        eprintln!("controlled inherited listener released: child_pid={pid}, same_origin_rebound={original}");
+        restarted.stop();
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -578,11 +806,12 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
-        let mut current = Some(
-            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
-        );
+        let mut current = Some(server);
         let original = current.as_ref().unwrap().url();
         let before = fs::read(&registry).unwrap();
         fs::write(source.join("other.html"), "other entry").unwrap();
@@ -620,12 +849,18 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
-        let stranger = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, stranger) = occupied_port_fixture();
         let mut server =
             DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
                 .unwrap();
-        assert_eq!(server.port, port + 1);
+        let fallback_port = server.port;
+        assert!(
+            (port + 1..port + 8).contains(&fallback_port),
+            "the source must skip the occupied first port and stay in its configured range"
+        );
         server.stop();
         stranger.set_nonblocking(true).unwrap();
         assert_eq!(
@@ -637,8 +872,7 @@ mod tests {
             DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
                 .unwrap();
         assert_eq!(
-            restarted.port,
-            port + 1,
+            restarted.port, fallback_port,
             "an earlier port becoming free must not change the saved origin"
         );
         restarted.stop();
@@ -650,10 +884,10 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
-        let mut server =
-            DevServer::start_in_port_range(&root.join("source"), "AIChat.html", &registry, port, 8)
-                .unwrap();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, mut server) = fixture();
         let saved_port = server.port;
         server.stop();
         let before = fs::read(&registry).unwrap();
@@ -680,12 +914,15 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
         fs::create_dir_all(root.join("other")).unwrap();
         fs::write(root.join("other/AIChat.html"), "other source").unwrap();
         fs::write(source.join("other.html"), "other entry").unwrap();
-        let mut current = None;
+        let mut current = Some(server);
         let first = DevServer::select_source_in_port_range(
             &mut current,
             &source,
@@ -705,7 +942,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(repeated, first);
-        assert_eq!(current.as_ref().unwrap().port, port);
+        let first_port = current.as_ref().unwrap().port;
         DevServer::select_source_in_port_range(
             &mut current,
             &root.join("other"),
@@ -715,7 +952,8 @@ mod tests {
             8,
         )
         .unwrap();
-        assert_eq!(current.as_ref().unwrap().port, port + 1);
+        let other_source_port = current.as_ref().unwrap().port;
+        assert_ne!(other_source_port, first_port);
         DevServer::select_source_in_port_range(
             &mut current,
             &source,
@@ -725,9 +963,9 @@ mod tests {
             8,
         )
         .unwrap();
-        assert_eq!(
-            current.as_ref().unwrap().port,
-            port + 2,
+        assert!(
+            current.as_ref().unwrap().port != first_port
+                && current.as_ref().unwrap().port != other_source_port,
             "released reserved ports belong to their original source"
         );
         assert_eq!(
@@ -751,11 +989,12 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
-        let mut current = Some(
-            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
-        );
+        let mut current = Some(server);
         let url = current.as_ref().unwrap().url();
         fs::write(source.join("other.html"), "other entry").unwrap();
         fs::write(&registry, "broken JSON").unwrap();
@@ -790,9 +1029,11 @@ mod tests {
         let _test_ports = TEST_PORT_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, busy) = occupied_port_fixture();
         let source = root.join("source");
-        let busy = TcpListener::bind(("127.0.0.1", port)).unwrap();
         let error = DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 1)
             .err()
             .unwrap();
@@ -821,11 +1062,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         use std::os::unix::fs::PermissionsExt;
-        let (root, registry, port) = fixture();
+        if isolated_origin_test() {
+            return;
+        }
+        let (root, registry, port, server) = fixture();
         let source = root.join("source");
-        let mut current = Some(
-            DevServer::start_in_port_range(&source, "AIChat.html", &registry, port, 8).unwrap(),
-        );
+        let mut current = Some(server);
         let url = current.as_ref().unwrap().url();
         let before = fs::read(&registry).unwrap();
         fs::write(source.join("other.html"), "other entry").unwrap();
@@ -859,11 +1101,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conditional_cache_reuses_bytes_but_revalidates_edits_deletion_and_paths() {
+        let root = std::env::temp_dir().join(format!("aichat-source-cache-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("AIChat.html"), "first-screen").unwrap();
+        fs::write(root.join("manifest.json"), r#"{"version":1}"#).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (source, entry) = source_identity(&root, "AIChat.html").unwrap();
+        let mut server = DevServer::serve_listener(listener, source, entry).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let body_is_not_a_header = client
+            .get(server.url())
+            .body("If-None-Match: *\r\n")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(body_is_not_a_header.status().as_u16(), 200);
+        assert_eq!(body_is_not_a_header.text().await.unwrap(), "first-screen");
+
+        for (file, original, edited) in [
+            ("AIChat.html", "first-screen", "ready-screen"),
+            ("manifest.json", r#"{"version":1}"#, r#"{"version":2}"#),
+        ] {
+            let url = format!("http://127.0.0.1:{}/{file}", server.port);
+            let initial = client.get(&url).send().await.unwrap();
+            assert_eq!(initial.status().as_u16(), 200);
+            assert_eq!(initial.headers()["cache-control"], "private, no-cache");
+            let etag = initial.headers()["etag"].to_str().unwrap().to_string();
+            assert_eq!(initial.text().await.unwrap(), original);
+            for validator in [etag.clone(), format!("\"other\", W/{etag}"), "*".into()] {
+                let cached = client
+                    .get(&url)
+                    .header("If-None-Match", validator)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(cached.status().as_u16(), 304);
+                assert_eq!(cached.headers()["etag"], etag);
+                assert_eq!(cached.headers()["cache-control"], "private, no-cache");
+                assert!(cached.bytes().await.unwrap().is_empty());
+            }
+            let head = client.head(&url).send().await.unwrap();
+            assert_eq!(head.headers()["etag"], etag);
+            assert_eq!(head.headers()["content-length"], original.len().to_string());
+            assert!(head.bytes().await.unwrap().is_empty());
+            let head_cached = client
+                .head(&url)
+                .header("If-None-Match", &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(head_cached.status().as_u16(), 304);
+            assert!(head_cached.bytes().await.unwrap().is_empty());
+
+            assert_eq!(
+                original.len(),
+                edited.len(),
+                "same-size edits still invalidate cache"
+            );
+            fs::write(root.join(file), edited).unwrap();
+            let changed = client
+                .get(&url)
+                .header("If-None-Match", &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(changed.status().as_u16(), 200);
+            assert_ne!(changed.headers()["etag"], etag);
+            assert_eq!(changed.text().await.unwrap(), edited);
+            fs::remove_file(root.join(file)).unwrap();
+            let deleted = client
+                .get(&url)
+                .header("If-None-Match", &etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(deleted.status().as_u16(), 404);
+            assert_eq!(deleted.headers()["cache-control"], "no-store");
+            assert!(deleted.headers().get("etag").is_none());
+        }
+        let escape = client
+            .get(format!("http://127.0.0.1:{}/%2e%2e%2fsecret", server.port))
+            .header("If-None-Match", "*")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(escape.status().as_u16(), 403);
+        assert_eq!(escape.headers()["cache-control"], "no-store");
+        assert!(escape.headers().get("etag").is_none());
+        #[cfg(unix)]
+        {
+            let outside = root.with_extension("outside");
+            fs::write(root.join("public.txt"), "public bytes").unwrap();
+            fs::write(&outside, "private bytes").unwrap();
+            let link = root.join("link.txt");
+            std::os::unix::fs::symlink(root.join("public.txt"), &link).unwrap();
+            let url = format!("http://127.0.0.1:{}/link.txt", server.port);
+            let before = client.get(&url).send().await.unwrap();
+            assert_eq!(before.status().as_u16(), 200);
+            let etag = before.headers()["etag"].to_str().unwrap().to_string();
+            assert_eq!(before.text().await.unwrap(), "public bytes");
+            fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let escaped = client
+                .get(&url)
+                .header("If-None-Match", etag)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(escaped.status().as_u16(), 403);
+            assert_eq!(escaped.headers()["cache-control"], "no-store");
+            assert!(escaped.headers().get("etag").is_none());
+            assert_eq!(escaped.text().await.unwrap(), "Forbidden");
+            fs::remove_file(outside).unwrap();
+        }
+        server.stop();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn serves_local_aichat_source_on_loopback_and_blocks_traversal() {
-        let _test_ports = TEST_PORT_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let (root, registry, port) = fixture();
+        let root = std::env::temp_dir().join(format!("aichat-rust-devsrv-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("js")).unwrap();
         fs::write(
             root.join("AIChat.html"),
@@ -872,8 +1231,12 @@ mod tests {
         .unwrap();
         fs::write(root.join("js/app.js"), "export const ok = true;").unwrap();
 
-        let mut server =
-            DevServer::start_in_port_range(&root, "AIChat.html", &registry, port, 8).unwrap();
+        // This case verifies HTTP and confinement, not origin allocation.
+        // Keep ownership of the OS-selected socket through server startup;
+        // probing and releasing a small range races other local test clients.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (source, entry) = source_identity(&root, "AIChat.html").unwrap();
+        let mut server = DevServer::serve_listener(listener, source, entry).unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let res = client.get(server.url()).send().await.unwrap();
@@ -884,7 +1247,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "no-store"
+            "private, no-cache"
         );
         let text = res.text().await.unwrap();
         assert!(text.contains("<title>AIChat</title>"));

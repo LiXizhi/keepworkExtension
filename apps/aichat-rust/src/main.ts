@@ -23,6 +23,8 @@ const headline = document.getElementById("headline");
 const summary = document.getElementById("summary");
 const detail = document.getElementById("detail");
 const retryStatus = document.getElementById("retry-status");
+const startup = document.getElementById("startup");
+const recoveryPanel = document.getElementById("recovery");
 const recovery = window.__AICHAT_PAGE_CONNECTION__;
 let connection: PageConnectionSnapshot | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -34,21 +36,38 @@ function clearRetry(): void {
   retryTimer = undefined;
 }
 
+function applyStartupTheme(theme: DesktopStatus["theme"]): void {
+  document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+  document.dispatchEvent(new Event("aichat:theme-changed"));
+}
+
+function showRecovery(failed: boolean): void {
+  if (recoveryPanel) recoveryPanel.hidden = !failed;
+  if (startup) {
+    startup.dataset.state = failed ? "unavailable" : "connecting";
+    startup.setAttribute("aria-busy", String(!failed));
+  }
+}
+
 function render(status: DesktopStatus): void {
   connection = status.pageConnection;
   const failed = connection?.phase === "unavailable";
-  if (headline) headline.textContent = failed ? "暂时无法打开 AIChat" : "正在打开 AIChat…";
+  // Legacy hosts have no connection snapshot; keep their manual reload usable.
+  showRecovery(failed || !connection);
+  if (headline) headline.textContent = failed ? "暂时无法打开 AIChat" : connection ? "正在打开工作台…" : "打开聊天工作台";
   if (summary) {
-    summary.textContent = connection?.localEntry
-      ? "正在连接本地页面服务。若无法打开，请检查本地源码服务后重试。"
-      : "请检查网络连接或页面服务。恢复连接后会自动尝试重新打开。";
+    summary.textContent = failed
+      ? connection?.localEntry
+        ? "无法连接本地页面服务，请检查服务后重试。"
+        : "请检查网络连接。恢复连接后会自动尝试重新打开。"
+      : connection ? "即将进入你的第二大脑。" : "点击下方按钮重新加载聊天窗口。";
   }
   // Display only the host-sanitized origin, never an entry query or fragment.
   if (detail) {
     const running = ["running", "attached"].includes(status.mcp.state);
     detail.textContent = `页面地址：${connection?.entryOrigin || "已配置的入口"}\n本机服务：${running ? "运行中" : "未就绪"}（${status.mcp.port}）${failed && connection?.error ? `\n${connection.error}` : ""}`;
   }
-  if (reloadBtn) reloadBtn.textContent = failed ? "立即重试" : "正在连接…";
+  if (reloadBtn) reloadBtn.textContent = failed ? "立即重试" : connection ? "正在连接…" : "重新加载聊天窗口";
   if (failed && connection && recovery) {
     if (connection.autoRetries < connection.maxAutoRetries) {
       const delay = [5, 15, 30][connection.autoRetries] || 30;
@@ -65,8 +84,10 @@ async function retry(automatic = false): Promise<void> {
   if (automatic && (connection?.phase !== "unavailable" || connection.autoRetries >= connection.maxAutoRetries)) return;
   clearRetry();
   pending = true;
+  showRecovery(false);
   if (reloadBtn) (reloadBtn as HTMLButtonElement).disabled = true;
   if (headline) headline.textContent = "正在打开 AIChat…";
+  if (summary) summary.textContent = "请稍候，正在连接工作台。";
   if (retryStatus) retryStatus.textContent = "正在连接页面，最多等待 20 秒…";
   try {
     await recovery.retry(automatic);
@@ -74,6 +95,7 @@ async function retry(automatic = false): Promise<void> {
     // recovery owns the timeout; online events cannot start a parallel attempt.
   } catch {
     pending = false;
+    showRecovery(true);
     if (reloadBtn) (reloadBtn as HTMLButtonElement).disabled = false;
     if (headline) headline.textContent = "暂时无法打开 AIChat";
     if (retryStatus) retryStatus.textContent = "无法重试，请通过应用菜单重新加载。";
@@ -97,15 +119,21 @@ if (recovery || bridge) {
   void (recovery ? recovery.status() : bridge!.status())
     .then((status) => {
       if (disposed) return;
+      applyStartupTheme(status.theme);
       render(status);
       if (connection?.phase === "idle") {
         retryTimer = setTimeout(() => { void retry(); }, 0);
       }
     })
     .catch(() => {
+      if (disposed) return;
+      applyStartupTheme(undefined);
+      showRecovery(true);
       if (headline) headline.textContent = "暂时无法打开 AIChat";
       if (summary) summary.textContent = "请通过应用菜单重新加载聊天窗口。";
     });
+} else {
+  applyStartupTheme(undefined);
 }
 
 // This module runs only in the local connection page. A loaded chat has no

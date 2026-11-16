@@ -1,6 +1,50 @@
 use super::*;
 use super::{dingtalk::*, feishu::*, lifecycle::*, policy::*};
 
+#[tokio::test]
+async fn listener_ready_survives_a_large_stderr_read() {
+    let burst = format!("[event] ready\n{}", "diagnostic output\n".repeat(600));
+    let mut stderr = burst.as_bytes();
+    wait_listener_ready(&mut stderr).await.unwrap();
+}
+
+#[tokio::test]
+async fn listener_ready_recognizes_a_marker_split_between_reads() {
+    let first = format!("{}[event] re", "x".repeat(5000));
+    let mut stderr = first.as_bytes().chain(&b"ady\n"[..]);
+    wait_listener_ready(&mut stderr).await.unwrap();
+}
+
+#[tokio::test]
+async fn listener_ready_handles_multibyte_and_invalid_diagnostics() {
+    let first = "日".repeat(2000);
+    let mut stderr = first
+        .as_bytes()
+        .chain(&b"\xff\xfe"[..])
+        .chain(&b"[event] ready\n"[..]);
+    wait_listener_ready(&mut stderr).await.unwrap();
+}
+
+#[tokio::test]
+async fn listener_ready_classifies_eof_without_exposing_diagnostics() {
+    for (diagnostic, reason) in [
+        ("", "DWS listener exited before ready"),
+        (
+            "unsupported event rule private-value",
+            "DWS CLI update required for message subscriptions",
+        ),
+        ("未登录 private-value", "DingTalk login required"),
+    ] {
+        let mut stderr = diagnostic.as_bytes();
+        let error = wait_listener_ready(&mut stderr).await.unwrap_err();
+        assert_eq!(
+            error.message,
+            format!("DWS rejected the operation ({reason})")
+        );
+        assert!(!error.uncertain);
+    }
+}
+
 #[test]
 fn feishu_identity_requires_verified_personal_login() {
     let ready = json!({

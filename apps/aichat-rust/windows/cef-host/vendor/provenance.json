@@ -1,0 +1,9 @@
+{
+  "name": "@oddbird/popover-polyfill",
+  "version": "0.7.3",
+  "license": "BSD-3-Clause",
+  "source": "https://github.com/oddbird/popover-polyfill",
+  "tarball": "https://registry.npmjs.org/@oddbird/popover-polyfill/-/popover-polyfill-0.7.3.tgz",
+  "integrity": "sha512-uOY7RLqS1M12u+EzZHQ8vPSh3NjwDlb4qwJ1WDzQ0inZ14+47Vv0NNs+1Lh4PtX1nLiiCbfJyIxPRHsgBTvhvg==",
+  "scriptSha256": "4f9e822461fff46ab3ce3c37148b900a8d2f29ee84217e0c467bf78d0bff9088"
+}

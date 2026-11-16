@@ -1,4 +1,4 @@
-/** Build-time vendoring. Checks verify canonical parity when available, otherwise packaged integrity. */
+/** Build-time vendoring. Auto preserves legacy selection; explicit checks are reproducible. */
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -29,8 +29,10 @@ function verifyPackagedRuntime(dest) {
         if (hash(fs.readFileSync(path.join(dest, file.replace(/\.mjs$/, '.cjs')))) !== info.output) throw Error('Vendored runtime modified: ' + file);
     }
 }
-function syncRuntime({ source = defaultSource, dest = defaultDest, check = false, allowMissingSource = true, freshness = verifyFreshness } = {}) {
-    if (!fs.existsSync(source) && !fs.existsSync(path.dirname(source)) && allowMissingSource) {
+function syncRuntime({ source = defaultSource, dest = defaultDest, check = false, mode = 'auto', allowMissingSource = true, freshness = verifyFreshness } = {}) {
+    if (!['auto', 'canonical', 'packaged'].includes(mode)) throw Error('Runtime mode must be auto, canonical or packaged');
+    if (mode === 'packaged' && !check) throw Error('Packaged mode requires --check; it never synchronizes source');
+    if (mode === 'packaged' || (mode === 'auto' && !fs.existsSync(source) && !fs.existsSync(path.dirname(source)) && allowMissingSource)) {
         verifyPackagedRuntime(dest);
         return [];
     }
@@ -66,7 +68,18 @@ function syncRuntime({ source = defaultSource, dest = defaultDest, check = false
     const manifestText = JSON.stringify(manifest, null, 2) + '\n';
     if (check) {
         if (!fs.existsSync(manifestPath) || fs.readFileSync(manifestPath, 'utf8') !== manifestText) {
-            throw Error('AIChat runtime out of sync (source, module inventory or compiler output changed). Run npm run sync:aichat-runtime.');
+            const differences = [];
+            const oldFiles = previous?.files || {};
+            for (const file of files) {
+                if (!oldFiles[file]) differences.push(`added source: ${file}`);
+                else {
+                    if (oldFiles[file].source !== manifest.files[file].source) differences.push(`source changed: ${file}`);
+                    if (oldFiles[file].output !== manifest.files[file].output) differences.push(`compiler output changed: ${file}`);
+                }
+            }
+            for (const file of Object.keys(oldFiles)) if (!manifest.files[file]) differences.push(`removed source: ${file}`);
+            if (!differences.length) differences.push('manifest metadata or formatting changed');
+            throw Error(`AIChat runtime out of sync (canonical mode, TypeScript ${ts.version}):\n${differences.map(item => `  ${item}`).join('\n')}\nSource: ${source}\nPackaged revision: ${previous?.sourceRevision?.commit || 'unknown'}\nReview the canonical changes before running npm run sync:aichat-runtime.`);
         }
         const actual = fs.readdirSync(dest).filter(f => f.endsWith('.cjs')).sort();
         if (JSON.stringify(actual) !== JSON.stringify([...outputs.keys()].sort())) throw Error('Vendored runtime module inventory changed');
@@ -88,12 +101,29 @@ function syncRuntime({ source = defaultSource, dest = defaultDest, check = false
     }
     return files.map(file => path.join(source, file));
 }
-module.exports = { syncRuntime, defaultSource, defaultDest };
+function parseArgs(args) {
+    const options = { mode: 'auto', check: false };
+    let explicitSource;
+    for (let index = 0; index < args.length; index++) {
+        const argument = args[index];
+        if (argument === '--check') options.check = true;
+        else if (argument === '--mode') {
+            if (!args[index + 1] || args[index + 1].startsWith('--')) throw Error('--mode requires auto, canonical or packaged');
+            options.mode = args[++index];
+        } else if (argument.startsWith('--mode=')) options.mode = argument.slice('--mode='.length);
+        else if (argument.startsWith('--')) throw Error('Unknown runtime option: ' + argument);
+        else if (explicitSource) throw Error('Only one canonical runtime directory is allowed');
+        else explicitSource = argument;
+    }
+    if (explicitSource && options.mode === 'packaged') throw Error('Packaged mode does not accept a canonical source directory');
+    return { ...options, source: explicitSource || defaultSource, allowMissingSource: !explicitSource };
+}
+module.exports = { syncRuntime, verifyPackagedRuntime, parseArgs, defaultSource, defaultDest };
 if (require.main === module) {
     const args = process.argv.slice(2);
     try {
-        const explicitSource = args.find(a => !a.startsWith('--'));
-        const files = syncRuntime({ source: explicitSource || defaultSource, check: args.includes('--check'), allowMissingSource: !explicitSource });
-        console.log(!files.length ? 'AIChat checkout absent; verified packaged runtime copy' : args.includes('--check') ? 'AIChat runtime source and packaged copy verified' : 'Synced AIChat runtime');
+        const options = parseArgs(args);
+        const files = syncRuntime(options);
+        console.log(!files.length ? `AIChat packaged runtime integrity verified (mode: ${options.mode})` : options.check ? `AIChat canonical source and packaged copy verified (mode: ${options.mode})` : 'Synced AIChat runtime');
     } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

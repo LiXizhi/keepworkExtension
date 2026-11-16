@@ -3,6 +3,7 @@
 use crate::desktop_lock::DesktopLock;
 use crate::dev_server::DevServer;
 use crate::files::NativeFiles;
+use crate::launch_intents::LaunchIntents;
 use crate::login_startup::{load_settings, save_settings, DesktopSettings, LoginStartup};
 use crate::page_connection::{self, PageConnection};
 use crate::permissions::MediaGrants;
@@ -12,6 +13,7 @@ use crate::runtime::{
 };
 use crate::security::ENTRY;
 use crate::terminal::TerminalSessionManager;
+use crate::theme::{DesktopTheme, ThemePreference};
 use crate::tray_channels::ChannelStatus;
 use crate::updates::{UpdateManager, UpdatesSnapshot};
 use crate::APP_VERSION;
@@ -25,6 +27,7 @@ use std::sync::{Arc, Mutex};
 #[serde(rename_all = "camelCase")]
 pub struct DesktopStatus {
     pub version: String,
+    pub theme: DesktopTheme,
     pub platform: String,
     pub arch: String,
     pub entry_url: String,
@@ -38,6 +41,7 @@ pub struct DesktopStatus {
 pub struct AppCore {
     pub profile_dir: PathBuf,
     pub settings_path: PathBuf,
+    pub theme: ThemePreference,
     pub mcp_home: PathBuf,
     pub files: NativeFiles,
     pub terminals: TerminalSessionManager,
@@ -47,9 +51,12 @@ pub struct AppCore {
     pub local_model_supervisor: Arc<RuntimeSupervisor>,
     pub updates: Arc<UpdateManager>,
     pub pet: Arc<PetController>,
+    pub(super) pet_approval_return: Mutex<Option<super::pet_approval::ReturnTicket>>,
     pub pet_audio: Arc<pet_audio::PetAudioRelay>,
     pub remote_voice: Arc<crate::remote_voice::RemoteVoice>,
     pub pet_menu: pet_menu::Session,
+    #[cfg(target_os = "macos")]
+    pub pet_home_overlay: Mutex<Option<crate::pet::WorkArea>>,
     pub dev_server: Mutex<Option<DevServer>>,
     pub entry_url: Mutex<String>,
     pub local_source_enabled: AtomicBool,
@@ -57,9 +64,12 @@ pub struct AppCore {
     pub zoom: Mutex<f64>,
     pub signed_in: AtomicBool,
     pub quitting: AtomicBool,
+    /// Instance takeover exits must not also replace the application bundle.
+    pub replacing_instance: AtomicBool,
     pub channels: Mutex<Vec<ChannelStatus>>,
     pub lock: Mutex<Option<DesktopLock>>,
     pub page_connection: Mutex<PageConnection>,
+    pub launch_intents: Mutex<LaunchIntents>,
 }
 
 impl AppCore {
@@ -97,6 +107,7 @@ impl AppCore {
             .unwrap_or_else(|_| ENTRY.to_string());
         DesktopStatus {
             version: APP_VERSION.to_string(),
+            theme: self.theme.current(),
             platform: current_runtime_platform().to_string(),
             arch: current_runtime_arch().to_string(),
             entry_url: entry_url.clone(),

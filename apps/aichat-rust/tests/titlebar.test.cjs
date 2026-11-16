@@ -169,4 +169,216 @@ for (const implementation of ["typescript", "rust-init-script"]) {
     assert.equal(bar.host, null);
     assert.deepEqual(bar.calls, []);
   });
+
+  const themeCalls = bar => bar.calls.filter(call => call.command === "desktop_sync_theme");
+  const legacyPalette = (element, document) => ({
+    colorScheme: "normal",
+    properties: { "--bg-sidebar": document.body.classList.contains("light") ? "#f2f3f7" : "#2b2b2b" },
+  });
+
+  test(`${implementation}: legacy AIChat without body.light uses dark chrome even without color-scheme metadata`, () => {
+    const bar = renderer(implementation, "windows", false, false, { computedStyle: legacyPalette });
+    const theme = bar.initialCalls.find(call => call.command === "desktop_sync_theme");
+    assert.equal(theme.args.dark, true);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#18181f");
+    assert.equal(bar.host.style.getPropertyValue("--chrome-text"), "#d4d4dc");
+    assert.equal(bar.host.style.getPropertyValue("--chrome-menu-bg"), "#202028");
+  });
+
+  test(`${implementation}: document-only theme events follow AIChat light-class removal and restoration`, () => {
+    const bar = renderer(implementation, "darwin", false, false, {
+      bodyClass: "light", computedStyle: legacyPalette,
+    });
+    assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.dark, false);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#f2f3f7");
+    bar.document.body.classList.remove("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false, detail: { theme: "dark" } });
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true]);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#18181f");
+    bar.document.body.classList.add("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false, detail: { theme: "light" } });
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true, false]);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-text"), "#1a1a2e");
+  });
+
+  test(`${implementation}: explicit class and data-theme remain authoritative over native or CSS preference`, () => {
+    for (const [className, scheme, dark] of [["dark", "light", true], ["light", "dark", false]]) {
+      const bar = renderer(implementation, "linux", false, false, {
+        bodyClass: className, computedStyle: { colorScheme: scheme }, systemDark: !dark,
+      });
+      assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.dark, dark);
+    }
+    const bar = renderer(implementation, "linux");
+    bar.document.documentElement.setAttribute("data-theme", "dark");
+    bar.mutation(bar.document.documentElement, "data-theme");
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true]);
+    bar.document.documentElement.setAttribute("data-theme", "light");
+    bar.mutation(bar.document.documentElement, "data-theme");
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true, false]);
+  });
+
+  test(`${implementation}: asynchronous stylesheet loading refreshes dark chrome before a page event`, () => {
+    const palette = { colorScheme: "normal", properties: {} };
+    const bar = renderer(implementation, "windows", false, false, { computedStyle: palette });
+    assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.dark, false);
+    palette.properties["--bg-sidebar"] = "#2b2b2b";
+    const sheet = bar.child(bar.document.head, "link");
+    sheet.setAttribute("rel", "stylesheet");
+    bar.fire(sheet, "load", { bubbles: false });
+    assert.deepEqual(themeCalls(bar).map(call => call.args.dark), [true]);
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#18181f");
+  });
+
+  test(`${implementation}: absent CSS theme defaults to unconfirmed light without following OS changes`, () => {
+    const bar = renderer(implementation, "darwin", false, false, {
+      computedStyle: { colorScheme: "normal" }, systemDark: true,
+    });
+    const initial = bar.initialCalls.find(call => call.command === "desktop_sync_theme");
+    assert.equal(initial.args.dark, false);
+    assert.equal(initial.args.confirmed, false, "a provisional theme cannot overwrite the native preference");
+    assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#f2f3f7");
+    bar.setSystemDark(false);
+    bar.setSystemDark(true);
+    assert.deepEqual(themeCalls(bar), []);
+    bar.document.body.classList.add("dark");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+    assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[true, true]]);
+  });
+
+  test(`${implementation}: startup chrome waits for the native theme snapshot without reporting an OS guess`, () => {
+    for (const mode of [{ shell: true }, { startupMarker: true }]) {
+      const bar = renderer(implementation, "darwin", false, false, {
+        ...mode, systemDark: true, computedStyle: { colorScheme: "dark" },
+      });
+      assert.equal(bar.host.style.visibility, "hidden");
+      assert.equal(bar.initialCalls.some(call => call.command === "desktop_sync_theme"), false);
+      bar.fire(bar.window, "load");
+      bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+      bar.setSystemDark(false);
+      assert.deepEqual(themeCalls(bar), []);
+      assert.equal(bar.document.documentElement.dataset.theme, undefined);
+      bar.document.documentElement.dataset.theme = "light";
+      bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+      assert.equal(bar.host.style.visibility, "visible");
+      assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), "#f2f3f7");
+      assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[false, true]]);
+    }
+  });
+
+  test(`${implementation}: saved startup theme overrides the opposite system appearance and remains stable`, () => {
+    for (const [theme, systemDark, background] of [["light", true, "#f2f3f7"], ["dark", false, "#18181f"]]) {
+      const bar = renderer(implementation, "windows", false, false, {
+        shell: true, htmlTheme: theme, systemDark,
+        computedStyle: { colorScheme: systemDark ? "dark" : "light" },
+      });
+      assert.equal(bar.host.style.visibility, "visible");
+      const initial = bar.initialCalls.find(call => call.command === "desktop_sync_theme");
+      assert.equal(initial.args.dark, theme === "dark");
+      assert.equal(initial.args.confirmed, true);
+      assert.equal(bar.host.style.getPropertyValue("--chrome-bg"), background);
+      bar.setSystemDark(!systemDark);
+      bar.setSystemDark(systemDark);
+      bar.fire(bar.window, "resize");
+      assert.equal(bar.document.documentElement.dataset.theme, theme, "chrome never rewrites the native startup preference");
+      assert.deepEqual(themeCalls(bar), []);
+    }
+  });
+
+  test(`${implementation}: actual chat theme changes remain confirmed and independent of the OS`, () => {
+    const bar = renderer(implementation, "windows", false, false, {
+      bodyClass: "light", systemDark: true, computedStyle: legacyPalette,
+    });
+    assert.equal(bar.document.documentElement.dataset.theme, undefined, "startup preferences cannot be injected into a real chat document");
+    assert.equal(bar.initialCalls.find(call => call.command === "desktop_sync_theme").args.confirmed, true);
+    bar.document.body.classList.remove("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+    bar.setSystemDark(false);
+    assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[true, true]]);
+    bar.document.body.classList.add("light");
+    bar.fire(bar.document, "aichat:theme-changed", { bubbles: false });
+    assert.deepEqual(themeCalls(bar).map(call => [call.args.dark, call.args.confirmed]), [[true, true], [false, true]]);
+  });
+
+  test(`${implementation}: repeated theme, skin and experience signals avoid duplicate native theme updates`, () => {
+    const bar = renderer(implementation, "linux", false, false, { computedStyle: legacyPalette });
+    for (const type of ["aichat:theme-changed", "aichat:skin-changed", "aichat:experience-changed"]) {
+      bar.fire(bar.document, type, { bubbles: false });
+      bar.fire(bar.window, type);
+    }
+    bar.fire(bar.window, "resize");
+    assert.deepEqual(themeCalls(bar), []);
+  });
 }
+
+for (const implementation of ["typescript", "rust-init-script"]) {
+  test(`${implementation}: titlebar follows AIChat language changes`, () => {
+    const bar = renderer(implementation, "windows");
+    bar.document.documentElement.lang = "en";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.element(".title").textContent, "KeepWork Second Brain");
+    assert.deepEqual(bar.elements("button[data-menu-id]").map(button => button.textContent), ["File", "Edit", "View", "Help"]);
+    assert.equal(bar.element(".refresh").getAttribute("aria-label"), "Reload page");
+    bar.document.documentElement.lang = "zh-CN";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.element(".title").textContent, "KeepWork 第二大脑");
+    assert.equal(bar.element('button[data-menu-id="file"]').textContent, "文件");
+  });
+  test(`${implementation}: macOS title follows language changes`, () => {
+    const bar = renderer(implementation, "darwin");
+    bar.document.documentElement.lang = "en";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.element(".title").textContent, "KeepWork Second Brain");
+  });
+}
+
+for (const implementation of ["typescript", "rust-init-script"]) {
+  test(`${implementation}: macOS serializes native menu language changes`, async () => {
+    const resolvers = [];
+    const bar = renderer(implementation, "darwin", false, false, {
+      invoke(command) {
+        if (command === "desktop_set_menu_language") return new Promise(resolve => resolvers.push(resolve));
+        return Promise.resolve(true);
+      },
+    });
+    assert.deepEqual(bar.initialCalls.filter(c => c.command === "desktop_set_menu_language").map(c => c.args.language), ["zh-CN"]);
+    bar.document.documentElement.lang = "en";
+    bar.mutation(bar.document.documentElement, "lang");
+    assert.equal(bar.calls.filter(c => c.command === "desktop_set_menu_language").length, 0);
+    resolvers.shift()(true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(bar.calls.filter(c => c.command === "desktop_set_menu_language").map(c => c.args.language), ["en"]);
+    bar.document.documentElement.lang = "zh-CN";
+    bar.fire(bar.document, "aichat:language-changed");
+    resolvers.shift()(true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(bar.calls.filter(c => c.command === "desktop_set_menu_language").map(c => c.args.language), ["en", "zh-CN"]);
+    resolvers.shift()(true);
+    await new Promise(resolve => setImmediate(resolve));
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal(bar.calls.filter(c => c.command === "desktop_set_menu_language").length, 2);
+  });
+  test(`${implementation}: Windows never sends native menu language updates`, () => {
+    const bar = renderer(implementation, "windows");
+    bar.document.documentElement.lang = "en";
+    bar.fire(bar.document, "aichat:language-changed");
+    assert.equal([...bar.initialCalls, ...bar.calls].some(c => c.command === "desktop_set_menu_language"), false);
+  });
+}
+
+test("macOS native menu localizes every Chinese label without changing command wiring", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const root = path.resolve(__dirname, "..");
+  const source = fs.readFileSync(path.join(root, "src-tauri/src/app/host_menu.rs"), "utf8");
+  const menu = source.split("pub(super) fn setup_mac_native_menu")[1].split("fn show_host_error")[0];
+  const translations = fs.readFileSync(path.join(root, "src-tauri/src/menu.rs"), "utf8").split("pub fn mac_menu_text")[1].split("/// 页面命令")[0];
+  const labels = [...menu.matchAll(/mac_menu_text\(language,\s*"([^"]+)"\)/g)].map(m => m[1]);
+  assert.ok(labels.length >= 33);
+  for (const label of labels) assert.ok(translations.includes(`"${label}" =>`), label);
+  for (const [id, shortcut] of [["new-chat", "CmdOrCtrl+N"], ["file:close-window", "CmdOrCtrl+W"], ["zoom-in", "CmdOrCtrl+="], ["tray:quit", "CmdOrCtrl+Q"]]) {
+    const entry = menu.slice(menu.indexOf(`"${id}"`));
+    assert.ok(entry.indexOf(`"${shortcut}"`) < 250, id);
+  }
+  assert.match(menu, /core\.settings\(\)\.pet_visible/);
+  assert.match(menu, /core\.login_startup\.is_enabled\(\)/);
+});

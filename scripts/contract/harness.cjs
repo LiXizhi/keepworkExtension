@@ -18,6 +18,7 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const binaryName = process.platform === 'win32' ? 'keepwork-mcp.exe' : 'keepwork-mcp';
 const defaultRustBin = path.join(repoRoot, 'apps', 'mcp-rust', 'target', 'release', binaryName);
 const nodeEntry = path.join(repoRoot, 'apps', 'mcp-runtime', 'dist', 'cli.cjs');
+const nodeReferenceSkipReason = 'Node reference has not been built; cross-engine comparison was not run. Run npm run build --prefix apps/mcp-runtime.';
 
 function rustBinary() {
   const candidate = process.env.KEEPWORK_MCP_TEST_BIN || defaultRustBin;
@@ -27,8 +28,18 @@ function rustBinary() {
   return candidate;
 }
 
-function hasNodeReference() {
-  return fs.existsSync(nodeEntry);
+function hasNodeReference({ env = process.env, exists = fs.existsSync } = {}) {
+  const available = exists(nodeEntry);
+  // CI comparisons are mandatory even if a caller forgot the explicit flag.
+  // Local Rust-only runs remain useful, with visible skipped comparison cases.
+  if (!available && (env.KEEPWORK_MCP_REQUIRE_NODE_REFERENCE === '1' || ['1', 'true'].includes(env.CI))) {
+    throw new Error('Required Node reference missing: ' + nodeEntry + '. Run npm run build --prefix apps/mcp-runtime before wire contracts.');
+  }
+  return available;
+}
+
+function nodeReferenceTestOptions() {
+  return { skip: hasNodeReference() ? false : nodeReferenceSkipReason };
 }
 
 function freePort() {
@@ -45,6 +56,13 @@ function freePort() {
 
 function isolatedHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kp-contract-'));
+}
+
+// Published Node agent sessions persist real paths as lowercase identities on
+// Windows. Keep raw inputs in fixtures and compare the exact canonical output.
+function canonicalAgentRoot(root) {
+  const real = fs.realpathSync(root);
+  return process.platform === 'win32' ? real.toLowerCase() : real;
 }
 
 async function waitForHealth(port, timeoutMs = 10_000, signal) {
@@ -123,7 +141,7 @@ async function killOwnedTree(child) {
   }
 }
 
-async function stopDaemon(daemon, { home, port, ownsEndpoint }) {
+async function stopDaemon(daemon, { home, port, ownsEndpoint, removeHome }) {
   const { child } = daemon;
   try {
     if (running(child) && ownsEndpoint) {
@@ -147,16 +165,18 @@ async function stopDaemon(daemon, { home, port, ownsEndpoint }) {
       throw new Error(`test daemon ${child.pid} left stdio open`);
     }
   } finally {
-    await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    if (removeHome) await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
 
-async function startDaemon(engine, command, extraArgs, env) {
-  const port = await freePort();
-  const home = isolatedHome();
+async function startDaemon(engine, command, extraArgs, env, { home: providedHome, port: providedPort } = {}) {
+  const port = providedPort ?? await freePort();
+  // A caller-provided fixture profile survives stop/restart. Its caller owns
+  // final deletion; the harness only deletes HOME directories it allocated.
+  const home = providedHome ?? isolatedHome();
   const daemon = spawnDaemon(command, [...extraArgs, '--port', String(port)], { home, port, env });
   let ownsEndpoint = false, stopping;
-  const stop = () => stopping ||= stopDaemon(daemon, { home, port, ownsEndpoint });
+  const stop = () => stopping ||= stopDaemon(daemon, { home, port, ownsEndpoint, removeHome: providedHome === undefined });
   const controller = new AbortController();
   let health;
   try {
@@ -182,8 +202,8 @@ async function startDaemon(engine, command, extraArgs, env) {
   };
 }
 
-async function startRust({ requireAuth = false, env = {} } = {}) {
-  return startDaemon('rust', rustBinary(), requireAuth ? ['--require-auth'] : [], env);
+async function startRust({ requireAuth = false, env = {}, home, port } = {}) {
+  return startDaemon('rust', rustBinary(), requireAuth ? ['--require-auth'] : [], env, { home, port });
 }
 
 async function startNode() {
@@ -242,8 +262,11 @@ module.exports = {
   repoRoot,
   rustBinary,
   hasNodeReference,
+  nodeReferenceTestOptions,
+  nodeReferenceSkipReason,
   freePort,
   isolatedHome,
+  canonicalAgentRoot,
   waitForHealth,
   startRust,
   startNode,

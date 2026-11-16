@@ -54,6 +54,8 @@ after(async () => {
   await node?.stop();
 });
 
+test('tool cross-engine comparisons have a built Node reference', h.nodeReferenceTestOptions(), () => assert.ok(node));
+
 test('tools/list exposes the portable tools with Node-identical schemas', async () => {
   const result = await both(async (engine) => {
     const id = await session(engine);

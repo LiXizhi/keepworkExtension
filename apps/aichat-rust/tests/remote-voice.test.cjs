@@ -2,9 +2,26 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
+const os = require("node:os");
+const { execFileSync } = require("node:child_process");
 
 const appRoot = path.resolve(__dirname, "..");
 const read = relative => fs.readFileSync(path.join(appRoot, relative), "utf8");
+
+function asrProduction(source) {
+  const boundary = /^#\[cfg\(test\)\]\r?\nmod tests\b/m.exec(source);
+  assert.ok(boundary, "the ASR test module boundary must be present");
+  return source.slice(0, boundary.index);
+}
+
+function assertCloudAsrContract(source) {
+  const production = asrProduction(source);
+  assert.ok(production.includes("wss://speechrtc.keepwork.com/speech?asr_format=pcm&asr_rate=16000"));
+  assert.match(production, /async fn transcribe\(\s*&self,\s*audio: [\w:]*Receiver<Vec<i16>>,\s*cancel: watch::Receiver<bool>,\s*preview: impl FnMut\(&str\)/);
+  assert.ok(production.includes("sample.to_le_bytes()"));
+  assert.ok(production.includes('"asr_end"'));
+  assert.doesNotMatch(production, /std::fs|tokio::fs|File::create|access_token|Authorization|asr_start/);
+}
 
 test("remote pages retain their existing ACL while only local settings can start and stop voice input", () => {
   const main = JSON.parse(read("src-tauri/capabilities/default.json"));
@@ -46,7 +63,7 @@ test("native voice packaging needs no Python, Node sidecar, model weights or sib
   for (const oldFile of ["worker.py", "native_input.py", "atvv.py", "requirements.txt", "model-files.json"]) {
     assert.equal(fs.existsSync(path.join(appRoot, "voice", oldFile)), false, `${oldFile} is no longer a runtime dependency`);
   }
-  assert.match(sources, /asr::transcribe/);
+  assert.match(read("src-tauri/src/remote_voice/ble.rs"), /SpeechConnection\b/);
   const manifest = read("src-tauri/Cargo.toml");
   assert.match(manifest, /btleplug\s*=/);
   assert.match(manifest, /tokio-tungstenite\s*=/);
@@ -55,15 +72,53 @@ test("native voice packaging needs no Python, Node sidecar, model weights or sib
 });
 
 test("cloud ASR uses the fixed Keepwork speech endpoint and a bounded cancellable PCM contract", () => {
-  const source = read("src-tauri/src/remote_voice/asr.rs");
-  const production = source.split("#[cfg(test)]")[0];
-  assert.ok(production.includes("wss://speechrtc.keepwork.com/speech?asr_format=pcm&asr_rate=16000"));
-  assert.match(production, /pub async fn transcribe\(pcm: &\[i16\], cancel: watch::Receiver<bool>\)/);
-  assert.ok(production.includes("sample.to_le_bytes()"));
-  assert.ok(production.includes('"asr_end"'));
-  assert.doesNotMatch(production, /std::fs|tokio::fs|File::create|access_token|Authorization|asr_start/);
+  assertCloudAsrContract(read("src-tauri/src/remote_voice/asr.rs"));
   const host = read("src-tauri/src/app/remote_voice_host.rs");
   assert.doesNotMatch(host, /endpoint|proxy_url|api_key|access_token/, "the renderer cannot select a speech server or credential");
+});
+
+test("ASR production guards accept LF and CRLF while rejecting production violations", () => {
+  const canonical = read("src-tauri/src/remote_voice/asr.rs").replace(/\r\n/g, "\n");
+  const expected = asrProduction(canonical);
+  for (const ending of ["\n", "\r\n"]) {
+    const source = canonical.replace(/\n/g, ending);
+    assertCloudAsrContract(source);
+    const production = asrProduction(source);
+    assert.equal(production.replace(/\r\n/g, "\n"), expected);
+    for (const forbidden of ["std::fs", "tokio::fs", "File::create", "access_token", "Authorization", "asr_start"]) {
+      const injected = production + `// forbidden production use: ${forbidden}${ending}` + source.slice(production.length);
+      assert.throws(() => assertCloudAsrContract(injected), { code: "ERR_ASSERTION" }, forbidden);
+    }
+    for (const required of [
+      "wss://speechrtc.keepwork.com/speech?asr_format=pcm&asr_rate=16000",
+      "sample.to_le_bytes()",
+      '"asr_end"',
+    ]) {
+      const changed = production.replaceAll(required, "REMOVED_CONTRACT") + source.slice(production.length);
+      assert.throws(() => assertCloudAsrContract(changed), { code: "ERR_ASSERTION" }, required);
+    }
+  }
+  assert.throws(() => asrProduction(expected), /ASR test module boundary must be present/);
+});
+
+test("ASR guards inspect production after an actual autocrlf Git checkout", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "kp-asr-checkout-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "asr.rs");
+  fs.writeFileSync(file, read("src-tauri/src/remote_voice/asr.rs").replace(/\r\n/g, "\n"));
+  const git = args => execFileSync("git", ["-c", "core.autocrlf=true", "-c", "core.safecrlf=false", ...args],
+    { cwd: directory, stdio: ["ignore", "pipe", "pipe"] });
+  git(["init", "--quiet"]);
+  git(["add", "--", "asr.rs"]);
+  fs.rmSync(file);
+  git(["checkout-index", "--all", "--force"]);
+  const checkedOut = fs.readFileSync(file, "utf8");
+  assert.ok(checkedOut.includes("\r\n"), "the real checkout must exercise Windows CRLF bytes");
+  assert.equal(checkedOut.replace(/\r\n/g, "").includes("\n"), false);
+  assertCloudAsrContract(checkedOut);
+  const production = asrProduction(checkedOut);
+  const injected = production + "// forbidden production use: File::create\r\n" + checkedOut.slice(production.length);
+  assert.throws(() => assertCloudAsrContract(injected), { code: "ERR_ASSERTION" });
 });
 
 test("voice settings explain cloud processing and expose only native device controls", () => {

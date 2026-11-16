@@ -7,22 +7,64 @@ use serde_json::json;
 ///   centered title, address pill, SVG refresh button, and CSS theme variable observer.
 /// - Installs the frozen `window.aichatDesktop` v1 bridge with all capabilities and methods.
 pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> String {
+    build_main_window_init_script_for_entry(platform, icon_data_url, crate::security::ENTRY)
+}
+
+pub fn build_main_window_init_script_for_entry(
+    platform: &str,
+    icon_data_url: &str,
+    entry_url: &str,
+) -> String {
+    build_main_window_init_script_with_launch_capability(platform, icon_data_url, entry_url, "")
+}
+
+pub fn build_main_window_init_script_with_launch_capability(
+    platform: &str,
+    icon_data_url: &str,
+    entry_url: &str,
+    launch_capability: &str,
+) -> String {
+    // Only origin/path is needed for early appearance. Do not expose an entry's
+    // query, fragment or credentials through the public bootstrap object.
+    let entry = url::Url::parse(entry_url)
+        .ok()
+        .filter(|url| !crate::security::has_credentials(url))
+        .map(|mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|| crate::security::ENTRY.to_string());
     let bootstrap = json!({
         "platform": platform,
         "iconDataUrl": icon_data_url,
         "menus": top_menu_bar_labels(),
         "hostCommands": HOST_COMMANDS,
         "pageCommands": PAGE_COMMANDS,
+        "entryUrl": entry,
     });
 
     let menu_chrome =
         include_str!("../../src/menuChrome.js").replacen("export function", "function", 1);
 
+    let chrome_theme =
+        include_str!("../../src/chromeTheme.js").replacen("export function", "function", 1);
+    let page_theme =
+        include_str!("../../src/pageTheme.js").replacen("export function", "function", 1);
+    let local_mcp_fetch =
+        include_str!("../../src/localMcpFetch.js").replacen("export function", "function", 1);
+
     format!(
         r#"(() => {{
   if (window !== window.top) return;
   const bootstrap = {bootstrap};
+  const launchCapability = {launch_capability};
   {menu_chrome}
+  {chrome_theme}
+  {page_theme}
+  {local_mcp_fetch}
+  installLocalMcpFetch(bootstrap);
+  installPageTheme(bootstrap.entryUrl);
   window.__AICHAT_DESKTOP_BOOTSTRAP__ = bootstrap;
 
   // Native desktop chrome should not be text-selectable. Inputs, the composer
@@ -73,10 +115,31 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
   const updateListeners = new Set();
   const folderListeners = new Set();
   const browserListeners = new Set();
+  const launchListeners = new Set();
+  const launchDocument = globalThis.crypto?.randomUUID?.() || "";
+  const launchEnabled = (() => {{
+    if (!launchCapability || !launchDocument || window.__AICHAT_PAGE_CONNECTION__) return false;
+    try {{
+      const current = new URL(window.location.href);
+      const entry = new URL(bootstrap.entryUrl || "https://keepwork.com/chat");
+      return !current.username && !current.password && (
+        (current.origin === entry.origin && current.pathname === entry.pathname)
+        || (current.origin === "https://keepwork.com" && current.pathname === "/chat")
+        || (current.protocol === "http:" && ["127.0.0.1", "localhost"].includes(current.hostname)
+          && current.pathname.endsWith("/AIChat.html")));
+    }} catch {{ return false; }}
+  }})();
+  let launchLive = launchEnabled;
+  window.addEventListener("pagehide", () => {{ launchLive = false; launchListeners.clear(); }}, {{ once: true }});
+  const invokeLaunch = (command, args = {{}}) => launchLive
+    ? invoke(command, {{ document: launchDocument, token: launchCapability, ...args }})
+    : Promise.reject(new Error("Launch document is no longer active"));
 
   window.addEventListener("__aichat_desktop_event__", (e) => {{
     const detail = e.detail || {{}};
-    if (detail.event === "browser-surface") {{
+    if (detail.event === "launch-intent" && launchLive) {{
+      for (const cb of launchListeners) {{ try {{ cb(); }} catch {{}} }}
+    }} else if (detail.event === "browser-surface") {{
       for (const cb of browserListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
     }} else if (detail.event === "pet-command") {{
       for (const cb of petListeners) {{ try {{ cb(detail.payload); }} catch {{}} }}
@@ -98,16 +161,42 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     defaultBrainFolder: true,
     gitSetup: true,
     floatingPet: true,
+    petReplyPresentationVersion: 1,
+    petStreamingSpeechVersion: 1,
+    ...(bootstrap.platform === "darwin" ? {{ remoteNarrationPauseVersion: 1 }} : {{}}),
     petDictationAudioVersion: 1,
     petVoiceAudioVersion: 1,
     startupSignIn: true,
-    ...(bootstrap.platform === "darwin" ? {{ browserSurfaceVersion: 1, browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
+    ...(launchEnabled && ["darwin", "win32"].includes(bootstrap.platform) ? {{ desktopScreenshotVersion: 1 }} : {{}}),
+    ...(launchEnabled ? {{ launchIntents: true, petApprovalRevealVersion: 1, petApprovalReturnVersion: 1 }} : {{}}),
+    ...(["darwin", "win32"].includes(bootstrap.platform) ? {{ browserSurfaceVersion: 1, remoteDialogueVersion: 1, remotePhoneVersion: 1, remotePhoneCaptionVersion: 1, remotePhoneActivityVersion: 1 }} : {{}}),
+    ...(bootstrap.platform === "darwin" ? {{ browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
   }});
 
   if (!window.aichatDesktop) {{
     const bridge = Object.freeze({{
       version: 1,
       capabilities,
+      ...(capabilities.desktopScreenshotVersion === 1 ? {{
+        captureScreenshot: async () => {{
+          const shot = await invokeLaunch("desktop_capture_screenshot");
+          if (!launchLive) throw new Error("Screenshot document is no longer active");
+          return shot;
+        }},
+        getScreenshotPermission: () => invokeLaunch("desktop_get_screenshot_permission"),
+        setScreenshotPermission: (enabled) => invokeLaunch("desktop_set_screenshot_permission", {{ enabled }}),
+      }} : {{}}),
+      ...(launchEnabled ? {{
+        revealPetApproval: (options) => invokeLaunch("desktop_reveal_pet_approval", options?.returnToPet === true ? {{ returnToPet: true }} : {{}}),
+        returnToPetAfterApproval: () => invokeLaunch("desktop_return_to_pet_after_approval"),
+        getLaunchIntent: () => invokeLaunch("desktop_get_launch_intent"),
+        acknowledgeLaunchIntent: (id) => invokeLaunch("desktop_acknowledge_launch_intent", {{ id: String(id || "") }}),
+        onLaunchIntent: (cb) => {{
+          if (typeof cb !== "function") return () => {{}};
+          launchListeners.add(cb);
+          return () => launchListeners.delete(cb);
+        }},
+      }} : {{}}),
       browserSurface: (op, args = {{}}) => invoke("desktop_browser_surface", {{ op: String(op || ""), args: args || {{}} }}),
       onBrowserSurface: (cb) => {{
         if (typeof cb !== "function") return () => {{}};
@@ -115,6 +204,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
         return () => browserListeners.delete(cb);
       }},
       reportStartupSignIn: (signedIn) => invoke("desktop_report_startup_signin", {{ signedIn: !!signedIn }}),
+      closeRemoteDialogue: (id) => invoke("remote_voice_dialogue_closed", {{ id }}),
       publishPetState: (state) => invoke("desktop_publish_pet_state", {{ state: state || {{}}, document: petAudioDocument }}),
       petResult: (result) => invoke("desktop_pet_result", {{ result: result || {{}} }}),
       petAudio: (op, id, seq) => invoke("desktop_pet_audio", {{ op: String(op || ""), id: String(id || ""), ...(seq == null ? {{}} : {{ seq }}), document: petAudioDocument }}),
@@ -268,7 +358,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
         img.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3.5 3h3v4.5L11 3h3.5L8.5 9l6 6H11L6.5 10.5V15H3.5z" fill="currentColor" opacity="0.72"/></svg>`;
         left.appendChild(img);
       }}
-      mountDesktopMenus({{ host, shadow, left, invoke, menus: bootstrap.menus || [] }});
+
     }}
 
     const center = document.createElement("div");
@@ -325,6 +415,8 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     shadow.append(controls);
   }}
 
+
+    mountDesktopMenus({{ host, shadow, left, invoke, menus: isMac ? [] : (bootstrap.menus || []), nativeMenu: isMac }});
 
     let pendingMaximize = null;
     const isInteractive = (event) => {{
@@ -390,89 +482,7 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     }}
 
 
-    const canvas = document.createElement("canvas");
-    canvas.width = 1;
-    canvas.height = 1;
-    const ctx = canvas.getContext("2d", {{ willReadFrequently: true }});
-    const toHex = (raw, fallback) => {{
-      if (!ctx || !raw) return fallback;
-      ctx.clearRect(0, 0, 1, 1);
-      ctx.fillStyle = fallback;
-      ctx.fillStyle = raw;
-      ctx.fillRect(0, 0, 1, 1);
-      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-      return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
-    }};
-
-    let lastThemeKey = "";
-    const syncTheme = () => {{
-      if (!document.body) return;
-      const cs = getComputedStyle(document.body);
-      const dark =
-        document.body.classList.contains("dark") ||
-        document.documentElement.classList.contains("dark") ||
-        cs.colorScheme === "dark";
-      const bgRaw =
-        cs.getPropertyValue("--experience-rail-bg").trim() ||
-        cs.getPropertyValue("--bg-sidebar").trim() ||
-        (dark ? '#18181f' : '#f2f3f7');
-      const textRaw =
-        cs.getPropertyValue("--text-primary").trim() || (dark ? '#d4d4dc' : '#1a1a2e');
-      const hoverRaw =
-        cs.getPropertyValue("--bg-pill-hover").trim() || (dark ? '#282834' : '#e2e6ef');
-      const addressRaw =
-        cs.getPropertyValue("--text-secondary").trim() || (dark ? '#9a9aa8' : '#4a4a5a');
-      const pillRaw =
-        cs.getPropertyValue("--bg-pill").trim() || (dark ? '#242430' : '#e2e6ef');
-
-      const bgHex = toHex(bgRaw, dark ? '#18181f' : '#f2f3f7');
-      const textHex = toHex(textRaw, dark ? '#d4d4dc' : '#1a1a2e');
-      host.style.setProperty("--chrome-menu-bg", cs.getPropertyValue("--bg-card").trim() || (dark ? '#202028' : '#ffffff'));
-      host.style.setProperty("--chrome-bg", bgHex);
-      host.style.setProperty("--chrome-text", textHex);
-      host.style.setProperty("--chrome-hover", hoverRaw);
-      host.style.setProperty("--chrome-address", addressRaw);
-      host.style.setProperty("--chrome-pill", pillRaw);
-
-      const simple =
-        document.body.dataset.experience === "simple" && window.innerWidth > 768;
-      const railWidth = cs.getPropertyValue("--experience-rail-width").trim() || "56px";
-      host.style.setProperty(
-        "--chrome-surface-start",
-        simple ? `calc(${{railWidth}} + 14px)` : "0px"
-      );
-
-      const key = `${{dark ? "dark" : "light"}}:${{bgHex}}:${{textHex}}`;
-      if (key !== lastThemeKey) {{
-        lastThemeKey = key;
-        void invoke("desktop_sync_theme", {{
-          dark,
-          color: bgHex,
-          symbolColor: textHex,
-        }});
-      }}
-    }};
-
-    syncTheme();
-    const observer = new MutationObserver(syncTheme);
-    observer.observe(document.documentElement, {{
-      attributes: true,
-      attributeFilter: ["class", "style", "data-theme"],
-    }});
-    if (document.body) {{
-      observer.observe(document.body, {{
-        attributes: true,
-        attributeFilter: ["class", "style", "data-experience", "data-skin"],
-      }});
-    }}
-    for (const evt of [
-      "aichat:theme-changed",
-      "aichat:skin-changed",
-      "aichat:experience-changed",
-      "resize",
-    ]) {{
-      window.addEventListener(evt, syncTheme);
-    }}
+    mountDesktopTheme({{ host, invoke }});
   }};
 
   if (document.readyState === "loading") {{
@@ -481,12 +491,32 @@ pub fn build_main_window_init_script(platform: &str, icon_data_url: &str) -> Str
     mountChrome();
   }}
 }})();"#,
+        launch_capability = json!(launch_capability),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_appearance_receives_only_the_configured_entry_origin_and_path() {
+        let script = build_main_window_init_script_for_entry(
+            "darwin",
+            "",
+            "http://localhost:3001/AIChat.html?token=private-entry-secret#private-entry-fragment",
+        );
+        assert!(script.contains("\"entryUrl\":\"http://localhost:3001/AIChat.html\""));
+        assert!(!script.contains("private-entry-secret"));
+        assert!(!script.contains("private-entry-fragment"));
+        let credentialed = build_main_window_init_script_for_entry(
+            "darwin",
+            "",
+            "https://user:private-password@example.com/chat",
+        );
+        assert!(!credentialed.contains("private-password"));
+        assert!(credentialed.contains("\"entryUrl\":\"https://keepwork.com/chat\""));
+    }
 
     #[test]
     fn generates_frozen_main_frame_init_script_with_titlebar_and_v1_bridge() {
@@ -501,5 +531,25 @@ mod tests {
         assert!(script.contains("defaultBrainFolder"));
         assert!(script.contains("checkUpdates"));
         assert!(script.contains("installUpdate"));
+    }
+
+    #[test]
+    fn launch_authority_stays_in_the_top_frame_closure_outside_public_bootstrap() {
+        let script = build_main_window_init_script_with_launch_capability(
+            "darwin",
+            "",
+            "https://keepwork.com/chat",
+            "private-launch-authority",
+        );
+        let bootstrap = script
+            .lines()
+            .find(|line| line.contains("const bootstrap ="))
+            .unwrap();
+        assert!(!bootstrap.contains("private-launch-authority"));
+        assert!(
+            script.find("if (window !== window.top) return;").unwrap()
+                < script.find("private-launch-authority").unwrap()
+        );
+        assert!(script.contains("token: launchCapability"));
     }
 }

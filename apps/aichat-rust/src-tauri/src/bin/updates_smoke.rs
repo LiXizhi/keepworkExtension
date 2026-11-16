@@ -19,14 +19,14 @@ async fn main() {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let pkg_url = format!("http://127.0.0.1:{port}/KeepWork-SecondBrain.zip");
+    let pkg_url = format!("http://127.0.0.1:{port}/KeepWork-SecondBrain.dmg");
     let feed_url = format!("http://127.0.0.1:{port}/latest-client.json");
 
     let feed_body = serde_json::json!({
         "product": "aichat-desktop",
         "version": "0.3.0",
         "publishedAt": "2026-11-09T12:00:00Z",
-        "fileName": "KeepWork-SecondBrain.zip",
+        "fileName": "KeepWork-SecondBrain.dmg",
         "url": pkg_url,
         "sha256": installer_sha,
         "size": installer_size,

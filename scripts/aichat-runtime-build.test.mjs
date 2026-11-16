@@ -4,11 +4,42 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { aichatRuntimePlugin } from './aichat-runtime-build.mjs';
 const require = createRequire(import.meta.url);
-const { context, build } = require('../apps/vscode-extension/node_modules/esbuild');
+const { context, build } = require('../apps/mcp-runtime/node_modules/esbuild');
 const { syncRuntime } = require('./sync-aichat-runtime.cjs');
+
+test('explicit packaged builds ignore canonical drift, never sync and still reject modified vendor bytes', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-packaged-build-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, 'AIChat/runtime'), dest = path.join(root, 'vendor');
+  fs.mkdirSync(source, { recursive: true });
+  fs.writeFileSync(path.join(source, 'agent.mjs'), 'export const value = 1;');
+  syncRuntime({ source, dest, freshness: () => undefined });
+  const before = fs.readdirSync(dest).sort().map(file => [file, fs.readFileSync(path.join(dest, file), 'utf8')]);
+  fs.writeFileSync(path.join(source, 'agent.mjs'), 'export const value = 42;');
+  const options = {
+    entryPoints: [path.join(dest, 'agent.cjs')], bundle: true, platform: 'node', write: false, logLevel: 'silent',
+    plugins: [aichatRuntimePlugin({ source, dest, mode: 'packaged', development: true, freshness: () => { throw Error('packaged must never synchronize'); } })],
+  };
+  const result = await build(options);
+  assert.match(result.outputFiles[0].text, /value = 1/);
+  assert.doesNotMatch(result.outputFiles[0].text, /value = 42/);
+  assert.deepEqual(fs.readdirSync(dest).sort().map(file => [file, fs.readFileSync(path.join(dest, file), 'utf8')]), before);
+  // Verify the documented environment route in a separate process so the test
+  // cannot affect other builds running in this worker.
+  const module = pathToFileURL(path.join(import.meta.dirname, 'aichat-runtime-build.mjs')).href;
+  const script = `import {createRequire} from 'node:module'; const require=createRequire(import.meta.url); const {build}=require(${JSON.stringify(require.resolve('../apps/mcp-runtime/node_modules/esbuild'))}); const {aichatRuntimePlugin}=await import(${JSON.stringify(module)}); const result=await build({entryPoints:[${JSON.stringify(path.join(dest, 'agent.cjs'))}],bundle:true,platform:'node',write:false,logLevel:'silent',plugins:[aichatRuntimePlugin({source:${JSON.stringify(source)},dest:${JSON.stringify(dest)},development:true,freshness:()=>{throw Error('must not sync')}})]}); console.log(result.outputFiles[0].text);`;
+  const envResult = execFileSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, KEEPWORK_AICHAT_RUNTIME_MODE: 'packaged' }, encoding: 'utf8' });
+  assert.match(envResult, /value = 1/);
+  assert.doesNotMatch(envResult, /value = 42/);
+  fs.appendFileSync(path.join(dest, 'agent.cjs'), '// tampered');
+  await assert.rejects(build(options), /modified/);
+  assert.throws(() => aichatRuntimePlugin({ mode: 'typo' }), /mode must be/);
+});
 
 test('development watches local modules without syncing packaged bytes or provenance', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-dev-'));

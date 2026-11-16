@@ -174,25 +174,19 @@ fn browser_command_runner_observes_success_failure_and_spawn_error() {
 
 #[test]
 fn browser_command_timeout_is_bounded_and_reaps_the_child() {
-    let pid_path = std::env::temp_dir().join(format!(
-        "aichat-browser-timeout-{}.pid",
-        uuid::Uuid::new_v4()
-    ));
-    let mut command = Command::new("/bin/sh");
-    command.args([
-        "-c",
-        "printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 30",
-        "browser-timeout-fixture",
-    ]);
-    command.arg(&pid_path);
+    // Own the identity before starting the deadline. A shell-created PID file
+    // can be empty if timeout kills it between redirection and printf.
+    let child = Command::new("/bin/sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the test-owned timeout child");
+    let pid = child.id() as libc::pid_t;
     let started = Instant::now();
-    let result = run_browser_command(&mut command, Duration::from_millis(300));
+    let result = wait_browser_child(child, Duration::from_millis(300));
     let elapsed = started.elapsed();
-    let pid: libc::pid_t = std::fs::read_to_string(&pid_path)
-        .expect("fixture child records its own PID before sleeping")
-        .parse()
-        .expect("fixture PID is numeric");
-    let _ = std::fs::remove_file(&pid_path);
 
     // A zombie still answers kill(pid, 0). Checking both calls proves the
     // timed-out child was killed and waited, rather than simply detached.
@@ -208,7 +202,10 @@ fn browser_command_timeout_is_bounded_and_reaps_the_child() {
         }
     }
 
-    assert!(result.is_err(), "a timed-out command must report failure");
+    assert_eq!(
+        result.expect_err("a timed-out command must report failure"),
+        "打开浏览器超时"
+    );
     assert!(elapsed < Duration::from_secs(3), "elapsed: {elapsed:?}");
     assert!(
         !exists,

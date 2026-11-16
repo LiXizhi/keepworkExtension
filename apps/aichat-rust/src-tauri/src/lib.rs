@@ -1,5 +1,8 @@
 pub mod brain_folder;
 pub mod bridge;
+pub mod browser_surface_policy;
+#[cfg(windows)]
+pub mod browser_surface_windows;
 pub mod deployment;
 pub mod desktop_identity;
 pub mod desktop_lock;
@@ -7,6 +10,7 @@ pub mod dev_server;
 pub mod files;
 pub mod git_setup;
 pub mod installer_stop;
+pub mod launch_intents;
 pub mod login_startup;
 pub mod menu;
 pub mod navigation;
@@ -20,8 +24,13 @@ pub mod runtime;
 pub mod remote_voice;
 pub mod security;
 pub mod terminal;
+pub mod theme;
 pub mod tray_channels;
 pub mod updates;
+mod update_network;
+
+#[cfg(test)]
+mod clipboard_acl_tests;
 
 mod app;
 
@@ -31,3 +40,6 @@ pub use app::{
 };
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(all(feature = "dev-bins", target_os = "macos"))]
+pub use app::run_startup_smoke;

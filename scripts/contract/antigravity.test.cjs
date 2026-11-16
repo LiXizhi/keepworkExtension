@@ -146,8 +146,8 @@ test('a zero-turn Rust sidecar can be read and continued by the Node native adap
   const saved = JSON.parse(fs.readFileSync(path.join(directory, session.threadId + '.json'), 'utf8'));
   assert.equal(saved.driver, 'antigravity-v1');
   assert.ok(saved.nativeId);
-  assert.deepEqual(saved.roots, [root, extraRoot]);
-  assert.equal(saved.cwd, root);
+  assert.deepEqual(saved.roots, [root, extraRoot].map(h.canonicalAgentRoot));
+  assert.equal(saved.cwd, h.canonicalAgentRoot(root));
   assert.equal(saved.model, 'native-model');
   assert.equal(saved.mode, 'plan');
   assert.deepEqual(saved.turns, []);
@@ -177,7 +177,7 @@ test('a zero-turn Rust sidecar can be read and continued by the Node native adap
     const data = JSON.parse(continued.turns.at(-1).items.find(item => item.type === 'agentMessage').text);
     assert.equal(data.nativeId, saved.nativeId);
     assert.equal(data.args[data.args.indexOf('--conversation') + 1], saved.nativeId);
-    assert.ok(data.args.includes(extraRoot));
+    assert.ok(data.args.includes(h.canonicalAgentRoot(extraRoot)));
     assert.equal(data.args[data.args.indexOf('--mode') + 1], 'plan');
     assert.equal(rows('prompt').length, count, 'Node fixture does not write to the Rust process log');
   } finally {
@@ -344,9 +344,10 @@ test('context MCP configuration is scoped and native plan permissions stay intac
   const session = await create(conversationId, { contextVersion: 1, roots: [root, extraRoot], mode: 'plan' });
   const result = await completed(session, 'context-1', 'FIXTURE_INSPECT');
   const data = inspect(result);
-  assert.notEqual(data.cwd, root);
+  assert.notEqual(data.cwd, h.canonicalAgentRoot(root));
   assert.ok(data.args.includes('--add-dir'));
-  assert.ok(data.args.includes(root)); assert.ok(data.args.includes(extraRoot));
+  assert.ok(data.args.includes(h.canonicalAgentRoot(root)));
+  assert.ok(data.args.includes(h.canonicalAgentRoot(extraRoot)));
   assert.equal(data.args[data.args.indexOf('--mode') + 1], 'plan');
   assert.ok(data.mcp.mcpServers.keepwork_aichat.command);
   assert.equal(data.hasCapability, true);

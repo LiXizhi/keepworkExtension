@@ -5,8 +5,11 @@ import type {
   BrainFolderResult,
   DesktopCapabilities,
   DesktopStatus,
+  DesktopScreenshot,
+  ScreenshotPermission,
   GitInstallResult,
   GitStatus,
+  LaunchIntent,
   RootGrant,
   UpdatesSnapshot,
 } from "./types";
@@ -52,9 +55,23 @@ export const PAGE_COMMANDS = [
   "theme-dark",
 ] as const;
 
-export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
+export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktopBridge | null {
   if (window !== window.top) return null;
   if (window.aichatDesktop) return window.aichatDesktop;
+
+  const launchDocument = globalThis.crypto?.randomUUID?.() || "";
+  const launchEnabled = (() => {
+    if (!launchCapability || !launchDocument || window.__AICHAT_PAGE_CONNECTION__) return false;
+    try {
+      const current = new URL(window.location.href);
+      const entry = new URL(window.__AICHAT_DESKTOP_BOOTSTRAP__?.entryUrl || "https://keepwork.com/chat");
+      return !current.username && !current.password && (
+        (current.origin === entry.origin && current.pathname === entry.pathname)
+        || (current.origin === "https://keepwork.com" && current.pathname === "/chat")
+        || (current.protocol === "http:" && ["127.0.0.1", "localhost"].includes(current.hostname)
+          && current.pathname.endsWith("/AIChat.html")));
+    } catch { return false; }
+  })();
 
   const capabilities: DesktopCapabilities = Object.freeze({
     files: true,
@@ -62,16 +79,32 @@ export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
     defaultBrainFolder: true,
     gitSetup: true,
     floatingPet: true,
+    petReplyPresentationVersion: 1,
+    petStreamingSpeechVersion: 1,
+    ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { remoteNarrationPauseVersion: 1 as const } : {}),
     startupSignIn: true,
-    ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceVersion: 1 as const, browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
+    ...(launchEnabled && ["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { desktopScreenshotVersion: 1 as const } : {}),
+    ...(launchEnabled ? { launchIntents: true as const, petApprovalRevealVersion: 1 as const, petApprovalReturnVersion: 1 as const } : {}),
+    ...(["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { browserSurfaceVersion: 1 as const, remoteDialogueVersion: 1 as const, remotePhoneVersion: 1 as const, remotePhoneCaptionVersion: 1 as const, remotePhoneActivityVersion: 1 as const } : {}),
+    ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
   });
 
   const petListeners = new Set<(payload: Record<string, unknown>) => void>();
+  const launchListeners = new Set<() => void>();
+  let launchLive = launchEnabled;
+  window.addEventListener("pagehide", () => { launchLive = false; launchListeners.clear(); }, { once: true });
+  const invokeLaunch = <T>(command: string, args: Record<string, unknown> = {}): Promise<T> => launchLive
+    ? invoke<T>(command, { document: launchDocument, token: launchCapability, ...args })
+    : Promise.reject(new Error("Launch document is no longer active"));
   const browserListeners = new Set<(payload: Record<string, unknown>) => void>();
   void listen<Record<string, unknown>>("aichat-desktop:browser-surface", (event) => {
     for (const cb of browserListeners) { try { cb(event.payload); } catch {} }
   });
   window.addEventListener("__aichat_desktop_event__", ((event: CustomEvent) => {
+    if (event.detail?.event === "launch-intent" && launchLive) {
+      for (const cb of launchListeners) { try { cb(); } catch {} }
+      return;
+    }
     if (event.detail?.event !== "browser-surface") return;
     for (const cb of browserListeners) { try { cb(event.detail.payload); } catch {} }
   }) as EventListener);
@@ -121,6 +154,27 @@ export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
   const bridge: AIChatDesktopBridge = Object.freeze({
     version: 1,
     capabilities,
+    ...(capabilities.desktopScreenshotVersion === 1 ? {
+      captureScreenshot: async (): Promise<DesktopScreenshot> => {
+        const shot = await invokeLaunch<DesktopScreenshot>("desktop_capture_screenshot");
+        if (!launchLive) throw new Error("Screenshot document is no longer active");
+        return shot;
+      },
+      getScreenshotPermission: (): Promise<ScreenshotPermission> => invokeLaunch("desktop_get_screenshot_permission"),
+      setScreenshotPermission: (enabled: boolean): Promise<ScreenshotPermission> => invokeLaunch("desktop_set_screenshot_permission", { enabled }),
+    } : {}),
+    ...(launchEnabled ? {
+      revealPetApproval: (options?: { returnToPet?: boolean }): Promise<boolean> =>
+        invokeLaunch("desktop_reveal_pet_approval", options?.returnToPet === true ? { returnToPet: true } : {}),
+      returnToPetAfterApproval: (): Promise<boolean> => invokeLaunch("desktop_return_to_pet_after_approval"),
+      getLaunchIntent: (): Promise<LaunchIntent | null> => invokeLaunch("desktop_get_launch_intent"),
+      acknowledgeLaunchIntent: (id: string): Promise<boolean> => invokeLaunch("desktop_acknowledge_launch_intent", { id: String(id || "") }),
+      onLaunchIntent: (callback: () => void): (() => void) => {
+        if (typeof callback !== "function") return () => {};
+        launchListeners.add(callback);
+        return () => { launchListeners.delete(callback); };
+      },
+    } : {}),
     browserSurface(op: string, args: Record<string, unknown> = {}): Promise<unknown> {
       return invoke("desktop_browser_surface", { op, args });
     },
@@ -131,6 +185,7 @@ export function installAIChatDesktopBridge(): AIChatDesktopBridge | null {
     reportStartupSignIn(signedIn: boolean): Promise<boolean> {
       return invoke<boolean>("desktop_report_startup_signin", { signedIn: !!signedIn });
     },
+    closeRemoteDialogue(id: string): Promise<boolean> { return invoke("remote_voice_dialogue_closed", { id }); },
     publishPetState(state: Record<string, unknown>): Promise<boolean> {
       return invoke<boolean>("desktop_publish_pet_state", { state: state || {} });
     },

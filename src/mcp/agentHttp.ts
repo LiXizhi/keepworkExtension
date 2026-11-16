@@ -11,12 +11,17 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
         if (req.method === 'POST' || req.method === 'PATCH') {
             if (!String(req.headers['content-type']).startsWith('application/json')) throw new Error('JSON required');
             const chunks: Buffer[] = []; let size = 0;
-            const imageTurn = /^\/agents\/sessions\/[\w-]+\/image-turns$/.test(url.pathname);
+            const imageTurn = /^\/agents\/sessions\/[\w-]+\/(?:approval-)?image-turns$/.test(url.pathname);
             const limit = imageTurn ? 7_000_000 : url.pathname.startsWith('/agents/contexts/') && url.pathname.endsWith('/result') ? 12_500_000 : 2_000_000;
             for await (const chunk of req) { size += chunk.length; if (size > limit) throw new Error('Request too large'); chunks.push(chunk); }
             input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         }
         const parts = url.pathname.split('/').filter(Boolean);
+        if ((parts[1] === 'approval-sessions' || ['approval-turns', 'approval-image-turns'].includes(parts[3]))
+            && req.method === 'POST' && input.approvalMode === undefined) throw new Error('Codex approvalMode required');
+        if (parts.join('/') === 'agents/approval-sessions' && req.method === 'POST') {
+            send(200, await manager.create(owner, input)); return;
+        }
         if (parts[1] === 'contexts') {
             const id = parts[2], action = parts[3];
             if (id === 'revoke' && req.method === 'POST') { manager.revokeContext(owner); send(200, { ok: true }); return; }
@@ -65,8 +70,8 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
         if (id && !action && req.method === 'GET') { send(200, await manager.read(id, owner)); return; }
         if (id && !action && req.method === 'PATCH') { send(200, await manager.update(id, owner, input)); return; }
         if (id && req.method === 'POST') {
-            if (action === 'image-turns' && !Array.isArray(input.images)) throw new Error('Missing images');
-            if (action === 'turns' || action === 'image-turns') { send(200, await manager.turn(id, owner, input)); return; }
+            if ((action === 'image-turns' || action === 'approval-image-turns') && !Array.isArray(input.images)) throw new Error('Missing images');
+            if (['turns', 'image-turns', 'approval-turns', 'approval-image-turns'].includes(action)) { send(200, await manager.turn(id, owner, input)); return; }
             if (action === 'interrupt') { send(200, await manager.interrupt(id, owner)); return; }
             if (action === 'respond') { send(200, manager.respond(id, owner, input)); return; }
         }

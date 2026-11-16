@@ -7,13 +7,14 @@ use super::sender::verify_main_sender;
 use super::state::{AppCore, DesktopStatus};
 use crate::brain_folder::{default_brain_folder, BrainFolderInfo};
 use crate::deployment::resolve_local_aichat_source_dir;
-use crate::files::FolderGrant;
+use crate::files::{FolderGrant, NativeFiles};
 use crate::git_setup::{check_git, install_git, GitInstallResult, GitStatus};
 use crate::menu::{
     canonical_host_command, is_allowed_host_command, is_allowed_page_command, menu_payload,
     MenuContextState,
 };
 use crate::security::ENTRY;
+use crate::theme::DesktopTheme;
 use crate::APP_VERSION;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -98,9 +99,17 @@ pub(super) fn desktop_revoke_folder(
     root_id: String,
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state)?;
-    let removed = state.files.revoke(&root_id)?;
+    revoke_folder_with_cleanup(&state.files, &root_id, || state.terminals.close_all())
+}
+
+fn revoke_folder_with_cleanup(
+    files: &NativeFiles,
+    root_id: &str,
+    close_terminals: impl FnOnce(),
+) -> Result<bool, String> {
+    let removed = files.revoke(root_id)?;
     if removed {
-        state.terminals.close_all();
+        close_terminals();
     }
     Ok(removed)
 }
@@ -231,6 +240,24 @@ fn menu_context(state: &AppCore) -> MenuContextState {
 }
 
 #[tauri::command]
+pub(super) fn desktop_set_menu_language(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    language: String,
+) -> Result<(), String> {
+    verify_main_sender(&window, &state)?;
+    if language != "en" && language != "zh-CN" {
+        return Err("Unsupported menu language".into());
+    }
+    #[cfg(target_os = "macos")]
+    super::host_menu::setup_mac_native_menu(&app, &state, &language).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+    Ok(())
+}
+
+#[tauri::command]
 pub(super) async fn desktop_open_menu(
     app: AppHandle,
     window: WebviewWindow,
@@ -293,6 +320,7 @@ pub(super) fn desktop_titlebar_action(
             window.close().map_err(|e| e.to_string())?;
         }
         "toggle-maximize" => {
+            state.pet_approval_return.lock().unwrap().take();
             if let Ok(is_max) = window.is_maximized() {
                 if is_max {
                     let _ = window.unmaximize();
@@ -313,12 +341,81 @@ pub(super) fn desktop_sync_theme(
     dark: bool,
     _color: Option<String>,
     _symbol_color: Option<String>,
+    confirmed: Option<bool>,
 ) -> Result<bool, String> {
     verify_main_sender(&window, &state)?;
-    let _ = window.set_theme(Some(if dark {
-        tauri::Theme::Dark
+    let url = window.url().map_err(|error| error.to_string())?;
+    let shell = state.page_connection.lock().unwrap().is_shell(&url);
+    let theme = if shell || confirmed == Some(false) {
+        state.theme.current()
     } else {
-        tauri::Theme::Light
-    }));
+        let theme = DesktopTheme::from_dark(dark);
+        let _ = state.theme.remember(theme);
+        theme
+    };
+    let _ = window.set_theme(Some(theme.native()));
+    let _ = window.set_background_color(Some(theme.background()));
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn native_grant_transaction_closes_terminals_only_after_successful_revoke() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("aichat-rust-revoke-order-{}", uuid::Uuid::new_v4())),
+        );
+        let folder = root.0.join("workspace");
+        fs::create_dir_all(&folder).unwrap();
+        let store = root.0.join("folder-grants.json");
+        let backup = root.0.join("persisted-grants.json");
+        let files = NativeFiles::new(store.clone());
+        let grant = files.grant(&folder).unwrap();
+        let original = fs::read(&store).unwrap();
+        let closes = Cell::new(0);
+        let close_terminals = || {
+            assert!(files.resolve(&grant.id, "", false, false).is_err());
+            assert!(
+                NativeFiles::new(store.clone())
+                    .resolve(&grant.id, "", false, false)
+                    .is_err(),
+                "terminal cleanup must follow durable revocation"
+            );
+            closes.set(closes.get() + 1);
+        };
+
+        fs::rename(&store, &backup).unwrap();
+        fs::create_dir(&store).unwrap();
+        assert!(!revoke_folder_with_cleanup(&files, "unknown-root-id", &close_terminals).unwrap());
+        assert!(revoke_folder_with_cleanup(&files, &grant.id, &close_terminals).is_err());
+        assert_eq!(closes.get(), 0, "a failed save cannot close terminals");
+        assert!(
+            revoke_folder_with_cleanup(&files, &grant.id, &close_terminals).is_err(),
+            "retry must still attempt the failed save"
+        );
+        assert_eq!(closes.get(), 0);
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        fs::remove_dir(&store).unwrap();
+        fs::rename(&backup, &store).unwrap();
+
+        assert!(revoke_folder_with_cleanup(&files, &grant.id, &close_terminals).unwrap());
+        assert_eq!(closes.get(), 1);
+        assert!(!revoke_folder_with_cleanup(&files, &grant.id, &close_terminals).unwrap());
+        assert_eq!(
+            closes.get(),
+            1,
+            "duplicate revoke cannot close terminals again"
+        );
+    }
 }

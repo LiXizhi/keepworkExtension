@@ -1,5 +1,9 @@
 #include "native.hpp"
 #include "common/archive.hpp"
+#ifdef KEEPWORK_WIN7_EDITION
+#include "win7_native.hpp"
+#include "client_updates.hpp"
+#endif
 #include <commctrl.h>
 #include <shellapi.h>
 #include <nlohmann/json.hpp>
@@ -14,10 +18,12 @@ using namespace keepwork;
 namespace {
 constexpr UINT update_message = WM_APP + 1, done_message = WM_APP + 2;
 std::atomic<bool> cancelled{false};
+std::atomic<bool> maintenance_committed{false};
 std::mutex text_mutex;
-std::wstring status_text, error_text;
+std::wstring status_text, error_text, warning_text, service_result;
 unsigned progress_percent = 0;
-HWND label = nullptr, bar = nullptr;
+int operation_exit_code = 0;
+HWND label = nullptr, bar = nullptr, progress_window = nullptr;
 std::string read_file(const fs::path& file, std::uint64_t limit = 2 * 1024 * 1024) {
   plain_path(file);
   if (!fs::is_regular_file(file) || fs::file_size(file) > limit) throw std::runtime_error("Invalid cached release manifest");
@@ -36,7 +42,14 @@ void atomic_write(const fs::path& file, const std::string& value) {
   if (!MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     throw std::runtime_error("Cannot activate downloaded CEF package");
 }
-struct Options { bool force_cef = false, update = false, background = false; };
+struct Options { bool force_cef = false, update = false, background = false, start_mcp = false;
+#ifdef KEEPWORK_WIN7_EDITION
+  bool update_mcp = false, update_client = false, restart_mcp = false, check_updates = false, install_update = false;
+  DWORD wait_pid = 0;
+  std::wstring ready_event, cancel_event, closed_event;
+  std::string expected_update;
+#endif
+};
 Options options() {
   int count = 0; auto args = CommandLineToArgvW(GetCommandLineW(), &count);
   if (!args) throw std::runtime_error("Cannot read launch arguments");
@@ -47,24 +60,117 @@ Options options() {
     if (arg == L"--cef") result.force_cef = true;
     else if (arg == L"--update-cef") { result.force_cef = true; result.update = true; }
     else if (arg == L"--background") result.background = true;
-    else throw std::runtime_error("Unknown launcher option. Supported: --cef, --update-cef, --background");
+    else if (arg == L"--start-mcp") result.start_mcp = true;
+#ifdef KEEPWORK_WIN7_EDITION
+    else if (arg == L"--update-mcp") result.update_mcp = true;
+    else if (arg == L"--update-client") result.update_client = true;
+    else if (arg == L"--restart-mcp") result.restart_mcp = true;
+    else if (arg == L"--check-updates") result.check_updates = true;
+    else if (arg == L"--install-update") result.install_update = true;
+    else if (arg == L"--wait-pid" || arg == L"--ready-event" || arg == L"--cancel-event" || arg == L"--closed-event" || arg == L"--expected-update") {
+      if (++i >= count) throw std::runtime_error("Missing compatibility maintenance option value");
+      const std::wstring value(args[i]);
+      if (arg == L"--wait-pid") {
+        if (value.empty() || value.size() > 10 || value.find_first_not_of(L"0123456789") != std::wstring::npos)
+          throw std::runtime_error("Invalid update parent PID");
+        const auto pid = std::stoull(value);
+        if (!pid || pid > MAXDWORD) throw std::runtime_error("Invalid update parent PID");
+        result.wait_pid = static_cast<DWORD>(pid);
+      } else if (arg == L"--ready-event") result.ready_event = value;
+      else if (arg == L"--cancel-event") result.cancel_event = value;
+      else if (arg == L"--closed-event") result.closed_event = value;
+      else result.expected_update = utf8(value);
+    }
+#endif
+    else throw std::runtime_error("Unknown launcher option");
   }
+#ifdef KEEPWORK_WIN7_EDITION
+  const unsigned actions = unsigned(result.start_mcp) + unsigned(result.restart_mcp) + unsigned(result.check_updates)
+    + unsigned(result.install_update) + unsigned(result.update_client) + unsigned(result.update_mcp) + unsigned(result.update);
+  if (actions > 1 || (result.install_update && (!result.wait_pid || result.ready_event.empty() || result.cancel_event.empty() || result.closed_event.empty()
+      || !is_sha256(result.expected_update))) || (!result.install_update && (result.wait_pid || !result.ready_event.empty()
+      || !result.cancel_event.empty() || !result.closed_event.empty() || !result.expected_update.empty()))) throw std::runtime_error("Invalid maintenance action options");
+#endif
   return result;
 }
 void run(const Options& opts, const Progress& progress) {
   auto os = windows_version();
-  if (cef_running()) throw std::runtime_error("Keepwork compatibility mode is already open; use the existing window or close it before switching runtimes");
+  bool maintenance = opts.start_mcp;
+#ifdef KEEPWORK_WIN7_EDITION
+  maintenance = maintenance || opts.restart_mcp || opts.check_updates || opts.install_update || opts.update_client;
+#endif
+  if (!maintenance && cef_running()) throw std::runtime_error("Keepwork is already open; use the existing window or close it before switching runtimes");
   auto cache = local_data() / L"Keepwork" / L"BrowserRuntimes";
   plain_path(cache); fs::create_directories(cache);
   // Serialize probe, download and promotion across concurrent launches.
   Handle lock(CreateFileW((cache / L"launcher.lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
   if (lock.value == INVALID_HANDLE_VALUE) throw std::runtime_error("Another Keepwork launcher is running; retry when it finishes");
+#ifdef KEEPWORK_WIN7_EDITION
+  if (opts.restart_mcp) {
+    const bool restarted = restart_win7_mcp(progress, [] {
+      if (cancelled) return false;
+      const bool confirmed = MessageBoxW(progress_window, L"重启本地 MCP？\n\n正在运行的本地任务和终端会中断，聊天窗口保持打开。",
+        L"Keepwork 本地服务", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
+      if (confirmed) {
+        maintenance_committed = true;
+        EnableWindow(GetDlgItem(progress_window, IDCANCEL), FALSE);
+      }
+      return confirmed;
+    });
+    if (restarted) service_result = wide(mcp_service_status(probe_mcp_health()));
+    return;
+  }
+  if (opts.check_updates || opts.update_client) {
+    const auto snapshot = check_win7_client_update(progress);
+    operation_exit_code = snapshot.value("ready", false) ? 10 : 0;
+    if (opts.update_client) service_result = snapshot.value("ready", false)
+      ? L"Keepwork 更新已下载。请在聊天窗口的“检查更新…”中选择“退出并更新”。"
+      : L"当前已是最新版本。";
+    return;
+  }
+  if (opts.install_update) {
+    install_win7_client_update(opts.wait_pid, opts.ready_event, opts.cancel_event, opts.closed_event, opts.expected_update, progress);
+    return;
+  }
+#endif
+  // Explicit native user action only. Keep the current browser and every
+  // existing daemon alive; the existing service startup paths attach safely.
+  if (opts.start_mcp) {
+#ifdef KEEPWORK_WIN7_EDITION
+    start_win7_mcp(false, progress);
+#else
+    start_compatible_mcp(os, progress);
+#endif
+    service_result = wide(mcp_service_status(probe_mcp_health()));
+    return;
+  }
   auto channel = select_channel(os, false);
+#ifdef KEEPWORK_WIN7_EDITION
+  // This edition only accepts packages whose minimum is Win7 SP1. It also
+  // runs on newer Windows for validation without selecting modern CEF/Tauri.
+  channel = "legacy";
+  os = {6, 1, 7601};
+  try { start_win7_mcp(opts.update_mcp, progress); }
+  catch (const std::exception& error) {
+    win7_startup_warning(error.what());
+    warning_text = wide(error.what()) + L"\n\n" + (local_data() / L"KeepworkWin7Win8").wstring();
+  }
+#endif
   if (channel == "modern" && !opts.force_cef && probe_webview(cache / L"webview-probe", progress)) {
     progress(L"正在打开 Keepwork…", 0, 0);
     if (launch_desktop(executable_dir() / L"aichat-rust.exe", opts.background, progress)) return;
   }
   if (installation_busy(executable_dir())) throw std::runtime_error("Close the existing Keepwork window before switching to CEF");
+#ifndef KEEPWORK_WIN7_EDITION
+  // Complete local service startup before the web page's first health probe.
+  // Legacy Windows must use the separately built Win7/8 MCP, never this payload.
+  try { start_compatible_mcp(os, progress); }
+  catch (const std::exception& error) {
+    const auto logs = local_data() / L"Keepwork";
+    mcp_startup_warning(logs, error.what());
+    warning_text = wide(error.what()) + L"\n\n" + logs.wstring();
+  }
+#endif
   auto root = cache / channel / architecture();
   plain_path(root); fs::create_directories(root / L"versions");
   auto active = root / L"active.json";
@@ -74,7 +180,7 @@ void run(const Options& opts, const Progress& progress) {
     verify_package(dir, m, hash);
     if (channel == "modern") allow_sandbox_read(dir);
     auto profile = local_data() / L"Keepwork" / L"CefProfiles" / (channel + "-" + std::to_string(m.chromium_major));
-    return launch_cef(dir, profile, opts.background, progress);
+    return launch_cef(dir, profile, opts.background, progress, m.service_launcher, m.maintenance);
   };
   std::string previous;
   if (fs::exists(active)) {
@@ -83,16 +189,36 @@ void run(const Options& opts, const Progress& progress) {
       auto m = validate_manifest(verify_envelope(previous), channel, architecture(), os);
       verify_package(root / L"versions" / m.sha256, m, hash);
     } catch (...) { previous.clear(); }
-    if (!previous.empty() && !opts.update) {
-      auto m = validate_manifest(verify_envelope(previous), channel, architecture(), os);
-      start(m, root / L"versions" / m.sha256); return;
+  }
+  std::string envelope;
+#ifdef KEEPWORK_WIN7_EDITION
+  const auto bundled_archive = executable_dir() / L"resources" / L"cef-bundled.zip";
+  const auto bundled_manifest = executable_dir() / L"resources" / L"cef-bundled.signed.json";
+  const bool bundled = !opts.update && fs::exists(bundled_archive) && fs::exists(bundled_manifest);
+  if (bundled) {
+    try {
+      auto bundled_envelope = read_file(bundled_manifest);
+      const auto candidate = validate_manifest(verify_envelope(bundled_envelope), channel, architecture(), os);
+      if (previous.empty() || newer_cef_host(candidate,
+          validate_manifest(verify_envelope(previous), channel, architecture(), os)))
+        envelope = std::move(bundled_envelope);
+    } catch (const std::exception& error) {
+      if (previous.empty()) throw;
+      win7_startup_warning(error.what());
     }
   }
-  auto envelope = fetch_manifest(std::string(cdn_base) + channel + "/windows-" + architecture() + "/stable.json", progress);
+#endif
+  if (!previous.empty() && !opts.update && envelope.empty()) {
+    auto m = validate_manifest(verify_envelope(previous), channel, architecture(), os);
+    start(m, root / L"versions" / m.sha256); return;
+  }
+  if (envelope.empty())
+    envelope = fetch_manifest(std::string(cdn_base) + channel + "/windows-" + architecture() + "/stable.json", progress);
   auto manifest = validate_manifest(verify_envelope(envelope), channel, architecture(), os);
   auto directory = root / L"versions" / manifest.sha256;
   auto archive = root / (manifest.sha256 + ".zip.part");
   auto staging = root / (manifest.sha256 + ".staging");
+  plain_path(archive);
   try {
     bool valid = false;
     if (fs::exists(directory)) {
@@ -101,7 +227,14 @@ void run(const Options& opts, const Progress& progress) {
       if (!valid) throw std::runtime_error("Cached CEF files are damaged; close Keepwork and remove the damaged version before retrying");
     }
     if (!valid) {
-      download(std::string(cdn_base) + "objects/" + manifest.sha256 + ".zip", archive, manifest.size, progress);
+#ifdef KEEPWORK_WIN7_EDITION
+      if (bundled) {
+        plain_path(bundled_archive);
+        if (fs::file_size(bundled_archive) != manifest.size) throw std::runtime_error("Bundled CEF size differs from its signed manifest");
+        fs::copy_file(bundled_archive, archive, fs::copy_options::overwrite_existing);
+      } else
+#endif
+        download(std::string(cdn_base) + "objects/" + manifest.sha256 + ".zip", archive, manifest.size, progress);
       if (sha256_file(archive) != manifest.sha256) throw std::runtime_error("CEF download SHA-256 mismatch");
       plain_path(staging);
       if (fs::exists(staging)) throw std::runtime_error("An interrupted CEF staging directory exists; close Keepwork and remove it before retrying");
@@ -123,8 +256,8 @@ void run(const Options& opts, const Progress& progress) {
   }
 }
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
-  if (message == WM_COMMAND && LOWORD(w) == IDCANCEL) { cancelled = true; EnableWindow(GetDlgItem(window, IDCANCEL), FALSE); return 0; }
-  if (message == WM_CLOSE) { cancelled = true; return 0; }
+  if (message == WM_COMMAND && LOWORD(w) == IDCANCEL) { if (!maintenance_committed) cancelled = true; EnableWindow(GetDlgItem(window, IDCANCEL), FALSE); return 0; }
+  if (message == WM_CLOSE) { if (!maintenance_committed) cancelled = true; return 0; }
   if (message == update_message) {
     std::lock_guard<std::mutex> lock(text_mutex);
     SetWindowTextW(label, status_text.c_str()); SendMessageW(bar, PBM_SETPOS, progress_percent, 0); return 0;
@@ -153,6 +286,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   RegisterClassW(&cls);
   HWND window = CreateWindowExW(WS_EX_DLGMODALFRAME, cls.lpszClassName, L"Keepwork", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, 500, 190, nullptr, nullptr, instance, nullptr);
   if (!window) return 2;
+  progress_window = window;
   label = CreateWindowW(L"STATIC", L"正在检查运行环境…", WS_CHILD | WS_VISIBLE, 24, 22, 450, 36, window, nullptr, instance, nullptr);
   bar = CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 24, 64, 450, 20, window, nullptr, instance, nullptr);
   CreateWindowW(L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 390, 103, 84, 28, window, reinterpret_cast<HMENU>(IDCANCEL), instance, nullptr);
@@ -160,7 +294,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::thread worker([&] {
     try {
       run(opts, [&](const std::wstring& text, std::uint64_t done, std::uint64_t total) {
-        if (cancelled) throw std::runtime_error("Download cancelled");
+        if (cancelled && !maintenance_committed) throw std::runtime_error("Download cancelled");
         { std::lock_guard<std::mutex> lock(text_mutex); status_text = text; progress_percent = total ? static_cast<unsigned>(done * 100 / total) : 0; }
         PostMessageW(window, update_message, 0, 0);
       });
@@ -169,9 +303,41 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   });
   MSG message{}; while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
   worker.join();
+#ifdef KEEPWORK_WIN7_EDITION
+  if (opts.check_updates) return cancelled ? 2 : !error_text.empty() ? 2 : operation_exit_code;
+  if (opts.install_update) {
+    if (!error_text.empty()) {
+      // If the chat is alive it observes this helper and presents the retained
+      // state. After chat exit the helper must surface an installation failure.
+      Handle parent(OpenProcess(SYNCHRONIZE, FALSE, opts.wait_pid));
+      if (!parent.value || WaitForSingleObject(parent.value, 0) == WAIT_OBJECT_0)
+        MessageBoxW(nullptr, (L"更新尚未安装，已下载的更新已保留。\n\n" + error_text).c_str(), L"Keepwork 更新", MB_OK | MB_ICONWARNING);
+      return 2;
+    }
+    return cancelled ? 2 : 0;
+  }
+#endif
+  if (opts.start_mcp
+#ifdef KEEPWORK_WIN7_EDITION
+      || opts.restart_mcp || opts.update_client
+#endif
+      ) {
+    if (!error_text.empty()) {
+      MessageBoxW(nullptr, (L"无法启动本地服务。\n\n" + error_text).c_str(), L"Keepwork 本地服务", MB_OK | MB_ICONERROR);
+      return 2;
+    }
+    if (!cancelled && !service_result.empty())
+      MessageBoxW(nullptr, service_result.c_str(), L"Keepwork 本地服务", MB_OK | MB_ICONINFORMATION);
+    return cancelled ? 1 : 0;
+  }
   if (!error_text.empty()) {
     MessageBoxW(nullptr, (L"无法启动 Keepwork。\n\n" + error_text + L"\n\n已保留原有数据。请检查网络后重新打开；如需重新获取兼容组件，可运行 Keepwork.exe --update-cef。").c_str(), L"Keepwork", MB_OK | MB_ICONERROR);
     return 2;
+  }
+  if (!cancelled && !warning_text.empty()) {
+    MessageBoxW(nullptr, (L"本地 MCP 服务未能启动，云聊天仍可使用。\n\n" + warning_text
+      + L"\n\n请查看该目录中的 mcp-startup-error.txt 和 mcp-runtime.log；检查安装文件或端口占用后重新打开 Keepwork。").c_str(),
+      L"Keepwork", MB_OK | MB_ICONWARNING);
   }
   return cancelled ? 1 : 0;
 }

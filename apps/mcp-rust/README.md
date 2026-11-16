@@ -14,17 +14,40 @@ Node. Same wire contract, no Node in the installer.
 - Only advertises capabilities it actually serves, so AIChat degrades instead of
   calling a 404 while the port is in progress.
 
-## Phase status
+## Current scope and acceptance
 
-| Phase | Scope | State |
-| --- | --- | --- |
-| P0 | lifecycle, config/paths, CORS/auth, `/health`, `/exists`, `/fs/stat`, `/admin/status|stop`, MCP handshake + `mcp_status` | implemented |
-| P1 | `/fs/*` full (`list`/`search`/`stat`/`file`/`dir`/`reveal`), `/fs/locations|browse`, PTY `/terminal/*`, `run_terminal`, `grep_files`, `web_search`, `fetch_url` | implemented |
-| P2 | agents/ACP, messaging, personas, presence SSE | partial: native ACP/Codex/Claude sessions, page-bound tool context, presence, persona tools and DingTalk/Feishu messaging implemented; provider-specific gaps remain |
-| P3 | browser, computer, paracraft, dashboard, admin API docs/history | planned |
+The [Rust capability matrix](../../docs/rust-capability-matrix.md) is the current
+feature/engine/platform index. Files, PTY, portable tools, Dashboard, admin API
+catalog/history, native CLI sessions and image turns, persona local tools,
+DingTalk/Feishu messaging and owner-driven Circles are implemented. Browser,
+computer and Paracraft services, autonomous multi-agent routing and headless
+messaging workers are not fully ported. Optional capabilities decide availability;
+product version equality is never required.
 
-See [docs/rust-runtime-migration.md](../../docs/rust-runtime-migration.md) for the
-migration contract, manifest v2 and rollout order.
+See [the migration contract](../../docs/rust-runtime-migration.md) for manifest
+v2, independent update streams and ownership boundaries, and the
+[packaged-release checklist](../../docs/acceptance/rust-desktop-release.md) for
+durable evidence. Dated validation below records its exact source/environment;
+it does not certify a current installed package, every platform or a real account.
+
+## Release platforms and independent CDN publication
+
+`Rust MCP daemon` (`.github/workflows/mcp-rust.yml`) builds three distribution
+groups matching the Rust desktop packages: Windows x64, Windows ARM64 and
+macOS Universal. The Mac group contains two native runtime slices; it does not
+claim to produce one fat daemon. The existing `macos-arm64` and `macos-x64`
+ZIP/feed contracts remain separate so installed clients can keep updating.
+Each ZIP has its own `report-<target>.json` acceptance report.
+
+After a successful build, explicitly run **Review or publish an accepted Rust
+MCP runtime** (`mcp-rust-publish.yml`) with its run ID, artifact, matching target,
+`report_path=report-<target>.json` and `publish=true`. Building or bundling MCP
+inside a desktop installer does not publish the independent CDN feed.
+New distribution excludes Linux; existing Linux CDN objects and historical
+manifest readers remain intact. The Ubuntu publisher runner is an upload host,
+not a Linux runtime product. See the maintained
+[release skill](../../.github/skills/rust-release/SKILL.md) for the complete
+publication, verification and merge-to-main procedure.
 
 ## Native CLI sessions
 
@@ -46,6 +69,30 @@ daemon or treats installation detection as a successful model turn.
   restart never replay an uncertain prompt. Restarted in-flight turns remain
   uncertain and can be inspected; native history is resumed only when the
   provider advertises the required contract.
+- Native observations and user intents have different save-failure semantics.
+  An observed native terminal result or confirmed harness exit must not roll back
+  into a permanently running turn when registry/history persistence fails. The
+  manager retains the actual observed data and items in memory; a private storage
+  marker projects a terminal session as the existing public `error` state with
+  `NATIVE_STATE_PERSIST_FAILED`, stating that the result is not durably confirmed
+  and must not be replayed. An actual active run remains active, preventing a
+  second concurrent turn. These markers add no required client request fields.
+  A confirmed exited harness is detached and its obsolete pending entries are
+  cleared even when saving fails; stale completion for an older turn is a no-op.
+- Recovery retries local file commits only. Reading the owned session may retry
+  the saved observation without submitting a provider prompt. A successful commit
+  clears the marker, publishes a new cursor and restores the known terminal
+  status, such as `completed`. Repair of a corrupt history sidecar is limited to
+  the changed session, so unrelated sessions can still commit. Pending registry
+  rows retain a legacy-visible error plus private observed metadata for later
+  repair, including after restart when that metadata was durably saved and its
+  owner/request/turn identity matches. Lost RAM or an old `running` row alone is
+  not evidence of success. Ordinary user edits still roll back on save failure;
+  a new turn requires its intent to persist before dispatch. The original request
+  ID and receipts remain intact, duplicate IDs never execute again, and storage
+  recovery never silently replays an uncertain request. This round's isolated
+  fault-injection evidence is under `.tmp/rust-terminal-recovery-20261113/`; it is
+  separate from the earlier unclassified Claude output-cap timeout observation.
 - `/agents/sessions/:id/image-turns` accepts 1–4 inline PNG/JPEG/WebP/GIF data
   URLs, at most 4 MiB decoded in total (7,000,000-byte HTTP body). Codex and
   Claude receive native image blocks; ACP requires `promptCapabilities.image`
@@ -126,7 +173,7 @@ continue. Antigravity accepts text only and explicitly rejects image input.
 Executable discovery remains separate from protocol/account verification, and
 metadata queries do not launch login or submit a prompt.
 
-Image turns, account switching, non-Codex native history import and the Copilot
+Account switching, non-Codex native history import and the Copilot
 VS Code custom-model bridge also remain outside this Rust implementation. A
 registered ACP provider is not evidence that its installed version, account,
 models or platform have passed a live acceptance run.
@@ -212,12 +259,13 @@ cargo test --offline --manifest-path apps/mcp-rust/Cargo.toml --test circles_con
 cargo test --offline --manifest-path apps/mcp-rust/Cargo.toml --lib circle_
 ```
 
-## Persona support in 0.2.4
+## Persona support
 
 The daemon supports persona configuration, conversation history, message submission,
 read/clear/cancel operations and change events under `/agents/personas`. AIChat's
 existing desktop pet can send to **My Persona** through Bridge v1 when the local
-service and a local second-brain folder are connected. This does not complete P2.
+service and a local second-brain folder are connected. The current optional
+contracts and remaining scope live in the capability matrix.
 
 - Persona records use the Node-compatible `~/.keepwork-mcp/personas-v1` files.
   Requests require an allowed explicit `Origin`, `X-Agent-Owner` and daemon
@@ -234,10 +282,14 @@ service and a local second-brain folder are connected. This does not complete P2
   `stats.ownerGroups`; fingerprints never expose request owner keys. Historical
   records are retained, including empty conversations, and are never merged
   across identities.
-- Replies come from a real HTTPS Keepwork `/core/v0/gpt/chat` request. This
-  runtime uses Keepwork rather than native CLI executors. It can include the
-  persona's bounded conversation history and confined `AGENTS.md` instructions;
-  it has no workspace tools or general second-brain file retrieval.
+- Replies use HTTPS Keepwork `/core/v0/gpt/chat`, rather than a native CLI persona
+  executor. The bounded conversation history and confined `AGENTS.md` instructions
+  can be combined with `grep_files`, `web_search`, `fetch_url`, and a `run_terminal`
+  limited to one `dws` or `lark-cli` command. Keepwork receives `localTools`; tools
+  execute only after a complete validated argument snapshot, with at most eight
+  rounds. This is not arbitrary shell or general file-write authority. The channel
+  auto-answer pump uses its separate text-only path; native persona CLI and
+  headless-worker execution remain unsupported.
 - `taskContextVersion: 1` supports `contextMode: "isolated"`, which omits prior
   conversation history and summaries. Omitted `contextMode` keeps the historical
   conversation behavior.
@@ -245,11 +297,13 @@ service and a local second-brain folder are connected. This does not complete P2
   Reusing the request ID does not submit another model request. Interrupted runs
   become unknown after restart and are not replayed. Clients must inspect an
   uncertain outcome before submitting a new request.
-- Replies carry daemon-owned execution counts of zero tool requests and zero
-  tool returns. They are text answers, not evidence that files changed or business
-  actions completed. Persona collaboration, file writes, DingTalk/Feishu/WeChat,
-  sales automation and native CLI execution are not provided; unsupported actions
-  return feature-specific errors and their optional capabilities are not advertised.
+- Replies carry actual daemon-owned execution metadata; zero counts are not a
+  blanket current contract, and omitted metadata means unknown. Claimed file
+  changes or business actions require tool results and receipts. DingTalk/Feishu
+  channel management, manual replies and owner-driven Circles are implemented;
+  autonomous persona collaboration, general file writes, WeChat, sales automation
+  and native CLI persona execution remain outside this implementation. Unsupported
+  actions fail at their feature boundary while ordinary text remains usable.
 
 ## DingTalk listener lifecycle
 
@@ -379,6 +433,27 @@ node --test apps/mcp-rust/scripts/dashboard-personas.test.cjs # isolated browser
 
 `--build-info` reports the compiled `version`, `commit`, `target`, `sourceHash`
 and `capabilities`; host identity environment variables cannot override them.
+The build script resolves its crate directory from Cargo's **runtime**
+`CARGO_MANIFEST_DIR`, then uses that directory consistently for source enumeration,
+workspace inputs and Git queries. Compiling a checkout path into the build-script
+executable with `env!("CARGO_MANIFEST_DIR")` is unsafe when Cargo caches are moved:
+a reused script could read the former checkout's source and commit. Absolute
+checkout paths are excluded from the source-hash input, so the same source and
+build-input bytes retain the same hash after relocation. When Git metadata is
+unavailable, the commit remains unknown/empty under the existing contract; it
+must never be borrowed from the original checkout or supplied through host identity
+variables. Release packaging still requires its existing valid provenance.
+
+The relocation regression must reuse an already compiled build script/cache from
+checkout A in checkout B, change B's source/commit without cleaning that cache,
+and verify that B's binary reports B's identity. Later changes in A must not
+affect B; equal input bytes in different directories must hash equally. A fresh
+build in B alone does not exercise the cached-script defect. These are build
+identity checks, not a change to HTTP/MCP compatibility or proof of live account,
+Windows or installed-package acceptance. This round's planned evidence directory
+is `.test-runtime/rust-agents-build-install-20261113/`; actual command results are
+recorded separately after execution.
+
 The desktop bundler validates every requested target against the current source
 and required capabilities before writing resources. `--no-build` still rejects
 older binaries, stale binaries with the same version and missing capabilities.
@@ -405,7 +480,7 @@ crates/keepwork-mcp/
   src/fs.rs          /fs/* routes, MIME and size caps
   src/folders.rs     /fs/locations, /fs/browse
   src/presence.rs    /aichat/presence (JSON + SSE) & MCP keepwork/presence
-  src/personas.rs    owner-scoped persona records, text replies and change events
+  src/personas/     owner-scoped persona records, local tools, Circles and change events
   src/terminal.rs    PTY sessions, cursor replay, deny-list
   src/shell.rs       run_terminal (spawn, timeout, output cap)
   src/grep.rs        grep_files (ripgrep + loop-aware walker)
@@ -417,6 +492,31 @@ crates/keepwork-mcp/
   tests/contract.rs  wire contract (headers, payloads, SSE framing)
 ```
 
+## Session persistence optimization (0.2.47)
+
+The 0.2.48 smoke runner checks the compiled binary identity, live child PID and
+isolated workspace before every POST, including shutdown. Authentication uses
+only that child's temporary profile. HTTP startup/body/shutdown are bounded;
+cleanup signals and reaps only the owned child before removing its profile.
+Port conflicts, peer replacement, auth-on/auth-off loopback operation,
+hanging responses and spawn/exit failures have isolated regression fixtures in
+`scripts/smoke.test.cjs`. No smoke is allowed to use the shared port 8089.
+
+Streamed native CLI updates rewrite only the changed session's Node-compatible
+history sidecar. Registry records, request receipts, `sync_all`, cursors and full
+reconnect snapshots retain their existing commit order. Provider exits save the
+affected histories together; failed writes do not advance a cached fingerprint.
+
+An isolated macOS arm64 debug A/B benchmark (64 sessions × 32 chunks) reduced
+history writes from 2,048 to 32 and history bytes from 17,511,232 to 510,592.
+Registry writes remained 32 / 17,984,567 bytes. Its measured P95 was 436.938 ms
+versus 26.220 ms; this is a local disk fixture, not an end-to-end latency promise.
+Repeat with `node apps/mcp-rust/scripts/benchmark-agent-persistence.cjs --out <new-directory>`
+from the repository root. It saves both strategies' counters, build identity and
+logs without connecting to any daemon or account. Final task validation receipts
+are collected under `.test-runtime/rust-optimization-final/` at the repository root;
+real account, clean-machine and published-feed checks remain separate pending gates.
+
 ## Rules
 
 - Loopback only. Never bind `0.0.0.0`.
@@ -427,3 +527,25 @@ crates/keepwork-mcp/
 
 
 DingTalk manual image attachments use the additive conversation `replyImage` contract and `POST /agents/personas/:id/reply-image`. One PNG/JPEG/GIF/WebP up to 5 MiB is validated, staged privately under the binding root, sent through current-user DWS file transport, and cleaned after the attempt. Images arrive as downloadable attachments. Text replies keep their legacy request shape; Feishu and older services keep text usable without advertising this optional capability. The persistent request ledger prevents replay of unknown sends. See [manual image attachments](../../docs/message-autoreply.md#manual-image-attachments).
+
+## Windows 7 / 8 compatibility edition (preview)
+
+A separate `variant: "win7-win8"` build targets Windows 7 SP1 x64, Windows 8 x64 and Windows 8.1 x64 from the same Rust sources. The technical target `x86_64-win7-windows-msvc` names the minimum OS; it does not certify all three systems. This edition retains basic files, folder browsing, search and noninteractive `run_terminal`. Starting with runtime `0.2.67`, the complete compatibility package also includes pinned WinPTY `0.4.3` x64 `bin/winpty.dll`, `bin/winpty-agent.exe` and their license/provenance. It provides a real interactive shell through the existing HTTP `pty-session-v1` routes, including input, output cursor replay, resize, interrupt and close, without Node. Its legacy Windows path does not require system ConPTY support.
+
+The running service advertises `terminalApi` only after verifying its adjacent backend files, loading the DLL and passing a backend readiness probe. The first probe opens and frees a WinPTY backend without starting a user shell or running commands. Missing, modified or unloadable dependencies and failed readiness leave the optional capability absent and return HTTP `501` / `UNSUPPORTED_FEATURE` from terminal routes; ordinary MCP operations keep working. Runtime `0.2.66` and older compatibility services still omit PTY support, so a disabled Terminal entry when attached to one is expected. Client and runtime versions remain independent; do not kill another application's daemon or treat `cmd.exe /c` as an interactive-terminal substitute.
+
+Runtime `0.2.81` selects the compatibility session's native backend from the running OS's APIs: this edition uses ConPTY on modern Windows with the required system exports, while Windows 7/8 without those exports keeps the pinned WinPTY path. This compatibility adapter resolves ConPTY functions only from the already loaded `kernel32.dll`, without searching for an additional `conpty.dll` or adding static ConPTY imports to the legacy binary. The ordinary modern MCP build's existing native adapter and the Unix path are unchanged. The `win7-win8` variant, minimum OS, signed packages and independent `mcp-win7-win8-rs` channel remain the same. The complete package must still pass its pinned WinPTY dependency integrity, loading and readiness checks, including when running on a modern host. Once a backend attempts to spawn a shell, a failure does not silently start another shell through the other backend. No terminal input is replayed.
+
+The optional `terminalBackend: "conpty" | "winpty"` diagnostic in `/health` is emitted only after readiness succeeds and identifies the backend selected for new sessions. The same optional field in a session snapshot records the backend that successfully spawned that session. Neither field replaces `terminalApi` or proves that a particular shell command executed; Unix omits it, and missing or unknown values mean unknown. A passing ConPTY smoke on a modern build host does not verify WinPTY Unicode, including non-BMP characters and UTF-16 cursor behavior, on Windows 7 SP1, Windows 8 or Windows 8.1. Those systems retain their separate native acceptance records or the release's explicitly recorded user waiver; a waiver never marks the tests passed.
+
+Runtime `0.2.68` probes readiness in the background and retries transient startup failures with a bounded per-attempt timeout and backoff, instead of permanently caching the first timeout. Concurrent health requests share one probe and return without waiting for it; no user shell or command starts during a probe. Dependency integrity or loading failures remain closed until the dependencies are repaired and the service is restarted. Optional health fields `terminalStatus` (`initializing`, `ready`, `unavailable`) and failure-only `terminalReason` explain the current state using fixed, bounded messages without local paths or raw backend errors. Only `ready` advertises the existing `terminalApi: "pty-session-v1"`; absent or unknown diagnostic fields mean unknown, not success. Each 25-second SSE heartbeat recomputes health capabilities so existing clients can discover recovery without changing the terminal protocol. A disabled menu screenshot alone does not identify which peer is running or why its terminal is unavailable; inspect that peer's actual `/health` response.
+
+Installing the new desktop package does not replace an already running daemon. To activate the bundled backend after an upgrade, finish work in other connected clients, review the local MCP dashboard and explicitly confirm **Stop service**, which disconnects clients and ends work running in that daemon. Then use the compatibility client's **启动本地服务** action; it invokes the installed launcher's fixed `--start-mcp` operation without closing or reloading the chat window. Reopening the webpage's **+** menu probes the actual service capabilities again. This action starts a verified runtime only when the shared port is free; it attaches to existing Keepwork peers and never stops another process or starts a second listener. The native action is hidden when no valid compatibility launcher was supplied.
+
+Desktop `0.2.149` reports the actual service health after this action, including the reported runtime version and whether the terminal is ready, initializing, unavailable or not declared. This is a read-only result, not a replacement of the running peer or a request to upgrade solely because of its version.
+
+Loopback, Origin/authentication, session ownership, concurrency limits, the 30-minute idle cleanup policy, cursor replay and daemon lifecycle rules remain in force. Relative terminal working directories reject `..` components and validate the real path of an existing ancestor before creating a missing leaf; failed canonicalization cannot bypass confinement. Existing absolute and `~` directories remain allowed. Reconnecting does not replay uncertain input, and closing one terminal does not stop the shared daemon. This iteration cross-built the legacy target; real WinPTY startup, Unicode input/output, resize, Ctrl+C and cleanup still need native verification on each supported legacy OS.
+
+Build/package instructions and the independent `mcp-win7-win8-rs` channel are documented in the [Win7/Win8 release flow](../../.github/skills/rust-release/references/windows7.md); the [Windows compatibility contract](../aichat-rust/docs/windows-cef.md) defines the shared client/server scope. The ordinary modern MCP release does not include this edition. Native MCP smoke and client/CEF/update acceptance must be recorded separately for each legacy OS; a modern Windows build is not native legacy acceptance. No compatibility release was published as part of this development task.
+
+Run `apps/aichat-rust/scripts/win7-native-smoke.ps1` with `-RequireTerminal` when accepting a complete current package. Both authentication cases must exercise the real PTY and report `ptyVerified: true`; the default mode intentionally retains legacy unsupported-feature checks, so a successful smoke that accepted HTTP `501` is not proof of terminal support. Keep those native results separate from cross-compilation and fixture tests.

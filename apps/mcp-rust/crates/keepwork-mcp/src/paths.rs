@@ -76,7 +76,7 @@ pub struct DiskInfo {
 }
 
 /// `fs.realpathSync.native` drops the `\\?\` prefix libuv/Rust add on Windows.
-fn strip_verbatim(path: PathBuf) -> PathBuf {
+pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));

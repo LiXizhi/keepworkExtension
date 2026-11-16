@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8">
+<div id="chatInput" class="composer-input" role="textbox" contenteditable="true"></div>
+<input id="search" type="search" value="Retain search">
+<dialog id="modal"><input id="message" value="Retain modal input"></dialog>
+<script>
+const edits = [];
+let model = '';
+chatInput.addEventListener('input', event => {
+  model = chatInput.innerText.trim();
+  edits.push([event.isTrusted, event.inputType]);
+});
+chatInput.addEventListener('paste', event => {
+  event.preventDefault();
+  if (event.isTrusted && document.activeElement === chatInput) {
+    // This fixture supplies input without reading the general pasteboard.
+    document.execCommand('insertText', false, 'Dictated without a click');
+    window.receivedPaste = true;
+  }
+});
+</script>

@@ -227,6 +227,7 @@ test('a failed universal slice validation leaves every existing staged resource 
     fs.writeFileSync(file, body);
   };
   write(script, fs.readFileSync(path.resolve(__dirname, '../scripts/bundle-mcp-rust.cjs')));
+  write(path.join(fakeRepo, 'scripts/lib/rust-runtime-identity.cjs'), fs.readFileSync(path.resolve(__dirname, '../../../scripts/lib/rust-runtime-identity.cjs')));
   writeRustSources({ rustRoot: fakeRustRoot, write });
   const sourceHash = sourceFingerprint(fakeRustRoot);
   for (const arch of targets.slice(0, 2)) {

@@ -30,7 +30,7 @@ impl AgentManager {
                             "kimi" | "copilot" => (vec!["login"], Some(vec![]), Some("/logout")),
                             "qwen" => (vec![], None, Some("/auth")),
                             "deepseek" => (vec!["web"], None, None),
-                            "trae" => (vec![], Some(vec!["logout"]), None),
+                            "trae" => (vec!["--help"], None, None),
                             _ => (vec![], Some(vec![]), Some("/logout")),
                         };
                     let command = |args: Vec<&str>| {
@@ -45,6 +45,9 @@ impl AgentManager {
                         )
                     };
                     item["actions"]["login"] = json!({"label":"登录","command":command(login)});
+                    if *backend == "trae" {
+                        item["actions"]["login"]["label"] = json!("配置模型提供商");
+                    }
                     if *backend == "qwen" {
                         item["actions"]["login"]["input"] = json!(input);
                     }
@@ -74,7 +77,19 @@ impl AgentManager {
         if offset > 10_000 {
             return Err("Invalid list cursor".into());
         }
-        let sessions = self.sessions.lock().expect("agent sessions");
+        let mut sessions = self.sessions.lock().expect("agent sessions");
+        let recovering: std::collections::HashSet<_> = sessions
+            .iter()
+            .filter(|(_, s)| {
+                s.data["owner"] == owner
+                    && s.data["removed"] != true
+                    && s.data.get(NATIVE_PERSISTENCE_ERROR).is_some()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !recovering.is_empty() {
+            let _ = self.persist_with_histories(&mut sessions, |id| recovering.contains(id));
+        }
         let mut rows = sessions
             .values()
             .filter(|s| s.data["owner"] == owner && s.data["removed"] != true)
@@ -110,6 +125,14 @@ impl AgentManager {
             let spec = definition(backend).unwrap();
             let launch = discover(backend);
             let mut value = json!({"name":spec.name,"protocol":spec.protocol.as_str(),"protocolSupported":spec.protocol.supported(),"installUrl":spec.install_url,"available":launch.is_ok(),"authenticated":null,"authState":"unknown","probe":"executable","models":[]});
+            if backend == "trae" {
+                value["aichatContext"] = json!(false);
+                value["executionMode"] = json!("one-shot");
+                value["supportedModes"] = json!(["craft"]);
+            }
+            if backend == "codex" {
+                value["approvalModes"] = json!(approval::MODES);
+            }
             match launch {
                 Ok(launch) => value["cli"] = launch.info(),
                 Err(error) => {
@@ -180,10 +203,11 @@ impl AgentManager {
                 let harness = self.harness_for(backend, &cwd, cursor_preview).await?;
                 value["probe"] = json!("protocol");
                 value["cli"] = harness.cli_info();
-                if matches!(spec.protocol, Protocol::Codex | Protocol::Claude | Protocol::Antigravity) {
+                if matches!(spec.protocol, Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae) {
                     let account = harness
                         .call("account/read", json!({"refreshToken":false,"refresh":query.get("refresh").map(String::as_str)==Some("1")}), RPC_TIMEOUT)
                         .await?;
+                    if let Some(probe) = account.get("probe") { value["probe"] = probe.clone(); }
                     if account["authUnknown"] == true {
                         value["authenticated"] = Value::Null;
                         value["authState"] = json!("unknown");
@@ -343,6 +367,11 @@ impl AgentManager {
     pub(super) async fn login(self: &Arc<Self>, input: &Value) -> Result<Value, String> {
         let backend = input["backend"].as_str().unwrap_or("codex");
         let spec = definition(backend).ok_or("Unsupported agent backend")?;
+        if backend == "trae" {
+            return Ok(
+                json!({"command":"trae-cli --help","message":"Configure your provider API key and model in Trae Agent’s native trae_config.yaml or environment, then reconnect. Trae Agent has no account login command."}),
+            );
+        }
         if backend != "codex" {
             return Ok(
                 json!({"command":spec.login,"message":"Run this command in your terminal to sign in, then reconnect."}),
@@ -412,6 +441,7 @@ impl AgentManager {
             return Err("Invalid workspace names".into());
         }
         let selected_mode = mode(input.get("mode"), "craft")?;
+        let selected_approval = approval::selected(input.get("approvalMode"), backend, None)?;
         if !spec.protocol.supported() {
             return Err(
                 "UNSUPPORTED_FEATURE: This native CLI protocol is not yet available in Rust MCP"
@@ -448,6 +478,7 @@ impl AgentManager {
                         .join("agent-workspaces")
                         .join(owner)
                         .join(conversation);
+                    let temporary = path_identity::normalize(temporary);
                     if s.data["roots"][0].as_str() != Some(temporary.to_string_lossy().as_ref()) {
                         return Err(
                             "Existing session primary workspace differs; start a new conversation"
@@ -478,6 +509,7 @@ impl AgentManager {
                         .join("agent-workspaces")
                         .join(owner)
                         .join(conversation);
+                    let temporary = path_identity::normalize(temporary);
                     let stored = s.data["roots"].as_array().unwrap();
                     let stored = if stored
                         .first()
@@ -554,6 +586,8 @@ impl AgentManager {
             .collect::<Vec<_>>();
         let harness = self.harness(backend, Path::new(&roots[0])).await?;
         self.context.set_mode(owner, conversation, &selected_mode);
+        self.context
+            .set_approval_mode(owner, conversation, selected_approval.as_deref());
         let (server, context_marker) = if contextual {
             let (descriptor, marker) =
                 self.context
@@ -565,12 +599,21 @@ impl AgentManager {
         let mut parameters =
             json!({"cwd":roots[0],"mcpServers":server.clone().into_iter().collect::<Vec<_>>()});
         if spec.protocol == Protocol::Codex {
-            parameters = json!({"cwd":roots[0],"sandbox":if selected_mode=="craft"{"danger-full-access"}else{"read-only"},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
+            let access =
+                approval::access(&selected_mode, selected_approval.as_deref(), &json!(roots));
+            parameters =
+                json!({"cwd":roots[0],"sandbox":access.sandbox,"approvalPolicy":access.policy});
+            if access.sandbox == "workspace-write" {
+                parameters["config"] = json!({"sandbox_workspace_write":{"writable_roots":roots,"network_access":false}});
+            }
             if let Some(server) = server {
-                parameters["config"] = codex_server(&server);
+                parameters["config"]["mcp_servers"] = codex_server(&server)["mcp_servers"].clone();
                 parameters["developerInstructions"]=json!("Use keepwork_aichat tools and the versioned aichat_context supplied each turn. Preserve native instructions.");
             }
-        } else if matches!(spec.protocol, Protocol::Claude | Protocol::Antigravity) {
+        } else if matches!(
+            spec.protocol,
+            Protocol::Claude | Protocol::Antigravity | Protocol::Trae
+        ) {
             parameters["roots"] = json!(roots);
             parameters["mode"] = json!(selected_mode);
             if contextual {
@@ -579,7 +622,7 @@ impl AgentManager {
         }
         if matches!(
             spec.protocol,
-            Protocol::Codex | Protocol::Claude | Protocol::Antigravity
+            Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae
         ) {
             if let Some(model) = &requested_model {
                 parameters["model"] = json!(model);
@@ -613,7 +656,10 @@ impl AgentManager {
             return Err("AIChat page changed while creating the native tool bridge; reconnect before sending".into());
         }
         let session_id = id();
-        let data = json!({"id":session_id,"owner":owner,"backend":backend,"conversationId":conversation,"threadId":thread,"title":spec.name,"roots":roots,"worktrees":roots,"rootNames":root_names,"model":input["model"],"archived":false,"removed":false,"status":"idle","mode":selected_mode,"cursor":0,"items":[],"pending":[],"submissions":{},"updatedAt":now(),"aichatContext":contextual,"nativeMetadata":native});
+        let mut data = json!({"id":session_id,"owner":owner,"backend":backend,"conversationId":conversation,"threadId":thread,"title":spec.name,"roots":roots,"worktrees":roots,"rootNames":root_names,"model":input["model"],"archived":false,"removed":false,"status":"idle","mode":selected_mode,"cursor":0,"items":[],"pending":[],"submissions":{},"updatedAt":now(),"aichatContext":contextual,"nativeMetadata":native});
+        if let Some(approval) = selected_approval {
+            data["approvalMode"] = json!(approval);
+        }
         let (events, _) = watch::channel(json!({"cursor":0,"session":snapshot(&data)}));
         {
             let mut sessions = self.sessions.lock().unwrap();
@@ -632,7 +678,7 @@ impl AgentManager {
                     needs_native_history: false,
                 },
             );
-            if let Err(error) = self.persist(&sessions) {
+            if let Err(error) = self.persist_changed(&mut sessions, &session_id) {
                 sessions.remove(&session_id);
                 return Err(error);
             }
@@ -814,7 +860,10 @@ impl AgentManager {
                     return Err("UNSUPPORTED_FEATURE: This CLI cannot resume its previous native session; start a new conversation".into());
                 }
                 json!({"sessionId":data["threadId"],"cwd":data["roots"][0],"mcpServers":server.into_iter().collect::<Vec<_>>()})
-            } else if matches!(harness.protocol(), Protocol::Claude | Protocol::Antigravity) {
+            } else if matches!(
+                harness.protocol(),
+                Protocol::Claude | Protocol::Antigravity | Protocol::Trae
+            ) {
                 // Public snapshots omit receipts. Read the owned raw record so
                 // a restored conversation retains its existing native identity.
                 let resume = self.sessions.lock().unwrap()[session_id].data["submissions"]
@@ -825,6 +874,10 @@ impl AgentManager {
                         })
                     });
                 let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"roots":data["roots"],"model":data["model"],"mode":data["mode"],"resume":resume,"mcpServers":server.into_iter().collect::<Vec<_>>()});
+                if harness.protocol() == Protocol::Trae {
+                    params["driver"] =
+                        self.sessions.lock().unwrap()[session_id].native["driver"].clone();
+                }
                 if harness.protocol() == Protocol::Antigravity {
                     let sessions = self.sessions.lock().unwrap();
                     let session = &sessions[session_id];
@@ -850,9 +903,17 @@ impl AgentManager {
                 }
                 params
             } else {
-                let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"sandbox":if data["mode"]=="craft"{"danger-full-access"}else{"read-only"},"approvalPolicy":if data["mode"]=="ask"{"on-request"}else{"never"}});
+                let access = approval::access(
+                    data["mode"].as_str().unwrap_or("craft"),
+                    data["approvalMode"].as_str(),
+                    &data["roots"],
+                );
+                let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"sandbox":access.sandbox,"approvalPolicy":access.policy});
+                if access.sandbox == "workspace-write" {
+                    params["config"] = json!({"sandbox_workspace_write":{"writable_roots":data["roots"],"network_access":false}});
+                }
                 if let Some(server) = server {
-                    params["config"] = codex_server(&server);
+                    params["config"]["mcp_servers"] = codex_server(&server)["mcp_servers"].clone();
                 }
                 params
             };
@@ -959,6 +1020,11 @@ impl AgentManager {
         let requested_model = optional_text(input, "model", 1024)?;
         let requested_effort = optional_text(input, "effort", 256)?;
         let selected_mode = mode(input.get("mode"), data["mode"].as_str().unwrap_or("craft"))?;
+        let selected_approval = approval::selected(
+            input.get("approvalMode"),
+            data["backend"].as_str().unwrap_or("codex"),
+            data.get("approvalMode"),
+        )?;
         let mut native_text = if data["aichatContext"] == true {
             let (instructions, revision) = self
                 .context
@@ -992,6 +1058,11 @@ impl AgentManager {
             }
             s.data["status"] = json!("starting");
             s.data["mode"] = json!(selected_mode);
+            if let Some(approval) = &selected_approval {
+                s.data["approvalMode"] = json!(approval);
+            } else {
+                s.data.as_object_mut().unwrap().remove("approvalMode");
+            }
             s.data["error"] = json!("");
             s.data["turnId"] = Value::Null;
             s.data["submissions"][&request_id] = json!({"state":"starting"});
@@ -1011,6 +1082,11 @@ impl AgentManager {
             data["conversationId"].as_str().unwrap(),
             &selected_mode,
         );
+        self.context.set_approval_mode(
+            owner,
+            data["conversationId"].as_str().unwrap(),
+            selected_approval.as_deref(),
+        );
         // Concurrent requests can only observe this persisted claim, never dispatch it again.
         let configured: Result<Arc<Harness>, String> = async {
             let gate = self.sessions.lock().unwrap()[session_id]
@@ -1018,6 +1094,11 @@ impl AgentManager {
                 .clone();
             let _guard = gate.lock().await;
             let harness = self.load(session_id, owner, &request_id).await?;
+            if harness.protocol() == Protocol::Trae
+                && (!images.is_empty() || selected_mode != "craft" || requested_effort.is_some())
+            {
+                return Err("UNSUPPORTED_FEATURE: Trae Agent supports text-only Craft tasks with no reasoning effort selection.".into());
+            }
             if harness.protocol() == Protocol::Antigravity && !images.is_empty() {
                 return Err("UNSUPPORTED_FEATURE: Antigravity supports text input only. Remove the images or switch agents.".into());
             }
@@ -1046,6 +1127,7 @@ impl AgentManager {
                 data["conversationId"].as_str().unwrap(),
                 &selected_mode,
             );
+            self.context.set_approval_mode(owner, data["conversationId"].as_str().unwrap(), selected_approval.as_deref());
             Ok(harness)
         }
         .await;
@@ -1133,8 +1215,13 @@ impl AgentManager {
                 }
             });
         } else {
-            let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":native_content,"sandboxPolicy":{"type":if selected_mode=="craft"{"dangerFullAccess"}else{"readOnly"}},"approvalPolicy":if selected_mode=="ask"{"on-request"}else{"never"}});
-            if matches!(harness.protocol(), Protocol::Claude | Protocol::Antigravity) {
+            let access =
+                approval::access(&selected_mode, selected_approval.as_deref(), &data["roots"]);
+            let mut params = json!({"threadId":data["threadId"],"cwd":data["roots"][0],"input":native_content,"sandboxPolicy":access.sandbox_policy,"approvalPolicy":access.policy});
+            if matches!(
+                harness.protocol(),
+                Protocol::Claude | Protocol::Antigravity | Protocol::Trae
+            ) {
                 params.as_object_mut().unwrap().remove("sandboxPolicy");
                 params.as_object_mut().unwrap().remove("approvalPolicy");
                 params["mode"] = json!(selected_mode);
@@ -1192,7 +1279,7 @@ impl AgentManager {
     }
 
     fn reject_submission(&self, session_id: &str, request_id: &str, error: &str, unknown: bool) {
-        let _ = self.edit(session_id, |s| {
+        let _ = self.edit_native(session_id, None, |s| {
             s.data["submissions"][request_id]["state"] =
                 json!(if unknown { "unknown" } else { "rejected" });
             s.data["status"] = json!(if unknown { "uncertain" } else { "error" });
@@ -1209,10 +1296,7 @@ impl AgentManager {
         status: &str,
         error: Option<String>,
     ) {
-        let _ = self.edit(session_id, |s| {
-            if s.data["turnId"] != turn_id {
-                return Ok(());
-            }
+        let _ = self.edit_native(session_id, Some(turn_id), |s| {
             s.data["status"] = json!(status);
             s.data["pending"] = json!([]);
             s.pending.clear();
@@ -1509,9 +1593,10 @@ fn workspace_prompt(text: &str, data: &Value) -> Result<String, String> {
         };
         let real =
             std::fs::canonicalize(candidate).map_err(|_| "Referenced local file is unavailable")?;
+        let identity = path_identity::normalize(real.clone());
         if !roots
             .iter()
-            .any(|root| real.starts_with(root.as_str().unwrap_or("")))
+            .any(|root| identity.starts_with(root.as_str().unwrap_or("")))
         {
             return Err("File reference is outside the session workspace roots".into());
         }
@@ -1528,4 +1613,70 @@ fn workspace_prompt(text: &str, data: &Value) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join("\n")
     ))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_file_references_accept_real_files_and_reject_sibling_and_link_escapes() {
+        let directory = std::env::temp_dir().join(format!("kp-reference-paths-{}", id()));
+        let folder = directory.join("MixedCaseWorkspace");
+        let outside = directory.join("MixedCaseWorkspace-sibling");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(folder.join("Notes.txt"), b"inside").unwrap();
+        std::fs::write(outside.join("Notes.txt"), b"outside").unwrap();
+        let root = canonical_root(folder.to_str().unwrap()).unwrap();
+        let data = json!({"roots":[root],"rootNames":["work"]});
+        let prompt = workspace_prompt("read [#ref //work/Notes.txt]", &data).unwrap();
+        assert!(prompt.contains("Notes.txt"));
+        let escaped = format!("read [#ref {}]", outside.join("Notes.txt").display());
+        assert!(workspace_prompt(&escaped, &data)
+            .unwrap_err()
+            .contains("outside"));
+
+        let link = folder.join("outside-link");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(
+            workspace_prompt("read [#ref //work/outside-link/Notes.txt]", &data)
+                .unwrap_err()
+                .contains("outside")
+        );
+        // Replacing the previously canonical root with a link must still fail
+        // the live identity check used by load(), even for old Rust records.
+        #[cfg(windows)]
+        std::fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir_all(&folder).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&folder)
+            .arg(&outside)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &folder).unwrap();
+        assert_ne!(canonical_root(root.to_str().unwrap()).unwrap(), root);
+        #[cfg(windows)]
+        std::fs::remove_dir(&folder).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&folder).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

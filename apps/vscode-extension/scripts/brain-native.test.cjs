@@ -36,15 +36,38 @@ test('native dialog grants persist; JSON round trips preserve binary files witho
     await next('file', { ...args, op: 'write', bytes: [0, 255, 128, 1] });
     assert.deepEqual(JSON.parse(JSON.stringify(await next('file', { ...args, op: 'read' }))).bytes, [0, 255, 128, 1]);
     assert.deepEqual((await next('file', { rootId: grant.id, op: 'search', query: 'BYTES' })).files, ['nested/bytes.bin']);
+    const actualFile = fs.realpathSync(path.join(folder, 'nested', 'bytes.bin'));
     await next('file', { ...args, op: 'reveal' });
     assert.equal(state.commands[0][0], 'revealFileInOS');
+    assert.equal(state.commands[0][1].fsPath, actualFile);
     await next('file', { ...args, op: 'reveal', mode: 'open' });
     assert.equal(state.commands[1][0], 'vscode.open');
-    assert.equal(state.commands[1][1].fsPath, path.join(folder, 'nested', 'bytes.bin'));
+    assert.equal(state.commands[1][1].fsPath, actualFile);
     await next('file', { ...args, op: 'delete' });
     assert.equal((await next('file', { ...args, op: 'stat' })).exists, false);
     await next('revokeFolder', { rootId: grant.id });
     await assert.rejects(next('file', { ...args, op: 'read' }), /not granted/);
+});
+
+test('choosing a directory alias reuses the canonical grant and reveals or opens the real file', async t => {
+    const { state, folder, call } = fixture(t);
+    const grant = await call('pickFolder');
+    const alias = path.join(path.dirname(folder), 'workspace-alias');
+    fs.symlinkSync(folder, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    state.selected = [{ scheme: 'file', fsPath: alias }];
+    const aliasGrant = await call('pickFolder');
+    assert.equal(aliasGrant.id, grant.id);
+    assert.equal(aliasGrant.path, fs.realpathSync(alias));
+    assert.equal((await call('roots')).length, 1);
+    const args = { rootId: aliasGrant.id, rel: 'nested/alias.txt' };
+    await call('file', { ...args, op: 'write', text: 'canonical target' });
+    assert.equal(Buffer.from((await call('file', { ...args, op: 'read' })).bytes).toString(), 'canonical target');
+    const actualFile = fs.realpathSync(path.join(alias, 'nested', 'alias.txt'));
+    await call('file', { ...args, op: 'reveal' });
+    await call('file', { ...args, op: 'reveal', mode: 'open' });
+    assert.deepEqual(state.commands.map(([command, uri]) => [command, uri.fsPath]), [
+        ['revealFileInOS', actualFile], ['vscode.open', actualFile],
+    ]);
 });
 
 test('workspace listing is grant-free and selection revalidates membership and trust', async t => {

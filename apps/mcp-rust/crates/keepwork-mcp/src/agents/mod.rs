@@ -1,6 +1,10 @@
 //! Native CLI sessions. The browser receives normalized snapshots, never a raw
 //! RPC tunnel or a choice of executable. Credentials and tool grants stay in RAM.
 mod antigravity;
+mod approval;
+#[cfg(test)]
+mod approval_tests;
+mod body;
 mod claude;
 pub mod context;
 pub mod discovery;
@@ -10,7 +14,13 @@ mod history;
 mod images;
 mod item_stream;
 mod native;
+mod path_identity;
+#[cfg(test)]
+mod persistence_tests;
 mod sessions;
+mod trae;
+#[cfg(test)]
+use persistence_tests::PersistenceStats;
 
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
@@ -30,6 +40,34 @@ use tokio::sync::{watch, Mutex as AsyncMutex};
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SESSIONS: usize = 1000;
 const ACTIVE: &[&str] = &["starting", "running", "waiting", "uncertain"];
+const NATIVE_PERSISTENCE_ERROR: &str = "_nativePersistenceError";
+const NATIVE_OBSERVED_STATE: &str = "_nativeObservedState";
+
+fn native_persistence_error(error: &str) -> String {
+    format!("NATIVE_STATE_PERSIST_FAILED: Native state could not be saved; its result is not durably confirmed. Do not automatically replay this request. {error}")
+}
+
+fn native_observation_identity(data: &Value) -> Value {
+    // A fixed-order tuple binds every identity field without duplicating private
+    // values in unknown metadata that an older server might pass through.
+    let identity: Vec<_> = [
+        "id",
+        "owner",
+        "backend",
+        "threadId",
+        "conversationId",
+        "turnId",
+        "lastRequestId",
+        "cursor",
+    ]
+    .iter()
+    .map(|key| &data[*key])
+    .collect();
+    json!(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&identity).expect("JSON identity tuple"))
+    ))
+}
 
 struct Session {
     data: Value,
@@ -53,6 +91,10 @@ pub struct AgentManager {
     creation: AsyncMutex<()>,
     load_error: Option<String>,
     closing: AtomicBool,
+    #[cfg(test)]
+    persist_calls: AtomicUsize,
+    #[cfg(test)]
+    persistence_stats: PersistenceStats,
     pub context: Arc<context::ContextManager>,
 }
 
@@ -99,6 +141,15 @@ fn valid_record(data: &Value) -> bool {
         && data
             .get("backend")
             .is_none_or(|v| v.as_str().is_some_and(valid_id))
+        && data.get("approvalMode").is_none_or(|value| {
+            value.is_null()
+                || approval::selected(
+                    Some(value),
+                    data["backend"].as_str().unwrap_or("codex"),
+                    None,
+                )
+                .is_ok()
+        })
         && data.get("items").is_none_or(Value::is_array)
         && data.get("submissions").is_none_or(|v| {
             v.as_object().is_some_and(|m| {
@@ -121,17 +172,7 @@ fn canonical_root(value: &str) -> Result<PathBuf, String> {
     }
     let canonical =
         std::fs::canonicalize(path).map_err(|_| "Existing absolute local folder required")?;
-    #[cfg(windows)]
-    {
-        let raw = canonical.to_string_lossy();
-        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
-            return Ok(PathBuf::from(format!(r"\\{rest}")));
-        }
-        if let Some(rest) = raw.strip_prefix(r"\\?\") {
-            return Ok(PathBuf::from(rest));
-        }
-    }
-    Ok(canonical)
+    Ok(path_identity::normalize(canonical))
 }
 fn checked_roots(data: &Value) -> Result<Vec<String>, String> {
     let roots = data["roots"]
@@ -184,8 +225,19 @@ fn snapshot(data: &Value) -> Value {
         "sandboxPolicy",
         "nativeMetadata",
         "lastRequestId",
+        NATIVE_PERSISTENCE_ERROR,
+        NATIVE_OBSERVED_STATE,
     ] {
         obj.remove(key);
+    }
+    if let Some(error) = data[NATIVE_PERSISTENCE_ERROR].as_str() {
+        // Keep actual observations in RAM for a safe local commit retry. Old
+        // clients still receive an explicit error instead of a false durable
+        // completion, without permitting a second run while one is active.
+        if !ACTIVE.contains(&data["status"].as_str().unwrap_or("")) {
+            obj.insert("status".into(), json!("error"));
+        }
+        obj.insert("error".into(), json!(error));
     }
     let last = data["lastRequestId"]
         .as_str()
@@ -283,6 +335,17 @@ impl AgentManager {
             if !data["worktrees"].is_array() {
                 data["worktrees"] = data["roots"].clone();
             }
+            if data[NATIVE_PERSISTENCE_ERROR].is_string()
+                && data[NATIVE_OBSERVED_STATE]["status"].is_string()
+                && data[NATIVE_OBSERVED_STATE]["identity"] == native_observation_identity(&data)
+            {
+                // A different session can commit this visible storage error
+                // without repairing its unavailable history sidecar. Preserve
+                // the observation across restart, but never replay the run.
+                data["status"] = data[NATIVE_OBSERVED_STATE]["status"].clone();
+                data["error"] = data[NATIVE_OBSERVED_STATE]["error"].clone();
+            }
+            data.as_object_mut().unwrap().remove(NATIVE_OBSERVED_STATE);
             if ACTIVE.contains(&data["status"].as_str().unwrap_or("")) {
                 data["status"] = json!("interrupted");
             }
@@ -290,6 +353,7 @@ impl AgentManager {
             let needs_native_history = data["backend"] == "codex" && !data["items"].is_array();
             if !data["items"].is_array()
                 || (data["backend"] == "gemini" && !data["nativeMetadata"]["nativeId"].is_string())
+                || (data["backend"] == "trae" && !data["nativeMetadata"]["driver"].is_string())
             {
                 let loaded = history::load(
                     &file,
@@ -330,6 +394,9 @@ impl AgentManager {
                     receipt["state"] = json!("unknown");
                 }
             }
+            // Old Rust registries used case-preserved Windows paths. Convert
+            // only their spelling; load() still verifies the live real path.
+            path_identity::normalize_record(&mut data);
             let (events, _) =
                 watch::channel(json!({"cursor":data["cursor"],"session":snapshot(&data)}));
             let native = data["nativeMetadata"].clone();
@@ -358,20 +425,130 @@ impl AgentManager {
             creation: AsyncMutex::new(()),
             load_error,
             closing: AtomicBool::new(false),
+            #[cfg(test)]
+            persist_calls: AtomicUsize::new(0),
+            #[cfg(test)]
+            persistence_stats: PersistenceStats::default(),
             context: Arc::new(context::ContextManager::new()),
         })
     }
 
-    fn persist(&self, sessions: &HashMap<String, Session>) -> Result<(), String> {
+    fn persist(&self, sessions: &mut HashMap<String, Session>) -> Result<(), String> {
+        self.persist_with_histories(sessions, |_| true)
+    }
+
+    fn persist_changed(
+        &self,
+        sessions: &mut HashMap<String, Session>,
+        changed: &str,
+    ) -> Result<(), String> {
+        self.persist_with_histories(sessions, |id| id == changed)
+    }
+
+    /// Registry records and receipts are still synchronously committed on every
+    /// update. Only histories belonging to the edited sessions are rewritten;
+    /// unrelated transcripts must not amplify each streamed chunk into N fsyncs.
+    /// This is explicit mutation scope, not a cache: a failed registry commit
+    /// cannot advance a fingerprint and suppress a required retry.
+    fn persist_with_histories(
+        &self,
+        sessions: &mut HashMap<String, Session>,
+        save_history: impl Fn(&str) -> bool,
+    ) -> Result<(), String> {
+        let recovering: Vec<_> = sessions
+            .iter()
+            .filter(|(id, session)| {
+                save_history(id) && session.data.get(NATIVE_PERSISTENCE_ERROR).is_some()
+            })
+            .map(|(id, session)| (id.clone(), session.data.get("cursor").cloned()))
+            .collect();
+        for (id, _) in &recovering {
+            let data = &mut sessions.get_mut(id).unwrap().data;
+            data["cursor"] = json!(data["cursor"].as_u64().unwrap_or(0) + 1);
+        }
+        if let Err(error) = self.write_registry(sessions, save_history) {
+            for (id, cursor) in recovering {
+                let data = sessions.get_mut(&id).unwrap().data.as_object_mut().unwrap();
+                match cursor {
+                    Some(value) => {
+                        data.insert("cursor".into(), value);
+                    }
+                    None => {
+                        data.remove("cursor");
+                    }
+                }
+            }
+            return Err(error);
+        }
+        for (id, _) in recovering {
+            let session = sessions.get_mut(&id).unwrap();
+            session
+                .data
+                .as_object_mut()
+                .unwrap()
+                .remove(NATIVE_PERSISTENCE_ERROR);
+            let result = self.render(&session.data);
+            session
+                .events
+                .send_replace(json!({"cursor":result["cursor"],"session":result}));
+        }
+        Ok(())
+    }
+
+    fn write_registry(
+        &self,
+        sessions: &HashMap<String, Session>,
+        save_history: impl Fn(&str) -> bool,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        self.persist_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(error) = &self.load_error {
             return Err(error.clone());
         }
         let parent = self.file.parent().ok_or("Invalid agent registry")?;
         std::fs::create_dir_all(parent).map_err(|_| "Could not persist agent registry")?;
         let mut rows = Vec::with_capacity(sessions.len());
-        for session in sessions.values() {
-            history::save(&self.file, &session.data, &session.native)?;
+        for (id, session) in sessions {
+            let write_history = save_history(id);
+            #[cfg(test)]
+            let write_history = write_history
+                || self
+                    .persistence_stats
+                    .legacy_all_histories
+                    .load(Ordering::Relaxed);
+            if write_history {
+                let history_bytes = history::save(&self.file, &session.data, &session.native)?;
+                #[cfg(test)]
+                if history_bytes > 0 {
+                    self.persistence_stats
+                        .history_writes
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.persistence_stats
+                        .history_bytes
+                        .fetch_add(history_bytes, Ordering::Relaxed);
+                }
+                #[cfg(not(test))]
+                let _ = history_bytes;
+            }
             let mut data = session.data.clone();
+            if !write_history && data.get(NATIVE_PERSISTENCE_ERROR).is_some() {
+                // Do not make an unrelated session depend on a broken history
+                // file, or report this observation as fully committed. Legacy
+                // readers see the existing error status; Rust retains enough
+                // private metadata for a later, local-only commit retry.
+                data[NATIVE_OBSERVED_STATE] = json!({
+                    "status":data["status"], "error":data["error"],
+                    "identity":native_observation_identity(&data),
+                });
+                let visible = snapshot(&data);
+                data["status"] = visible["status"].clone();
+                data["error"] = visible["error"].clone();
+            } else {
+                data.as_object_mut()
+                    .unwrap()
+                    .remove(NATIVE_PERSISTENCE_ERROR);
+                data.as_object_mut().unwrap().remove(NATIVE_OBSERVED_STATE);
+            }
             // Node Codex history lives in the CLI. Preserve its unresolved
             // absence across unrelated registry saves and shutdown.
             if session.needs_native_history {
@@ -405,15 +582,37 @@ impl AgentManager {
         let mut file = options
             .open(&temporary)
             .map_err(|_| "Could not persist agent registry")?;
-        file.write_all(&serde_json::to_vec(&rows).map_err(|_| "Could not persist agent registry")?)
+        let bytes = serde_json::to_vec(&rows).map_err(|_| "Could not persist agent registry")?;
+        file.write_all(&bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| "Could not persist agent registry")?;
+        #[cfg(test)]
+        {
+            self.persistence_stats
+                .registry_writes
+                .fetch_add(1, Ordering::Relaxed);
+            self.persistence_stats
+                .registry_bytes
+                .fetch_add(bytes.len(), Ordering::Relaxed);
+        }
         std::fs::rename(temporary, &self.file)
             .map_err(|_| "Could not persist agent registry".into())
     }
 
     fn view(&self, session_id: &str, owner: &str) -> Result<Value, String> {
-        let sessions = self.sessions.lock().expect("agent sessions");
+        let mut sessions = self.sessions.lock().expect("agent sessions");
+        let recover = sessions
+            .get(session_id)
+            .filter(|s| s.data["owner"] == owner && s.data["removed"] != true)
+            .ok_or("Agent session not found")?
+            .data
+            .get(NATIVE_PERSISTENCE_ERROR)
+            .is_some();
+        if recover {
+            // Retry only the local state commit, never the native request.
+            // A continuing fault remains visible through the error snapshot.
+            let _ = self.persist_changed(&mut sessions, session_id);
+        }
         let s = sessions
             .get(session_id)
             .filter(|s| s.data["owner"] == owner && s.data["removed"] != true)
@@ -434,10 +633,38 @@ impl AgentManager {
     where
         F: FnOnce(&mut Session) -> Result<(), String>,
     {
+        self.edit_state(session_id, None, false, edit)
+    }
+
+    fn edit_native<F>(
+        &self,
+        session_id: &str,
+        expected_turn: Option<&str>,
+        edit: F,
+    ) -> Result<Value, String>
+    where
+        F: FnOnce(&mut Session) -> Result<(), String>,
+    {
+        self.edit_state(session_id, expected_turn, true, edit)
+    }
+
+    fn edit_state<F>(
+        &self,
+        session_id: &str,
+        expected_turn: Option<&str>,
+        observed: bool,
+        edit: F,
+    ) -> Result<Value, String>
+    where
+        F: FnOnce(&mut Session) -> Result<(), String>,
+    {
         let mut sessions = self.sessions.lock().expect("agent sessions");
         let session = sessions
             .get_mut(session_id)
             .ok_or("Agent session not found")?;
+        if expected_turn.is_some_and(|turn| session.data["turnId"] != turn) {
+            return Ok(self.render(&session.data));
+        }
         let original = session.data.clone();
         if let Err(error) = edit(session) {
             session.data = original;
@@ -453,16 +680,26 @@ impl AgentManager {
                 items.remove(0);
             }
         }
-        if let Err(error) = self.persist(&sessions) {
-            sessions.get_mut(session_id).unwrap().data = original;
-            return Err(error);
+        let persistence_error = self.persist_changed(&mut sessions, session_id).err();
+        if let Some(error) = &persistence_error {
+            if !observed {
+                sessions.get_mut(session_id).unwrap().data = original;
+                return Err(error.clone());
+            }
+            // An observed native outcome cannot be rolled back into a running
+            // process. Retain it for recovery and publish its storage failure.
+            sessions.get_mut(session_id).unwrap().data[NATIVE_PERSISTENCE_ERROR] =
+                json!(native_persistence_error(error));
         }
         let session = &sessions[session_id];
         let result = self.render(&session.data);
         session
             .events
             .send_replace(json!({"cursor":result["cursor"],"session":result}));
-        Ok(result)
+        match persistence_error {
+            Some(error) => Err(error),
+            None => Ok(result),
+        }
     }
 
     async fn harness(self: &Arc<Self>, backend: &str, cwd: &Path) -> Result<Arc<Harness>, String> {
@@ -542,7 +779,7 @@ impl AgentManager {
             s.pending.clear();
             s.events.send_replace(json!({"closed":true}));
         }
-        let _ = self.persist(&sessions);
+        let _ = self.persist(&mut sessions);
     }
 
     fn stream(&self, session_id: &str, owner: &str) -> Result<Response, String> {
@@ -620,7 +857,15 @@ async fn handle_request(
             .await;
     }
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
-    let image_turn = matches!(parts.as_slice(), ["agents", "sessions", _, "image-turns"]);
+    let image_turn = matches!(
+        parts.as_slice(),
+        [
+            "agents",
+            "sessions",
+            _,
+            "image-turns" | "approval-image-turns"
+        ]
+    );
     let input = if ["POST", "PATCH"].contains(&method) {
         if !headers
             .get(header::CONTENT_TYPE)
@@ -631,7 +876,7 @@ async fn handle_request(
             return error_response("JSON required");
         }
         let limit = if image_turn { 7_000_000 } else { 2_000_000 };
-        match axum::body::to_bytes(req.into_body(), limit).await {
+        match body::read(req.into_body(), limit).await {
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(value) if value.is_object() => value,
                 _ => return error_response("JSON object required"),
@@ -657,10 +902,26 @@ async fn handle_request(
         }
         ("GET", ["agents", "sessions"]) => manager.list(&owner, query),
         ("POST", ["agents", "sessions"]) => manager.create(&owner, &input).await,
+        ("POST", ["agents", "approval-sessions"]) => {
+            if input.get("approvalMode").is_none() {
+                Err("approvalMode required".into())
+            } else {
+                manager.create(&owner, &input).await
+            }
+        }
         ("GET", ["agents", "sessions", session_id]) => manager.read_owned(session_id, &owner).await,
         ("PATCH", ["agents", "sessions", session_id]) => manager.update(session_id, &owner, &input),
         ("POST", ["agents", "sessions", session_id, "turns"]) => {
             manager.turn(session_id, &owner, &input).await
+        }
+        ("POST", ["agents", "sessions", session_id, "approval-turns" | "approval-image-turns"]) => {
+            if input.get("approvalMode").is_none() {
+                Err("approvalMode required".into())
+            } else if image_turn && !input["images"].is_array() {
+                Err("Missing images".into())
+            } else {
+                manager.turn(session_id, &owner, &input).await
+            }
         }
         ("POST", ["agents", "sessions", session_id, "image-turns"]) => {
             if !input["images"].is_array() {

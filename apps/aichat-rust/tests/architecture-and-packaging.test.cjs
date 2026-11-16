@@ -164,7 +164,7 @@ test("MCP runtime bootstraps from bundle or launcher and follows published feed 
     "utf8"
   );
   assert.match(runtime, /pub fn mcp_feed_platform\(/);
-  assert.match(lib, /mcp_feed_platform\(\)/);
+  assert.match(lib, /default_mcp_feed_url\(mcp_is_rust\)/);
   assert.match(lib, /resolve_bundled_mcp_dir/);
   assert.match(lib, /launcher_mcp_runtime/);
   assert.match(

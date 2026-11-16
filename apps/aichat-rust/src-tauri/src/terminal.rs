@@ -680,6 +680,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("aichat-rust-pty-{}", Uuid::new_v4()));
         let files = NativeFiles::new(root.join("grants.json"));
         let manager = TerminalSessionManager::new(root.join("workspaces"));
+        struct Cleanup<'a>(&'a TerminalSessionManager, &'a std::path::Path);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.close_all();
+                let _ = fs::remove_dir_all(self.1);
+            }
+        }
+        let _cleanup = Cleanup(&manager, &root);
 
         let created = manager
             .handle(
@@ -697,18 +705,38 @@ mod tests {
             .handle("other:window", &files, "output", &json!({ "id": id }))
             .is_err());
 
-        manager
-            .handle(
-                "desktop:main",
-                &files,
-                "write",
-                &json!({ "id": id, "data": "echo KEEPWORK_PTY_OK\n" }),
-            )
-            .unwrap();
+        // Keep the complete marker out of the input: PTY command echo is not
+        // proof of execution. Two writes also verify persistent shell state.
+        let commands = if cfg!(windows) {
+            [
+                "$kpMarker = 'KEEPWORK_PTY_'\r\n",
+                "Write-Output ($kpMarker + 'OK')\r\n",
+            ]
+        } else {
+            [
+                "kp_marker=KEEPWORK_PTY_\n",
+                "printf '%s%s\\n' \"$kp_marker\" OK\n",
+            ]
+        };
+        assert!(commands
+            .iter()
+            .all(|input| !input.contains("KEEPWORK_PTY_OK")));
+        for command in commands {
+            manager
+                .handle(
+                    "desktop:main",
+                    &files,
+                    "write",
+                    &json!({"id":id, "data":command}),
+                )
+                .unwrap();
+        }
 
         let mut combined = String::new();
         let mut cursor = 0usize;
-        for _ in 0..40 {
+        // A cold Windows PowerShell can need more than 2s on a busy CI runner.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let last_chunk = loop {
             let out = manager
                 .handle(
                     "desktop:main",
@@ -717,21 +745,53 @@ mod tests {
                     &json!({ "id": id, "cursor": cursor }),
                 )
                 .unwrap();
-            cursor = out["cursor"].as_u64().unwrap() as usize;
+            let next_cursor = out["cursor"].as_u64().unwrap() as usize;
+            assert!(
+                next_cursor >= cursor,
+                "Output cursor must not move backwards"
+            );
+            cursor = next_cursor;
             combined.push_str(out["output"].as_str().unwrap_or(""));
-            if combined.contains("KEEPWORK_PTY_OK") {
-                break;
+            if combined.contains("KEEPWORK_PTY_OK")
+                || out["closed"] == true
+                || Instant::now() >= deadline
+            {
+                break out;
             }
             thread::sleep(Duration::from_millis(50));
-        }
+        };
         assert!(
             combined.contains("KEEPWORK_PTY_OK"),
-            "Expected PTY output to contain KEEPWORK_PTY_OK, got: {combined}"
+            "Expected executed command output KEEPWORK_PTY_OK; last chunk: {last_chunk}; output: {combined}"
+        );
+        let replay = manager
+            .handle(
+                "desktop:main",
+                &files,
+                "output",
+                &json!({"id":id, "cursor":0}),
+            )
+            .unwrap();
+        assert!(replay["output"]
+            .as_str()
+            .unwrap()
+            .contains("KEEPWORK_PTY_OK"));
+        let next = manager
+            .handle(
+                "desktop:main",
+                &files,
+                "output",
+                &json!({"id":id, "cursor":cursor}),
+            )
+            .unwrap();
+        assert!(
+            !next["output"].as_str().unwrap().contains("KEEPWORK_PTY_OK"),
+            "cursor output must not repeat prior command results"
         );
 
+        // Explicit close and the scope cleanup protect both success and panic paths.
         manager
             .handle("desktop:main", &files, "close", &json!({ "id": id }))
             .unwrap();
-        let _ = fs::remove_dir_all(&root);
     }
 }

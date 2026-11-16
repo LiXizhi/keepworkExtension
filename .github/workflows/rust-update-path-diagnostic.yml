@@ -1,0 +1,42 @@
+name: Rust update Windows path diagnostic
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/auto-update-release-20261113]
+    paths: [.github/workflows/rust-update-path-diagnostic.yml, apps/mcp-rust/scripts/smoke.cjs]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch existing published runtime fixture
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download aichat-rust-v0.2.82 --repo LiXizhi/keepworkExtension --pattern 'Keepwork_0.2.82_x64-setup.exe' --dir fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & 'C:\Program Files\7-Zip\7z.exe' x fixture/Keepwork_0.2.82_x64-setup.exe -ofixture/payload -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Observe exact owned health identity without publication
+        shell: pwsh
+        run: |
+          $binary = @(Get-ChildItem fixture/payload -Filter keepwork-mcp.exe -Recurse)
+          if ($binary.Count -ne 1) { throw 'Expected exactly one fixture runtime' }
+          @'
+          const fs=require('fs');
+          const source='apps/mcp-rust/scripts/smoke.cjs';
+          const needle="error.code = 'SMOKE_OWNERSHIP_MISMATCH';";
+          const detail=`error.message += JSON.stringify({expected:{pid:child.pid,root:actualWorkspace,version:expected.version,commit:expected.commit},actual:{pid:health?.pid,root:health?.workspaceRoot,version:health?.runtimeVersion,commit:health?.runtimeCommit,name:health?.name,engine:health?.runtimeEngine,product:health?.runtimeProduct,host:health?.hostKind},nativeRoot:fs.realpathSync.native(actualWorkspace)});`;
+          const text=fs.readFileSync(source,'utf8');
+          if(!text.includes(needle)) throw Error('Diagnostic injection point missing');
+          fs.writeFileSync('apps/mcp-rust/scripts/smoke-diagnostic.cjs',text.replace(needle,needle+detail));
+          '@ | node
+          node apps/mcp-rust/scripts/smoke-diagnostic.cjs $binary[0].FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

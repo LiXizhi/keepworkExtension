@@ -65,7 +65,7 @@ test('paired-device admission probes never perform discovery, connection, or key
 test('automatic monitoring starts after core initialization and shutdown revokes both watcher and input', () => {
   const startup = read('src-tauri/src/app/startup.rs');
   const setup = startup.indexOf('.setup(');
-  const automatic = startup.indexOf('.start_automatic()');
+  const automatic = startup.indexOf('.start_automatic(');
   assert.ok(setup >= 0 && automatic > setup, 'the watcher is installed from app setup after AppCore exists');
   assert.ok(startup.indexOf('let core = Arc::new(AppCore') < automatic);
   const core = read('src-tauri/src/remote_voice.rs');
@@ -91,6 +91,39 @@ test('automatic-start intent and stale-probe policy passes isolated production R
     const result = await execute(executable, [], { timeout: 5000 });
     assert.ok(/test result: ok/.test(result.stdout), result.stdout + result.stderr);
     assert.ok(/0 failed/.test(result.stdout));
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('macOS inventory distinguishes first Bluetooth consent and preserves BLE HID evidence when the classic controller is off', {
+  skip: process.platform !== 'darwin', timeout: 30000,
+}, async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-voice-paired-'));
+  try {
+    const executable = path.join(temporary, 'inventory');
+    await execute('clang', ['-fobjc-arc', '-Wall', '-Werror',
+      '-framework', 'Foundation', '-framework', 'CoreBluetooth',
+      '-framework', 'IOBluetooth', '-framework', 'IOKit',
+      path.join(__dirname, 'fixtures/remote_voice_paired_macos.m'), '-o', executable], { timeout: 15000 });
+    const { stdout } = await execute(executable, [], { timeout: 5000 });
+    assert.match(stdout, /isolated pairing inventory authorization, HID and retry scenarios passed/);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('macOS forwards system sleep and wake once per event and ignores display-only notifications', {
+  skip: process.platform !== 'darwin', timeout: 30000,
+}, async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-voice-power-'));
+  try {
+    const executable = path.join(temporary, 'observer');
+    await execute('clang', ['-fobjc-arc', '-Wall', '-Werror', '-framework', 'AppKit',
+      path.join(appRoot, 'src-tauri/src/remote_voice/power_macos.m'),
+      path.join(__dirname, 'fixtures/remote_voice_power_macos.m'), '-o', executable], { timeout: 15000 });
+    const { stdout } = await execute(executable, [], { timeout: 6000 });
+    assert.match(stdout, /two isolated workspace sleep\/wake cycles passed/);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

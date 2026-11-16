@@ -1,10 +1,11 @@
 //! Main document lifecycle, connection recovery and local source navigation.
 
+use super::native_startup;
 use super::pet_audio_host::stop_pet_audio;
 use super::sender::verify_main_sender;
 use super::state::{AppCore, DesktopStatus};
 use crate::dev_server::DevServer;
-use crate::page_connection::{Phase, LOAD_TIMEOUT_SECONDS};
+use crate::page_connection::{Phase, Presentation, LOAD_TIMEOUT_SECONDS};
 use crate::pet::PetController;
 use crate::security::{self, ENTRY};
 use crate::terminal::TerminalSessionManager;
@@ -12,6 +13,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{webview::PageLoadEvent, AppHandle, Manager, WebviewWindow};
+
+// Protect both editable WebViews if AppKit supplies the Home function character
+// without a device identity that the native event tap can verify.
+pub(super) const HOME_TEXT_GUARD: &str = include_str!("home_text_guard.js");
 
 pub(super) fn handle_main_page_load(
     event: PageLoadEvent,
@@ -27,15 +32,280 @@ pub(super) fn handle_main_page_load(
 }
 
 pub fn show_main_window(app: &AppHandle, core: &AppCore) {
+    core.pet_approval_return.lock().unwrap().take();
     stop_pet_audio(app, core, None, "已打开主窗口，语音输入已停止", false);
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
+    core.page_connection.lock().unwrap().set_foreground(true);
+    super::remote_phone_view::sync(app);
+    sync_window_presentation(app, true);
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn handle_dock_reopen(app: &AppHandle, event: &tauri::RunEvent) {
+    // AppKit counts the pet and settings as visible windows. Every explicit
+    // Dock reopen should bring the retained chat window to the front.
+    if matches!(event, tauri::RunEvent::Reopen { .. }) {
+        let handle = app.clone();
+        let _ = run_on_window_thread(app, move || {
+            let core = handle.state::<Arc<AppCore>>();
+            if !core.quitting.load(Ordering::Relaxed) {
+                show_main_window(&handle, &core);
+            }
+        });
     }
-    if let Some(pet_win) = app.get_webview_window("pet") {
-        let _ = pet_win.hide();
+}
+
+pub(super) fn hide_main_window(app: &AppHandle, core: &AppCore) {
+    core.pet_approval_return.lock().unwrap().take();
+    core.page_connection.lock().unwrap().set_foreground(false);
+    sync_window_presentation(app, false);
+}
+
+pub(super) enum DismissAction {
+    Close,
+    Minimize,
+    RemoteHome,
+}
+
+pub(super) fn dismiss_main_window(app: &AppHandle, core: &Arc<AppCore>, action: DismissAction) {
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
     }
+    let show_pet = core.settings().pet_visible;
+    if !show_pet {
+        match action {
+            DismissAction::Minimize => return, // Already minimized by the OS.
+            DismissAction::RemoteHome => {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.minimize();
+                }
+                return;
+            }
+            DismissAction::Close => {}
+        }
+    }
+    hide_main_window(app, core);
+    if show_pet {
+        super::pet_host::ensure_pet_window(app, core, true);
+    }
+}
+
+/// Runs on the UI thread so consecutive Home taps see the previous transition.
+pub(super) fn toggle_remote_home(app: &AppHandle) {
+    let core = app.state::<Arc<AppCore>>();
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    if super::pet_home_overlay::handle_home(app, &core, &main) {
+        return;
+    }
+    if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
+        dismiss_main_window(app, &core, DismissAction::RemoteHome);
+    } else {
+        show_main_window(app, &core);
+    }
+}
+
+fn main_did_minimize(app: &AppHandle) {
+    let core = app.state::<Arc<AppCore>>();
+    if core.page_connection.lock().unwrap().presentation() != Presentation::Hidden {
+        dismiss_main_window(app, &core, DismissAction::Minimize);
+    }
+}
+
+// A native restore (for example from the taskbar) can bypass show_main_window.
+fn observe_main_focus(main: &WebviewWindow) {
+    let window = main.clone();
+    main.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Focused(true)) {
+            return;
+        }
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            let app = window.app_handle().clone();
+            let _ = run_on_window_thread(&app, move || {
+                let app = window.app_handle();
+                if !window.is_focused().unwrap_or(false)
+                    || !window.is_visible().unwrap_or(false)
+                    || window.is_minimized().unwrap_or(true)
+                    || !app.get_webview_window("pet")
+                        .is_some_and(|pet| pet.is_visible().unwrap_or(false))
+                {
+                    return;
+                }
+                show_main_window(app, &app.state::<Arc<AppCore>>());
+            });
+        });
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn observe_main_minimize(main: &WebviewWindow) -> Result<(), String> {
+    use std::ffi::c_void;
+
+    extern "C" {
+        fn keepwork_observe_main_minimize(
+            window: *mut c_void,
+            context: *mut c_void,
+            notify: extern "C" fn(*mut c_void),
+            release: extern "C" fn(*mut c_void),
+        );
+    }
+    extern "C" fn notify(context: *mut c_void) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            main_did_minimize(&*context.cast::<AppHandle>());
+        }));
+    }
+    extern "C" fn release(context: *mut c_void) {
+        unsafe { drop(Box::from_raw(context.cast::<AppHandle>())) };
+    }
+
+    let native = main.ns_window().map_err(|error| error.to_string())?;
+    observe_main_focus(main);
+    // Called on the setup thread. The NSWindow owns the observer and its context.
+    let context = Box::into_raw(Box::new(main.app_handle().clone()));
+    unsafe { keepwork_observe_main_minimize(native, context.cast(), notify, release) };
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn observe_main_minimize(main: &WebviewWindow) -> Result<(), String> {
+    let window = main.clone();
+    observe_main_focus(main);
+    // Tao reports both Win32 WM_SIZE and GTK iconification via Resized.
+    main.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Resized(_))
+            || !window.is_minimized().unwrap_or(false)
+        {
+            return;
+        }
+        // Let the native resize callback finish before creating a WebView2
+        // window. A restore can overtake the queued notification.
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            let app = window.app_handle().clone();
+            let _ = app.run_on_main_thread(move || {
+                if window.is_minimized().unwrap_or(false) {
+                    main_did_minimize(window.app_handle());
+                }
+            });
+        });
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn run_on_window_thread<F: FnOnce() + Send + 'static>(
+    _app: &AppHandle,
+    action: F,
+) -> tauri::Result<()> {
+    use std::ffi::c_void;
+
+    extern "C" {
+        fn keepwork_run_window_action(context: *mut c_void, invoke: extern "C" fn(*mut c_void));
+    }
+    extern "C" fn invoke<F: FnOnce()>(context: *mut c_void) {
+        let action = unsafe { Box::from_raw(context.cast::<F>()) };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action));
+    }
+    // The AppKit queue invokes the action exactly once, releasing this box.
+    unsafe { keepwork_run_window_action(Box::into_raw(Box::new(action)).cast(), invoke::<F>) };
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn run_on_window_thread<F: FnOnce() + Send + 'static>(
+    app: &AppHandle,
+    action: F,
+) -> tauri::Result<()> {
+    app.run_on_main_thread(action)
+}
+
+/// Always read the latest visibility intent on the UI thread. Ready, timeout,
+/// single-instance wake and close may have been queued in a different order.
+pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
+    let handle = app.clone();
+    let _ = run_on_window_thread(app, move || {
+        let core = handle.state::<Arc<AppCore>>();
+        if core.quitting.load(Ordering::Relaxed) {
+            return;
+        }
+        let (foreground, presentation, failed) = {
+            let connection = core.page_connection.lock().unwrap();
+            (
+                connection.wants_foreground(),
+                connection.presentation(),
+                connection.snapshot("").phase == Phase::Unavailable,
+            )
+        };
+        if foreground {
+            if let Some(pet) = handle.get_webview_window("pet")
+                .filter(|pet| pet.is_visible().unwrap_or(true))
+            {
+                if let Err(err) = super::pet_host::dismiss_pet_view(&pet) {
+                    eprintln!("[desktop] Cannot hide desktop pet before showing chat: {err}");
+                    return;
+                }
+            }
+        }
+        let main = handle.get_webview_window("main");
+        match presentation {
+            Presentation::Hidden => {
+                // Normal initialization stays off screen. Preserve the user's
+                // foreground intent separately so readiness may reveal it once.
+                if let Some(window) = main {
+                    let _ = window.hide();
+                }
+            }
+            Presentation::Startup => {
+                // Only a failed attempt exposes recovery controls, in the same
+                // main window. Retrying returns to hidden preparation.
+                if let Some(window) = main.as_ref() {
+                    let _ = window.set_theme(Some(core.theme.current().native()));
+                }
+                if let Err(error) = native_startup::update(&handle, failed) {
+                    eprintln!("[desktop] Cannot update native startup: {error}");
+                }
+                if let Some(window) = main {
+                    let was_visible = window.is_visible().unwrap_or(false);
+                    if focus || !was_visible {
+                        let _ = window.unminimize();
+                    }
+                    let _ = window.show();
+                    if focus || !was_visible {
+                        let _ = window.set_focus();
+                    }
+                }
+            }
+            Presentation::Main => {
+                if let Some(window) = main {
+                    let was_visible = window.is_visible().unwrap_or(false);
+                    // Remove loading UI before revealing the fully prepared
+                    // document, including a cold launch from a hidden window.
+                    if let Err(error) = native_startup::remove(&handle) {
+                        eprintln!("[desktop] Cannot remove native startup: {error}");
+                        return;
+                    }
+                    // Restore first: ordering a miniaturized NSWindow front can
+                    // synchronously re-enter Tao's redraw handler from the Dock.
+                    if focus || !was_visible {
+                        let _ = window.unminimize();
+                    }
+                    if window.show().is_ok() {
+                        if focus || !was_visible {
+                            let _ = window.set_focus();
+                            if let Some(webview) = handle.get_webview("main") {
+                                let _ = webview.set_focus();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 pub(super) fn current_entry_url(core: &Arc<AppCore>) -> String {
@@ -89,21 +359,38 @@ fn show_connection_failure(app: &AppHandle, core: &AppCore, generation: u64, rea
     if let (Some(window), Some(shell)) = (app.get_webview_window("main"), shell) {
         let _ = window.navigate(shell);
     }
+    sync_window_presentation(app, false);
 }
 
 fn start_page_connection(app: &AppHandle, core: &Arc<AppCore>, target: &str, automatic: bool) {
     if core.quitting.load(Ordering::Relaxed) {
         return;
     }
-    let Some(window) = app.get_webview_window("main") else {
+    if app.get_webview_window("main").is_none() {
         return;
-    };
+    }
     let Some(generation) = core
         .page_connection
         .lock()
         .unwrap()
         .begin(target, automatic)
     else {
+        return;
+    };
+    sync_window_presentation(app, false);
+    navigate_page_connection(app, core, target, generation);
+}
+
+pub(super) fn navigate_page_connection(
+    app: &AppHandle,
+    core: &Arc<AppCore>,
+    target: &str,
+    generation: u64,
+) {
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else {
         return;
     };
     // The URL is always chosen by the host; recovery IPC cannot supply a URL.
@@ -120,6 +407,11 @@ fn start_page_connection(app: &AppHandle, core: &Arc<AppCore>, target: &str, aut
         );
         return;
     };
+    // Startup waits for the first daemon attempt off the UI thread. A menu
+    // navigation during that wait may already have superseded this ticket.
+    if core.page_connection.lock().unwrap().attempt(&url) != Some(generation) {
+        return;
+    }
     if window.navigate(url).is_err() {
         show_connection_failure(
             app,
@@ -208,6 +500,7 @@ pub(super) fn desktop_page_connection_attempt(
 
 #[tauri::command]
 pub(super) fn desktop_main_document_ready(
+    app: AppHandle,
     window: WebviewWindow,
     state: tauri::State<'_, Arc<AppCore>>,
     token: String,
@@ -218,11 +511,15 @@ pub(super) fn desktop_main_document_ready(
     if actual.as_str() != url {
         return Ok(false);
     }
-    Ok(state
+    let ready = state
         .page_connection
         .lock()
         .unwrap()
-        .document_ready(generation, &actual))
+        .document_ready(generation, &actual);
+    if ready {
+        sync_window_presentation(&app, false);
+    }
+    Ok(ready)
 }
 
 /// 按比例步进缩放（Tauri 2.12 无 zoom 读取接口，用 `AppCore::zoom` 记账）。

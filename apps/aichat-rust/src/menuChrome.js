@@ -1,7 +1,45 @@
 // Shared by the bundled fallback page and the Rust main-frame init script.
 // Keep this module dependency-free: the Rust bridge embeds this function too.
-export function mountDesktopMenus({ host, shadow, left, invoke, menus }) {
-  if (!Array.isArray(menus) || menus.length === 0) return { close() {} };
+export function mountDesktopMenus({ host, shadow, left, invoke, menus, nativeMenu = false }) {
+  const english = () => {
+    const lang = document.documentElement.lang || (() => { try { return new URLSearchParams(window.location.search).get("locale") || new URLSearchParams(window.location.search).get("lang") || localStorage.getItem("aichat.language") || navigator.language; } catch { return ""; } })();
+    return /^en(?:[-_]|$)/i.test(lang || "");
+  };
+  const labels = { file: "File", edit: "Edit", view: "View", help: "Help",
+    "new-chat": "New chat", "open-folder": "Open folder…", reload: "Reload", "check-updates": "Check for updates…", "toggle-login": "Launch at login", quit: "Quit",
+    undo: "Undo", redo: "Redo", cut: "Cut", copy: "Copy", paste: "Paste", "select-all": "Select all", "remote-voice": "Remote voice input…",
+    "experience-simple": "Simple mode", "experience-professional": "Professional mode", "theme-light": "Light appearance", "theme-dark": "Dark appearance", "toggle-sidebar": "Chat history", "toggle-files": "Files", "zoom-in": "Zoom in", "zoom-out": "Zoom out", "zoom-reset": "Actual size", fullscreen: "Full screen", "open-settings": "Settings", "mcp-status": "View status…", "mcp-dashboard": "Open Dashboard", "mcp-restart": "Restart Keepwork MCP", "open-browser": "Open in browser", "local-source": "Use local source server…", "published-site": "Use online server" };
+  const translate = (id, text) => !english() ? text : labels[id] || (id === "menu-info:version" ? text.replace("桌面版本", "Desktop version") : id === "menu-info:update-error" ? text.replace("更新失败：", "Update failed: ") : text);
+  let requestedLanguage = "", appliedLanguage = "", syncingLanguage = false;
+  const syncNativeMenu = () => {
+    if (!nativeMenu) return;
+    requestedLanguage = english() ? "en" : "zh-CN";
+    if (syncingLanguage || requestedLanguage === appliedLanguage) return;
+    syncingLanguage = true;
+    const next = requestedLanguage;
+    Promise.resolve(invoke("desktop_set_menu_language", { language: next })).then(() => {
+      appliedLanguage = next;
+    }).catch(() => {}).finally(() => {
+      syncingLanguage = false;
+      if (requestedLanguage !== next) syncNativeMenu();
+    });
+  };
+  const updateChrome = () => {
+    syncNativeMenu();
+    for (const button of buttons) button.textContent = translate(button.dataset.menuId, menus.find(menu => menu.id === button.dataset.menuId)?.label || "");
+    const title = shadow.querySelector(".title");
+    if (title) title.textContent = english() ? "KeepWork Second Brain" : "KeepWork 第二大脑";
+    const translations = { ".address": ["在默认浏览器中打开", "Open in default browser"], ".refresh": ["刷新页面", "Reload page"], '[data-window-action="minimize"]': ["最小化", "Minimize"], '[data-window-action="toggle-maximize"]': ["最大化或还原", "Maximize or restore"], '[data-window-action="close"]': ["关闭", "Close"] };
+    for (const [selector, pair] of Object.entries(translations)) { const element = shadow.querySelector(selector); if (element) { element.title = pair[english() ? 1 : 0]; if (selector !== ".address") element.setAttribute("aria-label", element.title); } }
+  };
+  const buttons = [];
+  if (!Array.isArray(menus)) menus = [];
+  document.addEventListener("aichat:language-changed", () => { if (menus.length) close(); updateChrome(); });
+  window.addEventListener("DOMContentLoaded", updateChrome, { once: true });
+  // AIChat can initialize asynchronously after DOMContentLoaded without emitting an event.
+  new MutationObserver(updateChrome).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+  updateChrome();
+  if (menus.length === 0) return { close() {}, updateChrome };
 
   const style = document.createElement("style");
   style.textContent = `
@@ -40,7 +78,6 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus }) {
   left.setAttribute("role", "menubar");
   left.setAttribute("aria-label", "应用菜单");
 
-  const buttons = [];
   let activeIndex = -1;
   let generation = 0;
   let popup = null;
@@ -134,7 +171,7 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus }) {
     popup = document.createElement("div");
     popup.className = "menu-popup";
     popup.setAttribute("role", "menu");
-    popup.setAttribute("aria-label", payload.menu?.label || button.textContent);
+    popup.setAttribute("aria-label", button.textContent);
     popup.addEventListener("mousedown", event => {
       event.preventDefault();
       event.stopPropagation(); // Menu padding/separators are never window drag regions.
@@ -167,7 +204,7 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus }) {
       mark.textContent = checked === true ? "✓" : "";
       const label = document.createElement("span");
       label.className = "menu-label";
-      label.textContent = item.label;
+      label.textContent = translate(item.id, item.label);
       const shortcut = document.createElement("span");
       shortcut.className = "menu-shortcut";
       shortcut.textContent = typeof item.shortcut === "string" ? item.shortcut : "";
@@ -221,7 +258,7 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus }) {
     button.setAttribute("role", "menuitem");
     button.setAttribute("aria-haspopup", "menu");
     button.setAttribute("aria-expanded", "false");
-    button.textContent = menu.label;
+    button.textContent = translate(menu.id, menu.label);
     button.addEventListener("mousedown", event => event.preventDefault());
     button.addEventListener("click", () => activeIndex === index ? close(true) : open(index));
     button.addEventListener("mouseenter", () => {

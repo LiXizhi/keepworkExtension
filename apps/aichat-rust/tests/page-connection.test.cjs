@@ -33,10 +33,38 @@ function eventTarget() {
   };
 }
 
-function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUrl, readyState = "loading", subframe = false, root = null, invoke } = {}) {
+function pageNode(values = {}) {
+  const node = Object.assign(values, eventTarget());
+  const attributes = new Map(Object.entries(values.attributes || {}));
+  node.childElementCount ??= 0;
+  node.textContent ??= "";
+  node.dataset ??= {};
+  node.style ??= { display: "block", visibility: "visible" };
+  node.queries ??= new Map();
+  node.getAttribute = name => {
+    if (name === "data-workbench-ready" && Object.hasOwn(node.dataset, "workbenchReady")) return node.dataset.workbenchReady;
+    return attributes.has(name) ? attributes.get(name) : null;
+  };
+  node.setAttribute = (name, value) => attributes.set(name, String(value));
+  node.removeAttribute = name => attributes.delete(name);
+  node.querySelectorAll = selector => node.queries.get(selector) || [];
+  node.querySelector = selector => node.querySelectorAll(selector)[0] || null;
+  node.closest = () => node.hidden || node.hiddenAncestor || attributes.has("hidden") || attributes.get("aria-hidden") === "true" ? node : null;
+  node.getClientRects = () => node.hasLayout === false ? [] : [{ width: 640, height: 480 }];
+  node.layoutReads = 0;
+  node.getBoundingClientRect = () => { node.layoutReads++; return { width: 640, height: 480 }; };
+  return node;
+}
+
+function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUrl, readyState = "loading", subframe = false, root = null, invoke, onVerifiedEntry,
+  marker, progress = false, styles = [], dialogs = [], elements = {}, fonts = Object.assign(eventTarget(), { status: "loaded" }),
+} = {}) {
   const calls = [];
   const observers = [];
-  const window = Object.assign(eventTarget(), { location: new URL(url) });
+  const window = Object.assign(eventTarget(), {
+    location: new URL(url), getComputedStyle: node => node.style,
+    matchMedia: media => ({ matches: media !== "print" }),
+  });
   window.top = subframe ? {} : window;
   window.__TAURI_INTERNALS__ = {
     invoke(command, args) {
@@ -44,7 +72,16 @@ function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUr
       return invoke ? invoke(command, args) : Promise.resolve(command === "desktop_page_connection_attempt" ? 7 : true);
     },
   };
-  const document = Object.assign(eventTarget(), { readyState, getElementById: id => id === "app" ? root : null });
+  const byId = new Map(Object.entries(elements));
+  if (root) byId.set("app", pageNode(root));
+  if (progress) byId.set("startup-progress", pageNode());
+  const documentElement = pageNode();
+  if (marker !== undefined) documentElement.dataset.workbenchReady = marker;
+  const document = Object.assign(eventTarget(), {
+    readyState, documentElement, fonts,
+    getElementById: id => byId.get(id) || null,
+    querySelectorAll: selector => selector === 'link[rel~="stylesheet"]' ? styles : dialogs,
+  });
   class MutationObserver {
     constructor(callback) { this.callback = callback; this.connected = false; observers.push(this); }
     observe(target, options) { this.target = target; this.options = options; this.connected = true; }
@@ -53,10 +90,11 @@ function injectedPage({ url = "https://keepwork.com/chat", recoveryUrl = shellUr
   }
   const source = fs.readFileSync(path.join(appRoot, "src/pageConnection.js"), "utf8")
     .replace("export function", "function");
-  vm.runInNewContext(`${source}\ninstallPageConnection(${JSON.stringify(privateToken)}, ${JSON.stringify(recoveryUrl)});`, {
-    window, document, MutationObserver,
+  vm.runInNewContext(`${source}\ninstallPageConnection(${JSON.stringify(privateToken)}, ${JSON.stringify(recoveryUrl)}${onVerifiedEntry ? ", onVerifiedEntry" : ""});`, {
+    window, document, MutationObserver, onVerifiedEntry,
   });
-  return { window, document, calls, observers, mutate() { observers.forEach(observer => observer.fire()); } };
+  return { window, document, calls, observers, elements: byId, styles, dialogs, fonts,
+    mutate() { observers.forEach(observer => observer.fire()); } };
 }
 
 test("document readiness is injected into older chat pages without adding recovery listeners", async () => {
@@ -89,7 +127,7 @@ test("already loaded documents report readiness and a rejected report stays boun
   await settle();
   assert.equal(page.calls.length, 2);
   assert.equal(page.calls[1].command, "desktop_main_document_ready");
-  assert.equal(page.document.listeners.has("DOMContentLoaded"), false);
+  assert.equal((page.document.listeners.get("DOMContentLoaded") || []).length, 0);
 });
 
 test("DOMContentLoaded waits for the captured attempt ticket instead of using a later generation", async () => {
@@ -117,6 +155,66 @@ test("rejected and absent attempt tickets never mark a document ready", async ()
   }
 });
 
+test("a switched entry receives the appearance callback only after its captured native ticket is verified", async () => {
+  const url = "http://localhost:4177/AIChat.html?theme=light#current-entry";
+  const entries = [];
+  let resolveAttempt;
+  const page = injectedPage({ url, onVerifiedEntry: verified => entries.push(verified),
+    invoke: command => command === "desktop_page_connection_attempt"
+      ? new Promise(resolve => { resolveAttempt = resolve; }) : Promise.resolve(true) });
+  await settle();
+  assert.deepEqual(entries, [], "a URL alone does not authorize appearance changes");
+  resolveAttempt(9);
+  await settle();
+  assert.deepEqual(entries, [url]);
+  page.document.fire("DOMContentLoaded");
+  page.document.fire("DOMContentLoaded");
+  await settle();
+  assert.deepEqual(entries, [url], "DOM readiness cannot replay the one-shot callback");
+  assert.equal(page.calls.at(-1).command, "desktop_main_document_ready");
+});
+
+test("invalid, rejected, subframe and shell tickets never authorize the appearance fallback", async () => {
+  const entries = [];
+  for (const generation of [null, undefined, false, -1, 1.5, "7", NaN, Infinity]) {
+    injectedPage({ invoke: async () => generation, onVerifiedEntry: url => entries.push(url) });
+    await settle();
+  }
+  injectedPage({ invoke: async () => { throw Error("untrusted document"); }, onVerifiedEntry: url => entries.push(url) });
+  injectedPage({ subframe: true, onVerifiedEntry: url => entries.push(url) });
+  injectedPage({ url: shellUrl, onVerifiedEntry: url => entries.push(url) });
+  await settle();
+  assert.deepEqual(entries, []);
+  const firstGeneration = [];
+  injectedPage({ invoke: async () => 0, onVerifiedEntry: url => firstGeneration.push(url) });
+  await settle();
+  assert.deepEqual(firstGeneration, ["https://keepwork.com/chat"], "generation zero is a valid native ticket");
+});
+
+test("an optional appearance callback failure does not interrupt ordinary document readiness", async () => {
+  const page = injectedPage({ readyState: "complete", onVerifiedEntry() { throw Error("appearance unavailable"); } });
+  await settle();
+  assert.deepEqual(page.calls.map(call => call.command), ["desktop_page_connection_attempt", "desktop_main_document_ready"]);
+});
+
+for (const invalidation of ["pagehide", "changed-url", "rendered-app"]) {
+  test(`a late appearance ticket cannot modify a ${invalidation} document`, async () => {
+    const entries = [];
+    const root = { childElementCount: 0, textContent: "" };
+    let resolveAttempt;
+    const page = injectedPage({ url: "http://localhost:4177/AIChat.html", root,
+      invoke: command => command === "desktop_page_connection_attempt"
+        ? new Promise(resolve => { resolveAttempt = resolve; }) : Promise.resolve(true),
+      onVerifiedEntry: url => entries.push(url) });
+    if (invalidation === "pagehide") page.window.fire("pagehide");
+    if (invalidation === "changed-url") page.window.location = new URL("http://localhost:4177/oauth/callback");
+    if (invalidation === "rendered-app") root.childElementCount = 1;
+    resolveAttempt(12);
+    await settle();
+    assert.deepEqual(entries, [], "late native verification cannot override a document that has handed off theme ownership");
+  });
+}
+
 test("known AIChat documents with an empty app wait for rendering instead of accepting cached HTML alone", async () => {
   for (const url of ["https://keepwork.com/chat", "http://127.0.0.1:3001/AIChat.html", "http://localhost:3001/local/AIChat.html"]) {
     const root = { childElementCount: 0, textContent: " \n " };
@@ -125,7 +223,7 @@ test("known AIChat documents with an empty app wait for rendering instead of acc
     await settle();
     assert.equal(page.calls.length, 1, url);
     assert.equal(page.observers.length, 1);
-    assert.equal(page.observers[0].target, root);
+    assert.equal(page.observers[0].target, page.document.documentElement, "observe the marker and progress element outside #app too");
     assert.equal(page.observers[0].options.childList, true);
     assert.equal(page.observers[0].options.characterData, true);
     page.mutate();
@@ -146,12 +244,12 @@ test("known AIChat documents with an empty app wait for rendering instead of acc
   }
 });
 
-test("rendered child elements or nonempty text accept the known app without waiting for further network resources", async () => {
+test("older rendered layouts or nonempty error UI remain usable without a new readiness marker", async () => {
   for (const root of [{ childElementCount: 1, textContent: "" }, { childElementCount: 0, textContent: "登录提示" }]) {
     const page = injectedPage({ root, readyState: "interactive" });
     await settle();
     assert.equal(page.calls.length, 2);
-    assert.equal(page.observers.length, 0);
+    assert.equal(page.observers[0].connected, false);
   }
   const root = { childElementCount: 0, textContent: "" };
   const loading = injectedPage({ root });
@@ -180,8 +278,153 @@ test("legacy documents with no app root and unknown custom layouts retain DOM re
     const page = injectedPage({ url, root, readyState: "complete" });
     await settle();
     assert.equal(page.calls.length, 2, url);
-    assert.equal(page.observers.length, 0, url);
+    assert.equal(page.observers[0].connected, false, url);
   }
+});
+
+test("an existing loading shell waits for the workbench marker and removal of startup progress", async () => {
+  const root = { childElementCount: 1, textContent: "Loading workspace…" };
+  const page = injectedPage({ root, marker: "false", progress: true, readyState: "complete" });
+  await settle();
+  assert.equal(page.calls.length, 1, "the first child in #app is not a completed first screen");
+  page.document.documentElement.dataset.workbenchReady = "true";
+  page.mutate();
+  await settle();
+  assert.equal(page.calls.length, 1, "the boot progress element must disappear too");
+  root.textContent = "Workspace actions";
+  page.elements.delete("startup-progress");
+  page.mutate();
+  await settle();
+  assert.equal(page.calls.length, 2);
+  assert.equal(page.calls[1].command, "desktop_main_document_ready");
+  assert.equal(page.observers[0].connected, false);
+  assert.ok(page.document.documentElement.layoutReads > 0, "prepare layout before revealing the hidden window");
+  assert.ok(page.observers[0].options.attributeFilter.includes("data-workbench-ready"));
+});
+
+test("older pages reject a busy root, loading-only placeholder, and an empty chat shell", async () => {
+  const placeholders = ':scope > [role="progressbar"], :scope > [aria-busy="true"], :scope > .loading, :scope > .spinner';
+  for (const busyRoot of [true, false]) {
+    const root = { childElementCount: 1, textContent: "Loading…", queries: new Map() };
+    if (busyRoot) root.attributes = { "aria-busy": "true" };
+    else root.queries.set(placeholders, [pageNode()]);
+    const page = injectedPage({ root, readyState: "complete" });
+    await settle();
+    assert.equal(page.calls.length, 1);
+    root.removeAttribute("aria-busy");
+    root.queries.delete(placeholders);
+    const chat = pageNode();
+    root.queries.set(".app-shell", [pageNode()]);
+    root.queries.set(".scenario-pane.active", [pageNode({ id: "paneChat" })]);
+    page.elements.set("chatMessages", chat);
+    page.mutate();
+    await settle();
+    assert.equal(page.calls.length, 1, "a mounted shell with no initial chat content stays hidden");
+    chat.textContent = "Start a new conversation";
+    page.mutate();
+    await settle();
+    assert.equal(page.calls.length, 2, "a completed legacy first screen remains compatible without a marker");
+  }
+});
+
+test("current first-screen stylesheet and fonts finish before readiness and their listeners are released", async () => {
+  const stylesheet = pageNode({ sheet: null });
+  const fonts = Object.assign(eventTarget(), { status: "loading" });
+  const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", styles: [stylesheet], fonts, readyState: "complete" });
+  await settle();
+  assert.equal(page.calls.length, 1);
+  stylesheet.sheet = {};
+  stylesheet.fire("load");
+  await settle();
+  assert.equal(page.calls.length, 1, "a ready document still waits for its current fonts");
+  fonts.status = "loaded";
+  fonts.fire("loadingdone");
+  await settle();
+  assert.equal(page.calls.length, 2);
+  for (const event of ["load", "error"]) assert.equal(stylesheet.listeners.get(event).length, 0);
+  for (const event of ["loadingdone", "loadingerror"]) assert.equal(fonts.listeners.get(event).length, 0);
+  assert.equal(page.observers[0].connected, false);
+  page.mutate();
+  stylesheet.fire("load");
+  fonts.fire("loadingdone");
+  await settle();
+  assert.equal(page.calls.length, 2, "readiness is one-shot and does not keep watching an opened chat");
+});
+
+test("failed critical CSS stays unready for native timeout recovery instead of showing an unstyled workspace", async () => {
+  const stylesheet = pageNode({ sheet: null });
+  const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", styles: [stylesheet], readyState: "complete" });
+  stylesheet.fire("error");
+  page.mutate();
+  await settle();
+  assert.equal(stylesheet.sheet, null, "a browser keeps failed stylesheet.sheet null");
+  assert.equal(page.calls.length, 1, "native owns the bounded 20-second failure/recovery path");
+  assert.equal(page.observers[0].connected, true);
+  page.window.fire("pagehide");
+  assert.equal(page.observers[0].connected, false);
+  assert.equal(stylesheet.listeners.get("error").length, 0);
+});
+
+test("disabled, nonmatching and already-loaded styles do not block older documents", async () => {
+  const styles = [pageNode({ sheet: null, disabled: true }), pageNode({ sheet: null, media: "print" }), pageNode({ sheet: {} })];
+  const page = injectedPage({ styles, fonts: null, readyState: "complete" });
+  await settle();
+  assert.equal(page.calls.length, 2);
+  assert.ok(styles.every(link => link.listeners.size === 0));
+});
+
+test("usable login and modal prompts can finish a boot that is waiting for user interaction", async () => {
+  for (const kind of ["login", "modal"]) {
+    const prompt = pageNode({ queries: new Map() });
+    prompt.queries.set(kind === "login" ? 'button:not([disabled])' : 'button:not([disabled]), input:not([disabled]), a[href]', [pageNode()]);
+    const page = injectedPage({ root: { childElementCount: 1 }, marker: "false", progress: true, readyState: "complete",
+      ...(kind === "login" ? { elements: { loginPromptBar: prompt } } : { dialogs: [prompt] }),
+    });
+    await settle();
+    assert.equal(page.calls.length, 2, `${kind} must be visible so the user can complete initialization`);
+  }
+});
+
+test("hidden or noninteractive prompts cannot reveal an incomplete workbench", async () => {
+  for (const hidden of [{ hidden: true }, { hiddenAncestor: true }, { style: { display: "none" } }, { style: { visibility: "hidden" } }, { hasLayout: false }, { noControl: true }]) {
+    const modal = pageNode({ ...hidden, queries: new Map() });
+    if (!hidden.noControl) modal.queries.set('button:not([disabled]), input:not([disabled]), a[href]', [pageNode()]);
+    const page = injectedPage({ root: { childElementCount: 1 }, marker: "false", progress: true, dialogs: [modal], readyState: "complete" });
+    await settle();
+    assert.equal(page.calls.length, 1, JSON.stringify(hidden));
+    page.window.fire("pagehide");
+  }
+});
+
+test("pagehide or a changed URL invalidates a delayed readiness ticket", async () => {
+  for (const invalidate of [page => page.window.fire("pagehide"), page => { page.window.location = new URL("https://keepwork.com/chat?different-document=1"); }]) {
+    let resolveAttempt;
+    const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", readyState: "complete",
+      invoke: command => command === "desktop_page_connection_attempt" ? new Promise(resolve => { resolveAttempt = resolve; }) : Promise.resolve(true),
+    });
+    invalidate(page);
+    resolveAttempt(7);
+    page.mutate();
+    await settle();
+    assert.equal(page.calls.length, 1, "an old document must not reveal itself after navigation");
+  }
+});
+
+test("a stylesheet added while the native ticket is pending is rechecked before revealing the page", async () => {
+  let resolveAttempt;
+  const page = injectedPage({ root: { childElementCount: 1 }, marker: "true", readyState: "complete",
+    invoke: command => command === "desktop_page_connection_attempt" ? new Promise(resolve => { resolveAttempt = resolve; }) : Promise.resolve(true),
+  });
+  const stylesheet = pageNode({ sheet: null });
+  page.styles.push(stylesheet);
+  resolveAttempt(17);
+  await settle();
+  assert.equal(page.calls.length, 1);
+  stylesheet.sheet = {};
+  stylesheet.fire("load");
+  await settle();
+  assert.equal(page.calls.length, 2);
+  assert.equal(page.calls[1].args.generation, 17, "the captured attempt remains unchanged");
 });
 
 test("tool frames and login subframes never receive recovery controls or publish readiness", async () => {
@@ -249,6 +492,7 @@ function desktopStatus(connection = {}) {
 
 async function connectionPage({ status = desktopStatus(), statusPromise, retry, legacy = false } = {}) {
   const calls = [];
+  const themeEvents = [];
   const timers = new Map();
   const elements = new Map();
   let clock = 0;
@@ -264,9 +508,21 @@ async function connectionPage({ status = desktopStatus(), statusPromise, retry, 
     runMenuCommand(id) { calls.push({ name: "menu", id }); return Promise.resolve(true); },
   };
   const document = {
+    documentElement: { dataset: {} },
+    dispatchEvent(event) {
+      themeEvents.push({ type: event.type, theme: document.documentElement.dataset.theme });
+      return true;
+    },
     getElementById(id) {
       if (!elements.has(id)) {
-        const element = Object.assign(eventTarget(), { textContent: "", disabled: false });
+        const attributes = new Map();
+        if (id === "startup") attributes.set("aria-busy", "true");
+        const element = Object.assign(eventTarget(), {
+          textContent: "", disabled: false, hidden: id === "recovery",
+          dataset: id === "startup" ? { state: "connecting" } : {},
+          setAttribute(name, value) { attributes.set(name, String(value)); },
+          getAttribute(name) { return attributes.get(name) ?? null; },
+        });
         element.click = () => { if (!element.disabled) element.fire("click"); };
         elements.set(id, element);
       }
@@ -277,7 +533,7 @@ async function connectionPage({ status = desktopStatus(), statusPromise, retry, 
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   vm.runInNewContext(source, {
-    exports: {}, window, document, navigator: { platform: "MacIntel", onLine: false },
+    exports: {}, window, document, Event, navigator: { platform: "MacIntel", onLine: false },
     require(name) {
       if (name === "./bridge") return { installAIChatDesktopBridge: () => bridge };
       if (name === "./titlebar") return { mountDesktopTitlebar() {} };
@@ -288,7 +544,7 @@ async function connectionPage({ status = desktopStatus(), statusPromise, retry, 
   });
   await settle();
   return {
-    window, calls, timers,
+    window, document, calls, timers, themeEvents,
     element: id => document.getElementById(id),
     retries: () => calls.filter(call => call.name === "retry"),
     delays: () => [...timers.values()].map(timer => timer.due - clock),
@@ -307,16 +563,62 @@ test("the local startup page waits for status then opens the configured entry ex
   const page = await connectionPage({ statusPromise: new Promise(resolve => { resolveStatus = resolve; }) });
   assert.deepEqual(page.delays(), []);
   assert.deepEqual(page.retries(), []);
+  assert.equal(page.element("startup").dataset.state, "connecting", "normal startup shows the compact loading state");
+  assert.equal(page.element("startup").getAttribute("aria-busy"), "true");
+  assert.equal(page.element("recovery").hidden, true, "diagnostics must not flash before a failure");
+  assert.equal(page.document.documentElement.dataset.theme, undefined, "the native backdrop remains visible until the theme snapshot arrives");
+  assert.deepEqual(page.themeEvents, []);
   resolveStatus(desktopStatus({ phase: "idle", error: "" }));
   await settle();
   assert.deepEqual(page.delays(), [0]);
   await page.advance(0);
   assert.deepEqual(page.retries(), [{ name: "retry", automatic: false }]);
   assert.equal(page.element("reload").disabled, true);
+  assert.equal(page.element("recovery").hidden, true);
+  assert.equal(page.document.documentElement.dataset.theme, "light");
   page.window.fire("online");
   page.element("reload").click();
   await page.advance(60000);
   assert.equal(page.retries().length, 1, "an unresolved navigation cannot start a competing attempt");
+});
+
+test("startup applies the current profile theme and signals chrome before connecting", async () => {
+  for (const [theme, expected] of [["light", "light"], ["dark", "dark"], [undefined, "light"], ["unknown", "light"]]) {
+    const page = await connectionPage({ status: { ...desktopStatus({ phase: "idle", error: "" }), theme } });
+    assert.equal(page.document.documentElement.dataset.theme, expected);
+    assert.deepEqual(page.themeEvents, [{ type: "aichat:theme-changed", theme: expected }]);
+    assert.deepEqual(page.retries(), [], "theme is resolved before scheduling the first navigation");
+    await page.advance(0);
+    assert.deepEqual(page.retries(), [{ name: "retry", automatic: false }]);
+    assert.equal(page.document.documentElement.dataset.theme, expected);
+  }
+});
+
+test("a recovery document reads the latest theme snapshot instead of a previous startup choice", async () => {
+  const first = await connectionPage({ status: { ...desktopStatus({ phase: "idle" }), theme: "light" } });
+  assert.equal(first.document.documentElement.dataset.theme, "light");
+  first.window.fire("pagehide");
+  const recovery = await connectionPage({ status: { ...desktopStatus(), theme: "dark" } });
+  assert.equal(recovery.document.documentElement.dataset.theme, "dark");
+  assert.deepEqual(recovery.themeEvents, [{ type: "aichat:theme-changed", theme: "dark" }]);
+  assert.equal(recovery.element("recovery").hidden, false);
+});
+
+test("healthy startup phases keep diagnostics hidden while a failed connection exposes recovery", async () => {
+  for (const phase of ["idle", "connecting", "ready"]) {
+    const page = await connectionPage({ status: desktopStatus({ phase, error: "" }) });
+    assert.equal(page.element("startup").dataset.state, "connecting", phase);
+    assert.equal(page.element("startup").getAttribute("aria-busy"), "true", phase);
+    assert.equal(page.element("recovery").hidden, true, phase);
+  }
+  const failed = await connectionPage();
+  assert.equal(failed.element("startup").dataset.state, "unavailable");
+  assert.equal(failed.element("startup").getAttribute("aria-busy"), "false");
+  assert.equal(failed.element("recovery").hidden, false);
+  failed.element("reload").click();
+  await settle();
+  assert.equal(failed.element("startup").dataset.state, "connecting", "retry returns to loading feedback");
+  assert.equal(failed.element("recovery").hidden, true, "diagnostics stay out of the normal navigation state");
 });
 
 test("automatic recovery uses 5/15/30 second backoff and stops at the native budget", async () => {
@@ -384,6 +686,8 @@ test("page disposal cancels backoff, ignores online, and ignores a late startup 
   await starting.advance(60000);
   assert.deepEqual(starting.delays(), []);
   assert.deepEqual(starting.retries(), []);
+  assert.equal(starting.document.documentElement.dataset.theme, undefined, "a disposed page cannot apply a late theme snapshot");
+  assert.deepEqual(starting.themeEvents, []);
 });
 
 test("connection diagnostics show a safe origin and distinguish local entry from the MCP service", async () => {
@@ -406,6 +710,8 @@ test("a failed recovery invocation re-enables manual retry without replaying it 
   page.element("reload").click();
   await settle();
   assert.equal(page.element("reload").disabled, false);
+  assert.equal(page.element("startup").dataset.state, "unavailable", "an IPC failure must not leave a permanent spinner");
+  assert.equal(page.element("recovery").hidden, false, "manual recovery remains reachable");
   assert.match(page.element("retry-status").textContent, /无法重试/);
   await page.advance(60000);
   assert.equal(page.retries().length, 1);
@@ -420,9 +726,21 @@ test("older hosts without the private recovery API retain manual menu reload and
   delete status.pageConnection;
   const page = await connectionPage({ status, legacy: true });
   assert.deepEqual(page.delays(), []);
+  assert.equal(page.element("startup").dataset.state, "unavailable");
+  assert.equal(page.element("recovery").hidden, false, "older hosts keep their manual menu reload controls");
+  assert.equal(page.document.documentElement.dataset.theme, "light", "old hosts without a theme field retain the application default");
   page.window.fire("online");
   page.element("reload").click();
   await settle();
   assert.deepEqual(page.calls, [{ name: "bridge-status" }, { name: "menu", id: "reload" }]);
   assert.doesNotMatch(page.element("detail").textContent, /secret-query-value|private-fragment/);
+});
+
+test("an unavailable startup status leaves recovery controls visible", async () => {
+  const page = await connectionPage({ statusPromise: Promise.reject(new Error("Status unavailable")) });
+  assert.equal(page.element("startup").dataset.state, "unavailable");
+  assert.equal(page.element("recovery").hidden, false);
+  assert.equal(page.document.documentElement.dataset.theme, "light");
+  assert.match(page.element("headline").textContent, /暂时无法打开/);
+  assert.deepEqual(page.delays(), []);
 });

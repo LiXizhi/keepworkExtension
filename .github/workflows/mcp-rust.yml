@@ -2,59 +2,148 @@ name: Rust MCP daemon
 
 on:
   workflow_dispatch:
-  push:
-    branches: [master, main]
+  pull_request:
     paths:
-      - "package.json"
-      - "package-lock.json"
+      - "package*.json"
       - "apps/mcp-rust/**"
-      - "scripts/contract/**"
-      - "docs/rust-runtime-migration.md"
+      - "apps/mcp-runtime/**"
+      - "src/**"
+      - "scripts/**"
+      - "skills/**"
+      - "docs/acceptance/rust-release-evidence.schema.json"
       - ".github/workflows/mcp-rust.yml"
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build and contract (${{ matrix.os }})
+    name: Build and contract (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - name: Windows x64
+            group: windows-x64
+            os: windows-latest
+            node-arch: x64
+            native: x86_64-pc-windows-msvc
+            targets: x86_64-pc-windows-msvc
+            build-targets: x86_64-pc-windows-msvc
+            suffix: .exe
+          - name: Windows ARM64
+            group: windows-arm64
+            os: windows-11-arm
+            node-arch: arm64
+            native: aarch64-pc-windows-msvc
+            targets: aarch64-pc-windows-msvc
+            build-targets: aarch64-pc-windows-msvc
+            suffix: .exe
+          - name: macOS Universal
+            group: macos-universal
+            os: macos-15
+            node-arch: arm64
+            native: aarch64-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build-targets: aarch64-apple-darwin x86_64-apple-darwin
+            suffix: ""
     env:
-      BIN: apps/mcp-rust/target/release/keepwork-mcp${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+      BIN: apps/mcp-rust/target/${{ matrix.native }}/release/keepwork-mcp${{ matrix.suffix }}
+      BIN_SUFFIX: ${{ matrix.suffix }}
+      RUST_BUILD_TARGETS: ${{ matrix.build-targets }}
+      KEEPWORK_MCP_REQUIRE_NODE_REFERENCE: '1'
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable-${{ matrix.native }}
           components: rustfmt, clippy
+          targets: ${{ matrix.targets }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          architecture: ${{ matrix.node-arch }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mcp-${{ matrix.group }}
+          workspaces: apps/mcp-rust -> target
       - name: Install Node reference dependencies for wire contracts
-        run: npm ci --include=dev
+        run: |
+          mkdir -p .test-runtime/mcp-rust
+          npm ci --include=dev 2>&1 | tee .test-runtime/mcp-rust/dependencies.log
+          npm ci --prefix apps/mcp-runtime 2>&1 | tee -a .test-runtime/mcp-rust/dependencies.log
+      - name: Build mandatory Node reference
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-node-reference --level source --output .test-runtime/mcp-rust -- node scripts/build-node-reference.cjs
+      - name: Check validation infrastructure
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-validation --level fixture --output .test-runtime/mcp-rust -- node --test --test-concurrency=1 --test-reporter=tap scripts/contract/harness-reference.test.cjs scripts/sync-aichat-runtime.test.cjs scripts/aichat-runtime-build.test.mjs scripts/aichat-runtime-freshness.test.cjs scripts/rust-validation-evidence.test.cjs scripts/rust-validation-workflows.test.cjs apps/mcp-rust/scripts/package-runtime.test.cjs apps/mcp-rust/scripts/smoke.test.cjs
       - name: Format
-        working-directory: apps/mcp-rust
-        run: cargo fmt --all --check
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-format --level source --output .test-runtime/mcp-rust -- cargo fmt --all --check --manifest-path apps/mcp-rust/Cargo.toml
       - name: Lint
-        working-directory: apps/mcp-rust
-        run: cargo clippy --all-targets -- -D warnings
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id source-checks-lint --level source --output .test-runtime/mcp-rust -- cargo clippy --locked --manifest-path apps/mcp-rust/Cargo.toml --all-targets -- -D warnings
       - name: Unit and contract tests (Rust)
-        working-directory: apps/mcp-rust
-        run: cargo test
+        run: node scripts/rust-validation-evidence.cjs run --product mcp-rust --id fixture-contracts-rust --level fixture --output .test-runtime/mcp-rust -- cargo test --locked --manifest-path apps/mcp-rust/Cargo.toml
       - name: Release build
-        working-directory: apps/mcp-rust
-        run: cargo build --release
-      - name: Wire contract against the Node reference when available
-        timeout-minutes: 10
-        env:
-          KEEPWORK_MCP_TEST_BIN: ${{ github.workspace }}/${{ env.BIN }}
-        run: node --test scripts/contract/*.test.cjs
+        run: |
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            receipt_suffix="${runtime_triple//_/-}"
+            node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "source-checks-build-$receipt_suffix" --level source --output .test-runtime/mcp-rust -- cargo build --release --locked --manifest-path apps/mcp-rust/Cargo.toml --target "$runtime_triple"
+          done
+      - name: Wire contract against mandatory Node reference
+        timeout-minutes: 20
+        run: |
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            receipt_suffix="${runtime_triple//_/-}"
+            # The Mac Intel slice executes through Rosetta on the ARM runner;
+            # this is wire/fixture evidence, not Intel-machine live acceptance.
+            KEEPWORK_MCP_TEST_BIN="$GITHUB_WORKSPACE/apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX" \
+              node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "fixture-contracts-wire-$receipt_suffix" --level fixture --output .test-runtime/mcp-rust -- node --test --test-concurrency=1 --test-reporter=tap scripts/contract/*.test.cjs
+          done
       - name: Smoke (spawn, handshake, /admin/stop)
-        run: node apps/mcp-rust/scripts/smoke.cjs
+        run: |
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            receipt_suffix="${runtime_triple//_/-}"
+            node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "fixture-contracts-smoke-$receipt_suffix" --level fixture --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/smoke.cjs "apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX"
+          done
+      - name: Package immutable Rust v2 runtime artifacts (no upload or promotion)
+        run: |
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            runtime_binary="apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX"
+            runtime_target=$(node -e 'process.stdout.write(require("./scripts/lib/rust-runtime-identity.cjs").readBuildInfo(process.argv[1]).target)' "$runtime_binary")
+            test "$runtime_target" = "$runtime_triple"
+            receipt_suffix="${runtime_triple//_/-}"
+            node scripts/rust-validation-evidence.cjs run --product mcp-rust --id "source-checks-package-$receipt_suffix" --level source --output .test-runtime/mcp-rust -- node apps/mcp-rust/scripts/package-runtime.cjs --target "$runtime_target" --binary "$runtime_binary" --out .test-runtime/mcp-rust/package
+          done
       - name: Size gate (<= 10 MiB)
         shell: bash
         run: |
-          bytes=$(wc -c < "$BIN")
-          echo "binary bytes: $bytes"
-          test "$bytes" -lt $((10 * 1024 * 1024))
+          for runtime_triple in $RUST_BUILD_TARGETS; do
+            bytes=$(wc -c < "apps/mcp-rust/target/$runtime_triple/release/keepwork-mcp$BIN_SUFFIX")
+            echo "$runtime_triple binary bytes: $bytes"
+            test "$bytes" -lt $((10 * 1024 * 1024))
+          done
+      - name: Save honest release acceptance summary
+        if: always()
+        run: |
+          shopt -s nullglob
+          archives=(.test-runtime/mcp-rust/package/*.zip)
+          if [[ ${#archives[@]} -eq 0 ]]; then
+            node scripts/rust-validation-evidence.cjs collect --product mcp-rust --output .test-runtime/mcp-rust
+          else
+            for archive in "${archives[@]}"; do
+              runtime_target="$(basename "$archive" .zip)"
+              node scripts/rust-validation-evidence.cjs collect --product mcp-rust --output .test-runtime/mcp-rust --artifact "$archive" --report-name "report-$runtime_target.json"
+            done
+          fi
+      - name: Preserve first failures, TAP, native logs and pending gates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-rust-validation-${{ matrix.group }}
+          path: .test-runtime/mcp-rust/
+          if-no-files-found: warn
+          retention-days: 30
