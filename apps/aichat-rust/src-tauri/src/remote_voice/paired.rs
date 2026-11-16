@@ -136,11 +136,30 @@ pub(super) fn select_paired(
         return Ok(None); // Never substitute a different paired remote.
     }
     if unique.len() > 1 {
-        return Err("发现多只已配对遥控器，请在设置中指定要使用的设备 ID 后手动开启。".into());
+        // Several remotes may stay paired while only one is awake. Only a
+        // connected peripheral can be retrieved, so it is the unambiguous target.
+        let mut connected: Vec<_> = unique.iter().filter(|candidate| candidate.connected).cloned().collect();
+        match connected.len() {
+            0 => return Err(MULTIPLE_IDLE.into()),
+            1 => unique = vec![connected.pop().unwrap()],
+            _ => return Err("发现多只已连接的遥控器，请在设置中指定要使用的设备 ID 后手动开启。".into()),
+        }
     }
     Ok(unique
         .pop()
         .map(|candidate| candidate.identifier.unwrap_or_default()))
+}
+
+/// Several paired remotes are asleep. This is not a configuration error: the
+/// first remote woken by a key press becomes the only connected candidate.
+pub(super) const MULTIPLE_IDLE: &str = "发现多只已配对遥控器，按一下要使用的遥控器即可自动连接。";
+
+/// Waiting for one of several idle remotes keeps polling instead of pausing automation.
+fn select_or_wait(candidates: Vec<PairedRemote>, config_device: &str) -> Result<Result<Option<String>, Probe>, String> {
+    match select_paired(candidates, config_device) {
+        Err(message) if message == MULTIPLE_IDLE => Ok(Err(Probe::Retry(message))),
+        selected => selected.map(Ok),
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -188,7 +207,10 @@ pub(super) async fn paired_remote(config_device: &str) -> Result<Probe, String> 
             Ok(candidates) => candidates,
             Err(error) => return error.probe(),
         };
-        Ok(select_paired(candidates, config_device)?.map_or(Probe::Waiting, Probe::Available))
+        Ok(match select_or_wait(candidates, config_device)? {
+            Ok(device) => device.map_or(Probe::Waiting, Probe::Available),
+            Err(probe) => probe,
+        })
     }
 }
 
@@ -221,7 +243,11 @@ fn admit_macos(
     bluetooth_not_determined: bool,
     input_permission: impl FnOnce() -> Option<&'static str>,
 ) -> Result<Probe, String> {
-    let Some(device) = select_paired(candidates, if bluetooth_allowed { config_device } else { "" })? else {
+    let device = match select_or_wait(candidates, if bluetooth_allowed { config_device } else { "" })? {
+        Ok(device) => device,
+        Err(probe) => return Ok(probe),
+    };
+    let Some(device) = device else {
         return Ok(Probe::Waiting);
     };
     if !bluetooth_allowed {
@@ -474,14 +500,10 @@ mod tests {
             admit_macos(vec![], "", false, true, skip).unwrap(),
             Probe::Waiting
         );
-        assert!(admit_macos(
-            vec![device.clone(), remote(None, Some("hid:two"))],
-            "",
-            false,
-            true,
-            skip
-        )
-        .is_err());
+        assert_eq!(
+            admit_macos(vec![device.clone(), remote(None, Some("hid:two"))], "", false, true, skip).unwrap(),
+            Probe::Retry(MULTIPLE_IDLE.into())
+        );
         assert!(matches!(
             admit_macos(vec![device.clone()], "", false, false, skip),
             Ok(Probe::NeedsPermission(_))
@@ -590,6 +612,44 @@ mod tests {
             .unwrap(),
             Some("AA:BB:CC:DD:EE:01".into())
         );
+    }
+    #[test]
+    fn the_single_connected_remote_wins_over_other_idle_paired_remotes() {
+        // macOS: classic inventory and the HID registry describe the same awake remote.
+        let mut awake_hid = remote(None, Some("mac:E8:55:40:EE:4D:D9"));
+        awake_hid.paired = false;
+        awake_hid.connected = true;
+        awake_hid.hardware_supported = true;
+        let mut awake_paired = remote(None, Some("mac:E8:55:40:EE:4D:D9"));
+        awake_paired.connected = true;
+        let idle = remote(None, Some("mac:E8:55:40:E1:39:03"));
+        assert_eq!(
+            select_paired(vec![awake_paired.clone(), idle.clone(), awake_hid.clone()], "").unwrap(),
+            Some(String::new())
+        );
+        let mut awake_mac = remote(Some("AA:BB:CC:DD:EE:01"), None);
+        awake_mac.connected = true;
+        assert_eq!(
+            select_paired(vec![remote(Some("AA:BB:CC:DD:EE:02"), None), awake_mac.clone()], "").unwrap(),
+            Some("AA:BB:CC:DD:EE:01".into())
+        );
+        let mut second = remote(Some("AA:BB:CC:DD:EE:02"), None);
+        second.connected = true;
+        assert!(select_paired(vec![awake_mac, second], "").unwrap_err().contains("已连接"));
+        // Idle remotes keep the monitor polling until one key press wakes a target.
+        assert_eq!(select_paired(vec![idle.clone(), remote(None, Some("mac:AA:BB:CC:DD:EE:02"))], "").unwrap_err(), MULTIPLE_IDLE);
+        assert_eq!(
+            select_or_wait(vec![idle, remote(None, Some("mac:AA:BB:CC:DD:EE:02"))], "").unwrap(),
+            Err(Probe::Retry(MULTIPLE_IDLE.into()))
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn startup_admits_the_connected_remote_when_another_is_paired() {
+        let mut awake = remote(None, Some("mac:E8:55:40:EE:4D:D9"));
+        awake.connected = true;
+        let idle = remote(None, Some("mac:E8:55:40:E1:39:03"));
+        assert_eq!(admit_macos(vec![awake, idle], "", true, false, || None).unwrap(), Probe::Available(String::new()));
     }
     #[test]
     fn explicit_id_selects_only_a_verified_pair_and_never_another_remote() {
