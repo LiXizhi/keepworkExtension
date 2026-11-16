@@ -443,6 +443,7 @@ extern "C" {
     fn keepwork_startup_smoke_overlay_present(window: *mut std::ffi::c_void) -> bool;
     fn keepwork_startup_smoke_overlay_covers(window: *mut std::ffi::c_void) -> bool;
     fn keepwork_startup_smoke_document_focused(window: *mut std::ffi::c_void) -> bool;
+    fn keepwork_startup_smoke_voice_modifier_state() -> u32;
     fn keepwork_startup_smoke_action(window: *mut std::ffi::c_void, action: u32) -> bool;
 }
 
@@ -895,6 +896,75 @@ async fn check_screenshot_bridge(
     Ok(())
 }
 
+async fn check_direct_main_composer(app: &AppHandle) -> Result<(), String> {
+    use crate::remote_voice::ComposerDelivery;
+    let main = app.get_webview_window("main").ok_or("Missing main window")?;
+    ui(app, |app, core| {
+        super::host_menu::setup_mac_native_menu(app, core, "zh-CN").map_err(|e| e.to_string())
+    }).await?;
+    let evaluate = |script: String| {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let send = Mutex::new(Some(send));
+        let scheduled = main.eval_with_callback(script, move |value| {
+            if let Some(send) = send.lock().unwrap().take() { let _ = send.send(value); }
+        });
+        async move {
+            scheduled.map_err(|e| e.to_string())?;
+            let value = tokio::time::timeout(Duration::from_secs(2), receive).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+            serde_json::from_str::<Value>(&value).map_err(|e| e.to_string())
+        }
+    };
+    if unsafe { keepwork_startup_smoke_voice_modifier_state() } != 0 {
+        return Err("A real modifier is active before the direct main composer case".into());
+    }
+    for rich in [true, false] {
+        let kind = if rich { "rich" } else { "textarea" };
+        if evaluate(format!(r#"(() => {{
+            document.getElementById('voiceMainFixture')?.remove();
+            document.getElementById('chatInput')?.remove();
+            const panel=document.createElement('section');panel.id='voiceMainFixture';
+            panel.innerHTML='<button id="voiceMainToolbar">Toolbar</button>'+({rich}
+                ? '<div id="chatInput" contenteditable="true"></div>' : '<textarea id="chatInput"></textarea>');
+            document.body.append(panel);
+            chatInput.style.whiteSpace='pre-wrap';
+            if ({rich}) Object.defineProperty(chatInput,'value',{{get(){{return Array.from(this.childNodes).map(n=>
+                n.nodeType===Node.TEXT_NODE?n.textContent:n.nodeName==='BR'?'\n':n.matches?.('[data-file-ref]')?'':n.textContent).join('').replace(/\u200b/g,'')}}}});
+            if ({rich}) chatInput._fileMentionAdapter=true;
+            window.voiceMain={{model:'',events:[]}};
+            chatInput.oninput=e=>{{voiceMain.model=chatInput.value;voiceMain.events.push([e.isTrusted,e.inputType])}};
+            voiceMainToolbar.focus();return document.hasFocus()&&document.activeElement===voiceMainToolbar;
+        }})()"#)).await? != json!(true) { return Err(format!("Could not prepare direct main {kind} fixture")); }
+        for round in 0..3 {
+            let text = if round == 1 { "第二行\n\n  缩进与😀".to_owned() } else { format!("同一对话第{round}段😀") };
+            let reply = super::remote_voice_host::deliver_main_composer_smoke(app, &text)?.ok_or("Main direct delivery unexpectedly unavailable")?;
+            let delivery = tokio::time::timeout(Duration::from_secs(1), reply).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+            let delivery = match delivery {
+                Ok(delivery) => delivery,
+                Err(error) => {
+                    let metadata = evaluate("({active:document.activeElement?.id,focused:document.hasFocus(),valueLength:chatInput.value.length,modelLength:voiceMain.model.length,events:voiceMain.events})".to_owned()).await?;
+                    return Err(format!("Direct main {kind} rejected round={round}: {error}; {metadata}"));
+                }
+            };
+            let expected = json!(text);
+            let inserted = evaluate(format!("document.activeElement===chatInput && chatInput.value==={expected} && voiceMain.model==={expected} && voiceMain.events.at(-1)?.[0]===true && voiceMain.events.at(-1)?.[1].startsWith('insert')")).await? == json!(true);
+            if delivery != ComposerDelivery::Inserted || !inserted {
+                let metadata = evaluate("({active:document.activeElement?.id,focused:document.hasFocus(),valueLength:chatInput.value.length,modelLength:voiceMain.model.length,events:voiceMain.events})".to_owned()).await?;
+                return Err(format!("Direct main {kind} delivery failed round={round}: {delivery:?}, {metadata}"));
+            }
+            let cleared = super::remote_voice_host::clear_main_composer(app, Instant::now(), || true)?;
+            let empty = evaluate("document.activeElement===chatInput && !chatInput.value.trim() && voiceMain.model===chatInput.value && voiceMain.events.at(-1)?.[0]===true && voiceMain.events.at(-1)?.[1].startsWith('delete')".to_owned()).await? == json!(true);
+            let modifier_state = unsafe { keepwork_startup_smoke_voice_modifier_state() };
+            println!("{}", json!({"case":"main-direct-positive-ack","kind":kind,"round":round,
+                "accepted":delivery==ComposerDelivery::Inserted,"modelMatches":inserted,"cleared":cleared,"modelEmpty":empty,"modifierState":modifier_state}));
+            if !cleared || !empty || modifier_state != 0 { return Err(format!("Direct main {kind} clear/state regression")); }
+        }
+    }
+    if evaluate("document.getElementById('voiceMainFixture').remove();true".to_owned()).await? != json!(true) {
+        return Err("Could not clean up the direct main fixture".into());
+    }
+    Ok(())
+}
+
 async fn check_focused_composer_back(app: &AppHandle) -> Result<(), String> {
     let main = app.get_webview_window("main").ok_or("Missing main window")?;
     let evaluate = |script: &'static str| {
@@ -973,6 +1043,7 @@ async fn zoomed_home(app: &AppHandle, fixture: &FixtureState) -> Result<(), Stri
         if Instant::now() >= until { return Err("The isolated zoomed main could not take focus".into()); }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
+    check_direct_main_composer(app).await?;
     check_focused_composer_back(app).await?;
     for enabled in [true, false, true] {
         remote_ui(app, move |_, core| {

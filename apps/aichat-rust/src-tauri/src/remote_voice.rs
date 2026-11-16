@@ -1,6 +1,5 @@
-//! Native ATVV dictation. Audio and text stay out of the renderer/MCP bridge
-//! and are never persisted. Audio segments go directly to Keepwork ASR.
-//! Previews and final transcripts are transient.
+//! Native ATVV dictation. Audio goes directly to Keepwork ASR; transcripts are
+//! delivered only to the current editor and are never persisted or sent to MCP.
 #[path = "remote_voice/asr.rs"]
 mod asr;
 #[path = "remote_voice/atvv.rs"]
@@ -61,6 +60,11 @@ pub(crate) type RecordingTarget = Result<Option<RecordingFeedback>, String>;
 type RecordingFocusCallback = dyn Fn() -> RecordingTarget + Send + Sync;
 type ComposerFocusCallback = dyn Fn() -> RecordingFocus + Send + Sync;
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum ComposerDelivery { NotApplicable, Inserted }
+pub(crate) type ComposerDeliveryRequest = Result<Option<tokio::sync::oneshot::Receiver<Result<ComposerDelivery, String>>>, String>;
+type ComposerDeliveryCallback = dyn Fn(u64, &str) -> ComposerDeliveryRequest + Send + Sync;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VoiceConfig {
@@ -103,6 +107,7 @@ pub struct RemoteVoice {
     auto_events: watch::Sender<()>,
     recording_focus: std::sync::OnceLock<Box<RecordingFocusCallback>>,
     composer_focus: std::sync::OnceLock<Box<ComposerFocusCallback>>,
+    composer_delivery: std::sync::OnceLock<Box<ComposerDeliveryCallback>>,
     home_pressed: std::sync::OnceLock<Box<dyn Fn(u64) + Send + Sync>>,
     back_route: std::sync::OnceLock<Box<dyn Fn(u64) -> Result<BackRoute, String> + Send + Sync>>,
 }
@@ -125,6 +130,7 @@ impl RemoteVoice {
             auto_events,
             recording_focus: std::sync::OnceLock::new(),
             composer_focus: std::sync::OnceLock::new(),
+            composer_delivery: std::sync::OnceLock::new(),
             dialogue: Arc::new(dialogue::Dialogue::default()),
             home_pressed: std::sync::OnceLock::new(),
             back_route: std::sync::OnceLock::new(),
@@ -166,6 +172,9 @@ impl RemoteVoice {
     }
     pub(crate) fn set_composer_focus(&self, callback: impl Fn() -> RecordingFocus + Send + Sync + 'static) {
         let _ = self.composer_focus.set(Box::new(callback));
+    }
+    pub(crate) fn set_composer_delivery(&self, callback: impl Fn(u64, &str) -> ComposerDeliveryRequest + Send + Sync + 'static) {
+        let _ = self.composer_delivery.set(Box::new(callback));
     }
     pub(crate) fn set_home_pressed(&self, callback: impl Fn(u64) + Send + Sync + 'static) {
         let _ = self.home_pressed.set(Box::new(callback));
@@ -463,6 +472,30 @@ impl RemoteVoice {
             }
         }
     }
+    async fn deliver_composer_text(&self, generation: u64, text: &str, complete: bool) -> Result<Option<Delivery>, String> {
+        if !self.current(generation) || text.trim().is_empty() { return Ok(Some(Delivery::Cancelled)); }
+        if text.len() > 64_000 || text.contains('\0') { return Err("识别文字超出长度限制或包含无效字符。".into()); }
+        // Exact, complete commands keep their existing native semantics. A
+        // partial command and ordinary sentences remain literal dictation.
+        if complete && (native_input::is_clear_command(text) || native_input::is_submit_command(text)) { return Ok(None); }
+        let Some(callback) = self.composer_delivery.get() else { return Ok(None); };
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.native.as_deref().is_some_and(NativeInput::modifiers_down) {
+                return Ok(Some(Delivery::ModifiersHeld));
+            }
+        }
+        // Never hold the voice mutex while the UI resolves/edits its composer.
+        let Some(ack) = callback(generation, text)? else { return Ok(None); };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), ack).await;
+        if !self.current(generation) { return Ok(Some(Delivery::Cancelled)); }
+        match result {
+            Ok(Ok(Ok(ComposerDelivery::Inserted))) => Ok(Some(Delivery::Pasted)),
+            Ok(Ok(Ok(ComposerDelivery::NotApplicable))) => Ok(None),
+            Ok(Ok(Err(error))) => Err(error),
+            _ => Err("聊天框未确认文字写入，请先检查草稿；没有重复粘贴。".into()),
+        }
+    }
     async fn deliver_recognition(&self, generation: u64, owner: Option<&RecordingFeedback>, text: &str, complete: bool) -> bool {
         if let Some(edit) = owner.and_then(|target| target.pet_delivery.as_ref()) {
             {
@@ -496,6 +529,19 @@ impl RemoteVoice {
             if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return false; }
             Self::input_result(&mut inner.snapshot, Ok(outcome));
             return outcome == Delivery::Pasted;
+        }
+        match self.deliver_composer_text(generation, text, complete).await {
+            Ok(Some(delivery)) => {
+                let pasted = delivery == Delivery::Pasted;
+                let mut inner = self.inner.lock().unwrap();
+                if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return false; }
+                Self::input_result(&mut inner.snapshot, Ok(delivery));
+                return pasted;
+            }
+            Err(error) => { self.update(generation, "input-blocked", &error, None); return false; }
+            // Only an explicitly untouched, inapplicable target may use the
+            // legacy current-focus native path. Unknown edits never get replayed.
+            Ok(None) => {}
         }
         let mut inner = self.inner.lock().unwrap();
         if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) {
@@ -901,6 +947,99 @@ mod tests {
         assert_eq!(voice.snapshot().state, "waiting-paired");
         assert!(voice.inner.lock().unwrap().automatic.accepts(fresh, true, false));
         drop(voice);
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn main_composer_acknowledges_literal_text_without_native_paste_or_holding_voice_lock() {
+        let (voice, _stop, profile) = active_voice_before_sleep(true);
+        let voice = Arc::new(voice);
+        let weak = Arc::downgrade(&voice);
+        let edits = Arc::new(Mutex::new(Vec::new()));
+        let recorded = edits.clone();
+        voice.set_composer_delivery(move |generation, text| {
+            let current = weak.upgrade().unwrap();
+            assert!(current.inner.try_lock().is_ok(), "UI delivery must not inherit the voice lock");
+            assert_eq!(generation, 1);
+            recorded.lock().unwrap().push(text.to_owned());
+            let (send, ack) = tokio::sync::oneshot::channel();
+            send.send(Ok(ComposerDelivery::Inserted)).unwrap();
+            Ok(Some(ack))
+        });
+        for (text, complete) in [("你好\n第二行 <img onerror=alert(1)>", true), ("发送提示词", false), ("清除提示词", false)] {
+            assert!(voice.deliver_recognition(1, None, text, complete).await);
+            assert_eq!(voice.snapshot().state, "pasted");
+            assert_eq!(edits.lock().unwrap().last().unwrap(), text);
+        }
+        for text in ["发送提示词。", "清除提示词"] {
+            assert_eq!(voice.deliver_composer_text(1, text, true).await.unwrap(), None);
+        }
+        assert_eq!(edits.lock().unwrap().len(), 3, "exact complete commands must not become literal edits");
+        voice.stop();
+        assert!(!voice.deliver_recognition(1, None, "late", true).await);
+        assert_eq!(edits.lock().unwrap().len(), 3);
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_an_explicitly_untouched_composer_can_decline_to_native_delivery() {
+        for synchronous in [true, false] {
+            let (voice, _stop, profile) = active_voice_before_sleep(true);
+            voice.set_composer_delivery(move |_, _| {
+                if synchronous { return Ok(None); }
+                let (send, ack) = tokio::sync::oneshot::channel();
+                send.send(Ok(ComposerDelivery::NotApplicable)).unwrap();
+                Ok(Some(ack))
+            });
+            assert_eq!(voice.deliver_composer_text(1, "literal", true).await.unwrap(), None);
+            std::fs::remove_dir_all(profile).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_dropped_and_timed_out_composer_edits_never_fall_back_or_report_pasted() {
+        for mode in 0..4 {
+            let (voice, _stop, profile) = active_voice_before_sleep(true);
+            let held = Arc::new(Mutex::new(None));
+            let pending = held.clone();
+            voice.set_composer_delivery(move |_, _| {
+                if mode == 0 { return Err("主聊天已切换".into()); }
+                let (send, ack) = tokio::sync::oneshot::channel();
+                match mode {
+                    1 => { send.send(Err("编辑已取消".into())).unwrap(); }
+                    2 => drop(send),
+                    _ => { *pending.lock().unwrap() = Some(send); }
+                }
+                Ok(Some(ack))
+            });
+            assert!(!voice.deliver_recognition(1, None, "never replay this", true).await);
+            let snapshot = voice.snapshot();
+            assert_eq!(snapshot.state, "input-blocked");
+            assert!(!snapshot.error.is_empty());
+            assert!(!serde_json::to_string(&snapshot).unwrap().contains("never replay this"));
+            std::fs::remove_dir_all(profile).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_composer_request_preserves_stop_and_never_falls_back() {
+        let (voice, _stop, profile) = active_voice_before_sleep(true);
+        let pending = Arc::new(Mutex::new(None));
+        let slot = pending.clone();
+        voice.set_composer_delivery(move |_, _| {
+            let (send, ack) = tokio::sync::oneshot::channel();
+            *slot.lock().unwrap() = Some(send);
+            Ok(Some(ack))
+        });
+        let edit = voice.deliver_composer_text(1, "cancelled", true);
+        let cancel = async {
+            tokio::task::yield_now().await;
+            voice.stop();
+            pending.lock().unwrap().take().unwrap().send(Ok(ComposerDelivery::Inserted)).unwrap();
+        };
+        let (result, ()) = tokio::join!(edit, cancel);
+        assert_eq!(result.unwrap(), Some(Delivery::Cancelled));
+        assert_eq!(voice.snapshot().state, "stopping");
         std::fs::remove_dir_all(profile).unwrap();
     }
 

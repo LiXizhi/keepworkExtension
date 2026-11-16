@@ -454,6 +454,10 @@ pub fn run() {
             core_for_setup.remote_voice.set_composer_focus(move || {
                 super::remote_voice_host::prepare_main_composer(&composer_app)
             });
+            let delivery_app = app_handle.clone();
+            core_for_setup.remote_voice.set_composer_delivery(move |generation, text| {
+                super::remote_voice_host::deliver_main_composer(&delivery_app, generation, text)
+            });
             let voice_app = app_handle.clone();
             core_for_setup.remote_voice.start_automatic(move || {
                 super::remote_voice_host::show_voice_setup_if_focused(&voice_app)

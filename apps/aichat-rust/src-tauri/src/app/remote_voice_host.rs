@@ -116,6 +116,149 @@ pub(super) fn prepare_main_composer(app: &AppHandle) -> RecordingFocus {
     Ok(Some(receive))
 }
 
+/// The main chat owns its DOM and can acknowledge an ordinary text edit. Other
+/// applications and explicit non-composer targets retain current-focus input.
+pub(super) fn deliver_main_composer(
+    app: &AppHandle,
+    generation: u64,
+    text: &str,
+) -> crate::remote_voice::ComposerDeliveryRequest {
+    #[cfg(target_os = "macos")]
+    {
+        let voice = app.state::<Arc<AppCore>>().remote_voice.clone();
+        deliver_main_composer_current(app, text, Arc::new(move || voice.current(generation)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (app, generation, text); Ok(None) }
+}
+
+#[cfg(all(feature = "dev-bins", target_os = "macos"))]
+pub(super) fn deliver_main_composer_smoke(
+    app: &AppHandle,
+    text: &str,
+) -> crate::remote_voice::ComposerDeliveryRequest {
+    // The isolated private-profile smoke has no BLE or cloud session. All UI,
+    // origin, modifier, edit and acknowledgement checks remain production code.
+    deliver_main_composer_current(app, text, Arc::new(|| true))
+}
+
+#[cfg(target_os = "macos")]
+fn delivery_modifiers_down() -> bool {
+    extern "C" { fn keepwork_voice_input_modifiers() -> bool; }
+    unsafe { keepwork_voice_input_modifiers() }
+}
+
+#[cfg(target_os = "macos")]
+fn delivery_document_owned(view: &tauri::webview::PlatformWebview) -> bool {
+    extern "C" { fn keepwork_voice_document_has_input(owner: *mut std::ffi::c_void) -> bool; }
+    unsafe { keepwork_voice_document_has_input(view.inner()) }
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate_composer_delivery(
+    document: &WebviewWindow,
+    script: String,
+    started: std::time::Instant,
+    current: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<String, String> {
+    use std::time::Duration;
+    const UNKNOWN: &str = "未能确认聊天文字输入，请检查草稿后重试。";
+    if !current() || started.elapsed() >= Duration::from_secs(1) {
+        return Err(UNKNOWN.into());
+    }
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let target = document.clone();
+    document.with_webview(move |view| {
+        if !current() || started.elapsed() >= Duration::from_secs(1)
+            || !target.is_focused().unwrap_or(false) || delivery_modifiers_down()
+            || !delivery_document_owned(&view) {
+            let _ = send.send(Err(UNKNOWN.to_owned()));
+            return;
+        }
+        let send = std::sync::Mutex::new(Some(send));
+        let _ = target.eval_with_callback(script, move |result| {
+            if let Some(send) = send.lock().unwrap().take() { let _ = send.send(Ok(result)); }
+        });
+    }).map_err(|_| UNKNOWN.to_owned())?;
+    let budget = Duration::from_secs(1).checked_sub(started.elapsed()).ok_or(UNKNOWN)?;
+    tokio::time::timeout(budget, receive).await.map_err(|_| UNKNOWN.to_owned())?
+        .map_err(|_| UNKNOWN.to_owned())?
+}
+
+#[cfg(target_os = "macos")]
+fn deliver_main_composer_current(
+    app: &AppHandle,
+    text: &str,
+    current: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> crate::remote_voice::ComposerDeliveryRequest {
+    use crate::remote_voice::ComposerDelivery;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    const UNKNOWN: &str = "未能确认聊天文字输入，请检查草稿后重试。";
+    const INSERT: &str = include_str!("remote_voice_insert_composer.js");
+    const VERIFY: &str = include_str!("remote_voice_verify_composer.js");
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    if text.is_empty() || text.len() > 64_000 || text.contains('\0') {
+        return Err("聊天输入文字无效或超过长度限制。".into());
+    }
+    if !current() || delivery_modifiers_down() { return Err(UNKNOWN.into()); }
+    let Some(main) = app.get_webview_window("main") else { return Ok(None); };
+    if !main.is_focused().unwrap_or(false) { return Ok(None); }
+    let Some(url) = super::sender::loaded_page_url(&main)? else { return Err(UNKNOWN.into()); };
+    let core = app.state::<Arc<AppCore>>();
+    if !crate::security::trusted_page(url.as_str(), core.current_dev_url().as_deref()) { return Ok(None); }
+    let started = Instant::now();
+    let expires = (SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| UNKNOWN)? + Duration::from_secs(1)).as_millis();
+    let id = format!("{}-{}", std::process::id(), NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let request = serde_json::json!({"id":id,"page":url.as_str(),"expires":expires,"text":text});
+    let verify = serde_json::json!({"id":id,"page":url.as_str(),"expires":expires});
+    let script = format!("({INSERT})({request})");
+    let verify_script = format!("({VERIFY})({verify})");
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let document = main.clone();
+    main.with_webview(move |view| {
+        if !current() || !document.is_focused().unwrap_or(false) || delivery_modifiers_down() {
+            let _ = send.send(Err(UNKNOWN.to_owned())); return;
+        }
+        let restored = match composer_owner(&view) {
+            ComposerOwner::Other => { let _ = send.send(Ok(ComposerDelivery::NotApplicable)); return; }
+            ComposerOwner::Blocked => { let _ = send.send(Err(UNKNOWN.to_owned())); return; }
+            ComposerOwner::Document => false,
+            ComposerOwner::Restored => true,
+        };
+        tauri::async_runtime::spawn(async move {
+            let outcome = async {
+                // Only focus propagation may wait. An editing script is never replayed.
+                if restored {
+                    let mut focused = false;
+                    for _ in 0..6 {
+                        let value = evaluate_composer_delivery(&document, "document.hasFocus()".into(), started, current.clone()).await?;
+                        if value == "true" { focused = true; break; }
+                        tokio::time::sleep(Duration::from_millis(16)).await;
+                    }
+                    if !focused { return Err(UNKNOWN.to_owned()); }
+                }
+                let result = evaluate_composer_delivery(&document, script, started, current.clone()).await?;
+                match result.as_str() {
+                    "0" if !restored => return Ok(ComposerDelivery::NotApplicable),
+                    "1" => {},
+                    _ => return Err("当前聊天输入框拒绝写入，未重试粘贴。".into()),
+                }
+                // Allow input handlers, microtasks and the next render turn to
+                // publish the draft before a second, strictly read-only check.
+                tokio::time::sleep(Duration::from_millis(16)).await;
+                if evaluate_composer_delivery(&document, verify_script, started, current.clone()).await? != "1" {
+                    return Err(UNKNOWN.to_owned());
+                }
+                if !current() { return Err(UNKNOWN.to_owned()); }
+                Ok(ComposerDelivery::Inserted)
+            }.await;
+            let _ = send.send(outcome);
+        });
+    }).map_err(|_| UNKNOWN.to_owned())?;
+    Ok(Some(receive))
+}
+
 /// Called on the remote worker after the pet declines Back. A positive result
 /// consumes this press. Only an untouched target may fall through to native AX.
 #[cfg(target_os = "macos")]

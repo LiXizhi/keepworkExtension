@@ -1,6 +1,7 @@
 // Linked only into dev-bins builds. Drive this fixture's own AppKit controls;
 // never synthesize global keyboard or mouse events or activate the application.
 #import <Cocoa/Cocoa.h>
+#import <ApplicationServices/ApplicationServices.h>
 #import <objc/runtime.h>
 #include <stdbool.h>
 
@@ -22,6 +23,13 @@ static const char *KeepworkSmokeActivationType;
 static __weak NSWindow *KeepworkSmokeMain;
 static __weak NSView *KeepworkSmokeContent;
 static __weak NSView *KeepworkSmokeWebView;
+
+unsigned int keepwork_startup_smoke_voice_modifier_state(void) {
+    CGEventFlags mask = kCGEventFlagMaskCommand | kCGEventFlagMaskControl |
+        kCGEventFlagMaskAlternate | kCGEventFlagMaskShift;
+    return (CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & mask ? 1 : 0) |
+        (CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState) & mask ? 2 : 0);
+}
 
 static NSView *KeepworkSmokeFindWebView(NSView *view) {
     Class webviewClass = NSClassFromString(@"WKWebView");
