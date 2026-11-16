@@ -18,6 +18,14 @@ function writeExe(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
+function assertTaskCwd(stdout, cwd) {
+  const reported = stdout.match(/^CWD=(.*)$/m)?.[1];
+  assert.ok(reported, stdout);
+  // macOS tmpdir is /var/folders, and /var is a symlink to /private/var.
+  assert.equal(fs.realpathSync(reported), fs.realpathSync(cwd));
+  assert.notEqual(fs.realpathSync(reported), fs.realpathSync("/"));
+}
+
 function runTask(home, cwd, pathPrefix, zshrc) {
   const zdot = path.join(home, "zdot");
   fs.mkdirSync(cwd, { recursive: true });
@@ -49,7 +57,7 @@ launcherTest("macOS task launcher keeps pnpm already visible to the login shell"
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     assert.match(result.stdout, /WHICH=path/);
     assert.match(result.stdout, /ARGS=tauri dev/);
-    assert.match(result.stdout, new RegExp(`CWD=${cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assertTaskCwd(result.stdout, cwd);
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /SOURCED/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
@@ -68,7 +76,7 @@ launcherTest("macOS task launcher finds the official ~/Library/pnpm install", ()
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     assert.match(result.stdout, /WHICH=library/);
     assert.match(result.stdout, /ARGS=tauri dev/);
-    assert.match(result.stdout, new RegExp(`CWD=${cwd}`));
+    assertTaskCwd(result.stdout, cwd);
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /SOURCED/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
@@ -116,7 +124,7 @@ launcherTest("macOS task launcher reads interactive zsh PATH and stays in the ta
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     assert.match(result.stdout, /WHICH=zshrc/);
     assert.match(result.stdout, /ARGS=tauri dev/);
-    assert.match(result.stdout, new RegExp(`CWD=${cwd}`));
+    assertTaskCwd(result.stdout, cwd);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
