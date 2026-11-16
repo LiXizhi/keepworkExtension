@@ -47,8 +47,6 @@ choose_known_pnpm() {
     [[ -n "$dir" ]] || continue
     candidate="$dir/pnpm"
     if [[ -x "$candidate" ]]; then
-      PATH="$dir:$PATH"
-      hash -r
       print -r -- "$candidate"
       return 0
     fi
@@ -91,5 +89,10 @@ if ! pnpm_path="$(executable_pnpm)"; then
   fi
 fi
 
+# Discovery runs in command substitutions; update the parent shell so pnpm's
+# env-node shebang can also find the Node installed beside the selected pnpm.
+PATH="${pnpm_path:h}:$PATH"
+export PATH
+hash -r
 cd "$task_cwd"
 exec "$pnpm_path" "$@"

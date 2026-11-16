@@ -114,6 +114,23 @@ launcherTest("macOS task launcher prefers the newest nvm pnpm when login PATH ha
   }
 });
 
+launcherTest("macOS task launcher exposes the selected nvm Node to pnpm's env shebang", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pnpm-task-"));
+  try {
+    const cwd = path.join(home, "work dir");
+    const bin = path.join(home, ".nvm/versions/node/v22.11.0/bin");
+    writeExe(path.join(bin, "pnpm"), "#!/usr/bin/env node\n// pnpm fixture\n");
+    writeExe(path.join(bin, "node"), "#!/bin/sh\nprintf 'CWD=%s\\nARGS=%s\\nWHICH=nvm-node\\n' \"$(pwd)\" \"$*\"\n");
+    const result = runTask(home, cwd, "", "# no interactive pnpm\n");
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.match(result.stdout, /WHICH=nvm-node/);
+    assert.ok(result.stdout.includes(`ARGS=${bin}/pnpm tauri dev`), result.stdout);
+    assertTaskCwd(result.stdout, cwd);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 launcherTest("macOS task launcher reads interactive zsh PATH and stays in the task directory", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "pnpm-task-"));
   try {
