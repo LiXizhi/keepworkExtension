@@ -2,7 +2,7 @@
 name: rust-release
 description: 打包或发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；默认包含现代版和 Win7/Win8 专版，也支持仅现代版、仅 MCP 或仅兼容版。用于版本打包、发布与排查。
 metadata:
-  version: "1.1.0"
+  version: "1.1.3"
 ---
 
 # Rust 全平台发布
@@ -176,6 +176,39 @@ node .github/skills/rust-release/scripts/publish-local.cjs \
 `<!-- keepwork-cdn-downloads:start -->` / `<!-- keepwork-cdn-downloads:end -->` 区块写 CDN 下载表，
 最后上传 GitHub 附件并公开 Release。失败时新建 Release 保持草稿；不得提前公开或替换附件绕过 CDN 校验。
 
+### 每次桌面发布同步前台下载页（必做）
+
+`all`、`modern`、`win7-win8`（含 `win7` 别名）及明确的“只发桌面”发布，必须同步更新
+`https://keepwork.com/chat?showfrontpage=true` 对应安装包下载及复制安装说明。
+页面保留三个现代版入口及 Win7 SP1 / Win8 / Win8.1 x64 兼容版入口。
+`all` 更新四项；`modern` 只更新三个现代版；`win7-win8` 只更新兼容版，其他已发布入口保持原版本。
+`mcp-server` 不改任一桌面链接或桌面版本。
+
+1. 所选桌面渠道的安装包上传、feed 提升及 CDN 核验成功后，在相邻 apps 仓库定位
+   `../apps/official/apps/tools/AIChat/`（旧工作区可能在 Maisi；先按 apps 的迁移说明定位）。
+   读取该项目的 `AGENTS.md` 和 [AIChat 发布 Skill](../../../../apps/official/apps/tools/AIChat/.github/skills/publish-aichat-package/SKILL.md)。
+   找不到源码时报告该步骤未完成，不修改另一个副本或只更新 GitHub Release 表格代替页面。
+2. 在 `js/app/product_intro_release.js` 中，现代版更新 `INTRO_DESKTOP_VERSION`，
+   兼容版更新 `INTRO_LEGACY_DESKTOP_VERSION`，均使用本次对应渠道**已发布**的 `desktop_version`；
+   未发布的另一渠道版本保留，不能因本次只发一个渠道就覆盖它。
+   该文件统一生成 Windows x64、Windows ARM64 EXE 和 macOS Universal DMG 的完整直链：
+   `https://cdn.keepwork.com/keepwork/aichat-rust/<desktop_version>/Keepwork_<desktop_version>_<suffix>`，
+   suffix 分别为 `x64-setup.exe`、`arm64-setup.exe`、`universal.dmg`。
+   兼容版单独使用 `https://cdn.keepwork.com/keepwork/aichat-rust-win7-win8/<legacy_version>/Keepwork_Win7_Win8_<legacy_version>_x64-setup.exe`。
+   逐条与本次校验过的产物和 feed URL 比对；不使用源码当前版本猜发布版本，不回退到 Electron/Launcher ZIP 渠道。
+   四张下载卡和复制说明共用该配置；复制说明分别标明各项版本，安装说明先按系统区分现代/兼容版，再选择架构。
+   前台页已按用户要求删除“打开客户端”“建立第二大脑”按钮，发版同步不要恢复它们。
+   同步介绍页测试中的已发布版本和 URL 预期，不把兼容版 CDN 已发布说成三个旧系统已实测。
+3. 按 AIChat 约定递增 `base-manifest.json` 版本、保留无关工作，执行 `node --check js/app/product_intro_release.js`、
+   `node --test tests/client_download.test.mjs tests/unit/product_intro.test.mjs`、
+   `node scripts/inventory_packages.mjs` 与 `git diff --check`；用源码服务器运行 `tests/e2e/product_intro.test.mjs`，
+   验证四条链接、中英文复制内容、EXE/DMG 安装说明及上述两按钮保持删除，普通聊天及旧客户端默认下载契约保持兼容。
+4. 提交并按 AIChat 的 primary-origin-first 规则同步本次源码。该变更属于 App 外壳；
+   按 AIChat 发布 Skill 执行 App 发布并完成 Keepwork 入口及 GitHub 备份核对。
+   项目默认由发布人运行 Vite、build/upload 和部署脚本；当次用户已明确授权 Agent 执行 App/CDN 发布时沿用该授权，不重复确认，否则交由发布人执行。
+   部署后重新打开线上 `showfrontpage=true`，核对实际四个 `href` 和复制说明分别对应当前各渠道已发布版本，并确认没有“打开客户端”“建立第二大脑”按钮。
+   结果记录 AIChat 源提交、前台版本和线上核验状态；只有源码更新或尚未部署时明确报告“页面上线待完成”，不宣称已线上生效。
+
 ### 默认 all 的 Win7/Win8 发布
 
 `all` 中 `build-win7-win8` 必须成功，`win7_win8_run_id` 与 `desktop_run_id` 为同一次运行，源提交相同；artifact 保持独立，不混入现代版汇总包。
@@ -345,6 +378,7 @@ git push origin main
 4. Win7/Win8 job 成功，其 artifact 经本机代理下载；正式签名通过，三系统验收通过或已记录当次用户授权豁免，专版客户端、MCP、CEF 的独立归档和三个签名 feed 均由本地发布器上传并核验。豁免只表示允许发布，不表示旧系统已验收。
 5. 所选渠道 CDN 已核验，GitHub Release 同时包含现代桌面、现代 MCP 及 Win7/Win8 专版下载地址。
 6. 本次新增及修复提交已合并并推送到远端 `main`，主分支包含完整发布代码。
+7. 桌面前台下载配置已按所选渠道更新并按 AIChat 流程部署，线上 `showfrontpage=true` 的四个链接及安装说明已核对；页面发布未完成时单列待办，不报全流程完成。
 
 汇总桌面和 MCP 的独立版本号、专版 CEF 实际版本、源提交、构建 run 链接、本地下载回执和发布日志、各平台 CDN 地址、验收模式及未验证项目；仅汇总所选范围内的产物。
 任何一个目标失败都明确列出，不把桌面成功说成双产品成功，也不把现代双产品成功说成 `all` 完成。

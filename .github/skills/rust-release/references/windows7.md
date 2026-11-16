@@ -257,6 +257,13 @@ node .github/skills/rust-release/scripts/publish-win7.cjs \
 
 `cefUi` 和 `installerUpgrade` 是操作者另行执行并记录的 CEF/UI、安装升级验收，不由 MCP PowerShell smoke 推导。发布器检查结构、身份和证据文件，但不能代替操作者进行 GUI 验证；只有三个系统各自真实通过后才可提供真实验收回执。没有验收或豁免文件时仍可运行默认预检，返回的 pending / productionReady 状态必须原样报告。
 
+### 发布后同步前台下载入口
+
+专版客户端 CDN 上传与签名 feed 核验完成后，必须执行主 Skill 的[前台页同步步骤](../SKILL.md#每次桌面发布同步前台下载页必做)：
+只更新 AIChat `js/app/product_intro_release.js` 的 `INTRO_LEGACY_DESKTOP_VERSION` 及对应测试，保留现代版 `INTRO_DESKTOP_VERSION`。
+完成 App 发布后，核对线上 Win7 SP1 / Win8 / Win8.1 x64 卡片及复制说明的兼容版直链；不恢复已删除的“打开客户端”“建立第二大脑”按钮。
+在 `all` 模式还要核对现代三个入口；页面同步结果与专版运行实测/用户豁免分别记录。
+
 ### 用户授权跳过旧系统实测
 
 按主 Skill 记录的 2026-11-14 用户授权，默认不再将 Win7 SP1、Win8、Win8.1 实测作为 CDN 发布阻塞项。每次创建下载目录以外的独立豁免文件，填写本次已验签产物的真实身份；不能更改原始 smoke 或验收材料来伪造通过：

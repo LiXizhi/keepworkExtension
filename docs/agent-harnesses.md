@@ -301,8 +301,8 @@ Offline mode coverage: `node --test scripts/agent-modes.test.cjs`.
 Codex additionally supports optional independent approval. Health advertises
 `agentApprovalApi: "codex-v1"` and its targeted backend status includes
 `approvalModes: ["default", "on-request", "untrusted", "never", "read-only"]`.
-Session creation and turns accept `approvalMode`; other backends and unknown
-values fail explicitly. Omitted creation retains legacy mode behavior. Omitted
+Session creation and turns accept `approvalMode`; unsupported backend/mode
+combinations and unknown values fail explicitly. Omitted creation retains legacy mode behavior. Omitted
 turns retain the saved session policy; `default` deliberately resets it. Resume
 uses the saved policy. A running turn never changes policy or replays on a menu
 change. Existing clients and sessions with no explicit policy retain their prior
@@ -328,6 +328,68 @@ downgrade after the health check: an older handler rejects the route, never
 silently ignores the policy. Unsupported routes are definite rejections with no
 legacy fallback or automatic retry. Original routes still accept the optional
 field for compatible integrations.
+
+Other supported backends advertise
+`approvalModes` together with `approvalScope` in
+their backend status. Negotiate these fields for the selected backend; the
+existing `agentApprovalApi: "codex-v1"` alone does not establish support for
+another backend. `default` retains the legacy behavior above. Explicit `app`
+disables legacy Craft/programmatic auto-accept, and explicit `never` keeps
+automatic approval subject to the selected conversation mode and native policy.
+These modes do not provide Codex's workspace sandbox, network restrictions or
+native command classification. Ask/Plan and operating-system restrictions
+continue to apply; approval never grants access beyond an existing capability.
+
+WorkBuddy/CodeBuddy, DeepSeek Harness, Qwen Code, Kimi CLI, Cursor, Copilot,
+Claude Code and OpenCode use `approvalScope: "tool"` and advertise
+`["default", "app", "never", "ask", "edit", "auto", "readonly"]`.
+The four new choices match Keepwork tool approval: `ask` automatically accepts
+known reads and asks about edits, commands and unknown operations; `edit` also
+automatically accepts known file edits; `auto` accepts ordinary permissions;
+`readonly` rejects all commands, writes and unknown operations. Classification
+uses ACP protocol kinds or fixed Claude tool identifiers, never a shell string,
+tool title or model description. Required native questions and decisions remain
+interactive, and no automatic response expands a once-only grant into persistent
+permission. `app` and `never` retain their historical semantics for older clients.
+
+With `app`, `ask`, `edit` or `readonly`, the adapter
+selects an advertised mode that permits native confirmation rather than a
+bypass/YOLO mode. Native tool permission requests become owned pending requests
+in AIChat and pause until the user responds. Native questions remain interactive.
+The CLI determines which operations request permission: this is not a promise
+that every internal read, edit or command produces a prompt.
+
+The original AIChat page applies the captured turn policy to browser tools.
+Daemon-executed workspace file changes and Node native bridge tools that need
+consent emit an owned `aichat_approve_tool` event with the server's `approvalMode`
+and classified `approvalKind`. The page returns only `{approved:true}` inside a
+normal MCP text result; the daemon retains and executes the original arguments.
+Cancellation, timeout, revocation, page/context replacement or a changed policy
+invalidates consent before execution. A missing/offline original page denies
+the operation. `readonly` also filters and rejects writes at the daemon bridge
+boundary, including background `workspace_file` mutations.
+
+Trae Agent and Antigravity CLI use `approvalScope: "turn"` because their current
+headless protocols cannot return interactive tool permission responses. Their
+advertised modes remain `["default", "app", "never"]`; they do not advertise
+the four per-tool policies or imply that whole-turn consent enforces read-only
+execution. Their
+App menu and approval prompt must say that authorization covers the entire
+turn. With `app`, the prompt is held before submission to the CLI; acceptance
+allows that turn and its native tools to run, while rejection or interruption
+does not submit it. This is execution approval, not per-tool interception.
+Native permission denials remain denials; approval does not bypass them.
+
+Non-Codex explicit selections use the same dedicated approval routes. Omission
+on a later turn preserves the saved selection; `default` deliberately resets it.
+A policy cannot change during a running or waiting turn. Responses are bound to
+the owner, session and pending request; an answered request cannot execute twice.
+Disconnect, restart or an uncertain response never automatically submits or
+replays an approved turn. When a peer lacks the selected mode or scope, the UI
+disables that choice and reports the unsupported action without interrupting
+ordinary/default conversations. A rejected dedicated route never falls back to
+an ordinary turn with weaker semantics. Existing clients that omit these fields
+keep their historical behavior.
 
 Transient provider retry errors clear when item output resumes; pending requests
 keep their waiting state even during retry. Raw command results and exit codes

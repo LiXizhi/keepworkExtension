@@ -775,6 +775,80 @@ test('explicit Craft mode approves supported tool permissions without leaving st
   assert.deepEqual(complete.pending, []);
 });
 
+test('Rust and Node expose additive App approvals through dedicated routes without changing legacy defaults', h.nodeReferenceTestOptions(), async () => {
+  for (const engine of ['rust', 'node']) {
+    await stop(); await start(engine);
+    const status = await request('/backends?backend=workbuddy');
+    assert.deepEqual(status.json.workbuddy.approvalModes, ['default', 'app', 'never', 'ask', 'edit', 'auto', 'readonly']);
+    assert.equal(status.json.workbuddy.approvalScope, 'tool');
+    const created = await request('/approval-sessions', { method: 'POST', body: {
+      backend: 'workbuddy', conversationId: `app-approval-${engine}`, roots: [root], mode: 'craft', approvalMode: 'app',
+    } });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const session = created.json;
+    for (const [index, decision] of ['accept', 'decline'].entries()) {
+      // The second turn uses an older client's ordinary route/omitted field:
+      // it must retain the policy already saved by the explicit client.
+      const submitted = await request(`/sessions/${session.id}/${index ? 'turns' : 'approval-turns'}`, { method: 'POST', body: {
+        requestId: `app-${index}`, text: 'FIXTURE_PERMISSION', ...(index ? {} : { approvalMode: 'app' }),
+      } });
+      assert.equal(submitted.status, 200, JSON.stringify(submitted.json));
+      const waiting = await waitSession(session, view => view.status === 'waiting');
+      assert.equal(waiting.approvalMode, 'app');
+      assert.equal(waiting.pending.length, 1);
+      const pending = waiting.pending[0];
+      assert.equal(pending.decisionCapabilities.autoApproval, false);
+      const outsider = await request(`/sessions/${session.id}/respond`, {
+        method: 'POST', owner: ownerB, body: { id: pending.id, decision: 'accept' },
+      });
+      assert.notEqual(outsider.status, 200);
+      const answered = await request(`/sessions/${session.id}/respond`, { method: 'POST', body: { id: pending.id, decision } });
+      assert.equal(answered.status, 200, JSON.stringify(answered.json));
+      const complete = await waitSession(session, view => view.status === 'completed');
+      assert.ok(answerText(complete).endsWith(`permission:${decision === 'accept' ? 'allowed' : 'denied'}`));
+      const duplicate = await request(`/sessions/${session.id}/respond`, { method: 'POST', body: { id: pending.id, decision: 'accept' } });
+      assert.notEqual(duplicate.status, 200);
+    }
+    const reset = await request(`/sessions/${session.id}/approval-turns`, { method: 'POST', body: {
+      requestId: 'explicit-reset', text: 'FIXTURE_PERMISSION', approvalMode: 'default',
+    } });
+    assert.equal(reset.status, 200, JSON.stringify(reset.json));
+    const complete = await waitSession(session, view => view.status === 'completed');
+    assert.equal(complete.approvalMode, undefined);
+    assert.ok(answerText(complete).endsWith('permission:allowed'));
+  }
+  await stop(); await start();
+});
+
+test('Rust and Node enforce Keepwork four-policy file approvals over the same explicit HTTP contract', h.nodeReferenceTestOptions(), async () => {
+  for (const engine of ['rust', 'node']) {
+    await stop(); await start(engine);
+    const inventory = await request('/backends?probe=executable');
+    assert.deepEqual(inventory.json.workbuddy.approvalModes, ['default', 'app', 'never', 'ask', 'edit', 'auto', 'readonly']);
+    for (const policy of ['ask', 'edit', 'auto', 'readonly']) {
+      const created = await request('/approval-sessions', { method: 'POST', body: {
+        backend: 'workbuddy', conversationId: `kw-${engine}-${policy}`, roots: [root], mode: 'craft', approvalMode: policy,
+      } });
+      assert.equal(created.status, 200, JSON.stringify(created.json));
+      const session = created.json;
+      const submitted = await request(`/sessions/${session.id}/approval-turns`, { method: 'POST', body: {
+        requestId: `kw-${policy}`, text: 'FIXTURE_PERMISSION', approvalMode: policy,
+      } });
+      assert.equal(submitted.status, 200, JSON.stringify(submitted.json));
+      if (policy === 'ask') {
+        const pending = (await waitSession(session, view => view.status === 'waiting')).pending[0];
+        assert.equal(pending.params.approvalKind, 'edit');
+        assert.equal((await request(`/sessions/${session.id}/respond`, { method: 'POST', body: { id: pending.id, decision: 'decline' } })).status, 200);
+      }
+      const complete = await waitSession(session, view => view.status === 'completed');
+      assert.equal(complete.approvalMode, policy);
+      assert.ok(answerText(complete).endsWith(`permission:${['edit', 'auto'].includes(policy) ? 'allowed' : 'denied'}`), `${engine}/${policy}: ${answerText(complete)}`);
+      assert.deepEqual(complete.pending, []);
+    }
+  }
+  await stop(); await start();
+});
+
 test('archiving and local removal preserve history while preventing new execution', async () => {
   const session = await create('archiving');
   assert.equal((await turn(session, 'archive-1', 'keep this answer')).status, 200);

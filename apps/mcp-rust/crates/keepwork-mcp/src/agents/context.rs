@@ -35,6 +35,7 @@ struct Binding {
     tools: Vec<Value>,
     capability: String,
     binding_epoch: String,
+    execution_epoch: u64,
     stream: Option<(String, StreamSender)>,
     pending: HashMap<String, Pending>,
     mode: String,
@@ -97,10 +98,25 @@ fn failed(message: String) -> Response {
 }
 
 fn disconnect(binding: &mut Binding) {
+    binding.execution_epoch = binding.execution_epoch.wrapping_add(1);
     binding.stream = None;
     for (_, pending) in binding.pending.drain() {
         let _ = pending.sender.send(tool_error("web_result_unknown: page disconnected after dispatch; inspect any mutation before retrying"));
     }
+}
+
+fn workspace_approval_marker(binding: &Binding) -> String {
+    json!([
+        binding.page,
+        binding.generation,
+        binding.binding_epoch,
+        binding.revision,
+        binding.execution_epoch,
+        binding.mode,
+        binding.approval_mode,
+        binding.spaces
+    ])
+    .to_string()
 }
 
 fn readable_tool(name: &str) -> bool {
@@ -184,6 +200,7 @@ impl ContextManager {
                 tools: vec![],
                 capability: Uuid::new_v4().to_string(),
                 binding_epoch: Uuid::new_v4().to_string(),
+                execution_epoch: 0,
                 stream: None,
                 pending: HashMap::new(),
                 mode: "craft".into(),
@@ -440,6 +457,7 @@ impl ContextManager {
             .unwrap()
             .get_mut(&(owner.into(), conversation.into()))
         {
+            binding.execution_epoch = binding.execution_epoch.wrapping_add(1);
             for (call_id, pending) in binding.pending.drain() {
                 if let Some((_, stream)) = &binding.stream {
                     let _ = stream.try_send(Ok(format!("event: cancel\ndata: {}\n\n",json!({"callId":call_id,"pageId":binding.page,"generation":binding.generation}))));
@@ -530,12 +548,27 @@ impl ContextManager {
         native_request: Option<String>,
     ) -> Value {
         if name == "workspace_file" {
+            let approval = match self
+                .authorize_workspace(
+                    owner,
+                    conversation,
+                    args,
+                    capability,
+                    native_request.clone(),
+                    Duration::from_secs(120),
+                )
+                .await
+            {
+                Ok(approval) => approval,
+                Err(error) => return tool_error(&error),
+            };
             return match self.local_file_scoped(
                 owner,
                 conversation,
                 args,
                 capability,
                 native_request.as_deref(),
+                approval.as_deref(),
             ) {
                 Ok(value) => tool_result(value),
                 Err(error) => tool_error(&error),
@@ -578,7 +611,7 @@ impl ContextManager {
                 return tool_error("Too many pending webpage calls");
             }
             let (sender, receiver) = oneshot::channel();
-            let event = json!({"callId":call_id,"pageId":binding.page,"generation":binding.generation,"conversationId":conversation,"name":name,"arguments":args});
+            let event = json!({"callId":call_id,"pageId":binding.page,"generation":binding.generation,"conversationId":conversation,"name":name,"arguments":args,"approvalMode":binding.approval_mode});
             if stream
                 .try_send(Ok(format!("event: tool\ndata: {event}\n\n")))
                 .is_err()
@@ -604,6 +637,116 @@ impl ContextManager {
             .get_mut(&(owner.into(), conversation.into()))
             .map(|b| b.pending.remove(&call_id));
         match result { Ok(Ok(value))=>value,_=>tool_error("web_result_unknown: tool disconnected or timed out after dispatch; do not repeat automatically") }
+    }
+
+    /// The browser only decides consent. The daemon retains and executes the
+    /// original arguments after checking the binding and cancellation again.
+    async fn authorize_workspace(
+        &self,
+        owner: &str,
+        conversation: &str,
+        args: &Value,
+        capability: Option<&str>,
+        native_request: Option<String>,
+        timeout: Duration,
+    ) -> Result<Option<String>, String> {
+        let call_id = Uuid::new_v4().to_string();
+        let (receiver, marker) = {
+            let mut bindings = self.bindings.lock().unwrap();
+            let binding = bindings
+                .get_mut(&(owner.into(), conversation.into()))
+                .ok_or("Context expired")?;
+            if capability.is_some_and(|value| value != binding.capability)
+                || native_request
+                    .as_ref()
+                    .is_some_and(|id| binding.cancelled_requests.contains(id))
+            {
+                return Err("Tool capability expired or request cancelled".into());
+            }
+            let operation = text(args, "operation");
+            let kind = if matches!(operation, "read" | "list" | "search") {
+                "read"
+            } else if matches!(operation, "write" | "replace" | "delete" | "rename") {
+                "edit"
+            } else {
+                "other"
+            };
+            let mode = binding.approval_mode.as_deref().unwrap_or("");
+            if mode == "readonly" && kind != "read" {
+                return Err("Tool approval denied; no operation executed".into());
+            }
+            if kind == "read"
+                || !matches!(mode, "ask" | "edit" | "auto" | "readonly")
+                || mode == "auto"
+                || mode == "edit" && kind == "edit"
+            {
+                return Ok(None);
+            }
+            if binding.mode != "craft" {
+                return Err("Background workspace mutation requires Craft mode".into());
+            }
+            let Some((_, stream)) = &binding.stream else {
+                return Err("web_offline: reopen the original AIChat conversation to approve this operation".into());
+            };
+            if binding.pending.len() >= 16 {
+                return Err("Too many pending webpage calls".into());
+            }
+            let marker = workspace_approval_marker(binding);
+            let event = json!({"callId":call_id,"pageId":binding.page,"generation":binding.generation,"conversationId":conversation,"name":"aichat_approve_tool","arguments":{"name":"workspace_file","arguments":args,"execution":"backend","approvalKind":kind,"approvalMode":mode}});
+            let (sender, receiver) = oneshot::channel();
+            if stream
+                .try_send(Ok(format!("event: tool\ndata: {event}\n\n")))
+                .is_err()
+            {
+                disconnect(binding);
+                return Err(
+                    "Original page disconnected before approval; no operation executed".into(),
+                );
+            }
+            binding.pending.insert(
+                call_id.clone(),
+                Pending {
+                    page: binding.page.clone(),
+                    generation: binding.generation.clone(),
+                    sender,
+                    native_request,
+                },
+            );
+            (receiver, marker)
+        };
+        let result = tokio::time::timeout(timeout, receiver).await;
+        if let Some(binding) = self
+            .bindings
+            .lock()
+            .unwrap()
+            .get_mut(&(owner.into(), conversation.into()))
+        {
+            if let Some(pending) = binding.pending.remove(&call_id) {
+                if result.is_err()
+                    && binding.page == pending.page
+                    && binding.generation == pending.generation
+                {
+                    if let Some((_, stream)) = &binding.stream {
+                        let _ = stream.try_send(Ok(format!("event: cancel\ndata: {}\n\n", json!({"callId":call_id,"pageId":pending.page,"generation":pending.generation}))));
+                    }
+                }
+            }
+        }
+        let approved = result.ok().and_then(Result::ok).is_some_and(|result| {
+            result["isError"] != true
+                && result["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|part| {
+                        part["type"] == "text"
+                            && serde_json::from_str::<Value>(text(part, "text"))
+                                .is_ok_and(|value| value["approved"] == true)
+                    })
+                })
+        });
+        if approved {
+            Ok(Some(marker))
+        } else {
+            Err("Tool approval denied or expired; no operation executed".into())
+        }
     }
 
     fn result(&self, owner: &str, conversation: &str, input: &Value) -> Result<Value, String> {
@@ -953,7 +1096,7 @@ impl ContextManager {
     }
 
     fn local_file(&self, owner: &str, conversation: &str, args: &Value) -> Result<Value, String> {
-        self.local_file_scoped(owner, conversation, args, None, None)
+        self.local_file_scoped(owner, conversation, args, None, None, None)
     }
 
     fn local_file_scoped(
@@ -963,6 +1106,7 @@ impl ContextManager {
         args: &Value,
         capability: Option<&str>,
         native_request: Option<&str>,
+        approved_binding: Option<&str>,
     ) -> Result<Value, String> {
         let mut bindings = self.bindings.lock().unwrap();
         let binding = bindings
@@ -973,6 +1117,12 @@ impl ContextManager {
         }
         if native_request.is_some_and(|id| binding.cancelled_requests.contains(id)) {
             return Err("Tool call cancelled before dispatch".into());
+        }
+        if approved_binding.is_some_and(|marker| marker != workspace_approval_marker(binding)) {
+            return Err(
+                "Tool approval expired after context or policy changed; no operation executed"
+                    .into(),
+            );
         }
         let operation = text(args, "operation");
         let mutation = matches!(operation, "write" | "replace" | "delete" | "rename");
@@ -1510,6 +1660,161 @@ mod tests {
             ("pageId".into(), "page-a".into()),
             ("generation".into(), "generation-a".into()),
         ])
+    }
+
+    #[tokio::test]
+    async fn backend_approval_timeout_cancels_original_prompt_and_expires_the_result() {
+        let manager = Arc::new(ContextManager::new());
+        manager
+            .register("owner", "conversation", &registration())
+            .unwrap();
+        manager.set_mode("owner", "conversation", "craft");
+        manager.set_approval_mode("owner", "conversation", Some("ask"));
+        let (sender, mut receiver) = mpsc::channel(16);
+        manager
+            .bindings
+            .lock()
+            .unwrap()
+            .get_mut(&("owner".into(), "conversation".into()))
+            .unwrap()
+            .stream = Some(("fixture".into(), sender));
+        let cloned = Arc::clone(&manager);
+        let task = tokio::spawn(async move {
+            cloned
+                .authorize_workspace(
+                    "owner",
+                    "conversation",
+                    &json!({"operation":"write","path":"file.txt","content":"must not execute"}),
+                    None,
+                    None,
+                    Duration::from_millis(20),
+                )
+                .await
+        });
+        let event = receiver.recv().await.unwrap().unwrap();
+        let event: Value =
+            serde_json::from_str(event.split("data: ").nth(1).unwrap().trim()).unwrap();
+        assert!(task.await.unwrap().unwrap_err().contains("expired"));
+        let cancel = receiver.recv().await.unwrap().unwrap();
+        assert!(cancel.starts_with("event: cancel\n"));
+        let cancel: Value =
+            serde_json::from_str(cancel.split("data: ").nth(1).unwrap().trim()).unwrap();
+        assert_eq!(
+            cancel,
+            json!({"callId":event["callId"],"pageId":event["pageId"],"generation":event["generation"]})
+        );
+        assert!(
+            manager.bindings.lock().unwrap()[&("owner".into(), "conversation".into())]
+                .pending
+                .is_empty()
+        );
+        let mut response = event;
+        response["result"] = tool_result(json!({"approved":true}));
+        assert!(manager.result("owner", "conversation", &response).is_err());
+    }
+
+    #[tokio::test]
+    async fn backend_approval_holds_original_file_change_and_invalidates_stale_consent() {
+        for scenario in [
+            "approve",
+            "reject",
+            "cancel",
+            "revoke",
+            "revision",
+            "policy",
+            "native-cancel",
+        ] {
+            let directory =
+                std::env::temp_dir().join(format!("kp-context-gate-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let root = directory.canonicalize().unwrap();
+            std::fs::write(root.join("file.txt"), "original").unwrap();
+            let manager = Arc::new(ContextManager::new());
+            manager
+                .register("owner", "conversation", &registration())
+                .unwrap();
+            manager.credentials("owner", "conversation", &json!({"username":"tester","primaryId":"local","spaces":[{"id":"local","type":"local","root":root,"aliases":["local"]}]})).unwrap();
+            manager.set_mode("owner", "conversation", "craft");
+            manager.set_approval_mode("owner", "conversation", Some("ask"));
+            let (sender, mut receiver) = mpsc::channel(16);
+            manager
+                .bindings
+                .lock()
+                .unwrap()
+                .get_mut(&("owner".into(), "conversation".into()))
+                .unwrap()
+                .stream = Some(("fixture".into(), sender));
+            let _ = manager
+                .invoke(
+                    "owner",
+                    "conversation",
+                    "workspace_file",
+                    &json!({"operation":"read","path":"file.txt"}),
+                )
+                .await;
+            let capability = manager.bindings.lock().unwrap()
+                [&("owner".into(), "conversation".into())]
+                .capability
+                .clone();
+            let cloned = Arc::clone(&manager);
+            let task = tokio::spawn(async move {
+                cloned.invoke_scoped("owner", "conversation", "workspace_file", &json!({"operation":"write","path":"file.txt","content":"approved","expectedContent":"original"}), None, Some("1".into())).await
+            });
+            let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let event: Value =
+                serde_json::from_str(event.split("data: ").nth(1).unwrap().trim()).unwrap();
+            assert_eq!(event["name"], "aichat_approve_tool");
+            assert_eq!(event["arguments"]["approvalMode"], "ask");
+            assert_eq!(event["arguments"]["approvalKind"], "edit");
+            assert_eq!(
+                std::fs::read_to_string(root.join("file.txt")).unwrap(),
+                "original"
+            );
+            match scenario {
+                "cancel" => manager.cancel("owner", "conversation"),
+                "revoke" => manager.revoke("owner"),
+                "revision" => {
+                    let mut updated = registration();
+                    updated["revision"] = json!("changed");
+                    manager.register("owner", "conversation", &updated).unwrap();
+                }
+                "policy" => manager.set_approval_mode("owner", "conversation", Some("readonly")),
+                "native-cancel" => {
+                    manager
+                        .cancel_request("owner", "conversation", &capability, &json!(1))
+                        .unwrap();
+                }
+                _ => {}
+            }
+            if ["approve", "reject", "revision", "policy"].contains(&scenario) {
+                let mut response = event.clone();
+                response["result"] = tool_result(json!({"approved":scenario != "reject"}));
+                assert!(manager
+                    .result("wrong-owner", "conversation", &response)
+                    .is_err());
+                manager.result("owner", "conversation", &response).unwrap();
+                assert!(manager.result("owner", "conversation", &response).is_err());
+            }
+            let result = task.await.unwrap();
+            assert_eq!(
+                result["isError"] == true,
+                scenario != "approve",
+                "{scenario}: {result}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("file.txt")).unwrap(),
+                if scenario == "approve" {
+                    "approved"
+                } else {
+                    "original"
+                }
+            );
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]

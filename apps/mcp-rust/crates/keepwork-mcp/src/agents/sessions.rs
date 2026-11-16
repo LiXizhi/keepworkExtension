@@ -130,9 +130,8 @@ impl AgentManager {
                 value["executionMode"] = json!("one-shot");
                 value["supportedModes"] = json!(["craft"]);
             }
-            if backend == "codex" {
-                value["approvalModes"] = json!(approval::MODES);
-            }
+            value["approvalModes"] = json!(approval::modes(backend));
+            value["approvalScope"] = json!(approval::scope(backend));
             match launch {
                 Ok(launch) => value["cli"] = launch.info(),
                 Err(error) => {
@@ -1118,7 +1117,7 @@ impl AgentManager {
                 if let Some(effort) = requested_effort.as_deref() {
                     self.set_acp_effort(&harness, &mut native, effort).await?;
                 }
-                set_acp_mode(&harness, &mut native, &data["threadId"], &selected_mode).await?;
+                set_acp_mode(&harness, &mut native, &data["threadId"], &selected_mode, matches!(selected_approval.as_deref(), Some("app" | "ask" | "edit" | "readonly"))).await?;
                 let mut sessions = self.sessions.lock().unwrap();
                 sessions.get_mut(session_id).unwrap().native = native;
             }
@@ -1243,32 +1242,13 @@ impl AgentManager {
             if let Some(effort) = requested_effort {
                 params["effort"] = json!(effort);
             }
-            let result = harness.call("turn/start", params, RPC_TIMEOUT).await;
-            let _ = harness.flush_events().await;
-            match result {
-                Ok(result) => {
-                    let native_id = result["turn"]["id"].clone();
-                    self.edit(session_id, |s| {
-                        if !native_id.is_null() {
-                            s.data["turnId"] = native_id.clone();
-                        }
-                        s.data["submissions"][&request_id] =
-                            json!({"state":"accepted","turnId":s.data["turnId"]});
-                        if s.data["status"] == "starting" {
-                            s.data["status"] = json!("running");
-                        }
-                        Ok(())
-                    })?;
-                }
-                Err(error) => {
-                    let unknown = !error.starts_with("Native RPC rejected:");
-                    self.reject_submission(session_id, &request_id, &error, unknown);
-                    return Err(if unknown {
-                        format!("SUBMISSION_UNKNOWN:{error}")
-                    } else {
-                        error
-                    });
-                }
+            if selected_approval.as_deref() == Some("app")
+                && approval::scope(data["backend"].as_str().unwrap_or("codex")) == "turn"
+            {
+                self.queue_turn_approval(session_id, &request_id, params)?;
+            } else {
+                self.dispatch_native_turn(session_id, &request_id, &harness, params)
+                    .await?;
             }
         }
         let sessions = self.sessions.lock().unwrap();
@@ -1276,6 +1256,106 @@ impl AgentManager {
         Ok(
             json!({"submission":s.data["submissions"][&request_id],"session":snapshot(&s.data),"warnings":[]}),
         )
+    }
+
+    /// The executable payload stays only in Session.pending RAM. Restart drops
+    /// it and leaves the accepted receipt interrupted, never replaying a task.
+    fn queue_turn_approval(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        params: Value,
+    ) -> Result<(), String> {
+        let pending_id = id();
+        let queued = self.edit(session_id, |s| {
+            let name = definition(s.data["backend"].as_str().unwrap_or(""))
+                .map(|spec| spec.name).unwrap_or("CLI");
+            let visible = json!({"threadId":s.data["threadId"],"turnId":s.data["turnId"],
+                "command":format!("Run {name} for this whole turn"),
+                "reason":"This CLI cannot pause individual tools. Approval starts the whole native task, including any tool operations permitted by its native configuration.",
+                "cwd":s.data["roots"][0],"requestId":request_id,"approvalScope":"turn","requiresUserDecision":true,
+                "availableDecisions":["accept","decline","cancel"]});
+            s.pending.insert(pending_id.clone(), (Value::Null, json!({
+                "method":"_aichat/turnApproval", "params":{"availableDecisions":["accept","decline","cancel"]},
+                "turnParams":params, "requestId":request_id
+            })));
+            s.data["pending"].as_array_mut().unwrap().push(json!({"id":pending_id,
+                "method":"item/commandExecution/requestApproval","params":visible,
+                "decisionCapabilities":{"execpolicyAmendment":false,"autoApproval":false}}));
+            s.data["submissions"][request_id] = json!({"state":"accepted","turnId":s.data["turnId"]});
+            s.data["status"] = json!("waiting");
+            Ok(())
+        });
+        if let Err(error) = queued {
+            if let Some(session) = self.sessions.lock().unwrap().get_mut(session_id) {
+                session.pending.remove(&pending_id);
+            }
+            self.reject_submission(session_id, request_id, &error, false);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn dispatch_native_turn(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        harness: &Harness,
+        params: Value,
+    ) -> Result<(), String> {
+        let data = { self.sessions.lock().unwrap()[session_id].data.clone() };
+        if data["aichatContext"] == true {
+            let owner = data["owner"].as_str().unwrap_or("");
+            let conversation = data["conversationId"].as_str().unwrap_or("");
+            let expected = self.sessions.lock().unwrap()[session_id]
+                .context_marker
+                .clone();
+            if self.context.context(owner, conversation).is_err()
+                || self.context.marker(owner, conversation).ok() != expected
+            {
+                let error = "AIChat page changed before approval; reconnect before sending";
+                self.reject_submission(session_id, request_id, error, false);
+                return Err(error.into());
+            }
+        }
+        if let Err(error) = checked_roots(&data).and_then(|roots| {
+            if json!(roots) == data["roots"] {
+                Ok(())
+            } else {
+                Err("Workspace root changed before approval".into())
+            }
+        }) {
+            self.reject_submission(session_id, request_id, &error, false);
+            return Err(error);
+        }
+        let result = harness.call("turn/start", params, RPC_TIMEOUT).await;
+        let _ = harness.flush_events().await;
+        match result {
+            Ok(result) => {
+                let native_id = result["turn"]["id"].clone();
+                self.edit(session_id, |s| {
+                    if !native_id.is_null() {
+                        s.data["turnId"] = native_id.clone();
+                    }
+                    s.data["submissions"][request_id] =
+                        json!({"state":"accepted","turnId":s.data["turnId"]});
+                    if s.data["status"] == "starting" {
+                        s.data["status"] = json!("running");
+                    }
+                    Ok(())
+                })?;
+            }
+            Err(error) => {
+                let unknown = !error.starts_with("Native RPC rejected:");
+                self.reject_submission(session_id, request_id, &error, unknown);
+                return Err(if unknown {
+                    format!("SUBMISSION_UNKNOWN:{error}")
+                } else {
+                    error
+                });
+            }
+        }
+        Ok(())
     }
 
     fn reject_submission(&self, session_id: &str, request_id: &str, error: &str, unknown: bool) {
@@ -1312,7 +1392,32 @@ impl AgentManager {
         session_id: &str,
         owner: &str,
     ) -> Result<Value, String> {
+        let initial = self.view(session_id, owner)?;
+        // Configuration may still be changing native state. Preserve the
+        // immediate retryable Stop response instead of waiting for dispatch.
+        if initial["status"] == "starting" {
+            return Err("Turn is starting; retry Stop shortly".into());
+        }
+        let configuration = self.sessions.lock().unwrap()[session_id]
+            .configuration
+            .clone();
+        let _configuration = configuration.lock().await;
         let data = self.view(session_id, owner)?;
+        let turn_gate = self.sessions.lock().unwrap()[session_id]
+            .pending
+            .values()
+            .any(|(_, native)| native["method"] == "_aichat/turnApproval");
+        if turn_gate {
+            return self.edit(session_id, |s| {
+                s.pending.clear();
+                s.data["pending"] = json!([]);
+                s.data["status"] = json!("interrupted");
+                if let Some(request) = s.data["lastRequestId"].as_str().map(str::to_string) {
+                    s.data["submissions"][request]["state"] = json!("rejected");
+                }
+                Ok(())
+            });
+        }
         if data["status"] == "starting" {
             return Err("Turn is starting; retry Stop shortly".into());
         }
@@ -1452,6 +1557,7 @@ async fn set_acp_mode(
     native: &mut Value,
     thread: &Value,
     mode: &str,
+    manual: bool,
 ) -> Result<(), String> {
     let option = select_option(native, "mode");
     let modes = if let Some(option) = &option {
@@ -1470,15 +1576,29 @@ async fn set_acp_mode(
         .map(|o| o["currentValue"].clone())
         .unwrap_or_else(|| native["modes"]["currentModeId"].clone());
     let unsafe_mode = |v: &Value| {
-        [
-            "bypass",
-            "yolo",
-            "full-access",
-            "auto-approve",
-            "acceptEdits",
-        ]
-        .iter()
-        .any(|p| v.as_str().unwrap_or("").contains(p))
+        let compact: String = v
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        ["bypass", "yolo", "fullaccess", "autoapprove", "acceptedits"]
+            .iter()
+            .any(|pattern| compact.contains(pattern))
+    };
+    let advertised_modes = !modes.is_empty();
+    let unsafe_current = unsafe_mode(&current)
+        || modes
+            .iter()
+            .any(|candidate| candidate["id"] == current && unsafe_mode(&candidate["name"]));
+    let modes = if manual || mode == "ask" {
+        modes
+            .into_iter()
+            .filter(|candidate| !unsafe_mode(&candidate["id"]) && !unsafe_mode(&candidate["name"]))
+            .collect::<Vec<_>>()
+    } else {
+        modes
     };
     let selected = if mode == "plan" {
         modes.iter().find(|m| {
@@ -1486,7 +1606,7 @@ async fn set_acp_mode(
                 .contains(&m["id"].as_str().unwrap_or(""))
         })
     } else {
-        let preferred = if mode == "craft" {
+        let preferred = if mode == "craft" && !manual {
             vec![
                 "bypassPermissions",
                 "yolo",
@@ -1497,6 +1617,8 @@ async fn set_acp_mode(
                 "default",
                 "ask",
             ]
+        } else if mode == "craft" {
+            vec!["default", "code", "build", "agent", "ask"]
         } else {
             vec!["ask", "default", "code", "build", "agent"]
         };
@@ -1516,7 +1638,7 @@ async fn set_acp_mode(
     {
         return Err("UNSUPPORTED_FEATURE: This CLI does not advertise a mode to leave Plan".into());
     }
-    if mode == "ask" && selected.is_none() && (unsafe_mode(&current) || !modes.is_empty()) {
+    if (mode == "ask" || manual) && selected.is_none() && (unsafe_current || advertised_modes) {
         return Err(
             "UNSUPPORTED_FEATURE: This CLI does not advertise an interactive approval mode".into(),
         );
@@ -1678,5 +1800,78 @@ mod path_tests {
         #[cfg(unix)]
         std::fs::remove_file(&folder).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod approval_mode_tests {
+    use super::*;
+
+    const PEER: &str = r#"
+const readline = require('node:readline'), calls=[];
+const send = value => process.stdout.write(JSON.stringify({jsonrpc:'2.0',...value})+'\n');
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const m=JSON.parse(line);
+ if (m.method==='session/set_mode'||m.method==='session/set_config_option') calls.push(m.params);
+ if (m.id!==undefined) send({id:m.id,result:m.method==='fixture/log'?calls:{protocolVersion:1,agentCapabilities:{}}});
+});
+"#;
+
+    #[tokio::test]
+    async fn app_mode_leaves_bypass_and_rejects_a_provider_with_only_automatic_modes() {
+        let (child, _fixture) = harness::fixture(PEER, Protocol::Acp).await;
+        let mut native = json!({"sessionId":"fixture","modes":{"currentModeId":"yolo","availableModes":[{"id":"yolo","name":"Automatic"},{"id":"default","name":"Manual"}]}});
+        set_acp_mode(&child, &mut native, &json!("fixture"), "craft", true)
+            .await
+            .unwrap();
+        assert_eq!(native["modes"]["currentModeId"], "default");
+        let calls = child
+            .call("fixture/log", json!({}), Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(calls, json!([{"sessionId":"fixture","modeId":"default"}]));
+        for unsafe_mode in [
+            "yolo",
+            "bypassPermissions",
+            "full-access",
+            "acceptEdits",
+            "auto-approve",
+            "fullAccess",
+            "auto_approve",
+            "BYPASS",
+        ] {
+            let mut native = json!({"modes":{"currentModeId":unsafe_mode,"availableModes":[{"id":unsafe_mode,"name":"Automatic"}]}});
+            assert!(
+                set_acp_mode(&child, &mut native, &json!("fixture"), "craft", true)
+                    .await
+                    .unwrap_err()
+                    .contains("interactive approval mode")
+            );
+        }
+        let mut disguised = json!({"modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Bypass permissions"}]}});
+        assert!(
+            set_acp_mode(&child, &mut disguised, &json!("fixture"), "craft", true)
+                .await
+                .unwrap_err()
+                .contains("interactive approval mode")
+        );
+        for unsafe_current in ["fullAccess", "full_access", "Auto Approve"] {
+            let mut native = json!({"modes":{"currentModeId":unsafe_current}});
+            assert!(
+                set_acp_mode(&child, &mut native, &json!("fixture"), "craft", true)
+                    .await
+                    .is_err()
+            );
+        }
+        let calls = child
+            .call("fixture/log", json!({}), Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.as_array().unwrap().len(),
+            1,
+            "unsupported App policies must not change native settings"
+        );
+        child.close();
     }
 }

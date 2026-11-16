@@ -73,10 +73,11 @@ test('explicit approval preserves read-only Ask and Plan limits while Craft uses
     assert.equal(agentAccess('ask').approvalPolicy, 'on-request', 'old Ask contract remains unchanged');
 });
 
-test('only Codex advertises independent native approval choices', async t => {
+test('Codex retains its native choices while other providers advertise App approval separately', async t => {
     const { manager } = setup(t);
     assert.deepEqual((await manager.status('codex')).approvalModes, CODEX_APPROVAL_MODES);
-    assert.equal((await manager.status('claude')).approvalModes, undefined);
+    assert.deepEqual((await manager.status('claude')).approvalModes, ['default', 'app', 'never', 'ask', 'edit', 'auto', 'readonly']);
+    assert.equal((await manager.status('claude')).approvalScope, 'tool');
 });
 
 for (const approvalMode of ['on-request', 'untrusted', 'never', 'read-only']) {

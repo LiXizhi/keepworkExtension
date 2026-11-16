@@ -883,6 +883,12 @@ impl Connection {
                 let questions = request["tool_name"] == "AskUserQuestion";
                 let visible_input = super::scrub(&request["input"], 0, &mut 500_000);
                 let mut params = json!({"threadId":self.thread,"command":format!("{}\n{}",request["tool_name"].as_str().unwrap_or("Tool"),visible_input),"readOnly":matches!(request["tool_name"].as_str(),Some("Read"|"Glob"|"Grep"|"WebSearch"|"WebFetch")),"requiresUserDecision":request["tool_name"]=="ExitPlanMode","availableDecisions":["accept","decline","cancel"]});
+                params["approvalKind"] = json!(match request["tool_name"].as_str() {
+                    Some("Read" | "Glob" | "Grep" | "WebSearch" | "WebFetch") => "read",
+                    Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit") => "edit",
+                    Some("Bash") => "command",
+                    _ => "other",
+                });
                 if questions {
                     let mut normalized = vec![];
                     let questions = request["input"]["questions"]
