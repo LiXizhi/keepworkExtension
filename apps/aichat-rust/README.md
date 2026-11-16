@@ -160,7 +160,7 @@ ATVV 只在按住语音键时采集录音。请等识别完成后再录下一段
 
 ### 日常启动与运行时选择
 
-在 `apps/aichat-rust` 目录执行 `pnpm tauri dev` 启动桌面；默认构建并使用 **`apps/mcp-rust`**。VS Code 任务 `keepwork Rust Desktop: Start` 使用同一入口，`pnpm dev:rust` 保留为显式 Rust 别名。`pnpm dev` 只启动桌面页面的 Vite 服务，不启动桌面或 MCP。
+在 `apps/aichat-rust` 目录执行 `pnpm tauri dev` 启动桌面；默认构建并使用 **`apps/mcp-rust`**。VS Code 任务 `keepwork Rust Desktop: Start` 使用同一入口。macOS 上 VS Code 用登录 shell 启动该任务，因此会先采用开发者 shell 中的 pnpm PATH（官方安装脚本、nvm、fnm 通常写在 `~/.zshrc`），再执行同一条 `pnpm tauri dev`。`pnpm dev:rust` 保留为显式 Rust 别名。`pnpm dev` 只启动桌面页面的 Vite 服务，不启动桌面或 MCP。
 
 默认入口需要 Rust/Cargo 工具链及桌面开发依赖；准备 Rust MCP 失败会停止启动并保留错误。Node.js 仍用于桌面开发工具和可选外部 CLI，并不表示 MCP 服务端使用 Node。`pnpm build` 只构建桌面前端，不会准备或覆盖 MCP 资源；运行时由开发启动器或 `make:*` / `bundle:mcp*` 命令准备。
 

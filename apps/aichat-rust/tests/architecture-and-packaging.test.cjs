@@ -214,8 +214,19 @@ test("default runtime commands choose Rust and preserve explicit Node compatibil
   assert.ok(task, "VS Code must retain the Rust desktop start task");
   assert.match(task, /"command":\s*"pnpm"/);
   assert.match(task, /"args":\s*\["tauri",\s*"dev"\]/);
+  assert.ok(
+    task.indexOf('"command": "pnpm"') < task.indexOf('"osx"'),
+    "Windows and Linux keep the direct pnpm tauri dev command"
+  );
+  assert.match(
+    task,
+    /"osx"\s*:\s*\{[\s\S]*"command":\s*"\/bin\/zsh"[\s\S]*"\$\{workspaceFolder\}\/scripts\/vscode-pnpm-task\.zsh",\s*"tauri",\s*"dev"/
+  );
   assert.doesNotMatch(task, /--mcp-node|"AICHAT_MCP_ENGINE":\s*"node"/);
   assert.match(task, /apps\/mcp-rust/);
+  const launcher = fs.readFileSync(path.join(appRoot, "..", "..", "scripts", "vscode-pnpm-task.zsh"), "utf8");
+  assert.match(launcher, /exec "\$pnpm_path" "\$@"/);
+  assert.doesNotMatch(launcher, /--mcp-node|AICHAT_MCP_ENGINE/);
 });
 
 test("frontend checks never stage a Node runtime as an implicit fallback", () => {
