@@ -27,6 +27,56 @@ const jobSelected = (source, job, context) => {
   return evaluate(context.github, context.inputs, (value, prefix) => String(value).startsWith(prefix));
 };
 
+const pinnedPnpmVersion = manager => {
+  const match = /^pnpm@(\d+\.\d+\.\d+(?:-[\w.-]+)?)(?:\+sha\d+\.[a-f0-9]+)?$/.exec(manager || '');
+  assert.ok(match, 'packageManager must pin a pnpm version');
+  return match[1];
+};
+const checkPnpmSetup = body => {
+  const rootVersion = pinnedPnpmVersion(require('../package.json').packageManager);
+  const steps = body.split(/^      - /m).slice(1);
+  const uses = (step, action) => new RegExp(`(?:^|\\n)\\s*uses: ['"]?${action}@`).test(step);
+  const checkout = steps.findIndex(step => uses(step, 'actions/checkout'));
+  const setup = steps.map((step, index) => ({ step, index })).filter(({ step }) => uses(step, 'pnpm/action-setup'));
+  assert.ok(setup.length, 'job must install pnpm');
+  for (const { step, index } of setup) {
+    assert.ok(checkout >= 0 && checkout < index, 'checkout must precede pnpm manifest resolution');
+    const input = key => step.match(new RegExp(`^          ${key}:\\s*([^\\n]+)$`, 'm'))?.[1]
+      .replace(/\s+#.*$/, '').trim().replace(/^(['"])(.*)\1$/, '$2');
+    const packageFile = input('package_json_file') || 'package.json';
+    assert.ok(!path.isAbsolute(packageFile) && !packageFile.split(/[\\/]/).includes('..'),
+      'pnpm package manifest must belong to the checkout');
+    const manager = JSON.parse(fs.readFileSync(path.join(__dirname, '..', packageFile), 'utf8')).packageManager;
+    const manifestVersion = manager === undefined ? undefined : pinnedPnpmVersion(manager);
+    const explicitVersion = input('version');
+    if (explicitVersion !== undefined && manifestVersion !== undefined) {
+      assert.equal(explicitVersion, manifestVersion, 'pnpm setup version conflicts with its packageManager');
+    }
+    assert.equal(explicitVersion || manifestVersion, rootVersion,
+      'pnpm setup must resolve the version pinned by the root packageManager');
+  }
+};
+
+test('pnpm setup resolves the repository pin in every desktop validation and packaging job', async t => {
+  for (const [name, job] of [
+    ['rust-desktop-validation.yml', 'validate'],
+    ['aichat-rust-windows-release.yml', 'build'],
+    ['aichat-rust-windows-release.yml', 'build-macos'],
+    ['aichat-rust-cef.yml', 'preview'],
+  ]) {
+    await t.test(`${name}: ${job}`, () => checkPnpmSetup(jobBody(workflow(name), job)));
+  }
+});
+
+test('pnpm setup version checks accept manifest resolution or a matching fixed version and reject conflicting inputs', () => {
+  const version = pinnedPnpmVersion(require('../package.json').packageManager);
+  const fixture = input => `    steps:\n      - uses: actions/checkout@v4\n      - uses: pnpm/action-setup@v4\n${input}`;
+  checkPnpmSetup(fixture(''));
+  checkPnpmSetup(fixture(`        with:\n          version: '${version}'\n`));
+  assert.throws(() => checkPnpmSetup(fixture('        with:\n          version: 999.0.0\n')), /conflicts/);
+  assert.throws(() => checkPnpmSetup(fixture('').replace('actions/checkout@v4', 'actions/setup-node@v4')), /checkout must precede/);
+});
+
 test('PRs validate both Rust products without entering installer or publication jobs', () => {
   const desktop = workflow('aichat-rust-windows-release.yml');
   const mcp = workflow('mcp-rust.yml');
