@@ -531,6 +531,24 @@ unsafe fn field_dot_bounds(field: Bounds) -> Option<Bounds> {
     )
 }
 
+// Chromium editors expose a tiny caret rectangle instead of an Edit control.
+// Anchor the cue to that insertion point so the bars follow the text cursor.
+unsafe fn caret_dot_bounds(field: Bounds) -> Option<Bounds> {
+    let width = i64::from(field.right) - i64::from(field.left);
+    let height = i64::from(field.bottom) - i64::from(field.top);
+    if width > 32 || height > 64 {
+        return None;
+    }
+    let rect = RECT {
+        left: field.left,
+        top: field.top,
+        right: field.right,
+        bottom: field.bottom,
+    };
+    let work = monitor_work_area(MonitorFromRect(&rect, MONITOR_DEFAULTTONULL))?;
+    dot_bounds(field.right, field.bottom, work)
+}
+
 unsafe fn cursor_dot_bounds() -> Option<Bounds> {
     let mut cursor = POINT::default();
     if GetCursorPos(&mut cursor) == 0 {
@@ -838,7 +856,7 @@ impl Caption {
         waiting: bool,
     ) {
         let Some(anchor) = field
-            .and_then(|b| field_dot_bounds(b))
+            .and_then(|b| caret_dot_bounds(b).or_else(|| field_dot_bounds(b)))
             .or_else(|| cursor_dot_bounds())
         else {
             ShowWindow(self.hwnd, SW_HIDE);
@@ -1009,8 +1027,13 @@ fn paint_frames(rx: mpsc::Receiver<Option<Frame>>) {
             let new_frame = if phase.is_none() || phase == Some(Phase::Retry) {
                 None
             } else {
-                cue_bounds(cue, field, |b| field_dot_bounds(b), || cursor_dot_bounds())
-                    .map(|b| (active, b, cue))
+                cue_bounds(
+                    cue,
+                    field,
+                    |b| caret_dot_bounds(b).or_else(|| field_dot_bounds(b)),
+                    || cursor_dot_bounds(),
+                )
+                .map(|b| (active, b, cue))
             };
             if visible.map(|(_, frame)| frame) != new_frame {
                 if let Some(frame) = new_frame {
@@ -1225,5 +1248,50 @@ mod tests {
     fn outline_is_a_nonactivating_click_through_tool_window() {
         let required = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
         assert_eq!(STYLE & required, required);
+    }
+
+    #[test]
+    fn caret_sized_fields_anchor_dots_next_to_the_insertion_point() {
+        let work = Bounds {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        // Caret-sized fields (Chromium insertion point) must skip the compact
+        // in-field placement and anchor just past the caret, like caret_dot_bounds.
+        let is_caret = |b: Bounds| {
+            i64::from(b.right) - i64::from(b.left) <= 32
+                && i64::from(b.bottom) - i64::from(b.top) <= 64
+        };
+        let caret = Bounds {
+            left: 640,
+            top: 700,
+            right: 642,
+            bottom: 718,
+        };
+        // compact_dot_bounds would park the dots inside the tiny caret strip;
+        // the cue must instead sit just past the caret, where text appears next.
+        assert!(is_caret(caret));
+        let compact = compact_dot_bounds(caret, work).unwrap();
+        assert!(compact.right <= caret.right);
+        let anchored = if is_caret(caret) {
+            dot_bounds(caret.right, caret.bottom, work).unwrap()
+        } else {
+            compact
+        };
+        assert_eq!(anchored.left, caret.right + 16);
+        assert_eq!(anchored.top, caret.bottom + 20);
+        // A wide Edit field keeps the compact inside-the-field placement.
+        let field = Bounds {
+            left: 100,
+            top: 200,
+            right: 620,
+            bottom: 260,
+        };
+        assert!(!is_caret(field));
+        let inside = compact_dot_bounds(field, work).unwrap();
+        assert_eq!(inside.right, field.right);
+        assert_eq!(inside.top, field.bottom + 3);
     }
 }
