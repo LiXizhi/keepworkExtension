@@ -120,6 +120,7 @@ const pickerMarkup = `<!doctype html><meta charset="utf-8">
       <span id="spacePickerLocalHead">本地文件夹「Existing」</span>
       <button id="spacePickerLocalBrowse" type="button">浏览本机文件夹…</button>
       <p id="spacePickerLocalIntro">在 AIChat 中浏览常用位置或已连接的文件夹。</p>
+      <div id="spacePickerLocalCompanion" hidden></div>
       <details id="spacePickerLocalManual"><summary>手动填写路径</summary>
         <input id="spacePickerLocalAbsPath" value="C:\\Existing">
         <p id="spacePickerLocalAbsHelp">路径由 MCP 验证</p>
@@ -223,7 +224,99 @@ test('CEF native folder adapter handles real user clicks and discards stale work
     assert.deepEqual(await page.evaluate(() => folderFixture.applied), ['D:\\retry']);
     assert.deepEqual(errors, []); await page.close();
   });
-  for (const change of ['close-and-reopen', 'back', 'edit-target', 'input', 'replace-controls', 'pagehide']) {
+  for (const change of ['health-notice', 'intro', 'details', 'visual-styles', 'same-target-preparation']) {
+    for (const outcome of ['selection', 'native-error']) {
+      await t.test(`${change} updates preserve a pending native ${outcome}`, async () => {
+        const { page, errors } = await pageFixture();
+        await page.locator('#spacePickerLocalBrowse').click();
+        await page.evaluate(change => {
+          const $ = id => document.getElementById(id);
+          if (change === 'health-notice') {
+            // A delayed refreshLocalCompanionNotice() only changes status UI.
+            $('spacePickerLocalCompanion').innerHTML = '<strong>本地服务已连接</strong>';
+            $('spacePickerLocalCompanion').hidden = false;
+          } else if (change === 'intro') {
+            $('spacePickerLocalIntro').textContent = '在 AIChat 中浏览常用位置或已连接的文件夹。';
+          } else if (change === 'details') {
+            $('spacePickerLocalManual').open = true;
+          } else if (change === 'visual-styles') {
+            $('spacePickerModal').classList.add('is-updating');
+            $('spacePickerLevelLocal').style.borderColor = 'rgb(1, 2, 3)';
+          } else {
+            // prepareLocalPanel() refreshes these nodes even if the target and
+            // path remain identical. Their new text nodes are presentation IO.
+            $('spacePickerLocalHead').textContent = '本地文件夹「Existing」';
+            $('spacePickerLocalUse').className = 'prompt-ghost-btn';
+            $('spacePickerLocalUse').textContent = '保存路径并使用';
+          }
+        }, change);
+        if (outcome === 'selection') {
+          const path = 'D:\\用户资料\\My Brain';
+          await selected(page, path);
+          assert.deepEqual(await page.evaluate(() => ({ verified: folderFixture.verified, applied: folderFixture.applied })), {
+            verified: [path], applied: [path],
+          }, 'presentation changes cannot discard the user-selected path');
+        } else {
+          await page.evaluate(() => folderFixture.fail(Error('System folder picker unavailable')));
+          await page.locator('#spacePickerLocalAbsError').waitFor({ state: 'visible' });
+          assert.match(await page.locator('#spacePickerLocalAbsError').textContent(), /System folder picker unavailable/);
+          assert.deepEqual(await page.evaluate(() => folderFixture.applied), []);
+        }
+        assert.equal(await page.locator('#spacePickerLocalBrowse').isDisabled(), false);
+        assert.deepEqual(errors, []); await page.close();
+      });
+    }
+  }
+  await t.test('a pending path validation explains the busy state and browsing can retry after it finishes', async () => {
+    const { page, errors } = await pageFixture();
+    await page.evaluate(() => document.querySelector('#spacePickerLocalUse').disabled = true);
+    await page.locator('#spacePickerLocalBrowse').click();
+    assert.deepEqual(await page.evaluate(() => ({ calls: folderFixture.calls, webCalls: folderFixture.webCalls })), { calls: 0, webCalls: 0 });
+    await page.locator('#spacePickerLocalAbsError').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#spacePickerLocalAbsError').textContent(), /验证|处理|稍候|稍后|忙/);
+    assert.equal(await page.locator('#spacePickerLocalBrowse').isDisabled(), false);
+    await page.evaluate(() => document.querySelector('#spacePickerLocalUse').disabled = false);
+    await page.locator('#spacePickerLocalBrowse').click();
+    assert.equal(await page.evaluate(() => folderFixture.calls), 1);
+    await selected(page, 'D:\\retry');
+    assert.deepEqual(await page.evaluate(() => folderFixture.applied), ['D:\\retry']);
+    assert.deepEqual(errors, []); await page.close();
+  });
+  await t.test('a selection arriving during path validation stays visible for explicit validation after the busy operation', async () => {
+    const { page, errors } = await pageFixture();
+    await page.locator('#spacePickerLocalBrowse').click();
+    await page.evaluate(() => document.querySelector('#spacePickerLocalUse').disabled = true);
+    const path = 'D:\\用户资料\\Selected';
+    await selected(page, path);
+    assert.equal(await page.locator('#spacePickerLocalAbsPath').inputValue(), path);
+    assert.equal(await page.locator('#spacePickerLocalUse').isDisabled(), true, 'the adapter cannot release another operation\'s busy state');
+    assert.deepEqual(await page.evaluate(() => ({ verified: folderFixture.verified, applied: folderFixture.applied })), { verified: [], applied: [] });
+    await page.locator('#spacePickerLocalAbsError').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#spacePickerLocalAbsError').textContent(), /路径已选中|验证/);
+    await page.evaluate(() => document.querySelector('#spacePickerLocalUse').disabled = false);
+    await page.locator('#spacePickerLocalUse').click();
+    assert.deepEqual(await page.evaluate(() => folderFixture.applied), [path]);
+    assert.deepEqual(errors, []); await page.close();
+  });
+  await t.test('an async preparation changing the target explains the discarded result and allows a fresh selection', async () => {
+    const { page, errors } = await pageFixture();
+    await page.evaluate(() => document.querySelector('#spacePickerLocalHead').textContent = '📁 选择本地文件夹');
+    await page.locator('#spacePickerLocalBrowse').click();
+    await page.evaluate(() => {
+      document.querySelector('#spacePickerLocalHead').textContent = '📁 本地文件夹「Existing」';
+      document.querySelector('#spacePickerLocalUse').textContent = '保存路径并使用';
+    });
+    await selected(page, 'C:\\stale');
+    assert.deepEqual(await page.evaluate(() => folderFixture.applied), []);
+    assert.equal(await page.locator('#spacePickerLocalAbsPath').inputValue(), 'C:\\Existing');
+    await page.locator('#spacePickerLocalAbsError').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#spacePickerLocalAbsError').textContent(), /工作空间|路径已变化|重新选择/);
+    await page.locator('#spacePickerLocalBrowse').click();
+    await selected(page, 'D:\\retry');
+    assert.deepEqual(await page.evaluate(() => folderFixture.applied), ['D:\\retry']);
+    assert.deepEqual(errors, []); await page.close();
+  });
+  for (const change of ['close-and-reopen', 'back', 'back-and-return', 'visibility', 'edit-target', 'edit-target-roundtrip', 'workspace-id', 'input', 'replace-controls', 'replace-validation-control', 'pagehide']) {
     await t.test(`a pending native result cannot bind after ${change}`, async () => {
       const { page, errors } = await pageFixture();
       await page.locator('#spacePickerLocalBrowse').click();
@@ -234,12 +327,26 @@ test('CEF native folder adapter handles real user clicks and discards stale work
         } else if (change === 'back') {
           document.querySelector('#spacePickerBack').click();
           document.querySelector('#spacePickerLevelLocal').classList.add('hidden');
+        } else if (change === 'back-and-return') {
+          const panel = document.querySelector('#spacePickerLevelLocal');
+          panel.classList.add('hidden'); panel.classList.remove('hidden');
+        } else if (change === 'visibility') {
+          document.querySelector('#spacePickerLevelLocal').style.visibility = 'hidden';
         } else if (change === 'edit-target') {
           document.querySelector('#spacePickerLocalHead').textContent = '本地文件夹「Another」';
+        } else if (change === 'edit-target-roundtrip') {
+          const head = document.querySelector('#spacePickerLocalHead');
+          const original = head.textContent;
+          head.textContent = '本地文件夹「Another」'; head.textContent = original;
+        } else if (change === 'workspace-id') {
+          modal.dataset.workspaceId = 'another-workspace';
         } else if (change === 'input') {
           document.querySelector('#spacePickerLocalAbsPath').value = 'C:\\Other workspace';
         } else if (change === 'replace-controls') {
           modal.replaceWith(modal.cloneNode(true));
+        } else if (change === 'replace-validation-control') {
+          const use = document.querySelector('#spacePickerLocalUse');
+          use.replaceWith(use.cloneNode(true));
         } else window.dispatchEvent(new PageTransitionEvent('pagehide'));
       }, change);
       await selected(page, 'C:\\stale');

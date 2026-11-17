@@ -1,9 +1,13 @@
 #pragma once
 namespace keepwork_cef {
-// Pinned BSD-3-Clause browser API polyfill. No desktop APIs or IPC are exposed.
+// Page styles and pinned BSD-3-Clause Popover polyfill. No desktop APIs or IPC.
 inline constexpr char kPopoverScript[] = R"KW_POPOVER((() => {
-  const nativePopover = 'popover' in HTMLElement.prototype && typeof HTMLElement.prototype.showPopover === 'function';
   )KW_POPOVER"
+R"KW_COLORS(@KEEPWORK_ONBOARDING_COLORS_SCRIPT@)KW_COLORS"
+R"KW_ICONS(@KEEPWORK_MENU_ICONS_SCRIPT@)KW_ICONS"
+R"KW_START(
+  const nativePopover = 'popover' in HTMLElement.prototype && typeof HTMLElement.prototype.showPopover === 'function';
+  )KW_START"
 R"KW_POLYFILL(@KEEPWORK_POPOVER_SCRIPT@)KW_POLYFILL"
 R"KW_GUARD(
   if (!nativePopover) {

@@ -38,6 +38,10 @@ add_test(NAME cef-pet-artwork COMMAND cef-pet-artwork-test)
 
 # Generate the same embedded compatibility script for portable byte-identity
 # tests and the Windows host. Each raw literal stays below MSVC's token limit.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/onboarding_colors.js")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/onboarding_colors.js" KEEPWORK_ONBOARDING_COLORS_SCRIPT)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/menu_icons.js")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/menu_icons.js" KEEPWORK_MENU_ICONS_SCRIPT)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/popover.iife.min.js")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/vendor/popover.iife.min.js" KEEPWORK_POPOVER_SCRIPT)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/session_popovers.js")

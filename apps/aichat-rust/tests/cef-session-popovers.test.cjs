@@ -7,7 +7,9 @@ const read = name => fs.readFileSync(path.join(host, name), 'utf8');
 const template = [...read('compatibility_script.h.in').matchAll(/R"([A-Za-z0-9_]*)\(([\s\S]*?)\)\1"/g)]
   .map(match => match[2]).join('');
 const production = template.replace('@KEEPWORK_POPOVER_SCRIPT@', read('vendor/popover.iife.min.js'))
-  .replace('@KEEPWORK_SESSION_POPOVERS_SCRIPT@', read('session_popovers.js'));
+  .replace('@KEEPWORK_SESSION_POPOVERS_SCRIPT@', read('session_popovers.js'))
+  .replace('@KEEPWORK_ONBOARDING_COLORS_SCRIPT@', read('onboarding_colors.js'))
+  .replace('@KEEPWORK_MENU_ICONS_SCRIPT@', read('menu_icons.js'));
 const fixture = legacy => `<!doctype html><meta charset="utf-8"><style>
 ${legacy ? '@layer legacy-ua-fixture,popover-polyfill; @layer legacy-ua-fixture{:where([popover]){display:block}}' : ''}
 *{box-sizing:border-box}body{margin:0;font:14px sans-serif;--bg-card:#fff;--text-primary:#222;--border-card:#ddd}

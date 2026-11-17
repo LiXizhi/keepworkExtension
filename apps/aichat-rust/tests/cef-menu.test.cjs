@@ -40,12 +40,14 @@ test('CEF native menu, theme and pet regressions run against production C++ stat
   // C++ translation normalizes physical source newlines, including Windows
   // checkouts. Preserve the existing runtime bytes rather than checkout CRLF.
   const sourceText = file => fs.readFileSync(path.join(sourceRoot, file), 'utf8').replace(/\r\n?/g, '\n');
-  const expected = '(() => {\n  const nativePopover = \'popover\' in HTMLElement.prototype && typeof HTMLElement.prototype.showPopover === \'function\';\n  '
+  const expected = '(() => {\n  ' + sourceText('onboarding_colors.js')
+    + sourceText('menu_icons.js')
+    + '\n  const nativePopover = \'popover\' in HTMLElement.prototype && typeof HTMLElement.prototype.showPopover === \'function\';\n  '
     + sourceText('vendor/popover.iife.min.js')
     + '\n  if (!nativePopover) {\n    '
     + sourceText('session_popovers.js') + '\n  }\n})()';
   assert.deepEqual(fs.readFileSync(path.join(build, 'compiled-compatibility-script.js')), Buffer.from(expected),
-    'the actual C++ compiler must concatenate the original wrapper and both JavaScript sources without changing bytes');
+    'the actual C++ compiler must concatenate the wrapper and all configured JavaScript sources without changing bytes');
   const cmakeSource = fs.readFileSync(path.join(sourceRoot, 'CMakeLists.txt'), 'utf8');
   for (const target of ['cef-window-adapter-test', 'cef-pet-chat-panel-test'])
     assert.ok(cmakeSource.includes(`target_link_options(${target} PRIVATE /MANIFEST:NO)`),
