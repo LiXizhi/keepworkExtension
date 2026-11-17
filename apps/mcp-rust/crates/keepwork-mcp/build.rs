@@ -16,6 +16,11 @@ fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn main() {
+    // The build identity must track every Git state change (new commits, branch
+    // switches, worktree moves). File watching cannot cover all of those, so
+    // always re-run this script; the crate itself still recompiles only when
+    // its sources change.
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

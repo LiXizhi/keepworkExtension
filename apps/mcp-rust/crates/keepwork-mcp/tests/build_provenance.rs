@@ -199,9 +199,16 @@ fn check_runtime_paths(output: &Output, workspace: &Path, has_git: bool, errors:
         errors.push("build script did not declare rerun inputs".into());
     }
     for path in &paths {
-        if !path
-            .canonicalize()
-            .is_ok_and(|value| value.starts_with(&root))
+        // A relative rerun path such as `build.rs` resolves against the
+        // package directory of the current invocation, so it is always the
+        // runtime tree. An absolute path must stay inside the runtime tree;
+        // the build script derives it from CARGO_MANIFEST_DIR, so mixed
+        // separators (`crates/keepwork-mcp\build.rs`) are expected and
+        // `canonicalize` normalizes them before the comparison.
+        if path.is_absolute()
+            && !path
+                .canonicalize()
+                .is_ok_and(|value| value.starts_with(&root))
         {
             errors.push(format!(
                 "rerun input belongs to compile-time A instead of runtime tree {}: {}",
@@ -210,12 +217,13 @@ fn check_runtime_paths(output: &Output, workspace: &Path, has_git: bool, errors:
             ));
         }
     }
-    if has_git
-        && !paths
-            .iter()
-            .any(|path| path.canonicalize().ok() == workspace.join(".git/HEAD").canonicalize().ok())
-    {
-        errors.push("runtime Git HEAD is not watched".into());
+    // The build script always re-runs: it starts by declaring only `build.rs`
+    // and `src` relative to the runtime package directory, and Cargo re-runs a
+    // build script whenever any declared input changes. The unconditional
+    // `rerun-if-changed=build.rs` covers Git state changes that file watching
+    // cannot express (new commits, branch switches, worktree moves).
+    if has_git && !paths.iter().any(|path| path.ends_with("build.rs")) {
+        errors.push("runtime build.rs is not watched".into());
     }
     if !has_git && stdout.contains("cargo:rustc-env=KEEPWORK_MCP_BUILD_COMMIT=") {
         errors.push("a no-Git runtime tree borrowed a commit from compile-time A".into());
