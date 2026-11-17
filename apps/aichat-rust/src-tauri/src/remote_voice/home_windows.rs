@@ -16,7 +16,10 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_APPS, VK_HOME};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_APPS, VK_BROWSER_BACK, VK_DOWN, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RIGHT,
+    VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+};
 use windows_sys::Win32::UI::Input::*;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -24,28 +27,59 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const KEYBOARD: (u16, u16) = (1, 6);
 const SUBCLASS_ID: usize = 0x4b57484d;
 const SHORT_PRESS: Duration = Duration::from_secs(1);
-const MENU_HOLD_BUDGET_MS: u64 = 10_000;
-const MENU_RELEASE_GRACE_MS: u64 = 250;
+const KEY_HOLD_BUDGET_MS: u64 = 10_000;
+const KEY_RELEASE_GRACE_MS: u64 = 250;
+const VK_TABLE_LEN: usize = 256;
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
-static MENU_HELD: AtomicBool = AtomicBool::new(false);
-static MENU_SUPPRESS_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static UNIQUE_REMOTE: AtomicBool = AtomicBool::new(false);
+static KEY_HELD: [AtomicBool; VK_TABLE_LEN] = [const { AtomicBool::new(false) }; VK_TABLE_LEN];
+static KEY_SUPPRESS_UNTIL_MS: [AtomicU64; VK_TABLE_LEN] =
+    [const { AtomicU64::new(0) }; VK_TABLE_LEN];
+
+pub(super) fn has_unique_remote() -> bool {
+    UNIQUE_REMOTE.load(Ordering::Acquire)
+}
 
 fn monotonic_ms() -> u64 {
     let base = *EPOCH.get_or_init(Instant::now);
     Instant::now().saturating_duration_since(base).as_millis() as u64 + 1
 }
 
-fn note_remote_menu_at(release: bool, now_ms: u64) {
+/// Virtual keys on the RC003 that must not trigger global OS/browser actions
+/// while Keepwork owns remote voice input. `VK_RETURN` (OK) stays native.
+pub(super) fn is_suppressed_remote_vk(vk: u16) -> bool {
+    matches!(
+        vk,
+        VK_APPS
+            | VK_HOME
+            | VK_ESCAPE
+            | VK_LEFT
+            | VK_UP
+            | VK_RIGHT
+            | VK_DOWN
+            | VK_BROWSER_BACK
+            | VK_VOLUME_MUTE
+            | VK_VOLUME_DOWN
+            | VK_VOLUME_UP
+    )
+}
+
+fn note_remote_key_at(vk: u16, release: bool, now_ms: u64) {
+    let idx = vk as usize;
+    if idx >= VK_TABLE_LEN {
+        return;
+    }
     if !release {
-        MENU_SUPPRESS_UNTIL_MS.store(now_ms.saturating_add(MENU_HOLD_BUDGET_MS), Ordering::Release);
-        MENU_HELD.store(true, Ordering::Release);
+        KEY_SUPPRESS_UNTIL_MS[idx]
+            .store(now_ms.saturating_add(KEY_HOLD_BUDGET_MS), Ordering::Release);
+        KEY_HELD[idx].store(true, Ordering::Release);
     } else {
-        MENU_HELD.store(false, Ordering::Release);
-        let grace = now_ms.saturating_add(MENU_RELEASE_GRACE_MS);
-        let mut current = MENU_SUPPRESS_UNTIL_MS.load(Ordering::Acquire);
+        KEY_HELD[idx].store(false, Ordering::Release);
+        let grace = now_ms.saturating_add(KEY_RELEASE_GRACE_MS);
+        let mut current = KEY_SUPPRESS_UNTIL_MS[idx].load(Ordering::Acquire);
         while current != 0 {
-            match MENU_SUPPRESS_UNTIL_MS.compare_exchange_weak(
+            match KEY_SUPPRESS_UNTIL_MS[idx].compare_exchange_weak(
                 current,
                 current.min(grace),
                 Ordering::AcqRel,
@@ -58,27 +92,57 @@ fn note_remote_menu_at(release: bool, now_ms: u64) {
     }
 }
 
+#[cfg(test)]
+fn note_remote_menu_at(release: bool, now_ms: u64) {
+    note_remote_key_at(VK_APPS, release, now_ms);
+}
+
 pub(super) fn clear_menu_suppression() {
-    MENU_HELD.store(false, Ordering::Release);
-    MENU_SUPPRESS_UNTIL_MS.store(0, Ordering::Release);
+    UNIQUE_REMOTE.store(false, Ordering::Release);
+    for idx in 0..VK_TABLE_LEN {
+        KEY_HELD[idx].store(false, Ordering::Release);
+        KEY_SUPPRESS_UNTIL_MS[idx].store(0, Ordering::Release);
+    }
 }
 
-fn suppress_menu_keydown_at(now_ms: u64) -> bool {
-    MENU_HELD.load(Ordering::Acquire) && now_ms <= MENU_SUPPRESS_UNTIL_MS.load(Ordering::Acquire)
+fn suppress_key_keydown_at(vk: u16, now_ms: u64) -> bool {
+    let idx = vk as usize;
+    idx < VK_TABLE_LEN
+        && KEY_HELD[idx].load(Ordering::Acquire)
+        && now_ms <= KEY_SUPPRESS_UNTIL_MS[idx].load(Ordering::Acquire)
 }
 
-fn take_menu_keyup_at(now_ms: u64) -> bool {
-    MENU_HELD.store(false, Ordering::Release);
-    let prev = MENU_SUPPRESS_UNTIL_MS.swap(0, Ordering::AcqRel);
+fn take_key_keyup_at(vk: u16, now_ms: u64) -> bool {
+    let idx = vk as usize;
+    if idx >= VK_TABLE_LEN {
+        return false;
+    }
+    KEY_HELD[idx].store(false, Ordering::Release);
+    let prev = KEY_SUPPRESS_UNTIL_MS[idx].swap(0, Ordering::AcqRel);
     prev != 0 && now_ms <= prev
 }
 
-pub(super) fn should_suppress_menu_keydown() -> bool {
-    suppress_menu_keydown_at(monotonic_ms())
+#[cfg(test)]
+fn suppress_menu_keydown_at(now_ms: u64) -> bool {
+    suppress_key_keydown_at(VK_APPS, now_ms)
 }
 
-pub(super) fn take_menu_keyup_suppression() -> bool {
-    take_menu_keyup_at(monotonic_ms())
+#[cfg(test)]
+fn take_menu_keyup_at(now_ms: u64) -> bool {
+    take_key_keyup_at(VK_APPS, now_ms)
+}
+
+pub(super) fn should_suppress_key_keydown(vk: u16) -> bool {
+    suppress_key_keydown_at(vk, monotonic_ms())
+}
+
+pub(super) fn take_key_keyup_suppression(vk: u16) -> bool {
+    take_key_keyup_at(vk, monotonic_ms())
+}
+
+#[cfg(test)]
+pub(super) fn should_suppress_menu_keydown() -> bool {
+    should_suppress_key_keydown(VK_APPS)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -469,6 +533,10 @@ fn refresh_source(presses: &mut RemotePresses) {
     if presses.select(discover_source(), home_held, clear_held) {
         clear_menu_suppression();
     }
+    UNIQUE_REMOTE.store(
+        matches!(presses.choice, SourceChoice::Unique { .. }),
+        Ordering::Release,
+    );
 }
 
 unsafe fn handle_input(presses: &mut RemotePresses, raw: HRAWINPUT) {
@@ -504,9 +572,10 @@ unsafe fn handle_input(presses: &mut RemotePresses, raw: HRAWINPUT) {
     }
     let key = input.data.keyboard;
     let release = key.Flags & RI_KEY_BREAK as u16 != 0;
-    if presses.edge(header.hDevice as usize, key.VKey, release, Instant::now()) {
-        note_remote_menu_at(release, monotonic_ms());
+    if is_suppressed_remote_vk(key.VKey) {
+        note_remote_key_at(key.VKey, release, monotonic_ms());
     }
+    let _ = presses.edge(header.hDevice as usize, key.VKey, release, Instant::now());
 }
 
 unsafe extern "system" fn observe(
@@ -898,6 +967,23 @@ mod tests {
         // Expired grace window never swallows a later ordinary keyboard Menu keyup.
         note_remote_menu_at(false, 3_000);
         note_remote_menu_at(true, 3_050);
-        assert!(!take_menu_keyup_at(3_050 + MENU_RELEASE_GRACE_MS + 1));
+        assert!(!take_menu_keyup_at(3_050 + KEY_RELEASE_GRACE_MS + 1));
+    }
+
+    #[test]
+    fn remote_navigation_keys_are_suppressed_independently_while_ok_stays_native() {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+        clear_menu_suppression();
+        for vk in [VK_HOME, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_ESCAPE, VK_BROWSER_BACK] {
+            assert!(is_suppressed_remote_vk(vk));
+        }
+        assert!(!is_suppressed_remote_vk(VK_RETURN));
+
+        note_remote_key_at(VK_HOME, false, 5_000);
+        assert!(suppress_key_keydown_at(VK_HOME, 5_020));
+        assert!(!suppress_key_keydown_at(VK_LEFT, 5_020));
+        note_remote_key_at(VK_HOME, true, 5_050);
+        assert!(take_key_keyup_at(VK_HOME, 5_060));
+        assert!(!take_key_keyup_at(VK_HOME, 5_070));
     }
 }

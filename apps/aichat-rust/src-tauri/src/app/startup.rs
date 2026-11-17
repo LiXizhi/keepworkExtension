@@ -590,6 +590,8 @@ pub fn run() {
                 error
             });
             let main_win = main_win?;
+            #[cfg(windows)]
+            install_main_accelerator_guard(&main_win);
             super::pet_approval::observe_main(&main_win, Arc::clone(&core_for_setup));
             #[cfg(target_os = "macos")]
             super::pet_host::watch_main_narration_ok(&main_win)?;
@@ -835,6 +837,36 @@ fn finish_tauri_run(result: tauri::Result<()>) {
     // The CEF launcher exit protocol applies only to Windows. Preserve the
     // original failure message and panic unwinding on native WebView platforms.
     result.expect("error while running KeepWork 第二大脑 (aichat-rust)");
+}
+
+#[cfg(windows)]
+fn install_main_accelerator_guard(window: &tauri::WebviewWindow) {
+    use webview2_com::AcceleratorKeyPressedEventHandler;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        VK_APPS, VK_BROWSER_BACK, VK_BROWSER_REFRESH, VK_F5,
+    };
+
+    let _ = window.with_webview(|view| unsafe {
+        let controller = view.controller();
+        let mut token = 0;
+        let _ = controller.add_AcceleratorKeyPressed(
+            &AcceleratorKeyPressedEventHandler::create(Box::new(|_, args| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let mut vk = 0u32;
+                args.VirtualKey(&mut vk)?;
+                if matches!(
+                    vk as u16,
+                    VK_F5 | VK_BROWSER_REFRESH | VK_BROWSER_BACK | VK_APPS
+                ) {
+                    args.SetHandled(true)?;
+                }
+                Ok(())
+            })),
+            &mut token,
+        );
+    });
 }
 
 #[cfg(windows)]

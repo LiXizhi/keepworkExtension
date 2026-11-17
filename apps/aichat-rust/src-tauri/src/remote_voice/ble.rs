@@ -381,6 +381,8 @@ pub(super) async fn run(
                 "",
                 Some(peripheral.id().to_string()),
             );
+            #[cfg(target_os = "windows")]
+            ensure_windows_paired(service, generation, &peripheral, &cancel).await?;
             let result = connection(service, generation, &adapter, &peripheral, &cancel).await;
             service.dialogue.exit("disconnected");
             service.disarm(generation);
@@ -587,6 +589,41 @@ fn missing_atvv(empty: bool, previously_validated: bool) -> Failure {
         Failure::temporary("系统尚未恢复遥控器的语音服务，将重新连接。")
     } else {
         Failure::permanent("设备不提供完整的 ATVV 语音服务，请检查遥控器型号。")
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn ensure_windows_paired(
+    service: &RemoteVoice,
+    generation: u64,
+    peripheral: &Peripheral,
+    cancel: &watch::Receiver<bool>,
+) -> Result<(), Failure> {
+    use super::paired::{ensure_paired, PairOutcome};
+    let bytes = peripheral.address().into_inner();
+    let address = u64::from_be_bytes([0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]]);
+    let mut stop = cancel.clone();
+    let outcome = with_idle_buttons(service, generation, async {
+        tokio::select! {
+            biased;
+            _ = cancelled(&mut stop) => Err(Failure::permanent("已停止。")),
+            result = timeout(Duration::from_secs(15), ensure_paired(address)) => match result {
+                Ok(Ok(outcome)) => Ok(outcome),
+                Ok(Err(message)) => Err(Failure::temporary(&message)),
+                Err(_) => Err(Failure::temporary("蓝牙配对超时，请同时长按遥控器「主页 + 菜单」至快闪后重试。")),
+            }
+        }
+    })
+    .await?;
+    match outcome {
+        PairOutcome::AlreadyPaired => Ok(()),
+        PairOutcome::NewlyPaired => {
+            with_idle_buttons(service, generation, sleep(Duration::from_millis(400))).await;
+            Ok(())
+        }
+        PairOutcome::NeedsPairingMode => Err(Failure::temporary(
+            "遥控器尚未完成配对：请同时长按遥控器「主页 + 菜单」直到指示灯快闪，正在自动配对…",
+        )),
     }
 }
 

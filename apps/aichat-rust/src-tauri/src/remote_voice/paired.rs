@@ -396,11 +396,30 @@ mod platform {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PairOutcome {
+    AlreadyPaired,
+    NewlyPaired,
+    NeedsPairingMode,
+}
+
+#[cfg(target_os = "windows")]
+pub(super) async fn ensure_paired(address: u64) -> Result<PairOutcome, String> {
+    platform::ensure_paired(address).await
+}
+
+#[cfg(target_os = "windows")]
 mod platform {
-    use super::{canonical_mac, known_remote_name, InventoryError, PairedRemote};
+    use super::{canonical_mac, known_remote_name, InventoryError, PairOutcome, PairedRemote};
     use windows::core::{Interface, HSTRING};
-    use windows::Devices::{Bluetooth::BluetoothLEDevice, Enumeration::DeviceInformation};
-    use windows::Foundation::IPropertyValue;
+    use windows::Devices::{
+        Bluetooth::BluetoothLEDevice,
+        Enumeration::{
+            DeviceInformation, DeviceInformationCustomPairing, DevicePairingKinds,
+            DevicePairingRequestedEventArgs, DevicePairingResultStatus,
+        },
+    };
+    use windows::Foundation::{IPropertyValue, TypedEventHandler};
     fn error(error: windows::core::Error) -> InventoryError {
         if error.code().0 as u32 == 0x80070005 || error.code().0 as u32 == 0x80070522 {
             "系统拒绝读取已配对蓝牙设备，请检查蓝牙隐私权限后手动开启语音输入。".into()
@@ -487,6 +506,60 @@ mod platform {
             });
         }
         Ok(candidates)
+    }
+
+    fn pair_error(error: windows::core::Error) -> String {
+        if error.code().0 as u32 == 0x80070005 || error.code().0 as u32 == 0x80070522 {
+            "系统拒绝蓝牙配对，请检查 Keepwork 蓝牙权限后重试。".into()
+        } else {
+            "蓝牙配对暂时不可用，请按住遥控器「主页 + 菜单」至快闪后重试。".into()
+        }
+    }
+
+    pub(super) async fn ensure_paired(address: u64) -> Result<PairOutcome, String> {
+        let device = BluetoothLEDevice::FromBluetoothAddressAsync(address)
+            .map_err(pair_error)?
+            .await
+            .map_err(pair_error)?;
+        let pairing = device
+            .DeviceInformation()
+            .map_err(pair_error)?
+            .Pairing()
+            .map_err(pair_error)?;
+        if pairing.IsPaired().map_err(pair_error)? {
+            return Ok(PairOutcome::AlreadyPaired);
+        }
+        if !pairing.CanPair().map_err(pair_error)? {
+            return Ok(PairOutcome::NeedsPairingMode);
+        }
+        let custom = pairing.Custom().map_err(pair_error)?;
+        let token = custom
+            .PairingRequested(&TypedEventHandler::<
+                DeviceInformationCustomPairing,
+                DevicePairingRequestedEventArgs,
+            >::new(|_sender, args| {
+                if let Some(args) = args.as_ref() {
+                    if args.PairingKind()? == DevicePairingKinds::ConfirmOnly {
+                        args.Accept()?;
+                    }
+                }
+                Ok(())
+            }))
+            .map_err(pair_error)?;
+        let result = custom
+            .PairAsync(DevicePairingKinds::ConfirmOnly)
+            .map_err(|err| {
+                let _ = custom.RemovePairingRequested(token);
+                pair_error(err)
+            })?
+            .await;
+        let _ = custom.RemovePairingRequested(token);
+        let status = result.map_err(pair_error)?.Status().map_err(pair_error)?;
+        match status {
+            DevicePairingResultStatus::Paired => Ok(PairOutcome::NewlyPaired),
+            DevicePairingResultStatus::AlreadyPaired => Ok(PairOutcome::AlreadyPaired),
+            _ => Ok(PairOutcome::NeedsPairingMode),
+        }
     }
 }
 

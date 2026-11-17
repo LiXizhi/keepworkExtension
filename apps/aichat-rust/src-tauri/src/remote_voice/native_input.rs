@@ -137,7 +137,8 @@ impl NativeInput {
         })
     }
 
-    /// Arm device-scoped remote button guards without reserving global F5 yet.
+    /// Arm device-scoped remote button guards and reserve F5 for the active session
+    /// so pressing the remote voice key while scanning/reconnecting never reloads the page.
     pub fn enable_remote_buttons(&self) -> Result<(), String> {
         #[cfg(windows)]
         {
@@ -160,16 +161,11 @@ impl NativeInput {
         Ok(())
     }
 
-    /// Release F5 on BLE disconnect while keeping Windows remote Menu/Home active
-    /// across reconnects until the user stops the session.
+    /// Keep F5 and remote button guards active across reconnects until the user stops.
     pub fn disarm_ptt(&self) {
         #[cfg(windows)]
         {
             self.enabled.store(false, Ordering::Release);
-            if let Ok(_gate) = self.gate.lock() {
-                self.enabled.store(false, Ordering::Release);
-                self.platform.release_f5();
-            }
         }
         #[cfg(not(windows))]
         {
@@ -374,7 +370,7 @@ mod platform {
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-        VK_APPS, VK_BACK, VK_CONTROL, VK_F5, VK_RETURN,
+        VK_BACK, VK_BROWSER_BACK, VK_CONTROL, VK_F5, VK_RETURN,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, CreateWindowExW, DestroyWindow, GetAncestor, GetClassNameW,
@@ -408,13 +404,18 @@ mod platform {
                 return 1;
             }
             if MENU_GUARD.load(Ordering::Acquire)
-                && kb.vkCode == VK_APPS as u32
+                && kb.vkCode < 256
                 && kb.flags & LLKHF_INJECTED == 0
+                && super::super::home_windows::is_suppressed_remote_vk(kb.vkCode as u16)
             {
+                let vk = kb.vkCode as u16;
+                if vk == VK_BROWSER_BACK && super::super::home_windows::has_unique_remote() {
+                    return 1;
+                }
                 let suppress = if kb.flags & LLKHF_UP != 0 {
-                    super::super::home_windows::take_menu_keyup_suppression()
+                    super::super::home_windows::take_key_keyup_suppression(vk)
                 } else {
-                    super::super::home_windows::should_suppress_menu_keydown()
+                    super::super::home_windows::should_suppress_key_keydown(vk)
                 };
                 if suppress {
                     return 1;
@@ -512,11 +513,12 @@ mod platform {
             }
         }
         pub fn enable_menu_guard(&self) -> Result<(), String> {
-            self.ensure_hook(false)
+            self.ensure_hook(true)
         }
         pub fn start(&self) -> Result<(), String> {
             self.ensure_hook(true)
         }
+        #[allow(dead_code)]
         pub fn release_f5(&self) {
             RESERVED.store(false, Ordering::Release);
         }
