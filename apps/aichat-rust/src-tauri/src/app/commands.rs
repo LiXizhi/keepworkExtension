@@ -19,7 +19,7 @@ use crate::APP_VERSION;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 #[tauri::command]
 pub(super) fn desktop_report_startup_signin(
@@ -334,6 +334,17 @@ pub(super) fn desktop_titlebar_action(
     Ok(true)
 }
 
+pub(super) fn sync_secondary_windows_theme(app: &AppHandle, theme: DesktopTheme) {
+    let script = theme.document_theme_script();
+    for label in ["remote-voice", "updates"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.set_theme(Some(theme.native()));
+            let _ = window.set_background_color(Some(theme.background()));
+            let _ = window.eval(&script);
+        }
+    }
+}
+
 #[tauri::command]
 pub(super) fn desktop_sync_theme(
     window: WebviewWindow,
@@ -355,6 +366,7 @@ pub(super) fn desktop_sync_theme(
     };
     let _ = window.set_theme(Some(theme.native()));
     let _ = window.set_background_color(Some(theme.background()));
+    sync_secondary_windows_theme(window.app_handle(), theme);
     Ok(true)
 }
 

@@ -376,7 +376,11 @@ fn verify(window: &WebviewWindow) -> Result<(), String> {
 }
 
 pub(super) fn open_remote_voice_window(app: &AppHandle) {
+    let theme = app.state::<Arc<AppCore>>().theme.current();
     if let Some(window) = app.get_webview_window("remote-voice") {
+        let _ = window.set_theme(Some(theme.native()));
+        let _ = window.set_background_color(Some(theme.background()));
+        let _ = window.eval(theme.document_theme_script());
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -397,7 +401,32 @@ pub(super) fn show_voice_setup_if_focused(app: &AppHandle) -> bool {
     build_voice_settings(app, false).is_ok()
 }
 
+fn voice_settings_inner_height(app: &AppHandle) -> f64 {
+    const TARGET_HEIGHT: f64 = 760.0;
+    const MIN_HEIGHT: f64 = 480.0;
+    const CHROME_AND_MARGIN: f64 = 96.0;
+
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return TARGET_HEIGHT;
+    };
+    let scale = monitor.scale_factor();
+    if !scale.is_finite() || scale <= 0.0 {
+        return TARGET_HEIGHT;
+    }
+    let work_height = monitor.work_area().size.to_logical::<f64>(scale).height;
+    if !work_height.is_finite() || work_height <= 0.0 {
+        return TARGET_HEIGHT;
+    }
+    TARGET_HEIGHT.min((work_height - CHROME_AND_MARGIN).max(MIN_HEIGHT))
+}
+
 fn build_voice_settings(app: &AppHandle, focus: bool) -> tauri::Result<WebviewWindow> {
+    let height = voice_settings_inner_height(app);
+    let theme = app.state::<Arc<AppCore>>().theme.current();
     WebviewWindowBuilder::new(
         app,
         "remote-voice",
@@ -405,8 +434,11 @@ fn build_voice_settings(app: &AppHandle, focus: bool) -> tauri::Result<WebviewWi
     )
     .focused(focus)
     .title("遥控器语音输入")
-    .inner_size(620.0, 560.0)
+    .inner_size(620.0, height)
     .min_inner_size(480.0, 480.0)
+    .theme(Some(theme.native()))
+    .background_color(theme.background())
+    .initialization_script(&theme.document_theme_script())
     .on_navigation(|url| trusted_voice_settings("remote-voice", url))
     .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
     .build()

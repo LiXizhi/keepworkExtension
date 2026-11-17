@@ -129,3 +129,23 @@ test("voice settings explain cloud processing and expose only native device cont
   assert.match(html, /frame-src 'none'/);
   assert.match(html, /不会自动.*回车|不.*自动.*发送/);
 });
+
+test("remote-voice and updates windows follow desktop theme instead of OS dark mode", () => {
+  const voiceHost = read("src-tauri/src/app/remote_voice_host.rs");
+  const updatesHost = read("src-tauri/src/app/updates_window.rs");
+  const commands = read("src-tauri/src/app/commands.rs");
+  const voiceCss = read("src/remote-voice.css");
+  const updatesCss = read("src/updates.css");
+
+  for (const host of [voiceHost, updatesHost]) {
+    assert.match(host, /\.theme\(Some\(theme\.native\(\)\)\)/);
+    assert.match(host, /\.background_color\(theme\.background\(\)\)/);
+    assert.match(host, /\.initialization_script\(&theme\.document_theme_script\(\)\)/);
+  }
+  assert.match(commands, /sync_secondary_windows_theme\(window\.app_handle\(\), theme\)/);
+  assert.match(voiceCss, /:root\[data-theme="light"\]\s*\{\s*color-scheme:\s*light;\s*\}/);
+  assert.match(voiceCss, /:root\[data-theme="dark"\]\s*\{[^}]*color-scheme:\s*dark;/);
+  assert.match(voiceCss, /:root:not\(\[data-theme="light"\]\)/);
+  assert.match(updatesCss, /:root\[data-theme="light"\]\s*\{\s*color-scheme:\s*light;\s*\}/);
+  assert.match(updatesCss, /:root\[data-theme="dark"\]\s*\{\s*color-scheme:\s*dark;\s*\}/);
+});

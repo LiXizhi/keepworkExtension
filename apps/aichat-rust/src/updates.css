@@ -2,6 +2,12 @@
   color-scheme: light dark;
   font: 14px/1.5 system-ui, -apple-system, sans-serif;
 }
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
 body {
   margin: 28px;
   color: light-dark(#252936, #e5e7ef);

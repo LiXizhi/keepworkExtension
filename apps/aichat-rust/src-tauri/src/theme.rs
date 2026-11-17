@@ -36,6 +36,20 @@ impl DesktopTheme {
             Self::Dark => tauri::window::Color(24, 24, 31, 255),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn document_theme_script(self) -> String {
+        format!(
+            "document.documentElement.dataset.theme = {:?};",
+            self.as_str()
+        )
+    }
 }
 
 pub struct ThemePreference {
@@ -223,6 +237,14 @@ mod tests {
             assert_eq!(theme.native(), native);
             let tauri::window::Color(r, g, b, a) = theme.background();
             assert_eq!((r, g, b, a), rgba);
+            assert_eq!(theme.as_str(), if dark { "dark" } else { "light" });
+            assert_eq!(
+                theme.document_theme_script(),
+                format!(
+                    "document.documentElement.dataset.theme = {:?};",
+                    if dark { "dark" } else { "light" }
+                )
+            );
         }
     }
 }
