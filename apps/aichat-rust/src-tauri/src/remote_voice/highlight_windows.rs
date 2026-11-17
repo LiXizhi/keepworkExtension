@@ -1270,16 +1270,11 @@ mod tests {
             right: 642,
             bottom: 718,
         };
-        // compact_dot_bounds would park the dots inside the tiny caret strip;
-        // the cue must instead sit just past the caret, where text appears next.
+        // compact_dot_bounds refuses the tiny caret strip (nothing fits inside
+        // it), so without caret handling the cue fell back to the mouse cursor.
         assert!(is_caret(caret));
-        let compact = compact_dot_bounds(caret, work).unwrap();
-        assert!(compact.right <= caret.right);
-        let anchored = if is_caret(caret) {
-            dot_bounds(caret.right, caret.bottom, work).unwrap()
-        } else {
-            compact
-        };
+        assert!(compact_dot_bounds(caret, work).is_none());
+        let anchored = dot_bounds(caret.right, caret.bottom, work).unwrap();
         assert_eq!(anchored.left, caret.right + 16);
         assert_eq!(anchored.top, caret.bottom + 20);
         // A wide Edit field keeps the compact inside-the-field placement.
