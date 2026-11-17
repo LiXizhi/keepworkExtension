@@ -77,6 +77,53 @@ static FEEDBACK: Mutex<Feedback> = Mutex::new(Feedback {
     phase: None,
     transcript: String::new(),
 });
+
+// Set KEEPWORK_VOICE_DEBUG=1 to dump one probe report per press to
+// %TEMP%\keepwork_voice_probe.txt while diagnosing anchoring issues.
+fn probe_debug() -> Option<std::fs::File> {
+    use std::sync::atomic::AtomicU8;
+    static ENABLED: AtomicU8 = AtomicU8::new(0);
+    match ENABLED.load(Ordering::Acquire) {
+        2 => return None,
+        1 => {}
+        _ => {
+            let enabled = std::env::var_os("KEEPWORK_VOICE_DEBUG").is_some();
+            ENABLED.store(if enabled { 1 } else { 2 }, Ordering::Release);
+            if !enabled {
+                return None;
+            }
+        }
+    }
+    let path = std::env::temp_dir().join("keepwork_voice_probe.txt");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
+// Write every distinct line once per press, plus re-emit the same line if it
+// persists for over a second, so a hold shows how the UIA focus state evolves.
+fn probe_report(id: u64, line: &str) {
+    use std::io::Write;
+    static LAST: Mutex<Option<(u64, String, Instant)>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap();
+        let dominated = last
+            .as_ref()
+            .map(|(prev, text, at)| {
+                *prev == id && text == line && at.elapsed() < Duration::from_secs(1)
+            })
+            .unwrap_or(false);
+        if dominated {
+            return;
+        }
+        *last = Some((id, line.to_string(), Instant::now()));
+    }
+    if let Some(mut file) = probe_debug() {
+        let _ = writeln!(file, "[press {id}] {line}");
+    }
+}
 struct Workers {
     probe: thread::Thread,
     frames: mpsc::Sender<Option<Frame>>,
@@ -157,6 +204,11 @@ impl Workers {
                         let target = automation
                             .as_ref()
                             .and_then(|(uia, cache)| unsafe { focused_target(uia, cache) });
+                        if let Some(report) = target.as_ref().map(|t| t.report.clone()) {
+                            probe_report(id, &report);
+                        } else {
+                            probe_report(id, "focused_target: none");
+                        }
                         if sender
                             .send(Some(Frame {
                                 id,
@@ -196,6 +248,8 @@ unsafe fn automation() -> windows::core::Result<(IUIAutomation2, IUIAutomationCa
         UIA_ControlTypePropertyId,
         UIA_BoundingRectanglePropertyId,
         UIA_ValueIsReadOnlyPropertyId,
+        UIA_ClassNamePropertyId,
+        UIA_NamePropertyId,
     ] {
         cache.AddProperty(property)?;
     }
@@ -238,7 +292,7 @@ impl From<RECT> for Bounds {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
     foreground: usize,
     focus: usize,
@@ -247,6 +301,8 @@ struct Target {
     // field, so the red outline stays a small caret frame instead of
     // shrinking around the caret strip.
     caret: bool,
+    // One-line UIA trace, written once per press when KEEPWORK_VOICE_DEBUG=1.
+    report: String,
 }
 struct Frame {
     id: u64,
@@ -308,11 +364,23 @@ unsafe fn focused_target(
 ) -> Option<Target> {
     let (foreground, info) = gui_focus()?;
     let el = uia.GetFocusedElementBuildCache(cache).ok()?;
-    if !el.CachedHasKeyboardFocus().ok()?.as_bool()
-        || !el.CachedIsEnabled().ok()?.as_bool()
-        || el.CachedIsOffscreen().ok()?.as_bool()
-        || el.CachedIsPassword().ok()?.as_bool()
+    let focus = el.CachedHasKeyboardFocus().map(|b| b.as_bool());
+    let enabled = el.CachedIsEnabled().map(|b| b.as_bool());
+    let offscreen = el.CachedIsOffscreen().map(|b| b.as_bool());
+    let password = el.CachedIsPassword().map(|b| b.as_bool());
+    let class = el.CachedClassName().map(|s| s.to_string());
+    let name = el.CachedName().map(|s| s.to_string());
+    if !matches!(focus, Ok(true))
+        || !matches!(enabled, Ok(true))
+        || matches!(offscreen, Ok(true))
+        || matches!(password, Ok(true))
     {
+        probe_report(
+            ACTIVE.load(Ordering::Acquire),
+            &format!(
+                "rejected focus state: focus={focus:?} enabled={enabled:?} offscreen={offscreen:?} password={password:?} class={class:?} name={name:?}"
+            ),
+        );
         return None;
     }
     let role = el.CachedControlType().ok()?;
@@ -324,16 +392,12 @@ unsafe fn focused_target(
     ]
     .contains(&role)
     {
+        probe_report(ACTIVE.load(Ordering::Acquire), &format!("focused_target: rejected role {role:?}"));
         return None;
     }
     let value = el
         .GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
         .ok();
-    if let Some(value) = &value {
-        if value.CachedIsReadOnly().ok()?.as_bool() {
-            return None;
-        }
-    }
     let mut frame = RECT::default();
     if GetWindowRect(foreground, &mut frame) == 0 {
         return None;
@@ -354,17 +418,44 @@ unsafe fn focused_target(
     // Prefer the real text insertion point: the UIA TextPattern selection
     // works in Chromium editors (Cursor, VS Code, Chrome) that never create
     // a Win32 caret, and keeps the voice cue next to the text cursor.
-    let text_caret = text_caret_bounds(&el).and_then(|b| b.clipped(area));
+    // The subtree walk needs a live element: a cache-built element (from
+    // GetFocusedElementBuildCache) enumerates zero children cross-process.
+    let live = uia.GetFocusedElement().ok();
+    let (text_caret_raw, text_trace) = match live.as_ref() {
+        Some(live) => text_caret_bounds(uia, live),
+        None => text_caret_bounds(uia, &el),
+    };
+    let text_caret = text_caret_raw.and_then(|b| caret_clipped(b, area));
     let caret = text_caret.is_some();
+    // CodeMirror and Monaco mark their hidden textarea read-only even while it
+    // accepts input; only honor the read-only flag when no editable surface
+    // (a TextPattern caret or a usable field) was found.
+    let readonly = value
+        .as_ref()
+        .and_then(|v| v.CachedIsReadOnly().ok())
+        .map(|b| b.as_bool())
+        .unwrap_or(false);
+    if readonly && !caret && field.is_none() {
+        probe_report(ACTIVE.load(Ordering::Acquire), &format!("focused_target: rejected readonly, trace={text_trace}"));
+        return None;
+    }
     let bounds = text_caret
         .or(field)
         .or_else(|| caret_bounds(&info)?.clipped(area))?;
+    let report = format!(
+        "role={role:?} value={} readonly={readonly} text={:?} field={:?} caret={:?} chosen={bounds:?} trace={text_trace}",
+        value.is_some(),
+        text_caret,
+        field,
+        caret_bounds(&info).and_then(|b| b.clipped(area)),
+    );
     let (current, after) = gui_focus()?;
     (current == foreground && after.hwndFocus == info.hwndFocus).then_some(Target {
         foreground: foreground as usize,
         focus: info.hwndFocus as usize,
         bounds,
         caret,
+        report,
     })
 }
 
@@ -588,13 +679,12 @@ unsafe fn bounding_rectangles(array: *const SAFEARRAY, out: &mut Vec<Bounds>) ->
     !out.is_empty()
 }
 
-// Chromium editors expose their text cursor through the UIA TextPattern
-// selection rather than a Win32 caret. Ask the focused element for its
-// TextPattern selection and use the last rectangle of the last selection
-// range — that is where new text will be inserted.
-unsafe fn text_caret_bounds(el: &IUIAutomationElement) -> Option<Bounds> {
+// Read the TextPattern selection of one element. Descendants must be probed
+// with the live (non-cached) pattern because the cache request only applies
+// to the focused root.
+unsafe fn selection_caret(el: &IUIAutomationElement) -> Option<Bounds> {
     let pattern = el
-        .GetCachedPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+        .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
         .ok()?;
     let selection = pattern.GetSelection().ok()?;
     let length = selection.Length().ok()?;
@@ -607,16 +697,99 @@ unsafe fn text_caret_bounds(el: &IUIAutomationElement) -> Option<Bounds> {
     if !bounding_rectangles(rects, &mut out) {
         return None;
     }
-    // A multi-line selection reports one rectangle per line; the caret sits at
-    // the end of the last one. Keep only that rectangle, shrunk to caret size
-    // so callers treat it like caret_dot_bounds expects.
+    // A zero-width selection (a caret) can still report one rectangle per
+    // visual line; the insertion point is the START of the last line's rect.
+    // A real selection reports the highlighted text, and its active end (where
+    // the user is editing) is the END of the last rect. Keep a natural 2px
+    // caret so the dots anchor right at the cursor.
     let last = *out.last()?;
+    let width = last.right.saturating_sub(last.left);
+    let caret_left = if width <= 4 { last.left } else { last.right.saturating_sub(2) };
     Some(Bounds {
-        left: last.left,
+        left: caret_left,
         top: last.top,
-        right: (last.left + 2).min(last.right),
+        right: (caret_left + 2).min(last.right.max(caret_left + 2)),
         bottom: last.bottom,
     })
+}
+
+// `Bounds::clipped` rejects anything narrower than 6px, which would drop a
+// freshly found caret strip. Clip the caret into the window with a caret-wide
+// tolerance so the insertion point survives.
+fn caret_clipped(caret: Bounds, area: Bounds) -> Option<Bounds> {
+    let result = Bounds {
+        left: caret.left.max(area.left),
+        top: caret.top.max(area.top),
+        right: caret.right.min(area.right),
+        bottom: caret.bottom.min(area.bottom),
+    };
+    let width = result.right.checked_sub(result.left)?;
+    let height = result.bottom.checked_sub(result.top)?;
+    (width >= 1 && height >= 6).then_some(result)
+}
+
+// Chromium editors expose their text cursor through the UIA TextPattern
+// selection rather than a Win32 caret. CodeMirror and Monaco keep the real
+// editable control (and its TextPattern) on a descendant of the focused
+// element, so walk the subtree until a selection appears.
+unsafe fn text_caret_bounds(
+    uia: &IUIAutomation2,
+    el: &IUIAutomationElement,
+) -> (Option<Bounds>, String) {
+    if let Some(bounds) = selection_caret(el) {
+        return (Some(bounds), String::from("root has selection"));
+    }
+    let mut trace = String::new();
+    let Some(walker) = uia.RawViewWalker().ok() else {
+        return (None, String::from("no walker"));
+    };
+    let mut queue: std::collections::VecDeque<IUIAutomationElement> =
+        std::collections::VecDeque::new();
+    match walker.GetFirstChildElement(el) {
+        Ok(first) => {
+            let mut child = Some(first);
+            while let Some(c) = child {
+                let next = walker.GetNextSiblingElement(&c).ok();
+                queue.push_back(c);
+                child = next;
+            }
+        }
+        Err(e) => {
+            return (None, format!("no children: {e:?}"));
+        }
+    }
+    let seeded = queue.len();
+    let mut visited = 0usize;
+    while let Some(node) = queue.pop_front() {
+        visited += 1;
+        if visited > 64 {
+            break;
+        }
+        if trace.len() < 600 {
+            let role = node
+                .CurrentControlType()
+                .map(|r| format!("{r:?}"))
+                .unwrap_or_else(|_| String::from("?"));
+            let class = node
+                .CurrentClassName()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let has_text = node
+                .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                .is_ok();
+            trace.push_str(&format!(" [{visited}]{role}/{class}/text={has_text}"));
+        }
+        if let Some(bounds) = selection_caret(&node) {
+            return (Some(bounds), format!("descendant {visited}"));
+        }
+        let mut child = walker.GetFirstChildElement(&node).ok();
+        while let Some(c) = child {
+            let next = walker.GetNextSiblingElement(&c).ok();
+            queue.push_back(c);
+            child = next;
+        }
+    }
+    (None, format!("seeded {seeded} visited {visited}:{trace}"))
 }
 
 // Chromium editors expose a tiny caret rectangle instead of an Edit control.
@@ -1095,11 +1268,14 @@ fn paint_frames(rx: mpsc::Receiver<Option<Frame>>) {
             // if a provider stalls or focus changes while recognition is running.
             let brief = matches!(cue, Cue::Outline)
                 || last_observed.elapsed() <= Duration::from_millis(350);
-            let field = latest_field.filter(|_| brief).and_then(|(_, target)| {
-                let (fg, info) = gui_focus()?;
-                (fg as usize == target.foreground && info.hwndFocus as usize == target.focus)
-                    .then_some(target.bounds)
-            });
+            let field = latest_field
+                .as_ref()
+                .filter(|_| brief)
+                .and_then(|(_, target)| {
+                    let (fg, info) = gui_focus()?;
+                    (fg as usize == target.foreground && info.hwndFocus as usize == target.focus)
+                        .then_some(target.bounds)
+                });
             let icon = clock
                 .and_then(|(_, phase, began, animate)| {
                     phase
@@ -1259,9 +1435,10 @@ mod tests {
                 bottom: 60,
             },
             caret: false,
+            report: String::new(),
         };
-        let a = Some((1, target));
-        let b = Some((2, target));
+        let a = Some((1, target.clone()));
+        let b = Some((2, target.clone()));
         let frame = |id, target| {
             Some(Frame {
                 id,
@@ -1269,13 +1446,19 @@ mod tests {
                 observed: Instant::now(),
             })
         };
-        assert_eq!(next_target(0, a, frame(1, Some(target))), None);
-        assert_eq!(next_target(2, a, None), None);
-        assert_eq!(next_target(2, a, frame(1, None)), None);
-        assert_eq!(next_target(2, a, frame(1, Some(target))), None);
-        assert_eq!(next_target(2, a, frame(2, Some(target))), b);
-        assert_eq!(next_target(2, b, frame(1, None)), b);
-        assert_eq!(next_target(2, b, frame(2, None)), None);
+        assert_eq!(next_target(0, a.clone(), frame(1, Some(target.clone()))), None);
+        assert_eq!(next_target(2, a.clone(), None), None);
+        assert_eq!(next_target(2, a.clone(), frame(1, None)), None);
+        assert_eq!(
+            next_target(2, a.clone(), frame(1, Some(target.clone()))),
+            None
+        );
+        assert_eq!(
+            next_target(2, a.clone(), frame(2, Some(target.clone()))),
+            b.clone()
+        );
+        assert_eq!(next_target(2, b.clone(), frame(1, None)), b.clone());
+        assert_eq!(next_target(2, b.clone(), frame(2, None)), None);
     }
 
     #[test]
