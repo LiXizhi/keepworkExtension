@@ -7,6 +7,39 @@ const os = require('node:os');
 const path = require('node:path');
 const execute = promisify(execFile);
 
+// Isolate authorization/receipt time from hidden WebKit scheduling. Editing,
+// microtasks and the native pause bridge still run in the real browser. Advance
+// this clock explicitly when testing expiry and the production cleanup timer.
+function installFixtureClock() {
+  const originalNow = Date.now;
+  const originalSetTimeout = window.setTimeout;
+  const originalClearTimeout = window.clearTimeout;
+  let now = originalNow(), nextTimer = 0;
+  const timers = new Map();
+  Date.now = () => now;
+  window.setTimeout = (callback, delay = 0, ...args) => {
+    const id = ++nextTimer;
+    timers.set(id, { at: now + Math.max(0, Number(delay) || 0), callback, args });
+    return id;
+  };
+  window.clearTimeout = id => timers.delete(id);
+  return {
+    advance(milliseconds) {
+      if (!Number.isFinite(milliseconds) || milliseconds < 0) throw Error('invalid fixture clock advance');
+      now += milliseconds;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at <= now) { timers.delete(id); timer.callback(...timer.args); }
+      }
+    },
+    restore() {
+      Date.now = originalNow;
+      window.setTimeout = originalSetTimeout;
+      window.clearTimeout = originalClearTimeout;
+      timers.clear();
+    },
+  };
+}
+
 // The text-only .value adapter mirrors AIChat's inline composer contract:
 // BR serializes as newline, file chips stay out of ordinary text, and zero
 // width caret sentinels are not part of the draft. No adjacent app is imported.
@@ -291,8 +324,71 @@ async function checkMainDelivery(insertSource, verifySource, clearSource) {
   return 'main composer direct delivery passed';
 }
 
+async function checkDeliveryDeadlines(insertSource, verifySource, clockSource) {
+  const check = (condition, message) => { if (!condition) throw Error(message); };
+  const insert = eval('(' + insertSource + ')');
+  const verify = eval('(' + verifySource + ')');
+  Object.defineProperty(document, 'hasFocus', { value: () => true });
+  const setup = () => {
+    document.body.innerHTML = '<button id="toolbar">Tools</button>' +
+      '<div id="chatInput" contenteditable="true" style="white-space:pre-wrap">Seed </div>';
+    const editor = document.getElementById('chatInput');
+    Object.defineProperty(editor, 'value', { get: () => editor.textContent });
+    const state = { editor, model: 'Seed ', events: 0 };
+    editor.addEventListener('input', event => {
+      check(event.isTrusted, 'deadline fixture did not use real WebKit editing');
+      state.model = editor.value; state.events++;
+    });
+    document.getElementById('toolbar').focus();
+    return state;
+  };
+  let sequence = 0;
+  const request = () => ({ id: 'deadline-' + ++sequence, text: 'Windows\r\n换行',
+    page: location.href, expires: Date.now() + 1000 });
+  const delayedPause = async () => {
+    const start = performance.now();
+    await window.__keepworkFixturePause(1100);
+    check(performance.now() - start >= 1000, 'native fixture did not reproduce a delay beyond the request lifetime');
+  };
+
+  // Reproduce the original failure with a controlled native delay rather than
+  // depending on a busy CI runner. The unchanged verifier must fail closed.
+  let state = setup(), req = request();
+  check(insert(req) === 1 && state.model === 'Seed Windows\n换行', 'real-clock edit did not enter verification');
+  await delayedPause();
+  check(Date.now() > req.expires && verify(req) === -1, 'late wall-clock acknowledgement was accepted');
+  check(state.editor.value === 'Seed Windows\n换行', 'late verification changed or replayed the edit');
+
+  const clock = eval('(' + clockSource + ')')();
+  try {
+    state = setup(); req = request();
+    const started = Date.now();
+    check(insert(req) === 1, 'controlled-clock edit did not enter verification');
+    await delayedPause();
+    check(Date.now() === started && verify(req) === 1 && state.model === 'Seed Windows\n换行',
+      'hidden WebKit scheduling consumed the controlled authorization lifetime');
+
+    state = setup(); req = { ...request(), expires: Date.now() - 1 };
+    check(insert(req) === -1 && state.editor.value === 'Seed ' && state.events === 0,
+      'an already-expired request edited the draft');
+
+    req = request();
+    check(insert(req) === 1, 'could not prepare the late-verification receipt');
+    const events = state.events;
+    clock.advance(1001);
+    const receipts = window.__keepworkComposerDeliveryV1;
+    check(receipts.has(req.id) && verify(req) === -1, 'expired pending receipt was accepted');
+    const renewed = { ...req, expires: Date.now() + 1000 };
+    check(verify(renewed) === -1 && insert(renewed) === -1 && state.events === events &&
+      state.editor.value === 'Seed Windows\n换行', 'failed acknowledgement was renewed or replayed');
+    clock.advance(200);
+    check(!receipts.has(req.id) && verify(req) === -1, 'production receipt cleanup did not run at its deadline');
+  } finally { clock.restore(); }
+  return 'main composer deterministic deadlines passed';
+}
+
 function mainHistoryStages(insert, verify, clear) {
-  const stages = [String.raw`
+  const stages = [`(${installFixtureClock})();` + String.raw`
     Object.defineProperty(document,'hasFocus',{value:()=>true});
     document.body.innerHTML='<button id="toolbar">Tools</button><div id="chatInput" contenteditable="true" style="white-space:pre-wrap">上一段原草稿😀</div>';
     window.edit=document.getElementById('chatInput');edit._fileMentionAdapter=true;window.model='';window.events=[];
@@ -344,8 +440,13 @@ async function runFixture(buildScript, expected, staged = false) {
 
 test('main composer direct delivery verifies real WebKit editing, adapter/selection and blocked outcomes', {
   skip: process.platform !== 'darwin', timeout: 50000,
-}, () => runFixture((...sources) => `return await (${checkMainDelivery})(${sources.map(JSON.stringify).join(',')});`,
+}, () => runFixture((...sources) => `(${installFixtureClock})();return await (${checkMainDelivery})(${sources.map(JSON.stringify).join(',')});`,
   'main composer direct delivery passed'));
+
+test('main composer controls hidden WebKit scheduling while rejecting expired and replayed delivery', {
+  skip: process.platform !== 'darwin', timeout: 50000,
+}, () => runFixture((insert, verify) => `return await (${checkDeliveryDeadlines})(${[insert, verify, String(installFixtureClock)].map(JSON.stringify).join(',')});`,
+  'main composer deterministic deadlines passed'));
 
 test('main composer keeps native Undo/Redo text exact and later file chips at the editor root', {
   skip: process.platform !== 'darwin', timeout: 50000,

@@ -13,14 +13,16 @@
 @end
 @implementation MainComposerFixture
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
-    if (!message.frameInfo.mainFrame || ![message.body isKindOfClass:NSNumber.class]) return;
-    NSNumber *identifier = message.body;
+    if (!message.frameInfo.mainFrame || ![message.body isKindOfClass:NSDictionary.class]) return;
+    NSNumber *identifier = message.body[@"id"], *delay = message.body[@"delayMs"];
+    if (![identifier isKindOfClass:NSNumber.class] || ![delay isKindOfClass:NSNumber.class] ||
+        delay.longLongValue < 0 || delay.unsignedLongLongValue > 1500) return;
     if (identifier.unsignedLongLongValue > 10000) return;
     __weak WKWebView *view = message.webView;
     // The production host's second phase runs on its native runtime timer.
-    // Hidden pages throttle DOM setTimeout to 1s even with inactive scheduling
-    // disabled, so mirror that native scheduling without extending deadlines.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 18 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    // This remains a real native tick even when JavaScript's business timers
+    // use the fixture clock. Tests can request a bounded delay beyond expiry.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay.longLongValue * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         [view evaluateJavaScript:[NSString stringWithFormat:@"window.__keepworkFixtureTickReply(%llu)",
             identifier.unsignedLongLongValue] completionHandler:nil];
     });
@@ -74,8 +76,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     configuration.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
     [configuration.userContentController addScriptMessageHandler:runner name:@"fixtureTick"];
     NSString *ticks = @"(() => {let next=0;const pending=new Map();"
-        "window.__keepworkFixturePause=()=>new Promise(resolve=>{const id=++next;pending.set(id,resolve);"
-        "window.webkit.messageHandlers.fixtureTick.postMessage(id)});"
+        "window.__keepworkFixturePause=(delayMs=18)=>new Promise(resolve=>{const id=++next;pending.set(id,resolve);"
+        "window.webkit.messageHandlers.fixtureTick.postMessage({id,delayMs})});"
         "window.__keepworkFixtureTickReply=id=>{const resolve=pending.get(id);pending.delete(id);resolve?.()};})()";
     [configuration.userContentController addUserScript:[[WKUserScript alloc] initWithSource:ticks
         injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
