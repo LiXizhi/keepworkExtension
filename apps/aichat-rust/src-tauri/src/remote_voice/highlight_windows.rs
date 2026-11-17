@@ -7,6 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    SAFEARRAY,
+};
+use windows::Win32::System::Ole::{
+    SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
 };
 use windows::Win32::UI::Accessibility::*;
 use windows_sys::Win32::{
@@ -196,6 +200,8 @@ unsafe fn automation() -> windows::core::Result<(IUIAutomation2, IUIAutomationCa
         cache.AddProperty(property)?;
     }
     cache.AddPattern(UIA_ValuePatternId)?;
+    cache.AddPattern(UIA_TextPatternId)?;
+    cache.AddProperty(UIA_IsTextPatternAvailablePropertyId)?;
     Ok((uia, cache))
 }
 
@@ -237,6 +243,10 @@ struct Target {
     foreground: usize,
     focus: usize,
     bounds: Bounds,
+    // True when `bounds` is the text insertion point rather than the whole
+    // field, so the red outline stays a small caret frame instead of
+    // shrinking around the caret strip.
+    caret: bool,
 }
 struct Frame {
     id: u64,
@@ -341,12 +351,20 @@ unsafe fn focused_target(
             .clipped(area)
         })
         .flatten();
-    let bounds = field.or_else(|| caret_bounds(&info)?.clipped(area))?;
+    // Prefer the real text insertion point: the UIA TextPattern selection
+    // works in Chromium editors (Cursor, VS Code, Chrome) that never create
+    // a Win32 caret, and keeps the voice cue next to the text cursor.
+    let text_caret = text_caret_bounds(&el).and_then(|b| b.clipped(area));
+    let caret = text_caret.is_some();
+    let bounds = text_caret
+        .or(field)
+        .or_else(|| caret_bounds(&info)?.clipped(area))?;
     let (current, after) = gui_focus()?;
     (current == foreground && after.hwndFocus == info.hwndFocus).then_some(Target {
         foreground: foreground as usize,
         focus: info.hwndFocus as usize,
         bounds,
+        caret,
     })
 }
 
@@ -531,6 +549,76 @@ unsafe fn field_dot_bounds(field: Bounds) -> Option<Bounds> {
     )
 }
 
+// Read the bounds of every rectangle in a TextRange SAFEARRAY of f64
+// (left, top, width, height) quadruples. Returns true if at least one
+// rectangle was written into `out`.
+unsafe fn bounding_rectangles(array: *const SAFEARRAY, out: &mut Vec<Bounds>) -> bool {
+    if array.is_null() {
+        return false;
+    }
+    let bounds = (|| {
+        let lower = SafeArrayGetLBound(array, 1).ok()?;
+        let upper = SafeArrayGetUBound(array, 1).ok()?;
+        for i in (lower..=upper).step_by(4) {
+            let mut got = [0f64; 4];
+            let mut ok = true;
+            for (j, slot) in got.iter_mut().enumerate() {
+                let index = i + j as i32;
+                if index > upper
+                    || SafeArrayGetElement(array, &index, slot as *mut f64 as *mut _).is_err()
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                let left = got[0] as i32;
+                let top = got[1] as i32;
+                let right = left + got[2] as i32;
+                let bottom = top + got[3] as i32;
+                if right > left && bottom > top {
+                    out.push(Bounds { left, top, right, bottom });
+                }
+            }
+        }
+        Some(())
+    })();
+    let _ = bounds;
+    let _ = SafeArrayDestroy(array);
+    !out.is_empty()
+}
+
+// Chromium editors expose their text cursor through the UIA TextPattern
+// selection rather than a Win32 caret. Ask the focused element for its
+// TextPattern selection and use the last rectangle of the last selection
+// range — that is where new text will be inserted.
+unsafe fn text_caret_bounds(el: &IUIAutomationElement) -> Option<Bounds> {
+    let pattern = el
+        .GetCachedPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+        .ok()?;
+    let selection = pattern.GetSelection().ok()?;
+    let length = selection.Length().ok()?;
+    if length <= 0 {
+        return None;
+    }
+    let range = selection.GetElement(length - 1).ok()?;
+    let rects = range.GetBoundingRectangles().ok()?;
+    let mut out = Vec::new();
+    if !bounding_rectangles(rects, &mut out) {
+        return None;
+    }
+    // A multi-line selection reports one rectangle per line; the caret sits at
+    // the end of the last one. Keep only that rectangle, shrunk to caret size
+    // so callers treat it like caret_dot_bounds expects.
+    let last = *out.last()?;
+    Some(Bounds {
+        left: last.left,
+        top: last.top,
+        right: (last.left + 2).min(last.right),
+        bottom: last.bottom,
+    })
+}
+
 // Chromium editors expose a tiny caret rectangle instead of an Edit control.
 // Anchor the cue to that insertion point so the bars follow the text cursor.
 unsafe fn caret_dot_bounds(field: Bounds) -> Option<Bounds> {
@@ -640,7 +728,12 @@ fn cue_bounds(
     pointer: impl FnOnce() -> Option<Bounds>,
 ) -> Option<Bounds> {
     match cue {
-        Cue::Outline => field,
+        Cue::Outline => field.filter(|b| {
+            // A caret-sized bounds is the text insertion point, not the field:
+            // framing it would look like the outline shrank to nothing.
+            i64::from(b.right) - i64::from(b.left) > 32
+                || i64::from(b.bottom) - i64::from(b.top) > 64
+        }),
         Cue::Dots { .. } => field.and_then(field_dots).or_else(pointer),
     }
 }
@@ -1165,6 +1258,7 @@ mod tests {
                 right: 50,
                 bottom: 60,
             },
+            caret: false,
         };
         let a = Some((1, target));
         let b = Some((2, target));
@@ -1242,6 +1336,30 @@ mod tests {
         assert!(corner.right < -1 && corner.bottom < 899);
         let other_corner = dot_bounds(i32::MIN, i32::MIN, work).unwrap();
         assert_eq!((other_corner.left, other_corner.top), (work.left, work.top));
+    }
+
+    #[test]
+    fn caret_sized_bounds_never_frame_the_outline() {
+        // Once the TextPattern selection provides the insertion point, the red
+        // recording outline must not shrink to the caret strip; the strip only
+        // anchors the waiting dots.
+        let caret = Bounds {
+            left: 640,
+            top: 700,
+            right: 642,
+            bottom: 718,
+        };
+        assert_eq!(cue_bounds(Cue::Outline, Some(caret), |_| None, || None), None);
+        let field = Bounds {
+            left: 100,
+            top: 200,
+            right: 620,
+            bottom: 260,
+        };
+        assert_eq!(
+            cue_bounds(Cue::Outline, Some(field), |_| None, || None),
+            Some(field)
+        );
     }
 
     #[test]
