@@ -52,4 +52,5 @@ commands.allow = [
   "remote_voice_stop",
   "remote_voice_begin_input",
   "remote_voice_set_auto_start",
+  "remote_voice_refresh_devices",
 ]

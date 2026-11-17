@@ -2,7 +2,7 @@
 //! paired HID remotes often stop advertising while the OS owns their keyboard.
 use super::gestures::{Edge, Press, RecordGesture, Release};
 use super::atvv::{Action, Caps, Ptt, CHUNK_SAMPLES, AUDIO, CONTROL, GET_CAPS, SERVICE, TX};
-use super::{asr, cancelled, RecordingFeedback, RecordingFocus, RecordingPhase, RecordingTarget, RemoteVoice, VoiceConfig};
+use super::{asr, cancelled, RecordingFeedback, RecordingFocus, RecordingPhase, RecordingTarget, RemoteVoice, VoiceConfig, VoiceDevice};
 use btleplug::api::{
     Central, CentralEvent, CentralState, Characteristic, Manager as _, Peripheral as _,
     RetrievePeripheralsOptions, ScanFilter, WriteType,
@@ -27,18 +27,21 @@ pub(super) const NO_ADAPTER: &str = "没有可用的 BLE 蓝牙适配器，请�
 struct Failure {
     message: String,
     retry: bool,
+    devices: Option<Vec<VoiceDevice>>,
 }
 impl Failure {
     fn temporary(message: &str) -> Self {
         Self {
             message: message.into(),
             retry: true,
+            devices: None,
         }
     }
     fn permanent(message: &str) -> Self {
         Self {
             message: message.into(),
             retry: false,
+            devices: None,
         }
     }
 }
@@ -100,20 +103,92 @@ fn requested_id(device: &str) -> Result<PeripheralId, Failure> {
     }
 }
 fn remote_name(name: &str) -> bool {
-    let name = name.to_lowercase();
-    ["xiaomi", "rc001", "rc003", "小米"]
-        .iter()
-        .any(|n| name.contains(n))
+    super::paired::known_remote_name(name)
 }
-fn choose(mut peripherals: Vec<Peripheral>) -> Result<Option<Peripheral>, Failure> {
+fn unique(mut peripherals: Vec<Peripheral>) -> Vec<Peripheral> {
     let mut seen = std::collections::HashSet::new();
     peripherals.retain(|p| seen.insert(p.id()));
+    peripherals
+}
+async fn describe(peripherals: Vec<Peripheral>, cancel: &watch::Receiver<bool>) -> Result<Vec<VoiceDevice>, Failure> {
+    let mut devices = Vec::new();
+    for peripheral in unique(peripherals).into_iter().take(256) {
+        let name = operation(cancel, peripheral.properties(), 3).await?
+            .and_then(|properties| properties.local_name)
+            .unwrap_or_else(|| "小米遥控器".into());
+        devices.push(VoiceDevice {
+            id: peripheral.id().to_string(),
+            name: name.chars().take(120).collect(),
+            connected: operation(cancel, peripheral.is_connected(), 3).await?,
+        });
+    }
+    devices.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    Ok(devices)
+}
+async fn choose(peripherals: Vec<Peripheral>, cancel: &watch::Receiver<bool>) -> Result<Option<Peripheral>, Failure> {
+    let mut peripherals = unique(peripherals);
     if peripherals.len() > 1 {
-        return Err(Failure::permanent(
-            "发现多个遥控器，请在设置中填写要使用的蓝牙设备 ID。",
-        ));
+        return Err(Failure {
+            message: "发现多个遥控器，请选择要使用的设备。".into(),
+            retry: false,
+            devices: Some(describe(peripherals, cancel).await?),
+        });
     }
     Ok(peripherals.pop())
+}
+
+async fn known_peripherals(adapter: &Adapter, cancel: &watch::Receiver<bool>) -> Result<Vec<Peripheral>, Failure> {
+    let mut remotes = operation(cancel, adapter.retrieve_peripherals(RetrievePeripheralsOptions {
+        identifiers: None, services: Some(vec![SERVICE]),
+    }), 10).await?;
+    let keyboards = operation(cancel, adapter.retrieve_peripherals(RetrievePeripheralsOptions {
+        identifiers: None, services: Some(vec![Uuid::from_u128(0x0000181200001000800000805f9b34fb)]),
+    }), 10).await?;
+    for peripheral in keyboards {
+        if let Some(properties) = operation(cancel, peripheral.properties(), 5).await? {
+            if properties.local_name.as_deref().is_some_and(remote_name) { remotes.push(peripheral); }
+        }
+    }
+    Ok(unique(remotes))
+}
+
+async fn scan(adapter: &Adapter, requested: Option<&PeripheralId>, cancel: &watch::Receiver<bool>) -> Result<Vec<Peripheral>, Failure> {
+    let scanning = async {
+        operation(cancel, adapter.start_scan(ScanFilter::default()), 10).await?;
+        let mut stop = cancel.clone();
+        tokio::select! { biased; _=cancelled(&mut stop)=>return Err(Failure::permanent("已停止。")), _=sleep(Duration::from_secs(8))=>{} }
+        let mut candidates = vec![];
+        for peripheral in operation(cancel, adapter.peripherals(), 5).await? {
+            if let Some(id) = requested {
+                if &peripheral.id() == id { candidates.push(peripheral); }
+            } else if let Some(properties) = operation(cancel, peripheral.properties(), 5).await? {
+                if properties.services.contains(&SERVICE) || properties.local_name.as_deref().is_some_and(remote_name) { candidates.push(peripheral); }
+            }
+        }
+        Ok(candidates)
+    }.await;
+    let _ = timeout(Duration::from_secs(2), adapter.stop_scan()).await;
+    scanning
+}
+
+#[cfg(target_os = "macos")]
+pub(super) async fn known_devices() -> Result<Vec<VoiceDevice>, String> {
+    let (_sender, cancel) = watch::channel(false);
+    let result = async {
+        let adapter = powered_adapter(&cancel).await?;
+        describe(known_peripherals(&adapter, &cancel).await?, &cancel).await
+    }.await;
+    result.map_err(|error: Failure| error.message)
+}
+
+pub(super) async fn scan_devices(cancel: &watch::Receiver<bool>) -> Result<Vec<VoiceDevice>, String> {
+    let result = async {
+        let adapter = powered_adapter(cancel).await?;
+        let mut peripherals = known_peripherals(&adapter, cancel).await?;
+        peripherals.extend(scan(&adapter, None, cancel).await?);
+        describe(peripherals, cancel).await
+    }.await;
+    result.map_err(|error: Failure| error.message)
 }
 async fn discover(
     adapter: &Adapter,
@@ -136,60 +211,18 @@ async fn discover(
                 10,
             )
             .await?;
-            if let Some(peripheral) = choose(known)? {
+            let known = known.into_iter().filter(|p| &p.id() == id).collect();
+            if let Some(peripheral) = choose(known, cancel).await? {
                 return Ok(peripheral);
             }
         }
     } else {
-        let known = operation(
-            cancel,
-            adapter.retrieve_peripherals(RetrievePeripheralsOptions {
-                identifiers: None,
-                services: Some(vec![SERVICE]),
-            }),
-            10,
-        )
-        .await?;
-        if let Some(peripheral) = choose(known)? {
-            return Ok(peripheral);
-        }
-        let keyboards = operation(
-            cancel,
-            adapter.retrieve_peripherals(RetrievePeripheralsOptions {
-                identifiers: None,
-                services: Some(vec![Uuid::from_u128(0x0000181200001000800000805f9b34fb)]),
-            }),
-            10,
-        )
-        .await?;
-        let mut remotes = vec![];
-        for peripheral in keyboards {
-            if let Some(properties) = operation(cancel, peripheral.properties(), 5).await? {
-                if properties.local_name.as_deref().is_some_and(remote_name) {
-                    remotes.push(peripheral);
-                }
-            }
-        }
-        if let Some(peripheral) = choose(remotes)? {
+        if let Some(peripheral) = choose(known_peripherals(adapter, cancel).await?, cancel).await? {
             return Ok(peripheral);
         }
     }
-    let scanning=async {
-        operation(cancel, adapter.start_scan(ScanFilter::default()), 10).await?;
-        let mut stop=cancel.clone();
-        tokio::select! { biased; _=cancelled(&mut stop)=>return Err(Failure::permanent("已停止。")), _=sleep(Duration::from_secs(8))=>{} }
-        let mut candidates=vec![];
-        for peripheral in operation(cancel,adapter.peripherals(),5).await? {
-            if let Some(id)=requested {
-                if &peripheral.id()==id { candidates.push(peripheral); }
-            } else if let Some(properties)=operation(cancel,peripheral.properties(),5).await? {
-                if properties.services.contains(&SERVICE) || properties.local_name.as_deref().is_some_and(remote_name) { candidates.push(peripheral); }
-            }
-        }
-        choose(candidates)?.ok_or_else(||Failure::temporary("未找到小米遥控器，请先在系统蓝牙设置配对并按键唤醒；也可填写设备 ID。"))
-    }.await;
-    let _ = timeout(Duration::from_secs(2), adapter.stop_scan()).await;
-    scanning
+    choose(scan(adapter, requested, cancel).await?, cancel).await?
+        .ok_or_else(||Failure::temporary("未找到小米遥控器，请先在系统蓝牙设置配对并按键唤醒；也可填写设备 ID。"))
 }
 
 #[cfg(target_os = "macos")]
@@ -370,6 +403,10 @@ pub(super) async fn run(
         }
         match attempt {
             Ok(()) => break,
+            Err(error) if error.devices.is_some() => {
+                service.offer_devices(generation, error.devices.unwrap());
+                return Ok(());
+            }
             Err(error) if !error.retry => return Err(error.message),
             Err(error) => service.update(generation, "reconnecting", &error.message, None),
         }

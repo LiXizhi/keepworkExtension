@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <cwctype>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -24,7 +25,8 @@ class RemoteVoiceController {
     Shutdown();
     profile_ = profile;
     { std::lock_guard<std::mutex> lock(mutex_);
-      available_ = running_ = config_loaded_ = begin_ready_ = auto_paused_ = false; auto_start_ = true; device_.clear();
+      available_ = running_ = config_loaded_ = begin_ready_ = auto_paused_ = selection_required_ = stopped_ = false;
+      auto_start_ = true; device_.clear(); devices_.clear();
       status_ = L"正在读取遥控器状态…";
     }
     supported_ = SupportedWindows();
@@ -47,7 +49,7 @@ class RemoteVoiceController {
     if (!RegisterClassW(&type) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
     const HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, type.lpszClassName, L"遥控器语音输入",
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
-      CW_USEDEFAULT, CW_USEDEFAULT, 620, 500, owner, nullptr, type.hInstance, this);
+      CW_USEDEFAULT, CW_USEDEFAULT, 620, 590, owner, nullptr, type.hInstance, this);
     if (!window) return;
     ShowWindow(window, SW_SHOW); SetForegroundWindow(window);
   }
@@ -60,7 +62,29 @@ class RemoteVoiceController {
   }
  private:
   static constexpr UINT update_message = WM_APP + 63;
-  static constexpr int device_id = 201, auto_id = 202, start_id = 203, stop_id = 204, ready_id = 205;
+  static constexpr int device_id = 201, auto_id = 202, start_id = 203, stop_id = 204, ready_id = 205,
+    picker_id = 206, refresh_id = 207;
+  struct RemoteDevice { std::wstring id, name; bool connected = false; };
+  static bool SameDevices(const std::vector<RemoteDevice>& a, const std::vector<RemoteDevice>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+      if (a[i].id != b[i].id || a[i].name != b[i].name || a[i].connected != b[i].connected) return false;
+    return true;
+  }
+  std::wstring InputDevice() const {
+    std::array<wchar_t, 257> value{};
+    GetWindowTextW(device_control_, value.data(), static_cast<int>(value.size()));
+    return value.data();
+  }
+  static bool HasTarget(const std::wstring& value) {
+    for (const auto ch : value) if (!std::iswspace(ch)) return true;
+    return false;
+  }
+  void SetInputDevice(const std::wstring& value) {
+    updating_controls_ = true;
+    SetWindowTextW(device_control_, value.c_str());
+    updating_controls_ = false;
+  }
   static bool SupportedWindows() {
     using Version = LONG (WINAPI*)(OSVERSIONINFOW*);
     const auto address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
@@ -144,7 +168,9 @@ class RemoteVoiceController {
         char byte = 0; DWORD read = 0;
         if (!ReadFile(output_, &byte, 1, &read, nullptr) || read != 1) return false;
         if (byte == '\n') return true;
-        if (reply.size() >= 16384) return false;
+        // Bounded status now includes up to 256 named BLE identities. This is
+        // still a private status-only pipe; command input stays capped at 4 KiB.
+        if (reply.size() >= 262144) return false;
         reply += byte;
       } else std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
@@ -181,6 +207,7 @@ class RemoteVoiceController {
     const auto state = snapshot->GetString("state").ToString();
     std::wstring status = L"状态：";
     if (state == "waiting-paired") status += L"等待系统已配对的小米遥控器";
+    else if (state == "waiting-selection") status += L"请选择要使用的遥控器；未找到时请唤醒后刷新";
     else if (state == "preparing-microphone") status += L"正在准备麦克风，请保持按住语音键";
     else if (state == "no-audio") status += L"未收到音频，请重新按住语音键";
     else if (state == "scanning" || state == "connecting") status += L"正在连接遥控器";
@@ -195,8 +222,23 @@ class RemoteVoiceController {
     else status += L"请检查设备、权限与网络";
     const auto error = snapshot->GetString("error").ToWString();
     if (!error.empty()) status += L"\r\n" + error.substr(0, 500);
+    std::vector<RemoteDevice> devices;
+    if (const auto list = snapshot->GetList("devices")) {
+      for (size_t i = 0; i < list->GetSize() && devices.size() < 256; ++i) {
+        const auto candidate = list->GetDictionary(i);
+        if (!candidate) continue;
+        const auto id = candidate->GetString("id").ToWString();
+        if (id.empty() || id.size() > 256 || id.find(L'\0') != std::wstring::npos) continue;
+        bool duplicate = false;
+        for (const auto& previous : devices) if (previous.id == id) { duplicate = true; break; }
+        if (!duplicate) devices.push_back({id, candidate->GetString("name").ToWString().substr(0, 120), candidate->GetBool("connected")});
+      }
+    }
     { std::lock_guard<std::mutex> lock(mutex_);
       status_ = status; available_ = true; running_ = snapshot->GetBool("running");
+      selection_required_ = state == "waiting-selection";
+      stopped_ = state == "stopping" || state == "stopped";
+      devices_ = std::move(devices);
       begin_ready_ = running_ && state != "stopping" && state != "scanning" && state != "connecting" && state != "preparing-microphone" && state != "reconnecting";
       auto_paused_ = snapshot->GetBool("autoPaused");
       if (const auto config = snapshot->GetDictionary("config")) {
@@ -212,15 +254,59 @@ class RemoteVoiceController {
     changed_.notify_all();
   }
   void Refresh() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    SetWindowTextW(status_control_, status_.c_str());
-    EnableWindow(start_, supported_ && available_ && !running_);
-    EnableWindow(stop_, supported_ && available_ && (running_ || (auto_start_ && !auto_paused_)));
-    EnableWindow(ready_, supported_ && available_ && begin_ready_);
-    EnableWindow(automatic_, supported_ && available_);
-    EnableWindow(device_control_, supported_ && available_ && !running_);
-    SendMessageW(automatic_, BM_SETCHECK, supported_ && auto_start_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    if (!initialized_controls_ && config_loaded_) { SetWindowTextW(device_control_, device_.c_str()); initialized_controls_ = true; }
+    // Copy worker-owned state before touching HWNDs: edit notifications are
+    // synchronous and may reenter this UI thread while updating controls.
+    bool available, running, automatic, paused, ready, loaded, required, stopped;
+    std::wstring status, saved;
+    std::vector<RemoteDevice> devices;
+    { std::lock_guard<std::mutex> lock(mutex_);
+      available = available_; running = running_; automatic = auto_start_; paused = auto_paused_;
+      ready = begin_ready_; loaded = config_loaded_; required = selection_required_;
+      stopped = stopped_;
+      status = status_; saved = device_; devices = devices_;
+    }
+    if (!initialized_controls_ && loaded) {
+      SetInputDevice(saved); initialized_controls_ = true;
+      for (const auto& device : devices) if (device.id == saved) { selected_device_ = saved; break; }
+    }
+    if (stopped && !was_stopped_) {
+      // Stop intentionally clears discovery results. Keep the saved target
+      // available for another explicit Start, without treating it as offline.
+      selected_device_.clear(); choice_missing_ = false; SetInputDevice(saved);
+    }
+    was_stopped_ = stopped;
+    if (!selected_device_.empty()) {
+      bool found = false;
+      for (const auto& device : devices) if (device.id == selected_device_) { found = true; break; }
+      if (!found) {
+        selected_device_.clear(); choice_missing_ = true; SetInputDevice(L"");
+      }
+    }
+    if (!picker_initialized_ || !SameDevices(displayed_devices_, devices)) {
+      displayed_devices_ = std::move(devices); picker_initialized_ = true;
+      SendMessageW(picker_, CB_RESETCONTENT, 0, 0);
+      SendMessageW(picker_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"请选择遥控器…"));
+      for (const auto& device : displayed_devices_) {
+        const auto label = (device.name.empty() ? L"小米遥控器" : device.name) + L" · " + device.id
+          + (device.connected ? L" · 已连接" : L"");
+        SendMessageW(picker_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+      }
+    }
+    int selected = 0;
+    for (size_t i = 0; i < displayed_devices_.size(); ++i)
+      if (displayed_devices_[i].id == selected_device_) { selected = static_cast<int>(i + 1); break; }
+    if (SendMessageW(picker_, CB_GETCURSEL, 0, 0) != selected)
+      SendMessageW(picker_, CB_SETCURSEL, selected, 0);
+    if (choice_missing_) status += L"\r\n所选遥控器已不在列表中，请唤醒后刷新，或重新选择。";
+    SetWindowTextW(status_control_, status.c_str());
+    EnableWindow(start_, supported_ && available && !running && !choice_missing_ && (!required || HasTarget(InputDevice())));
+    EnableWindow(stop_, supported_ && available && (running || (automatic && !paused)));
+    EnableWindow(ready_, supported_ && available && ready);
+    EnableWindow(automatic_, supported_ && available);
+    EnableWindow(device_control_, supported_ && available && !running);
+    EnableWindow(picker_, supported_ && available && !running && !displayed_devices_.empty());
+    EnableWindow(refresh_, supported_ && available && !running);
+    SendMessageW(automatic_, BM_SETCHECK, supported_ && automatic ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   HWND Control(const wchar_t* type, const wchar_t* text, DWORD style, int x, int y, int width, int height, int id = 0) {
     const HWND control = CreateWindowExW(type == std::wstring(L"EDIT") ? WS_EX_CLIENTEDGE : 0, type, text,
@@ -229,16 +315,21 @@ class RemoteVoiceController {
   }
   void CreateControls() {
     Control(L"STATIC", L"适配小米蓝牙语音遥控器 2 / 2 Pro（RC001 / RC003）。请先在 Windows 蓝牙设置中配对。按住语音键录音，松手后由 Keepwork 云端识别；录音不落盘。", 0, 20, 20, 560, 54);
-    Control(L"STATIC", L"设备 MAC 地址（留空自动选择唯一配对设备）", 0, 20, 90, 550, 22);
-    device_control_ = Control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 20, 116, 550, 28, device_id);
+    Control(L"STATIC", L"选择遥控器（选择后点击启动，客户端会记住设备）", 0, 20, 84, 550, 22);
+    picker_ = Control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 20, 110, 420, 180, picker_id);
+    SendMessageW(picker_, CB_SETDROPPEDWIDTH, 550, 0);
+    refresh_ = Control(L"BUTTON", L"刷新设备", BS_PUSHBUTTON | WS_TABSTOP, 450, 110, 120, 28, refresh_id);
+    Control(L"STATIC", L"设备 MAC 地址（也可手填；留空自动查找唯一设备）", 0, 20, 148, 550, 22);
+    device_control_ = Control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 20, 174, 550, 28, device_id);
     SendMessageW(device_control_, EM_SETLIMITTEXT, 256, 0);
-    automatic_ = Control(L"BUTTON", L"检测到已配对遥控器时自动开启", BS_AUTOCHECKBOX | WS_TABSTOP, 20, 158, 550, 28, auto_id);
-    status_control_ = Control(L"STATIC", L"正在读取组件状态…", 0, 20, 202, 550, 72);
-    start_ = Control(L"BUTTON", L"启动语音输入", BS_PUSHBUTTON | WS_TABSTOP, 20, 288, 160, 32, start_id);
-    stop_ = Control(L"BUTTON", L"停止", BS_PUSHBUTTON | WS_TABSTOP, 192, 288, 100, 32, stop_id);
-    ready_ = Control(L"BUTTON", L"就绪，开始输入", BS_PUSHBUTTON | WS_TABSTOP, 320, 288, 250, 32, ready_id);
-    Control(L"STATIC", L"识别文字输入到完成时的当前焦点，不会自动发送；OK 保留原生回车。短按遥控器菜单键可取消在途识别并清空当前可编辑输入框（仅接管唯一 RC003 遥控器来源，普通键盘菜单键保持不变）。整句“发送提示词”发送一次回车，“清除提示词”同样可清空当前可编辑输入框。普通口述会替换剪贴板。", 0, 20, 340, 550, 82);
-    initialized_controls_ = false; Refresh();
+    automatic_ = Control(L"BUTTON", L"检测到已配对遥控器时自动开启", BS_AUTOCHECKBOX | WS_TABSTOP, 20, 214, 550, 28, auto_id);
+    status_control_ = Control(L"STATIC", L"正在读取组件状态…", 0, 20, 256, 550, 96);
+    start_ = Control(L"BUTTON", L"启动语音输入", BS_PUSHBUTTON | WS_TABSTOP, 20, 366, 160, 32, start_id);
+    stop_ = Control(L"BUTTON", L"停止", BS_PUSHBUTTON | WS_TABSTOP, 192, 366, 100, 32, stop_id);
+    ready_ = Control(L"BUTTON", L"就绪，开始输入", BS_PUSHBUTTON | WS_TABSTOP, 320, 366, 250, 32, ready_id);
+    Control(L"STATIC", L"识别文字输入到完成时的当前焦点，不会自动发送；OK 保留原生回车。短按遥控器菜单键可取消在途识别并清空当前可编辑输入框（仅接管唯一 RC003 遥控器来源，普通键盘菜单键保持不变）。整句“发送提示词”发送一次回车，“清除提示词”同样可清空当前可编辑输入框。普通口述会替换剪贴板。", 0, 20, 418, 550, 92);
+    initialized_controls_ = picker_initialized_ = choice_missing_ = was_stopped_ = false;
+    selected_device_.clear(); displayed_devices_.clear(); Refresh();
   }
   static LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
     auto self = reinterpret_cast<RemoteVoiceController*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -248,6 +339,23 @@ class RemoteVoiceController {
     if (message == update_message) { self->Refresh(); return 0; }
     if (message == WM_CLOSE) { ShowWindow(window, SW_HIDE); return 0; }
     if (message == WM_NCDESTROY) { self->window_.store(nullptr); SetWindowLongPtrW(window, GWLP_USERDATA, 0); }
+    if (message == WM_COMMAND && LOWORD(w) == picker_id && HIWORD(w) == CBN_SELCHANGE) {
+      { std::lock_guard<std::mutex> lock(self->mutex_); if (!self->available_ || self->running_) return 0; }
+      const auto selected = SendMessageW(self->picker_, CB_GETCURSEL, 0, 0);
+      self->selected_device_ = selected > 0 && static_cast<size_t>(selected) <= self->displayed_devices_.size()
+        ? self->displayed_devices_[static_cast<size_t>(selected - 1)].id : L"";
+      self->choice_missing_ = false;
+      self->SetInputDevice(self->selected_device_);
+      self->Refresh();
+      return 0;
+    }
+    if (message == WM_COMMAND && LOWORD(w) == device_id && HIWORD(w) == EN_CHANGE) {
+      if (!self->updating_controls_) {
+        self->selected_device_.clear(); self->choice_missing_ = false;
+        self->Refresh();
+      }
+      return 0;
+    }
     if (message == WM_COMMAND && HIWORD(w) == BN_CLICKED) {
       const int id = LOWORD(w);
       if (id == ready_id) {
@@ -256,9 +364,16 @@ class RemoteVoiceController {
       }
       const auto request = CefDictionaryValue::Create();
       if (id == start_id) {
-        std::array<wchar_t, 257> device{}; GetWindowTextW(self->device_control_, device.data(), static_cast<int>(device.size()));
-        request->SetString("action", "start"); request->SetString("device", device.data());
+        const auto device = self->InputDevice();
+        { std::lock_guard<std::mutex> lock(self->mutex_);
+          if (!self->supported_ || !self->available_ || self->running_ || self->choice_missing_
+              || (self->selection_required_ && !HasTarget(device))) return 0;
+        }
+        request->SetString("action", "start"); request->SetString("device", device);
         request->SetBool("autoStart", SendMessageW(self->automatic_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+      } else if (id == refresh_id) {
+        { std::lock_guard<std::mutex> lock(self->mutex_); if (!self->supported_ || !self->available_ || self->running_) return 0; }
+        request->SetString("action", "refreshDevices");
       } else if (id == stop_id) request->SetString("action", "stop");
       else if (id == auto_id) { request->SetString("action", "auto"); request->SetBool("enabled", SendMessageW(self->automatic_, BM_GETCHECK, 0, 0) == BST_CHECKED); }
       else return 0;
@@ -267,9 +382,15 @@ class RemoteVoiceController {
     return DefWindowProcW(window, message, w, l);
   }
   std::atomic<HWND> window_{nullptr};
-  HWND owner_ = nullptr, device_control_ = nullptr, automatic_ = nullptr, status_control_ = nullptr, start_ = nullptr, stop_ = nullptr, ready_ = nullptr;
+  HWND owner_ = nullptr, device_control_ = nullptr, automatic_ = nullptr, status_control_ = nullptr, start_ = nullptr, stop_ = nullptr, ready_ = nullptr,
+    picker_ = nullptr, refresh_ = nullptr;
   bool supported_ = false, available_ = false, running_ = false, auto_start_ = true, initialized_controls_ = false, config_loaded_ = false;
   bool begin_ready_ = false, auto_paused_ = false;
+  bool selection_required_ = false, stopped_ = false;
+  // These interaction fields belong solely to the native window thread.
+  bool picker_initialized_ = false, choice_missing_ = false, updating_controls_ = false, was_stopped_ = false;
+  std::wstring selected_device_;
+  std::vector<RemoteDevice> devices_, displayed_devices_;
   std::wstring profile_, status_ = L"正在读取遥控器状态…", device_;
   HANDLE input_ = nullptr, output_ = nullptr, process_ = nullptr, job_ = nullptr;
   std::atomic<bool> stopping_{true}; std::thread worker_;

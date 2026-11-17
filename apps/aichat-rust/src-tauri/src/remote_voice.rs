@@ -76,6 +76,13 @@ impl Default for VoiceConfig {
         Self { device: String::new(), auto_start: true }
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceDevice {
+    pub id: String,
+    pub name: String,
+    pub connected: bool,
+}
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceSnapshot {
@@ -84,6 +91,7 @@ pub struct VoiceSnapshot {
     pub state: String,
     pub error: String,
     pub device: String,
+    pub devices: Vec<VoiceDevice>,
     pub config: VoiceConfig,
     pub buttons: ButtonStatus,
     pub auto_paused: bool,
@@ -148,6 +156,7 @@ impl RemoteVoice {
                     state: if error.is_empty() { "stopped" } else { "auto-error" }.into(),
                     error,
                     device: String::new(),
+                    devices: Vec::new(),
                     config,
                     buttons: Buttons::new().status(),
                     auto_paused: false,
@@ -289,6 +298,7 @@ impl RemoteVoice {
     }
     fn stop_locked(inner: &mut Inner) {
         inner.resume_config = None;
+        inner.snapshot.devices.clear();
         if let Some(cancel) = &inner.cancel {
             let _ = cancel.send(true);
         }
@@ -331,6 +341,53 @@ impl RemoteVoice {
         Ok(Self::snapshot_locked(&inner))
     }
 
+    /// Explicit, local settings action. Discovery never arms keyboard input,
+    /// opens a microphone, or connects to any candidate.
+    pub fn refresh_devices(self: &Arc<Self>) -> Result<VoiceSnapshot, String> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.snapshot.supported { return Err("遥控器语音输入目前支持 Windows 和 macOS。".into()); }
+        if inner.snapshot.running { return Err("请先停止语音输入，再刷新遥控器。".into()); }
+        if inner.automatic.shutdown { return Err("客户端正在退出。".into()); }
+        if inner.automatic.asleep() { return Err("电脑休眠中，请在唤醒后刷新。".into()); }
+        inner.automatic.block();
+        inner.resume_config = None;
+        inner.generation += 1;
+        let generation = inner.generation;
+        let (cancel, receiver) = watch::channel(false);
+        inner.cancel = Some(cancel);
+        inner.snapshot.running = true;
+        inner.snapshot.state = "scanning".into();
+        inner.snapshot.error.clear();
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            let service = Arc::clone(self);
+            tauri::async_runtime::spawn(async move {
+                let result = ble::scan_devices(&receiver).await;
+                match result {
+                    Ok(devices) => {
+                        service.offer_devices(generation, devices);
+                        service.finish(generation, None);
+                    }
+                    Err(error) => service.finish(generation, Some(error)),
+                }
+            });
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let _ = (generation, receiver);
+        self.auto_events.send_replace(());
+        Ok(Self::snapshot_locked(&inner))
+    }
+
+    fn offer_devices(&self, generation: u64, devices: Vec<VoiceDevice>) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return; }
+        inner.snapshot.devices = devices;
+        inner.snapshot.state = "waiting-selection".into();
+        inner.snapshot.error = if inner.snapshot.devices.is_empty() {
+            "未找到可选择的遥控器，请先配对并按键唤醒，再刷新设备。".into()
+        } else { String::new() };
+    }
+
     fn power_changed(&self, sleeping: bool) {
         let mut inner = self.inner.lock().unwrap();
         if !inner.automatic.power_changed(sleeping) { return; }
@@ -371,6 +428,12 @@ impl RemoteVoice {
                 let mut setup_shown = false;
                 loop {
                     let Some(service) = weak.upgrade() else { return; };
+                    // BLE discovery can find ambiguity after passive admission.
+                    // Offer setup beside a focused main window, never steal
+                    // focus from another app or repeatedly reopen it.
+                    if !setup_shown && service.snapshot().state == "waiting-selection" {
+                        setup_shown = show_setup();
+                    }
                     let ticket = {
                         let mut inner = service.inner.lock().unwrap();
                         if inner.automatic.shutdown { return; }
@@ -444,6 +507,13 @@ impl RemoteVoice {
             Ok(paired::Probe::NeedsBluetoothPermission) => {
                 inner.snapshot.state = "needs-permission".into();
                 inner.snapshot.error = "已检测到遥控器。请在 Keepwork 位于前台时允许系统蓝牙授权；授权后将自动继续连接。".into();
+                return true;
+            }
+            Ok(paired::Probe::NeedsSelection(devices)) => {
+                inner.automatic.block();
+                inner.snapshot.state = "waiting-selection".into();
+                inner.snapshot.devices = devices;
+                inner.snapshot.error.clear();
                 return true;
             }
             Ok(paired::Probe::Available(device)) => {
@@ -706,6 +776,8 @@ impl RemoteVoice {
             inner.automatic.block();
             inner.snapshot.state = "error".into();
             inner.snapshot.error = error;
+        } else if !cancelled && inner.snapshot.state == "waiting-selection" {
+            inner.automatic.block();
         } else {
             inner.snapshot.state = "stopped".into();
             inner.snapshot.error.clear();
@@ -786,6 +858,91 @@ mod tests {
         assert!(!inner.snapshot.running);
         assert!(!inner.buttons.poll_clear());
         assert!(!inner.buttons.poll_home());
+    }
+
+    fn selection_fixture() -> Vec<VoiceDevice> {
+        ["12345678-1234-5678-1234-567812345671", "12345678-1234-5678-1234-567812345672"]
+            .into_iter().map(|id| VoiceDevice { id: id.into(), name: "同名遥控器".into(), connected: true }).collect()
+    }
+
+    #[test]
+    fn ambiguous_inventory_offers_choices_without_input_or_persisting_a_default() {
+        let profile = auto_profile("selection");
+        let voice = Arc::new(RemoteVoice::new(&profile));
+        let revision = voice.inner.lock().unwrap().automatic.ticket(true, false).unwrap();
+        let devices = selection_fixture();
+        assert!(voice.apply_auto_probe(revision, Ok(paired::Probe::NeedsSelection(devices.clone()))));
+        let snapshot = voice.snapshot();
+        assert_eq!(snapshot.state, "waiting-selection");
+        assert_eq!(snapshot.devices, devices);
+        assert!(snapshot.config.device.is_empty());
+        assert!(!voice.config_path.exists());
+        assert_no_native_session(&voice);
+        // Losing the other candidate cannot silently turn a pending choice into
+        // automatic admission. Only a fresh, explicit settings action resumes it.
+        voice.apply_auto_probe(revision, Ok(paired::Probe::Available(devices[0].id.clone())));
+        assert_eq!(voice.snapshot().state, "waiting-selection");
+        assert_no_native_session(&voice);
+        drop(voice);
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn discovery_cleanup_preserves_choices_but_stop_and_new_generations_revoke_late_results() {
+        for stop in [false, true] {
+            let profile = auto_profile("selection-cleanup");
+            let voice = RemoteVoice::new(&profile);
+            let (cancel, _receiver) = watch::channel(false);
+            {
+                let mut inner = voice.inner.lock().unwrap();
+                inner.generation = 1;
+                inner.cancel = Some(cancel);
+                inner.snapshot.running = true;
+            }
+            voice.offer_devices(0, selection_fixture());
+            assert!(voice.snapshot().devices.is_empty(), "obsolete discovery must not publish devices");
+            voice.offer_devices(1, selection_fixture());
+            if stop {
+                voice.stop();
+                voice.offer_devices(1, selection_fixture());
+            }
+            voice.finish(1, None);
+            let snapshot = voice.snapshot();
+            assert!(!snapshot.running);
+            assert_eq!(snapshot.state, if stop { "stopped" } else { "waiting-selection" });
+            assert_eq!(snapshot.devices.len(), if stop { 0 } else { 2 });
+            assert!(snapshot.config.device.is_empty());
+            assert!(!voice.config_path.exists());
+            voice.offer_devices(1, selection_fixture());
+            assert_eq!(voice.snapshot().state, snapshot.state, "completed discovery no longer owns the state");
+            drop(voice);
+            std::fs::remove_dir_all(profile).unwrap();
+        }
+    }
+
+    #[test]
+    fn selected_target_persists_through_preference_changes_restart_and_wake() {
+        let profile = auto_profile("selected-target");
+        let config = VoiceConfig { device: selection_fixture()[1].id.clone(), auto_start: false };
+        atomic_json_write(&profile.join("remote-voice/config.json"), &config).unwrap();
+        let voice = RemoteVoice::new(&profile);
+        voice.set_auto_start(true).unwrap();
+        let reopened = RemoteVoice::new(&profile);
+        assert_eq!(reopened.snapshot().config.device, config.device);
+        let (cancel, _receiver) = watch::channel(false);
+        {
+            let mut inner = voice.inner.lock().unwrap();
+            inner.session_config = Some(inner.snapshot.config.clone());
+            inner.snapshot.running = true;
+            inner.cancel = Some(cancel);
+            inner.generation = 1;
+        }
+        voice.power_changed(true);
+        voice.finish(1, None);
+        voice.power_changed(false);
+        assert_eq!(RemoteVoice::take_resume(&mut voice.inner.lock().unwrap()).unwrap().device, config.device);
+        drop((voice, reopened));
+        std::fs::remove_dir_all(profile).unwrap();
     }
 
     #[test]

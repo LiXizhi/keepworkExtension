@@ -39,6 +39,7 @@ const MAX_COMMAND: usize = 4096;
 #[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
 enum Command {
     Status {},
+    RefreshDevices {},
     Start { device: String, #[serde(rename = "autoStart")] auto_start: bool },
     Stop {},
     Auto { enabled: bool },
@@ -81,6 +82,7 @@ fn run(profile: std::path::PathBuf) -> Result<(), String> {
             let mut shutdown = false;
             let result = match command(&bytes) {
                 Ok(Command::Status {}) => Ok(voice.snapshot()),
+                Ok(Command::RefreshDevices {}) => voice.refresh_devices(),
                 Ok(Command::Start { device, auto_start }) => voice.start(VoiceConfig { device, auto_start }),
                 Ok(Command::Stop {}) => Ok(voice.stop()),
                 Ok(Command::Auto { enabled }) => voice.set_auto_start(enabled),
@@ -119,12 +121,13 @@ mod tests {
     use super::*;
     #[test]
     fn only_bounded_explicit_native_commands_are_accepted() {
-        for input in [r#"{"action":"status"}"#, r#"{"action":"start","device":"","autoStart":true}"#,
+        for input in [r#"{"action":"status"}"#, r#"{"action":"refreshDevices"}"#, r#"{"action":"start","device":"","autoStart":true}"#,
             r#"{"action":"stop"}"#, r#"{"action":"auto","enabled":false}"#, r#"{"action":"shutdown"}"#] {
             assert!(command(input.as_bytes()).is_ok(), "{input}");
         }
         for input in [r#"{"action":"input","text":"private"}"#, r#"{"action":"status","text":"private"}"#,
-            r#"{"action":"start","device":""}"#, r#"{"action":"auto","enabled":"false"}"#] {
+            r#"{"action":"start","device":""}"#, r#"{"action":"auto","enabled":"false"}"#,
+            r#"{"action":"refreshDevices","device":"AA:BB:CC:DD:EE:01"}"#] {
             assert!(command(input.as_bytes()).is_err(), "{input}");
         }
         assert!(command(&vec![b' '; MAX_COMMAND + 1]).is_err());

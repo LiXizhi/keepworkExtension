@@ -393,7 +393,7 @@ pub(super) fn show_voice_setup_if_focused(app: &AppHandle) -> bool {
         return false;
     }
     let core = app.state::<Arc<AppCore>>();
-    if core.remote_voice.snapshot().state != "needs-permission" { return false; }
+    if !["needs-permission", "waiting-selection"].contains(&core.remote_voice.snapshot().state.as_str()) { return false; }
     build_voice_settings(app, false).is_ok()
 }
 
@@ -436,6 +436,15 @@ pub(super) fn remote_voice_stop(
 ) -> Result<VoiceSnapshot, String> {
     verify(&window)?;
     Ok(state.remote_voice.stop())
+}
+
+#[tauri::command]
+pub(super) fn remote_voice_refresh_devices(
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+) -> Result<VoiceSnapshot, String> {
+    verify(&window)?;
+    state.remote_voice.refresh_devices()
 }
 
 #[tauri::command]

@@ -766,6 +766,7 @@ pub fn run() {
             super::remote_voice_host::remote_voice_stop,
             super::remote_voice_host::remote_voice_begin_input,
             super::remote_voice_host::remote_voice_set_auto_start,
+            super::remote_voice_host::remote_voice_refresh_devices,
         ])
         .build(tauri::generate_context!())
         .map(|app| {

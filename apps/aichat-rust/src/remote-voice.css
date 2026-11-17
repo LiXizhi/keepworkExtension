@@ -18,12 +18,18 @@ kbd { grid-row: span 2; text-align: center; padding: 5px 8px; border: 1px solid 
 #key-status { min-height: 20px; }
 fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 label { display: block; margin: 12px 0 4px; font-weight: 600; }
-input, button { font: inherit; border: 1px solid #aab1bd; border-radius: 6px; padding: 8px 10px; }
-input { width: 100%; background: #fff; color: inherit; min-width: 0; }
+input, select, button { font: inherit; border: 1px solid #aab1bd; border-radius: 6px; padding: 8px 10px; }
+input, select { width: 100%; background: #fff; color: inherit; min-width: 0; }
 button { white-space: nowrap; cursor: pointer; background: #fff; color: inherit; }
 button:disabled { opacity: .5; cursor: default; }
 button[hidden] { display: none; }
-button:focus-visible, summary:focus-visible { outline: 2px solid #2863d4; outline-offset: 3px; }
+button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid #2863d4; outline-offset: 3px; }
+.device-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+#device-selection { margin: 12px 0 20px; }
+#device-help { margin-top: 6px; }
+#selected-device { margin: 4px 0; }
+#selected-device:empty { display: none; }
+#connect-device { background: #2863d4; color: #fff; border-color: #2863d4; }
 .actions { display: flex; gap: 8px; margin: 16px 0 20px; flex-wrap: wrap; }
 .auto-option { display: flex; align-items: center; gap: 4px; font-weight: 400; }
 .auto-option input { width: auto; margin: 0; accent-color: #2863d4; }
@@ -33,7 +39,7 @@ details { border-top: 1px solid #d5dae3; padding-top: 12px; }
 summary { cursor: pointer; color: #596373; }
 @media (prefers-color-scheme: dark) {
   :root { color: #e8ebef; background: #20232a; }
-  input, button, kbd { background: #2b303a; border-color: #626b7a; }
+  input, select, button, kbd { background: #2b303a; border-color: #626b7a; }
   #status { background: #293c5c; }
   #status[data-state="recording"] { background: #4f2827; color: #ffada2; }
   #status[data-state="pasted"], #status[data-state="ready"], #status[data-state="cleared"] { background: #253f32; color: #a4d9b5; }

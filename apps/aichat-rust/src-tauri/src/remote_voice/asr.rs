@@ -11,6 +11,9 @@ use tokio::sync::watch;
 use tokio::time::{sleep_until, timeout, Instant};
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 
+#[path = "asr_connect.rs"]
+mod connect;
+
 const ENDPOINT: &str = "wss://speechrtc.keepwork.com/speech?asr_format=pcm&asr_rate=16000";
 const MAX_SAMPLES: usize = 16_000 * 600;
 const CHUNK_SAMPLES: usize = 3200;
@@ -192,7 +195,7 @@ async fn connect_ready(endpoint: &str, deadlines: Deadlines) -> Result<Connected
     };
     let (mut socket, _) = timeout(
         deadlines.connect,
-        tokio_tungstenite::connect_async_with_config(endpoint, Some(config), true),
+        connect::websocket(endpoint, config),
     )
     .await
     .map_err(|_| "连接云端语音服务超时，请检查网络后重试。".to_string())?

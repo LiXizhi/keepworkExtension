@@ -1,5 +1,6 @@
 //! Read-only pairing evidence. This probe never scans, connects or starts input.
 use serde::Deserialize;
+use super::VoiceDevice;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -68,21 +69,10 @@ fn canonical_identifier(value: &str) -> Option<String> {
     })
 }
 
-pub(super) fn select_paired(
-    candidates: Vec<PairedRemote>,
-    config_device: &str,
-) -> Result<Option<String>, String> {
+fn eligible(candidates: Vec<PairedRemote>) -> Result<Vec<PairedRemote>, String> {
     if candidates.len() > 256 {
         return Err("已配对设备列表过长，请在设置中指定遥控器设备 ID。".into());
     }
-    let explicit = if config_device.trim().is_empty() {
-        None
-    } else {
-        Some(
-            canonical_identifier(config_device)
-                .ok_or("遥控器设备 ID 格式无效，请检查蓝牙地址或 CoreBluetooth UUID。")?,
-        )
-    };
     let mut unique: Vec<PairedRemote> = Vec::new();
     for mut candidate in candidates {
         if !(candidate.paired || candidate.connected)
@@ -120,6 +110,18 @@ pub(super) fn select_paired(
             unique.push(candidate);
         }
     }
+    Ok(unique)
+}
+
+pub(super) fn select_paired(
+    candidates: Vec<PairedRemote>,
+    config_device: &str,
+) -> Result<Option<String>, String> {
+    let explicit = if config_device.trim().is_empty() { None } else {
+        Some(canonical_identifier(config_device)
+            .ok_or("遥控器设备 ID 格式无效，请检查蓝牙地址或 CoreBluetooth UUID。")?)
+    };
+    let mut unique = eligible(candidates)?;
     if let Some(explicit) = explicit {
         if let Some(candidate) = unique
             .iter()
@@ -142,7 +144,7 @@ pub(super) fn select_paired(
         match connected.len() {
             0 => return Err(MULTIPLE_IDLE.into()),
             1 => unique = vec![connected.pop().unwrap()],
-            _ => return Err("发现多只已连接的遥控器，请在设置中指定要使用的设备 ID 后手动开启。".into()),
+            _ => return Err(MULTIPLE_CONNECTED.into()),
         }
     }
     Ok(unique
@@ -153,11 +155,30 @@ pub(super) fn select_paired(
 /// Several paired remotes are asleep. This is not a configuration error: the
 /// first remote woken by a key press becomes the only connected candidate.
 pub(super) const MULTIPLE_IDLE: &str = "发现多只已配对遥控器，按一下要使用的遥控器即可自动连接。";
+const MULTIPLE_CONNECTED: &str = "发现多只已连接的遥控器，请选择要使用的设备。";
 
-/// Waiting for one of several idle remotes keeps polling instead of pausing automation.
+fn device_choices(candidates: Vec<PairedRemote>) -> Result<Vec<VoiceDevice>, String> {
+    Ok(eligible(candidates)?.into_iter().filter_map(|candidate| {
+        Some(VoiceDevice {
+            id: candidate.identifier?,
+            name: candidate.name.chars().take(120).collect(),
+            connected: candidate.connected,
+        })
+    }).collect())
+}
+
+/// Address-only macOS pairing evidence keeps polling until a remote wakes.
+/// Real connection identifiers can be offered without guessing a target.
 fn select_or_wait(candidates: Vec<PairedRemote>, config_device: &str) -> Result<Result<Option<String>, Probe>, String> {
-    match select_paired(candidates, config_device) {
-        Err(message) if message == MULTIPLE_IDLE => Ok(Err(Probe::Retry(message))),
+    match select_paired(candidates.clone(), config_device) {
+        Err(message) if message == MULTIPLE_IDLE || message == MULTIPLE_CONNECTED => {
+            let devices = device_choices(candidates)?;
+            if message == MULTIPLE_IDLE && devices.is_empty() {
+                Ok(Err(Probe::Retry(message)))
+            } else {
+                Ok(Err(Probe::NeedsSelection(devices)))
+            }
+        }
         selected => selected.map(Ok),
     }
 }
@@ -168,6 +189,7 @@ pub(super) enum Probe {
     Retry(String),
     NeedsPermission(&'static str),
     NeedsBluetoothPermission,
+    NeedsSelection(Vec<VoiceDevice>),
     Available(String),
 }
 
@@ -197,9 +219,15 @@ pub(super) async fn paired_remote(config_device: &str) -> Result<Probe, String> 
             Ok(inventory) => inventory,
             Err(error) => return error.probe(),
         };
-        probe_macos(inventory.candidates, config_device, inventory.bluetooth_allowed,
+        let probe = probe_macos(inventory.candidates, config_device, inventory.bluetooth_allowed,
             inventory.bluetooth_not_determined, super::ble::saved_remote(config_device.trim()),
-            super::native_input::missing_permission).await
+            super::native_input::missing_permission).await?;
+        // macOS pairing/HID addresses cannot be used as CoreBluetooth UUIDs.
+        // Read already connected BLE identities only after Bluetooth consent.
+        if matches!(&probe, Probe::NeedsSelection(devices) if devices.is_empty()) && inventory.bluetooth_allowed {
+            return super::ble::known_devices().await.map(Probe::NeedsSelection);
+        }
+        Ok(probe)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -243,18 +271,20 @@ fn admit_macos(
     bluetooth_not_determined: bool,
     input_permission: impl FnOnce() -> Option<&'static str>,
 ) -> Result<Probe, String> {
-    let device = match select_or_wait(candidates, if bluetooth_allowed { config_device } else { "" })? {
-        Ok(device) => device,
-        Err(probe) => return Ok(probe),
-    };
-    let Some(device) = device else {
+    let selection = select_or_wait(candidates, if bluetooth_allowed { config_device } else { "" })?;
+    if matches!(&selection, Ok(None)) {
         return Ok(Probe::Waiting);
-    };
+    }
+    if let Err(Probe::Retry(_)) = &selection { return Ok(selection.unwrap_err()); }
     if !bluetooth_allowed {
         if bluetooth_not_determined { return Ok(Probe::NeedsBluetoothPermission); }
         return Ok(Probe::NeedsPermission("已检测到小米遥控器。请点「启动语音输入」，按系统提示依次授权。若曾拒绝蓝牙访问，请到系统设置 → 隐私与安全性 → 蓝牙中授权。通过编辑器或终端启动时，系统可能显示该应用的名称。"));
     }
-    Ok(input_admission(device, input_permission))
+    match selection {
+        Ok(Some(device)) => Ok(input_admission(device, input_permission)),
+        Err(probe) => Ok(probe),
+        Ok(None) => Ok(Probe::Waiting),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -668,6 +698,32 @@ mod tests {
             select_paired(candidates, "AA:BB:CC:DD:EE:03").unwrap(),
             None
         );
+    }
+    #[test]
+    fn ambiguous_real_identifiers_offer_named_choices_without_selecting_the_first() {
+        let mut first = remote(Some("aa-bb-cc-dd-ee-01"), Some("hid:first"));
+        first.connected = true;
+        let mut second = remote(Some("AA:BB:CC:DD:EE:02"), Some("hid:second"));
+        second.connected = true;
+        let candidates = vec![first.clone(), first, second];
+        let selection = select_or_wait(candidates.clone(), "").unwrap().unwrap_err();
+        let Probe::NeedsSelection(devices) = selection else { panic!("ambiguous devices were not offered"); };
+        assert_eq!(devices.len(), 2, "several services from one remote are one choice");
+        assert_eq!(devices[0].name, devices[1].name, "names do not identify a physical remote");
+        assert_eq!(devices[0].id, "AA:BB:CC:DD:EE:01");
+        assert_eq!(devices[1].id, "AA:BB:CC:DD:EE:02");
+        assert_eq!(select_or_wait(candidates.clone(), &devices[1].id).unwrap(), Ok(Some(devices[1].id.clone())));
+        assert_eq!(select_or_wait(candidates, "AA:BB:CC:DD:EE:03").unwrap(), Ok(None));
+    }
+    #[test]
+    fn idle_devices_offer_only_verifiable_connection_ids_and_hardware_addresses_are_never_guessed() {
+        let candidates = vec![remote(Some("AA:BB:CC:DD:EE:01"), None), remote(Some("AA:BB:CC:DD:EE:02"), None)];
+        assert!(matches!(select_or_wait(candidates, "").unwrap(), Err(Probe::NeedsSelection(devices)) if devices.len() == 2));
+        let mut first = remote(None, Some("mac:AA:BB:CC:DD:EE:01"));
+        first.connected = true;
+        let mut second = remote(None, Some("mac:AA:BB:CC:DD:EE:02"));
+        second.connected = true;
+        assert_eq!(select_or_wait(vec![first, second], "").unwrap(), Err(Probe::NeedsSelection(vec![])));
     }
     #[test]
     fn mac_address_evidence_does_not_verify_an_unrelated_corebluetooth_uuid() {
