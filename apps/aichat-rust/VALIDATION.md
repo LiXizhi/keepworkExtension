@@ -1,10 +1,13 @@
 # `apps/aichat-rust` 验证与冒烟测试清单
 
-## 2026-11-17 遥控器听写双栈连接（0.2.193，验证中）
+## 2026-11-17 遥控器听写双栈连接（0.2.193）
 
 - 截图中的黑底三点属于松开遥控器语音键后等待 ASR 最终结果的原生提示。本机旧 ASR 路径使用合成音频复测，15 秒后报告连接超时；DNS 返回 IPv6 地址在前。同机 `curl` 的 IPv6 连接在 5 秒期限内未成功，IPv4 约 56 毫秒返回 HTTP 200。这些证据确认本次网络的 IPv6 连接阻塞，HTTP 探测本身不代表语音识别或实体遥控器已通过。
 - 修复在固定 Keepwork ASR 地址的音频上传前，对 IPv4 / IPv6 TCP 候选以 250 毫秒间隔错峰连接；仅获胜连接继续 WebSocket / TLS 握手，原始 URL 的 Host、SNI、证书校验及 15 秒连接总期限保持有效。IPv6 未禁用；连接竞速不重放音频，识别中断后仍须重新录制。本轮不修改网页 / MCP 协议或要求同步升级。
-- **正在验证。** 双栈连接、全部失败、期限与取消的隔离回归，完整应用检查及修复后的真实网络 ASR 结果待补充。实体遥控器录音、完整识别到当前输入框的交付，以及 Windows 实机网络尚未验收；本节不以网络探测替代硬件通过记录。
+- 新增 7 项确定性离线回归全部通过：IPv6 / IPv4 首地址阻塞时 250 毫秒后回退、立即失败、全部失败、地址族交错、空 DNS 结果，以及成功、超时和取消后的连接释放。在临时副本中仅将实际生产连接函数改回逐地址等待，同一组测试有 3 项失败，验证回归能检出原问题；未改动工作区生产代码进行变异。
+- `pnpm --prefix apps/aichat-rust check` 退出码 0：类型检查、前端构建通过，Rust **334 通过 / 3 忽略**，Node **674 通过 / 24 跳过 / 0 失败**。完整日志：`/private/tmp/keepwork-asr-connect-check.log`。Windows companion 的 x64 / ARM64 离线 `cargo check` 均通过；这是交叉编译检查，不是 Windows 实机验收。
+- 修复后运行 `cargo test --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins live_keepwork_speech_accepts_synthetic_silence_without_credentials -- --ignored --nocapture`，真实 Keepwork 服务 **1/1 通过，耗时 1.11 秒**，覆盖 TLS、`ready`、半秒程序生成的静音上传、`asr_end` 与 `done`。日志：`/private/tmp/keepwork-asr-connect-live.log`。没有读取用户录音或麦克风；实体遥控器人声识别、最终输入框交付以及 Windows 实机网络仍待验证。
+- 四处桌面版本同步 **0.2.193**；`cargo build --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --bin Keepwork` 通过，已生成本地 macOS 开发程序。未发布或替换安装版；旧进程需要重启新构建才能使用该修复。
 
 ## 2026-11-17 多遥控器选择（0.2.192）
 
