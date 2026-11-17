@@ -19,6 +19,8 @@ use uuid::Uuid;
 #[path = "ble_startup.rs"]
 mod startup;
 use startup::{NotificationInbox, TimedNotification};
+#[path = "ble_gatt.rs"]
+mod gatt;
 
 pub(super) const BLUETOOTH_OFF: &str = "没有已开启的 BLE 蓝牙适配器，请开启系统蓝牙后重试。";
 pub(super) const NO_ADAPTER: &str = "没有可用的 BLE 蓝牙适配器，请开启蓝牙后重试。";
@@ -28,6 +30,7 @@ struct Failure {
     message: String,
     retry: bool,
     devices: Option<Vec<VoiceDevice>>,
+    incomplete_atvv: bool,
 }
 impl Failure {
     fn temporary(message: &str) -> Self {
@@ -35,6 +38,7 @@ impl Failure {
             message: message.into(),
             retry: true,
             devices: None,
+            incomplete_atvv: false,
         }
     }
     fn permanent(message: &str) -> Self {
@@ -42,6 +46,7 @@ impl Failure {
             message: message.into(),
             retry: false,
             devices: None,
+            incomplete_atvv: false,
         }
     }
 }
@@ -132,6 +137,7 @@ async fn choose(peripherals: Vec<Peripheral>, cancel: &watch::Receiver<bool>) ->
             message: "发现多个遥控器，请选择要使用的设备。".into(),
             retry: false,
             devices: Some(describe(peripherals, cancel).await?),
+            incomplete_atvv: false,
         });
     }
     Ok(peripherals.pop())
@@ -368,12 +374,15 @@ pub(super) async fn run(
         Some(requested_id(&config.device).map_err(|error| error.message)?)
     };
     let mut delay = 2;
+    // Partial discovery can be a transient OS cache failure. Retry once, keeping
+    // the exact identity even if another remote becomes available meanwhile.
+    let mut retry_target = None;
     while service.current(generation) {
         service.update(generation, "scanning", "", None);
         let attempt = async {
             let adapter = with_idle_buttons(service, generation, powered_adapter(&cancel)).await?;
             let peripheral =
-                with_idle_buttons(service, generation, discover(&adapter, requested.as_ref(), &cancel))
+                with_idle_buttons(service, generation, discover(&adapter, requested.as_ref().or(retry_target.as_ref()), &cancel))
                     .await?;
             service.update(
                 generation,
@@ -383,7 +392,10 @@ pub(super) async fn run(
             );
             #[cfg(target_os = "windows")]
             ensure_windows_paired(service, generation, &peripheral, &cancel).await?;
-            let result = connection(service, generation, &adapter, &peripheral, &cancel).await;
+            let mut result = connection(service, generation, &adapter, &peripheral, &cancel).await;
+            if let Err(error) = &mut result {
+                recover_missing_atvv(error, peripheral.id(), &mut retry_target);
+            }
             service.dialogue.exit("disconnected");
             service.disarm(generation);
             // No audio request survives this attempt. Release this client's
@@ -391,7 +403,7 @@ pub(super) async fn run(
             for ch in peripheral
                 .characteristics()
                 .iter()
-                .filter(|c| [AUDIO, CONTROL].contains(&c.uuid))
+                .filter(|c| c.service_uuid == SERVICE && [AUDIO, CONTROL].contains(&c.uuid))
             {
                 let _ = timeout(Duration::from_secs(1), peripheral.unsubscribe(ch)).await;
             }
@@ -588,7 +600,16 @@ fn missing_atvv(empty: bool, previously_validated: bool) -> Failure {
     if empty || previously_validated {
         Failure::temporary("系统尚未恢复遥控器的语音服务，将重新连接。")
     } else {
-        Failure::permanent("设备不提供完整的 ATVV 语音服务，请检查遥控器型号。")
+        let mut failure = Failure::permanent("未发现本客户端支持的完整语音服务。请断开电视或其他遥控软件、唤醒遥控器后重试；仍失败时，请提供电池仓型号和下方蓝牙服务诊断。");
+        failure.incomplete_atvv = true;
+        failure
+    }
+}
+fn recover_missing_atvv(error: &mut Failure, device: PeripheralId, retry_target: &mut Option<PeripheralId>) {
+    if error.incomplete_atvv && retry_target.is_none() {
+        *retry_target = Some(device);
+        error.retry = true;
+        error.message = "遥控器语音服务尚未完整发现，正在对同一设备重新连接一次。".into();
     }
 }
 
@@ -644,15 +665,11 @@ async fn connection(
     static LAST_VALIDATED: std::sync::Mutex<Option<PeripheralId>> = std::sync::Mutex::new(None);
     let device_id = peripheral.id();
     let chars = peripheral.characteristics();
-    let find = |id| {
-        chars.iter().find(|c| c.service_uuid == SERVICE && c.uuid == id).cloned().ok_or_else(|| {
+    service.set_diagnostic(generation, gatt::report(&device_id.to_string(), &peripheral.services(), &chars));
+    let gatt::Channels { tx, control, audio } = gatt::channels(&chars).ok_or_else(|| {
             let known = LAST_VALIDATED.lock().unwrap().as_ref() == Some(&device_id);
             missing_atvv(chars.is_empty(), known)
-        })
-    };
-    let tx = find(TX)?;
-    let control = find(CONTROL)?;
-    let audio = find(AUDIO)?;
+        })?;
     let stream = operation(cancel, peripheral.notifications(), 5).await?;
     let mut notifications = NotificationInbox::new(stream);
     let setup = async {
@@ -1008,6 +1025,37 @@ mod tests {
         for absent in [false, true] {
             assert!(radio_unavailable(absent, false).retry);
             assert!(!radio_unavailable(absent, true).retry);
+        }
+    }
+
+    #[test]
+    fn incomplete_first_discovery_retries_once_and_pins_the_same_remote() {
+        #[cfg(target_os = "macos")]
+        let identity = "12345678-1234-5678-1234-567812345678";
+        #[cfg(windows)]
+        let identity = "E8:55:40:EE:4D:D9";
+        let device = requested_id(identity).unwrap();
+        let mut target = None;
+        let mut first = missing_atvv(false, false);
+        recover_missing_atvv(&mut first, device.clone(), &mut target);
+        assert!(first.retry);
+        assert_eq!(target.as_ref(), Some(&device));
+        let mut second = missing_atvv(false, false);
+        recover_missing_atvv(&mut second, device.clone(), &mut target);
+        assert!(!second.retry);
+        assert!(second.message.contains("蓝牙服务诊断"));
+        assert!(!second.message.contains("设备不提供"));
+        // Permission/cancellation errors cannot be converted into connection retries.
+        for mut error in [bluetooth_error(btleplug::Error::PermissionDenied), Failure::permanent("已停止。") ] {
+            let mut target = None;
+            recover_missing_atvv(&mut error, device.clone(), &mut target);
+            assert!(!error.retry);
+            assert!(target.is_none());
+        }
+        for empty in [false, true] {
+            let mut error = missing_atvv(empty, true);
+            recover_missing_atvv(&mut error, device.clone(), &mut target);
+            assert!(error.retry, "previously validated devices retain sleep recovery");
         }
     }
 

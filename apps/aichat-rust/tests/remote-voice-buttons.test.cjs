@@ -50,8 +50,8 @@ test('Home and Back/Menu are independent device-scoped controls and the HID read
   const fallback = source.slice(source.indexOf('#[cfg(not(any(target_os = "macos", windows)))]'));
   assert.match(fallback, /pub fn poll_clear\(_:\s*&Listener\) -> bool\s*\{\s*false\s*\}/);
   const input = read('src-tauri/src/remote_voice/native_input.rs');
-  assert.match(input, /take_menu_keyup_suppression\(\)/);
-  assert.match(input, /should_suppress_menu_keydown\(\)/);
+  assert.match(input, /home_windows::take_key_keyup_suppression\(vk\)/);
+  assert.match(input, /home_windows::should_suppress_key_keydown\(vk\)/);
   assert.ok(source.includes('清除提示词'));
   assert.ok(input.includes('is_command(text, "清除提示词")'));
   assert.doesNotMatch(source, /可说“清空输入”/);

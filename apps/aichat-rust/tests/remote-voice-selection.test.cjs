@@ -276,6 +276,47 @@ test('discovered names are rendered as text and refresh failures retain the user
   assert.equal(view.calls.some(call => call.command === 'remote_voice_start'), false);
 });
 
+test('legacy snapshots without diagnostics keep the diagnostic panel hidden and device controls usable', async () => {
+  const legacy = snapshot();
+  assert.equal(Object.hasOwn(legacy, 'diagnostic'), false);
+  const view = await renderer(legacy);
+  assert.equal(view.get('voice-diagnostic').hidden, true);
+  assert.equal(view.get('diagnostic').value, '');
+  await view.choose(deviceB.id);
+  await view.click('connect-device');
+  assert.equal(view.calls.find(call => call.command === 'remote_voice_start').args.config.device, deviceB.id);
+});
+
+test('native GATT diagnostics are selectable readonly text and never interpreted as HTML', async () => {
+  const diagnostic = 'Device: </textarea><img src=x onerror="globalThis.compromised=true">\n'
+    + 'Service: ab5e0001-5a21-4f05-bc7d-af01f617b664\nMissing: audio';
+  const view = await renderer(snapshot({ state: 'error', device: deviceA.id, diagnostic }));
+  assert.equal(view.get('voice-diagnostic').hidden, false);
+  assert.equal(view.get('diagnostic').tagName, 'TEXTAREA');
+  assert.equal(view.get('diagnostic').value, diagnostic);
+  assert.equal(view.get('diagnostic').children.length, 0);
+  assert.match(read('remote-voice.html'), /<textarea\b(?=[^>]*\bid="diagnostic")(?=[^>]*\breadonly(?:\s|>|=))[^>]*>/);
+  assert.equal(view.calls.some(call => call.command === 'remote_voice_start'), false,
+    'showing a diagnostic cannot start or retarget a native session');
+});
+
+test('cleared diagnostics and snapshots for another device remove the previous diagnostic text', async () => {
+  const diagnostic = 'Device: ' + deviceA.id + '\nMissing: audio';
+  const failed = snapshot({ state: 'error', device: deviceA.id, diagnostic });
+  const view = await renderer(failed);
+  for (const next of [
+    snapshot({ state: 'stopped', device: deviceA.id, diagnostic: '' }),
+    snapshot({ state: 'connecting', device: deviceB.id, config: { device: deviceB.id, autoStart: true } }),
+  ]) {
+    await view.poll(failed);
+    assert.equal(view.get('voice-diagnostic').hidden, false);
+    assert.equal(view.get('diagnostic').value, diagnostic);
+    await view.poll(next);
+    assert.equal(view.get('voice-diagnostic').hidden, true);
+    assert.equal(view.get('diagnostic').value, '', 'a hidden panel cannot retain another session\'s report');
+  }
+});
+
 test('only the local settings document can refresh discovered remotes', () => {
   const permissions = read('src-tauri/permissions/desktop-commands.toml').split('[[permission]]');
   const local = permissions.find(part => part.includes('identifier = "allow-remote-voice-settings"'));

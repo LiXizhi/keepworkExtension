@@ -12,6 +12,8 @@ p { margin: 12px 0; }
 #status[data-state="pasted"], #status[data-state="ready"], #status[data-state="cleared"] { background: #e4f1e9; color: #24693f; }
 #error { color: #a13024; overflow-wrap: anywhere; }
 #error:empty { display: none; }
+#voice-diagnostic[hidden] { display: none; }
+#diagnostic { width: 100%; resize: vertical; font: 12px/1.5 monospace; color: inherit; background: transparent; border: 1px solid #aab1bd; border-radius: 6px; padding: 8px; }
 .controls { list-style: none; padding: 0; margin: 16px 0 8px; display: grid; gap: 10px; }
 .controls li { display: grid; grid-template-columns: 84px 1fr; column-gap: 12px; align-items: center; }
 kbd { grid-row: span 2; text-align: center; padding: 5px 8px; border: 1px solid #d5dae3; border-bottom-width: 3px; border-radius: 8px; background: #fff; font: 600 13px/1.7 system-ui, sans-serif; }

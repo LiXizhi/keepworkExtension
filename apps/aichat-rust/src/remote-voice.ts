@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 interface Config { device: string; autoStart: boolean }
 interface ButtonStatus { supported: boolean; ready: boolean; homeReady?: boolean; clearKey?: string; device: string; error: string }
 interface Device { id: string; name: string; connected: boolean }
-interface Snapshot { supported: boolean; running: boolean; state: string; error: string; device: string; config: Config; devices?: Device[]; buttons?: ButtonStatus; autoPaused?: boolean }
+interface Snapshot { supported: boolean; running: boolean; state: string; error: string; device: string; config: Config; devices?: Device[]; buttons?: ButtonStatus; autoPaused?: boolean; diagnostic?: string }
 const input = (id: string) => document.getElementById(id) as HTMLInputElement;
 const button = (id: string) => document.getElementById(id) as HTMLButtonElement;
 function text(id: string, value: string) {
@@ -77,6 +77,8 @@ function render(next: Snapshot, replaceConfig = false) {
   text("status", next.state === "stopped" && next.autoPaused ? "本次已停止 · 点击启动可恢复" : labels[next.state] || next.state);
   status.dataset.state = next.state;
   text("error", actionError || next.error || (!next.supported ? "目前支持 Windows 和 macOS。" : ""));
+  input("diagnostic").value = next.diagnostic || "";
+  document.getElementById("voice-diagnostic")!.hidden = !next.diagnostic;
   if (!dirty || replaceConfig) { input("device").value = next.config.device; dirty = false; }
   if (replaceConfig) choiceMissing = false;
   renderDevices(next, replaceConfig);

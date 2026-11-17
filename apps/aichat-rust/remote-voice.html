@@ -13,6 +13,11 @@
     <p class="intro">小米遥控器 2 / 2 Pro · Keepwork 云端识别，无需本地模型。</p>
     <div id="status" role="status" aria-live="polite">正在读取状态…</div>
     <p id="error" role="alert"></p>
+    <details id="voice-diagnostic" hidden>
+      <summary>蓝牙服务诊断（可复制）</summary>
+      <p class="hint">连接仍失败时，请提供电池仓内的型号和下方诊断。这里只包含设备标识与服务信息。</p>
+      <textarea id="diagnostic" readonly rows="10" aria-label="蓝牙服务诊断"></textarea>
+    </details>
     <section id="device-selection" aria-label="选择遥控器">
       <label for="device-picker">选择要使用的遥控器</label>
       <select id="device-picker" aria-describedby="device-help"><option value="">请先查找或选择遥控器</option></select>

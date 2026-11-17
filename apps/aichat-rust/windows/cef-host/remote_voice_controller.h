@@ -222,6 +222,14 @@ class RemoteVoiceController {
     else status += L"请检查设备、权限与网络";
     const auto error = snapshot->GetString("error").ToWString();
     if (!error.empty()) status += L"\r\n" + error.substr(0, 500);
+    const auto diagnostic = snapshot->GetString("diagnostic").ToWString();
+    if (!diagnostic.empty()) {
+      status += L"\r\n\r\n蓝牙服务诊断（可复制）\r\n";
+      for (size_t i = 0; i < diagnostic.size() && i < 24000; ++i) {
+        if (diagnostic[i] == L'\n' && (i == 0 || diagnostic[i - 1] != L'\r')) status += L'\r';
+        status += diagnostic[i];
+      }
+    }
     std::vector<RemoteDevice> devices;
     if (const auto list = snapshot->GetList("devices")) {
       for (size_t i = 0; i < list->GetSize() && devices.size() < 256; ++i) {
@@ -298,7 +306,10 @@ class RemoteVoiceController {
     if (SendMessageW(picker_, CB_GETCURSEL, 0, 0) != selected)
       SendMessageW(picker_, CB_SETCURSEL, selected, 0);
     if (choice_missing_) status += L"\r\n所选遥控器已不在列表中，请唤醒后刷新，或重新选择。";
-    SetWindowTextW(status_control_, status.c_str());
+    if (displayed_status_ != status) {
+      displayed_status_ = status;
+      SetWindowTextW(status_control_, status.c_str());
+    }
     EnableWindow(start_, supported_ && available && !running && !choice_missing_ && (!required || HasTarget(InputDevice())));
     EnableWindow(stop_, supported_ && available && (running || (automatic && !paused)));
     EnableWindow(ready_, supported_ && available && ready);
@@ -323,13 +334,13 @@ class RemoteVoiceController {
     device_control_ = Control(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 20, 174, 550, 28, device_id);
     SendMessageW(device_control_, EM_SETLIMITTEXT, 256, 0);
     automatic_ = Control(L"BUTTON", L"检测到已配对遥控器时自动开启", BS_AUTOCHECKBOX | WS_TABSTOP, 20, 214, 550, 28, auto_id);
-    status_control_ = Control(L"STATIC", L"正在读取组件状态…", 0, 20, 256, 550, 96);
+    status_control_ = Control(L"EDIT", L"正在读取组件状态…", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP, 20, 256, 550, 96);
     start_ = Control(L"BUTTON", L"启动语音输入", BS_PUSHBUTTON | WS_TABSTOP, 20, 366, 160, 32, start_id);
     stop_ = Control(L"BUTTON", L"停止", BS_PUSHBUTTON | WS_TABSTOP, 192, 366, 100, 32, stop_id);
     ready_ = Control(L"BUTTON", L"就绪，开始输入", BS_PUSHBUTTON | WS_TABSTOP, 320, 366, 250, 32, ready_id);
     Control(L"STATIC", L"识别文字输入到完成时的当前焦点，不会自动发送；OK 保留原生回车。短按遥控器菜单键可取消在途识别并清空当前可编辑输入框（仅接管唯一 RC003 遥控器来源，普通键盘菜单键保持不变）。整句“发送提示词”发送一次回车，“清除提示词”同样可清空当前可编辑输入框。普通口述会替换剪贴板。", 0, 20, 418, 550, 92);
     initialized_controls_ = picker_initialized_ = choice_missing_ = was_stopped_ = false;
-    selected_device_.clear(); displayed_devices_.clear(); Refresh();
+    selected_device_.clear(); displayed_devices_.clear(); displayed_status_.clear(); Refresh();
   }
   static LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
     auto self = reinterpret_cast<RemoteVoiceController*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -390,6 +401,7 @@ class RemoteVoiceController {
   // These interaction fields belong solely to the native window thread.
   bool picker_initialized_ = false, choice_missing_ = false, updating_controls_ = false, was_stopped_ = false;
   std::wstring selected_device_;
+  std::wstring displayed_status_;
   std::vector<RemoteDevice> devices_, displayed_devices_;
   std::wstring profile_, status_ = L"正在读取遥控器状态…", device_;
   HANDLE input_ = nullptr, output_ = nullptr, process_ = nullptr, job_ = nullptr;

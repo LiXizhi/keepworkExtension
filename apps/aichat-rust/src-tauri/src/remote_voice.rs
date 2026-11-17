@@ -92,6 +92,8 @@ pub struct VoiceSnapshot {
     pub error: String,
     pub device: String,
     pub devices: Vec<VoiceDevice>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub diagnostic: String,
     pub config: VoiceConfig,
     pub buttons: ButtonStatus,
     pub auto_paused: bool,
@@ -157,6 +159,7 @@ impl RemoteVoice {
                     error,
                     device: String::new(),
                     devices: Vec::new(),
+                    diagnostic: String::new(),
                     config,
                     buttons: Buttons::new().status(),
                     auto_paused: false,
@@ -272,6 +275,7 @@ impl RemoteVoice {
         inner.snapshot.state = "scanning".into();
         inner.snapshot.error.clear();
         inner.snapshot.device.clear();
+        inner.snapshot.diagnostic.clear();
         #[cfg(windows)]
         {
             let _ = native.enable_remote_buttons();
@@ -299,6 +303,7 @@ impl RemoteVoice {
     fn stop_locked(inner: &mut Inner) {
         inner.resume_config = None;
         inner.snapshot.devices.clear();
+        inner.snapshot.diagnostic.clear();
         if let Some(cancel) = &inner.cancel {
             let _ = cancel.send(true);
         }
@@ -403,6 +408,7 @@ impl RemoteVoice {
         if inner.resume_config.is_some() {
             inner.snapshot.state = if sleeping { "sleeping" } else { "reconnecting" }.into();
             inner.snapshot.error.clear();
+            inner.snapshot.diagnostic.clear();
         }
         self.auto_events.send_replace(());
     }
@@ -548,7 +554,15 @@ impl RemoteVoice {
         inner.snapshot.state = state.into();
         inner.snapshot.error = error.chars().take(500).collect();
         if let Some(device) = device {
+            inner.snapshot.diagnostic.clear();
             inner.snapshot.device = device.chars().take(256).collect();
+        }
+    }
+    fn set_diagnostic(&self, generation: u64, report: String) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation == generation && inner.snapshot.running
+            && inner.cancel.as_ref().is_some_and(|cancel| !*cancel.borrow()) {
+            inner.snapshot.diagnostic = report.chars().take(12_000).collect();
         }
     }
     fn arm(&self, generation: u64) -> Result<(), String> {
@@ -832,8 +846,12 @@ mod tests {
             inner.snapshot.running = true;
         }
         voice.update(1, "recording", "", None);
+        voice.set_diagnostic(1, "selected device metadata".into());
+        assert_eq!(voice.snapshot().diagnostic, "selected device metadata");
         assert_eq!(voice.snapshot().state, "recording");
         voice.stop();
+        voice.set_diagnostic(1, "late metadata".into());
+        assert!(voice.snapshot().diagnostic.is_empty());
         voice.update(1, "pasted", "", None);
         voice.deliver_recognition(1, None, "private transcript", true).await;
         voice.deliver_recognition(1, None, "发送提示词。", true).await;
@@ -843,6 +861,32 @@ mod tests {
         assert!(!serde_json::to_string(&voice.snapshot())
             .unwrap()
             .contains("private transcript"));
+    }
+
+    #[test]
+    fn diagnostic_is_bounded_local_metadata_for_only_the_current_device_generation() {
+        let voice = RemoteVoice::new(Path::new("unused-voice-fixture"));
+        assert!(serde_json::to_value(voice.snapshot()).unwrap().get("diagnostic").is_none());
+        let (cancel, _receiver) = watch::channel(false);
+        {
+            let mut inner = voice.inner.lock().unwrap();
+            inner.generation = 2;
+            inner.cancel = Some(cancel);
+            inner.snapshot.running = true;
+        }
+        voice.set_diagnostic(2, "语".repeat(20_000));
+        assert_eq!(voice.snapshot().diagnostic.chars().count(), 12_000);
+        voice.set_diagnostic(1, "previous generation".into());
+        assert_eq!(voice.snapshot().diagnostic.chars().count(), 12_000);
+        voice.update(2, "connecting", "", Some("another-device".into()));
+        assert!(voice.snapshot().diagnostic.is_empty());
+        voice.set_diagnostic(2, "current metadata".into());
+        voice.finish(2, Some("missing supported service".into()));
+        assert_eq!(voice.snapshot().diagnostic, "current metadata", "failure retains a report for copying");
+        voice.set_diagnostic(2, "late metadata after finish".into());
+        assert_eq!(voice.snapshot().diagnostic, "current metadata");
+        voice.stop();
+        assert!(voice.snapshot().diagnostic.is_empty());
     }
 
     fn auto_profile(name: &str) -> PathBuf {
