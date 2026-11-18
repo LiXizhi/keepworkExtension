@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const Module=require('node:module');
 const ts=require('typescript');
-function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./personaSales'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./personaSales','./agentJobs','./agentJobProtocol'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
@@ -21,7 +21,7 @@ function fixture(t,backend='keepwork'){
     const factory=(login,executeTool)=>({close(){},answer(input,signal){return messaging.workers.answer(input,signal,login,(name,args)=>executeTool(name,args,signal));}});
     const service=new Personas(home,sessions,messaging,factory);t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
     service.upsert('owner',{id:'first',name:'我的分身',root:home,executor:'auto'});
-    return {service,home,pending,peerRequests,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,setClient:value=>{client=value;}};
+    return {service,home,pending,peerRequests,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,factory,setClient:value=>{client=value;}};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
 test('personas discover same-owner peers, exchange actual replies and retain only pair context', async t=>{
@@ -350,11 +350,11 @@ test('sales: only one worker starts and an interrupted round never replays after
     let scans=0;
     global.fetch=async(url,options)=>{
         assert.equal(options.headers.Authorization,'Bearer '+token);
-        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['marketing-campaigns:read','marketing-tasks:read','sales-reports:read','sales-reports:write']}}});
-        const {args}=JSON.parse(options.body);
-        if(args.path==='/marketing-campaigns/campaign')return Response.json({ok:true,result:campaign});
-        assert.equal(args.path,'/marketing-tasks');assert.equal(args.query.availability,'sales-due');scans++;
-        return Response.json({ok:true,result:{rows:[{id:'task',campaign_id:'campaign',status:'待认领',version:1}]}});
+        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['agent-jobs:read','agent-jobs:write','agent-jobs:role:SDR']}}});
+        const {command,args}=JSON.parse(options.body);
+        if(command==='agent_job_capabilities')return Response.json({ok:true,result:{protocol:'keepwork.agent-job.v1',roles:[{id:'SDR'}]}});
+        assert.equal(command,'next_job');assert.equal(args.role,'SDR');scans++;
+        return Response.json({ok:true,result:{job:{id:'task',kind:'first_touch',role:'SDR',status:'queued',version:1}}});
     };
     t.after(()=>{global.fetch=previousFetch;});
     const sale=await f.service.sales('owner','first',{action:'start',url:'http://localhost',token,credentialId:'credential',
@@ -381,4 +381,216 @@ test('explicit WeChat composer message uses the owned browser once without start
     assert.equal(f.service.read('owner','first').messages.at(-1).text,'verified bubble');
     assert.equal(f.calls.length,0);
     assert.equal(f.pending.length,0);
+});
+
+test('sales: job_knowledge, ActionNode citedKnowledgeIds guard, and transient poll backoff', async t=>{
+    const f=fixture(t),previousFetch=global.fetch,token='kwcrm_'+'b'.repeat(64);
+    let nextResponses=[],searchCalls=0,finishPayloads=[];
+    global.fetch=async(url,options)=>{
+        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['agent-jobs:read','agent-jobs:write','agent-jobs:role:客服','knowledge-items:read']}}});
+        const {command,args,meta}=JSON.parse(options.body);
+        if(command==='agent_job_capabilities')return Response.json({ok:true,result:{protocol:'keepwork.agent-job.v1',roles:[{id:'客服'}],budgetEnforcement:true}});
+        if(command==='next_job')return nextResponses.shift() || Response.json({ok:true,result:{empty:true}});
+        if(command==='search_knowledge'){
+            searchCalls++;
+            assert.equal(meta?.jobId,'job-k1');
+            return Response.json({ok:true,result:{rows:[{id:'k-real-1',name:'退款规则',excerpt:'7天可退'}]}});
+        }
+        if(command==='finish_job'){
+            finishPayloads.push({args,meta});
+            return Response.json({ok:true,result:{recordId:'job-k1',approvalId:'app-k1',status:'待审批',pendingApproval:true}});
+        }
+        throw Error('unexpected command '+command);
+    };
+    t.after(()=>{global.fetch=previousFetch;});
+    await f.service.sales('owner','first',{action:'start',url:'http://localhost',token,credentialId:'cred',
+        crmPersonaId:'crm',campaignId:'camp',role:'客服',expiresAt:new Date(Date.now()+86400000).toISOString(),objective:'解答售后'});
+
+    // Transient 503 should keep enabled=true and schedule exponential backoff
+    nextResponses.push(new Response('unavailable',{status:503}));
+    const t0=Date.now();
+    f.service.tick(t0);await tick();await tick();
+    const after503=f.service.read('owner','first').sales;
+    assert.equal(after503.enabled,true);
+    assert.equal(after503.consecutiveErrors,1);
+    assert.match(after503.status,/网络重试中/);
+    assert.equal(after503.next,t0+60000);
+
+    // Recovery resets consecutiveErrors and claims job with preloaded context + job_knowledge + ActionNode
+    nextResponses.push(Response.json({ok:true,result:{job:{
+        id:'job-k1',kind:'answer_inquiry',role:'客服',status:'执行中',version:1,
+        subject_module:'customers',subject_id:'cust-1',parent_job_id:'job-parent',cause_event:'agent_job.finished:research_lead',
+        context:{knowledgeCandidates:[{id:'k-preload-1',name:'营业时间'}],budget:{maxSteps:8,tokenBudget:12000},actionSpec:{requiredNodes:['evidence_anchor','output']}},
+    }}}));
+    f.service.tick(t0+60000);await tick();await tick();
+    const afterClaim=f.service.read('owner','first').sales;
+    assert.equal(afterClaim.consecutiveErrors,undefined);
+    const worker=f.pending.at(-1);
+    assert.match(worker.input.question,/k-preload-1/);
+    assert.match(worker.input.question,/job-parent/);
+    assert.ok(worker.input.tools.some(t=>t.function.name==='job_knowledge'));
+
+    await assert.rejects(worker.executeTool('job_result',{
+        content:'拟稿',evidence:['/agent-jobs/job-k1'],citedKnowledgeIds:['k-hallucinated'],body:'编造',
+    }),/citedKnowledgeIds/);
+
+    const searched=await worker.executeTool('job_knowledge',{query:'退款'});
+    assert.equal(searchCalls,1);
+    assert.equal(searched.rows[0].id,'k-real-1');
+
+    await worker.executeTool('job_result',{
+        content:'引用真实知识提交',
+        evidence:['/agent-jobs/job-k1'],
+        citedKnowledgeIds:['k-real-1'],
+        facts:['客户询问退款'],
+        body:'7 天内可申请退款',
+    });
+    assert.equal(finishPayloads.length,1);
+    assert.deepEqual(finishPayloads[0].args.result.cited_knowledge_ids,['k-real-1']);
+    assert.deepEqual(finishPayloads[0].args.result.nodes.evidence_anchor.knowledge_ids,['k-real-1']);
+    assert.equal(finishPayloads[0].args.result.nodes.output.body,'7 天内可申请退款');
+    worker.resolve('已提交审批 app-k1');await tick();
+});
+
+test('legacy campaign credentials start, resume and finish sales work across an upgrade', async t => {
+    const f = fixture(t);
+    const grant = {
+        url: 'http://localhost', token: 'kwcrm_' + 'a'.repeat(64), crmPersonaId: 'crm',
+        credentialId: 'credential', campaignId: 'spring', objective: '答复试玩咨询',
+        expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    };
+    const permissions = ['marketing-campaigns:read', 'marketing-tasks:read', 'sales-reports:read', 'sales-reports:write'];
+    const campaign = {id: 'spring', status: '启用', channel_account_id: 'channel'};
+    const task = {id: 'task', campaign_id: 'spring', status: '待认领', version: 1};
+    const writes = [];
+    let scans = 0;
+    let hasTask = false;
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+        assert.equal(options.headers.Authorization, 'Bearer ' + grant.token);
+        if (url.endsWith('/me')) return Response.json({user: {agent: {id: 'crm', permissions}}});
+        const {command, args} = JSON.parse(options.body);
+        assert.equal(command, 'crm_request');
+        const reply = result => Response.json({ok: true, result});
+        if (args.path === '/marketing-campaigns/spring') return reply(campaign);
+        if (args.path === '/marketing-tasks') {
+            assert.equal(args.query.availability, 'sales-due');
+            assert.deepEqual(JSON.parse(args.query.filters), {campaign_id: 'spring'});
+            scans++;
+            return reply({rows: hasTask ? [task] : []});
+        }
+        assert.equal(args.method, 'POST');
+        assert.ok(args.idempotencyKey);
+        writes.push(args);
+        if (args.path.endsWith('/actions/claim-task')) return reply({...task, status: '已认领', version: 2});
+        if (args.path.endsWith('/actions/answer-inquiry')) return reply({...task, status: '完成', version: 3});
+        assert.equal(args.path, '/sales-reports');
+        assert.equal(args.data.campaign_id, 'spring');
+        return reply({id: 'legacy-report'});
+    });
+
+    const started = await f.service.sales('owner', 'first', {action: 'start', ...grant});
+    assert.equal(started.enabled, true);
+    assert.equal(started.token, undefined);
+    f.service.close();
+
+    // Simulate the persisted shape written by a pre-agent-jobs daemon.
+    const filename = fs.readdirSync(f.home)
+        .filter(file => /^[a-f0-9]{64}\.json$/.test(file))
+        .map(file => path.join(f.home, file))
+        .find(file => JSON.parse(fs.readFileSync(file, 'utf8')).id === 'first');
+    const stored = JSON.parse(fs.readFileSync(filename, 'utf8'));
+    stored.sales = {
+        ...grant, enabled: true, intervalMinutes: 30, maxDailyCycles: 24, next: 0,
+        day: '', cycles: 0, status: '待巡查', learning: [], ownerDecisions: [{id: 'prior', question: '继续吗', answer: '采纳'}],
+    };
+    fs.writeFileSync(filename, JSON.stringify(stored));
+    const service = new f.Personas(f.home, f.sessions, f.messaging, f.factory);
+    t.after(() => service.close());
+    service.tick();
+    await tick();
+    assert.equal(scans, 1);
+    assert.equal(service.read('owner', 'first').sales.enabled, true);
+    assert.equal(f.pending.length, 0);
+
+    await service.sales('owner', 'first', {action: 'pause'});
+    const resumed = await service.sales('owner', 'first', {action: 'resume'});
+    assert.deepEqual(resumed.ownerDecisions, stored.sales.ownerDecisions);
+    hasTask = true;
+    service.tick();
+    service.tick();
+    await tick();
+    assert.equal(scans, 2);
+    assert.equal(f.pending.length, 1);
+    const worker = f.pending[0];
+    const toolNames = worker.input.tools.map(tool => tool.function.name);
+    assert.ok(toolNames.includes('sales_report'));
+    assert.ok(!toolNames.includes('job_result'));
+    await assert.rejects(worker.executeTool('crm_request', {method: 'GET', path: '/marketing-campaigns/other'}), /未授权/);
+    await worker.executeTool('crm_request', {method: 'POST', path: '/marketing-tasks/task/actions/claim-task', data: {version: 1}});
+    await worker.executeTool('crm_request', {method: 'POST', path: '/marketing-tasks/task/actions/answer-inquiry', data: {answer: '可以试玩', version: 2}});
+    await worker.executeTool('sales_report', {content: '已回复', evidence: ['/marketing-tasks/task']});
+    worker.resolve('已完成');
+    await tick();
+    const view = service.read('owner', 'first');
+    assert.equal(writes.length, 3);
+    assert.equal(view.job.state, 'done');
+    assert.equal(view.sales.lastReport.id, 'legacy-report');
+    assert.equal(view.sales.enabled, true);
+    assert.ok(!JSON.stringify(view).includes(grant.token));
+});
+
+test('resuming a configured CRM job role requires its job grant even when campaign access is available', async t => {
+    const f = fixture(t);
+    let permissions = ['agent-jobs:read', 'agent-jobs:write', 'agent-jobs:role:客服'];
+    const commands = [];
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+        if (url.endsWith('/me')) return Response.json({user: {agent: {id: 'crm', permissions}}});
+        const {command} = JSON.parse(options.body);
+        commands.push(command);
+        assert.equal(command, 'agent_job_capabilities');
+        return Response.json({ok: true, result: {protocol: 'keepwork.agent-job.v1', roles: [{id: '客服'}]}});
+    });
+    await f.service.sales('owner', 'first', {
+        action: 'start', url: 'http://localhost', token: 'kwcrm_' + 'c'.repeat(64),
+        crmPersonaId: 'crm', credentialId: 'cred', campaignId: 'spring', role: '客服',
+        objective: '客户服务', expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    });
+    await f.service.sales('owner', 'first', {action: 'pause'});
+    permissions = ['marketing-campaigns:read', 'marketing-tasks:read', 'sales-reports:read', 'sales-reports:write'];
+    await assert.rejects(f.service.sales('owner', 'first', {action: 'resume'}), /agent-jobs|作业/);
+    assert.deepEqual(commands, ['agent_job_capabilities']);
+    const saved = f.service.read('owner', 'first').sales;
+    assert.equal(saved.role, '客服');
+    assert.equal(saved.enabled, false);
+});
+
+test('campaign-only start stays bound to its campaign when the credential also grants agent jobs', async t => {
+    const f = fixture(t);
+    const permissions = [
+        'marketing-campaigns:read', 'marketing-tasks:read', 'sales-reports:read', 'sales-reports:write',
+        'agent-jobs:read', 'agent-jobs:write', 'agent-jobs:role:SDR',
+    ];
+    const campaign = {id: 'autumn', status: '启用', channel_account_id: 'channel'};
+    const commands = [];
+    const campaignFilters = [];
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+        if (url.endsWith('/me')) return Response.json({user: {agent: {id: 'crm', permissions}}});
+        const {command, args} = JSON.parse(options.body);
+        commands.push(command);
+        assert.equal(command, 'crm_request');
+        if (args.path === '/marketing-campaigns/autumn') return Response.json({ok: true, result: campaign});
+        assert.equal(args.path, '/marketing-tasks');
+        campaignFilters.push(JSON.parse(args.query.filters));
+        return Response.json({ok: true, result: {rows: []}});
+    });
+    await f.service.sales('owner', 'first', {
+        action: 'start', url: 'http://localhost', token: 'kwcrm_' + 'd'.repeat(64),
+        crmPersonaId: 'crm', credentialId: 'cred', campaignId: 'autumn',
+        objective: '跟进秋季活动', expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    });
+    f.service.tick();
+    await tick();
+    assert.deepEqual(campaignFilters, [{campaign_id: 'autumn'}]);
+    assert.ok(commands.every(command => command === 'crm_request'));
+    assert.equal(f.service.read('owner', 'first').sales.enabled, true);
 });
