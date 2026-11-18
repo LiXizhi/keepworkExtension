@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const Module=require('node:module');
 const ts=require('typescript');
-function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./agentJobs','./agentJobProtocol'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./personaSales'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
@@ -350,11 +350,11 @@ test('sales: only one worker starts and an interrupted round never replays after
     let scans=0;
     global.fetch=async(url,options)=>{
         assert.equal(options.headers.Authorization,'Bearer '+token);
-        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['agent-jobs:read','agent-jobs:write','agent-jobs:role:SDR']}}});
-        const {command,args}=JSON.parse(options.body);
-        if(command==='agent_job_capabilities')return Response.json({ok:true,result:{protocol:'keepwork.agent-job.v1',roles:[{id:'SDR'}]}});
-        assert.equal(command,'next_job');assert.equal(args.role,'SDR');scans++;
-        return Response.json({ok:true,result:{job:{id:'task',kind:'first_touch',role:'SDR',status:'queued',version:1}}});
+        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['marketing-campaigns:read','marketing-tasks:read','sales-reports:read','sales-reports:write']}}});
+        const {args}=JSON.parse(options.body);
+        if(args.path==='/marketing-campaigns/campaign')return Response.json({ok:true,result:campaign});
+        assert.equal(args.path,'/marketing-tasks');assert.equal(args.query.availability,'sales-due');scans++;
+        return Response.json({ok:true,result:{rows:[{id:'task',campaign_id:'campaign',status:'待认领',version:1}]}});
     };
     t.after(()=>{global.fetch=previousFetch;});
     const sale=await f.service.sales('owner','first',{action:'start',url:'http://localhost',token,credentialId:'credential',
@@ -381,73 +381,4 @@ test('explicit WeChat composer message uses the owned browser once without start
     assert.equal(f.service.read('owner','first').messages.at(-1).text,'verified bubble');
     assert.equal(f.calls.length,0);
     assert.equal(f.pending.length,0);
-});
-
-test('sales: job_knowledge, ActionNode citedKnowledgeIds guard, and transient poll backoff', async t=>{
-    const f=fixture(t),previousFetch=global.fetch,token='kwcrm_'+'b'.repeat(64);
-    let nextResponses=[],searchCalls=0,finishPayloads=[];
-    global.fetch=async(url,options)=>{
-        if(url.endsWith('/me'))return Response.json({user:{agent:{id:'crm',permissions:['agent-jobs:read','agent-jobs:write','agent-jobs:role:客服','knowledge-items:read']}}});
-        const {command,args,meta}=JSON.parse(options.body);
-        if(command==='agent_job_capabilities')return Response.json({ok:true,result:{protocol:'keepwork.agent-job.v1',roles:[{id:'客服'}],budgetEnforcement:true}});
-        if(command==='next_job')return nextResponses.shift() || Response.json({ok:true,result:{empty:true}});
-        if(command==='search_knowledge'){
-            searchCalls++;
-            assert.equal(meta?.jobId,'job-k1');
-            return Response.json({ok:true,result:{rows:[{id:'k-real-1',name:'退款规则',excerpt:'7天可退'}]}});
-        }
-        if(command==='finish_job'){
-            finishPayloads.push({args,meta});
-            return Response.json({ok:true,result:{recordId:'job-k1',approvalId:'app-k1',status:'待审批',pendingApproval:true}});
-        }
-        throw Error('unexpected command '+command);
-    };
-    t.after(()=>{global.fetch=previousFetch;});
-    await f.service.sales('owner','first',{action:'start',url:'http://localhost',token,credentialId:'cred',
-        crmPersonaId:'crm',campaignId:'camp',role:'客服',expiresAt:new Date(Date.now()+86400000).toISOString(),objective:'解答售后'});
-
-    // Transient 503 should keep enabled=true and schedule exponential backoff
-    nextResponses.push(new Response('unavailable',{status:503}));
-    const t0=Date.now();
-    f.service.tick(t0);await tick();await tick();
-    const after503=f.service.read('owner','first').sales;
-    assert.equal(after503.enabled,true);
-    assert.equal(after503.consecutiveErrors,1);
-    assert.match(after503.status,/网络重试中/);
-    assert.equal(after503.next,t0+60000);
-
-    // Recovery resets consecutiveErrors and claims job with preloaded context + job_knowledge + ActionNode
-    nextResponses.push(Response.json({ok:true,result:{job:{
-        id:'job-k1',kind:'answer_inquiry',role:'客服',status:'执行中',version:1,
-        subject_module:'customers',subject_id:'cust-1',parent_job_id:'job-parent',cause_event:'agent_job.finished:research_lead',
-        context:{knowledgeCandidates:[{id:'k-preload-1',name:'营业时间'}],budget:{maxSteps:8,tokenBudget:12000},actionSpec:{requiredNodes:['evidence_anchor','output']}},
-    }}}));
-    f.service.tick(t0+60000);await tick();await tick();
-    const afterClaim=f.service.read('owner','first').sales;
-    assert.equal(afterClaim.consecutiveErrors,undefined);
-    const worker=f.pending.at(-1);
-    assert.match(worker.input.question,/k-preload-1/);
-    assert.match(worker.input.question,/job-parent/);
-    assert.ok(worker.input.tools.some(t=>t.function.name==='job_knowledge'));
-
-    await assert.rejects(worker.executeTool('job_result',{
-        content:'拟稿',evidence:['/agent-jobs/job-k1'],citedKnowledgeIds:['k-hallucinated'],body:'编造',
-    }),/citedKnowledgeIds/);
-
-    const searched=await worker.executeTool('job_knowledge',{query:'退款'});
-    assert.equal(searchCalls,1);
-    assert.equal(searched.rows[0].id,'k-real-1');
-
-    await worker.executeTool('job_result',{
-        content:'引用真实知识提交',
-        evidence:['/agent-jobs/job-k1'],
-        citedKnowledgeIds:['k-real-1'],
-        facts:['客户询问退款'],
-        body:'7 天内可申请退款',
-    });
-    assert.equal(finishPayloads.length,1);
-    assert.deepEqual(finishPayloads[0].args.result.cited_knowledge_ids,['k-real-1']);
-    assert.deepEqual(finishPayloads[0].args.result.nodes.evidence_anchor.knowledge_ids,['k-real-1']);
-    assert.equal(finishPayloads[0].args.result.nodes.output.body,'7 天内可申请退款');
-    worker.resolve('已提交审批 app-k1');await tick();
 });
