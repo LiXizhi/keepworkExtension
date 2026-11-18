@@ -20,6 +20,8 @@ pub(crate) async fn login_dws(root: &str, profile: Option<&str>) -> Result<(), M
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW; authorization opens its own browser.
     let mut child = command
         .spawn()
         .map_err(|_| MessageError::bad("DingTalk authorization could not start"))?;
@@ -174,6 +176,8 @@ pub(crate) fn spawn_listener_child(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW for the background event listener.
     command
         .spawn()
         .map_err(|_| MessageError::bad("DWS listener could not start"))

@@ -7,12 +7,13 @@ const path = require('node:path');
 const h = require('./harness.cjs');
 
 // Channel-hosting contract: the Rust daemon drives fake `dws` / `lark-cli`
-// executables (KEEPWORK_DWS_PATH / KEEPWORK_LARK_PATH) so needs-login,
+// executables (a custom npm package prefix / KEEPWORK_LARK_PATH) so needs-login,
 // connect, stop, restart, conflict, switch and inbox flows run end to end
 // without network access. Binding ids and payloads must match the Node daemon.
 let rust;
 let rootDir;
 let cliDir;
+let dws;
 const roots = [];
 const ownerA = 'a'.repeat(32);
 const ownerB = 'b'.repeat(32);
@@ -24,7 +25,12 @@ before(async () => {
   roots.push(rootDir);
   cliDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-channel-cli-'));
   const suffix = process.platform === 'win32' ? '.exe' : '';
-  const dws = path.join(cliDir, `dws${suffix}`);
+  const prefix = path.join(cliDir, 'custom-npm');
+  const bin = process.platform === 'win32' ? prefix : path.join(prefix, 'bin');
+  const modules = process.platform === 'win32' ? prefix : path.join(prefix, 'lib');
+  dws = path.join(modules, 'node_modules', 'dingtalk-workspace-cli', 'vendor', `dws${suffix}`);
+  fs.mkdirSync(path.dirname(dws), { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
   const lark = path.join(cliDir, `lark-cli${suffix}`);
   // CI already installs Rust. Build a native fixture so the same process
   // contract runs on every platform without requiring a Unix shell on Windows.
@@ -33,7 +39,14 @@ before(async () => {
     '--crate-name', 'messaging_cli_fixture', '--edition=2021', '-o', dws,
   ], { cwd: cliDir, timeout: 60_000 });
   fs.copyFileSync(dws, lark);
-  rust = await h.startRust({ env: { KEEPWORK_DWS_PATH: dws, KEEPWORK_LARK_PATH: lark } });
+  // A terminal's npm shim can work while the daemon cannot find a native
+  // executable beside it. The fixture has only the package vendor binary.
+  rust = await h.startRust({ env: {
+    KEEPWORK_DWS_PATH: '', KEEPWORK_LARK_PATH: lark, KEEPWORK_CLI_BIN: '',
+    APPDATA: path.join(cliDir, 'appdata'),
+    PATH: bin, Path: bin, npm_config_prefix: '', NPM_CONFIG_PREFIX: '',
+    KEEPWORK_FIXTURE_REQUIRE_NO_CONSOLE: '1',
+  } });
 });
 
 after(async () => {
@@ -52,6 +65,37 @@ function headers(ownerKey, extra = {}) {
     'x-agent-owner': ownerKey,
     ...extra,
   };
+}
+
+for (const variable of ['npm_config_prefix', 'NPM_CONFIG_PREFIX']) {
+  test(`DWS profiles discover ${variable} without an inherited bin PATH`, async () => {
+    const prefix = path.join(cliDir, variable);
+    const modules = process.platform === 'win32' ? prefix : path.join(prefix, 'lib');
+    const target = path.join(modules, 'node_modules', 'dingtalk-workspace-cli', 'vendor', path.basename(dws));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(dws, target);
+    const daemon = await h.startRust({ env: {
+      KEEPWORK_DWS_PATH: '', KEEPWORK_CLI_BIN: '', PATH: '', Path: '',
+      APPDATA: path.join(cliDir, 'appdata'),
+      // Windows environment names are case-insensitive; avoid supplying
+      // conflicting duplicate keys when Node builds its child environment.
+      npm_config_prefix: process.platform === 'win32' ? prefix : '',
+      NPM_CONFIG_PREFIX: process.platform === 'win32' ? prefix : '', [variable]: prefix,
+      KEEPWORK_FIXTURE_REQUIRE_NO_CONSOLE: '1',
+    } });
+    try {
+      const response = await fetch(`${daemon.base}/messaging/profiles`, {
+        method: 'POST',
+        headers: { origin: daemon.base, 'content-type': 'application/json', 'x-agent-owner': ownerA },
+        body: JSON.stringify({ root: rootDir }),
+      });
+      const result = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(result));
+      assert.equal(result.profiles[0].id, 'corp1:user1');
+    } finally {
+      await daemon.stop();
+    }
+  });
 }
 
 async function persona(ownerKey, method, route, body) {
@@ -97,6 +141,14 @@ test('dingtalk connect starts a listener and the persona view carries the bindin
   assert.equal(view.json.channels[0].id, result.json.id);
   assert.equal(view.json.channels[0].listening, true);
   assert.equal(view.json.groupWorkActive, false);
+});
+
+test('dingtalk login reuses the discovered native package binary and reconnects', async () => {
+  const result = await persona(ownerA, 'POST', '/agent-a/channel-login', { root: rootDir });
+  assert.equal(result.status, 200, JSON.stringify(result.json));
+  assert.equal(result.json.channel, 'dingtalk');
+  assert.equal(result.json.profile, 'corp1:user1');
+  assert.equal(result.json.listening, true);
 });
 
 test('channel-stop halts the listener and channel-start brings it back', async () => {

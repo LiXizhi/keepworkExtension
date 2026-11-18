@@ -32,6 +32,14 @@ pub(crate) fn is_directory(dir: &Path) -> bool {
     std::fs::metadata(dir).map(|m| m.is_dir()).unwrap_or(false)
 }
 
+fn npm_prefix() -> Option<PathBuf> {
+    ["npm_config_prefix", "NPM_CONFIG_PREFIX"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 pub(crate) fn version_prefixes() -> Vec<PathBuf> {
     let home = crate::config::os_home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let roots: [(PathBuf, &str); 3] = [
@@ -72,6 +80,13 @@ pub(crate) fn cli_search_dirs() -> Vec<PathBuf> {
     }
     for prefix in version_prefixes() {
         dirs.push(prefix.join("bin"));
+    }
+    if let Some(prefix) = npm_prefix() {
+        dirs.push(if cfg!(windows) {
+            prefix
+        } else {
+            prefix.join("bin")
+        });
     }
     if let Some(custom) = std::env::var_os("KEEPWORK_CLI_BIN") {
         dirs.insert(0, PathBuf::from(custom));
@@ -160,7 +175,36 @@ pub(crate) fn global_module_dirs() -> Vec<PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         dirs.insert(0, PathBuf::from(appdata).join("npm"));
     }
-    dirs.into_iter().filter(|dir| is_directory(dir)).collect()
+    if let Some(prefix) = npm_prefix() {
+        dirs.push(prefix.clone());
+        dirs.push(prefix.join("lib"));
+    }
+    dirs.extend(npm_module_dirs(
+        std::env::split_paths(&inherited_path()).chain(cli_search_dirs()),
+    ));
+    let mut unique = Vec::new();
+    for dir in dirs {
+        if dir.is_absolute() && is_directory(&dir) && !unique.contains(&dir) {
+            unique.push(dir);
+        }
+    }
+    unique
+}
+
+/// Windows npm stores node_modules beside PATH shims; POSIX npm stores it in
+/// ../lib relative to bin. Resolve only package native binaries, never a shell shim.
+fn npm_module_dirs(bin_dirs: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for dir in bin_dirs {
+        if !dir.is_absolute() {
+            continue;
+        }
+        dirs.push(dir.clone());
+        if let Some(parent) = dir.parent() {
+            dirs.push(parent.join("lib"));
+        }
+    }
+    dirs
 }
 
 pub(crate) fn resolve_cli(
@@ -171,7 +215,7 @@ pub(crate) fn resolve_cli(
 ) -> Result<PathBuf, DwsError> {
     if let Ok(custom) = std::env::var(env_var) {
         let path = PathBuf::from(custom);
-        if path.is_file() {
+        if path.is_absolute() && path.is_file() {
             return Ok(path);
         }
     }
@@ -188,7 +232,7 @@ pub(crate) fn resolve_cli(
         candidates.push(dir.join("node_modules").join(module_subdir).join(binary));
     }
     for path in candidates {
-        if path.is_file() {
+        if path.is_absolute() && path.is_file() {
             return Ok(path);
         }
     }
@@ -330,6 +374,8 @@ pub(crate) async fn cli_call(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW for background channel calls.
     let mut child = command
         .spawn()
         .map_err(|_| DwsError::rejected("CLI could not start"))?;
