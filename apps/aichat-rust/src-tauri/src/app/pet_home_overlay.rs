@@ -82,7 +82,9 @@ pub(super) fn handle_home(app: &AppHandle, core: &Arc<AppCore>, main: &WebviewWi
     let Ok(native) = window.ns_window() else {
         return true;
     };
-    if let Err(error) = pet_canvas::sync_pet_canvas(&window, area) {
+    core.pet.set_work_area(area);
+    let canvas = core.pet.desired_canvas();
+    if let Err(error) = pet_canvas::sync_pet_canvas(&window, canvas) {
         eprintln!("[desktop] Cannot position the Home pet: {error}");
         return true;
     }
@@ -93,8 +95,9 @@ pub(super) fn handle_home(app: &AppHandle, core: &Arc<AppCore>, main: &WebviewWi
         return true;
     }
     if unsafe { keepwork_pet_overlay_show(native) } {
+        let _ = window.eval("window.__aichatPetHidden=false;window.dispatchEvent(new Event('aichat:pet-shown'))");
         core.pet.set_work_area(area);
-        core.pet.note_canvas(area);
+        core.pet.note_canvas(canvas);
         *core.pet_home_overlay.lock().unwrap() = Some(area);
         super::remote_phone_view::sync(app);
         pet_host::broadcast_pet_state(app, core);

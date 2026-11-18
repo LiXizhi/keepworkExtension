@@ -54,10 +54,21 @@ pub fn uses_pet_audio(snapshot: &Value, action: &str) -> bool {
                 && snapshot["petVoiceAudioVersion"].as_u64() == Some(1)))
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PetAppearanceMode {
+    Manual,
+    #[default]
+    #[serde(other)]
+    Model,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PetPreferences {
     pub appearance: String,
+    #[serde(default)]
+    pub appearance_mode: PetAppearanceMode,
     pub scale: f64,
     pub left: Option<i32>,
     pub top: Option<i32>,
@@ -73,6 +84,7 @@ impl Default for PetPreferences {
     fn default() -> Self {
         Self {
             appearance: "follow".to_string(),
+            appearance_mode: PetAppearanceMode::Model,
             scale: 1.0,
             left: None,
             top: None,
@@ -91,6 +103,35 @@ pub struct WorkArea {
     pub height: i32,
 }
 
+/// Bounded alpha occupancy grid for a bundled pet frame. Rows are packed
+/// continuously, MSB first; each lowercase hex pair represents one byte.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PetHitMask {
+    pub width: u16,
+    pub height: u16,
+    pub bits: String,
+}
+
+impl PetHitMask {
+    pub(crate) fn valid(&self) -> bool {
+        self.width > 0 && self.width <= 256 && self.height > 0 && self.height <= 256
+            && self.bits.len() == (self.width as usize * self.height as usize).div_ceil(8) * 2
+            && self.bits.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    pub(crate) fn contains(&self, x: usize, y: usize) -> bool {
+        if x >= self.width as usize || y >= self.height as usize { return false; }
+        let bit = y * self.width as usize + x;
+        let Some(byte) = self.bits.as_bytes().get(bit / 4) else { return false; };
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => return false,
+        };
+        nibble & (8 >> (bit % 4)) != 0
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct PetHitRegion {
     pub id: String,
@@ -98,13 +139,15 @@ pub struct PetHitRegion {
     pub top: f64,
     pub width: f64,
     pub height: f64,
+    #[serde(default)]
+    pub mask: Option<PetHitMask>,
 }
 
 impl PetHitRegion {
     fn clipped(mut self, area: WorkArea) -> Option<Self> {
         if !matches!(
             self.id.as_str(),
-            "pet" | "panel" | "bubble" | "exit-bubble" | "permission-bubble"
+            "pet" | "panel" | "bubble" | "exit-bubble" | "permission-bubble" | "dialogue-icon"
         ) || ![self.left, self.top, self.width, self.height]
             .iter()
             .all(|n| n.is_finite())
@@ -114,6 +157,13 @@ impl PetHitRegion {
             || self.height > area.height as f64
         {
             return None;
+        }
+        if let Some(mask) = &self.mask {
+            if self.id != "pet" || !mask.valid() { return None; }
+            // Preserve the original mask coordinate system if the art crosses
+            // an edge. pointer_interactive rejects points outside the work area.
+            return (self.left < area.width as f64 && self.top < area.height as f64
+                && self.left + self.width > 0.0 && self.top + self.height > 0.0).then_some(self);
         }
         let right = (self.left + self.width).min(area.width as f64);
         let bottom = (self.top + self.height).min(area.height as f64);
@@ -125,13 +175,21 @@ impl PetHitRegion {
     }
 
     fn contains(&self, x: f64, y: f64) -> bool {
-        x >= self.left && y >= self.top && x < self.left + self.width && y < self.top + self.height
+        if !(x >= self.left && y >= self.top && x < self.left + self.width && y < self.top + self.height) {
+            return false;
+        }
+        self.mask.as_ref().map_or(true, |mask| {
+            let column = ((x - self.left) / self.width * mask.width as f64).floor() as usize;
+            let row = ((y - self.top) / self.height * mask.height as f64).floor() as usize;
+            mask.contains(column, row)
+        })
     }
 }
 
 #[derive(Default)]
 struct PetPointerState {
     regions: Vec<PetHitRegion>,
+    crop: Option<WorkArea>,
     epoch: u64,
     held: bool,
     applied: Option<bool>,
@@ -500,7 +558,7 @@ pub fn sanitize_pet_state(
         }))
     });
 
-    json!({
+    let mut snapshot = json!({
         "version": 1,
         "context": raw.get("context").and_then(|v| v.as_str()).map(|s| truncate_str(s, 120)).unwrap_or_else(|| "default".to_string()),
         "expanded": expanded,
@@ -554,7 +612,13 @@ pub fn sanitize_pet_state(
         "classroomRecording": classroom_recording,
         "exitPrompt": exit_prompt,
         "permission": permission_prompt,
-    })
+    });
+    snapshot["preferences"]["appearanceMode"] = json!(prefs.appearance_mode);
+    snapshot["effectiveAppearance"] = json!(crate::pet_appearance::effective(
+        raw, &prefs.appearance, prefs.appearance_mode == PetAppearanceMode::Model,
+    ));
+    snapshot["modelId"] = json!(crate::pet_appearance::model_id(raw));
+    snapshot
 }
 
 fn phone_state<'a>(raw: &Value, phase: &'a Value) -> Option<&'a str> {
@@ -668,6 +732,7 @@ pub struct PetController {
     drag_moved: AtomicBool,
     native_drag_tracking: AtomicBool,
     canvas_synced: Mutex<Option<WorkArea>>,
+    drag_crop: Mutex<Option<WorkArea>>,
     pointer_state: Mutex<PetPointerState>,
 }
 
@@ -687,6 +752,7 @@ impl PetController {
             drag_moved: AtomicBool::new(false),
             native_drag_tracking: AtomicBool::new(false),
             canvas_synced: Mutex::new(None),
+            drag_crop: Mutex::new(None),
             pointer_state: Mutex::new(PetPointerState::default()),
         }
     }
@@ -697,9 +763,7 @@ impl PetController {
             .and_then(|raw| serde_json::from_str::<PetPreferences>(&raw).ok())
             .map(|mut p| {
                 p.scale = normalize_scale(p.scale);
-                if p.appearance != "dragon" && p.appearance != "follow" {
-                    p.appearance = "follow".to_string();
-                }
+                p.appearance = crate::pet_appearance::normalize(&p.appearance).to_string();
                 p
             })
             .unwrap_or_default()
@@ -721,6 +785,7 @@ impl PetController {
     pub fn clear_hit_regions(&self) {
         if let Ok(mut pointer) = self.pointer_state.lock() {
             pointer.regions.clear();
+            pointer.crop = None;
             pointer.epoch = pointer.epoch.wrapping_add(1);
         }
     }
@@ -733,24 +798,27 @@ impl PetController {
     }
 
     pub fn update_hit_regions(&self, raw: &Value, epoch: u64) {
+        self.update_layout(raw, &Value::Null, epoch);
+    }
+
+    /// Commit one renderer measurement, so painted bounds cannot be paired
+    /// with a different frame's pointer mask under concurrent state changes.
+    pub fn update_layout(&self, hits: &Value, visuals: &Value, epoch: u64) {
         let area = self.work_area();
-        let regions = raw
-            .as_array()
-            .map(|regions| {
-                regions
-                    .iter()
-                    .take(6)
-                    .filter_map(|region| {
-                        serde_json::from_value::<PetHitRegion>(region.clone()).ok()
-                    })
-                    .filter_map(|region| region.clipped(area))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Ok(mut pointer) = self.pointer_state.lock() {
-            if pointer.epoch == epoch {
-                pointer.regions = regions;
+        let fallback = self.fallback_canvas();
+        let regions: Vec<PetHitRegion> = hits.as_array().into_iter().flatten().take(6)
+            .filter_map(|v| serde_json::from_value::<PetHitRegion>(v.clone()).ok())
+            .filter_map(|r| r.clipped(area)).collect();
+        let mut combined = regions.clone();
+        for value in visuals.as_array().into_iter().flatten().take(12) {
+            if let Ok(mut region) = serde_json::from_value::<PetHitRegion>(value.clone()) {
+                region.id = "bubble".into(); region.mask = None;
+                if let Some(region) = region.clipped(area) { combined.push(region); }
             }
+        }
+        let crop = crate::pet_crop::crop(area, fallback, &combined);
+        if let Ok(mut pointer) = self.pointer_state.lock() {
+            if pointer.epoch == epoch { pointer.regions = regions; pointer.crop = Some(crop); }
         }
     }
 
@@ -761,6 +829,7 @@ impl PetController {
     }
 
     pub fn suspend_pointer_tracking(&self) {
+        if let Ok(mut relative) = self.drag_crop.lock() { *relative = None; }
         if let Ok(mut drag) = self.drag_origin.lock() {
             *drag = None;
         }
@@ -774,6 +843,9 @@ impl PetController {
         let area = self.work_area();
         let prefs = self.preferences();
         let dragging = self.is_dragging();
+        let effective_appearance = self.page_state.lock().ok().map(|page| {
+            crate::pet_appearance::effective(&page.raw, &prefs.appearance, prefs.appearance_mode == PetAppearanceMode::Model)
+        }).unwrap_or_else(|| crate::pet_appearance::normalize(&prefs.appearance));
         let Ok(mut pointer) = self.pointer_state.lock() else {
             return false;
         };
@@ -795,18 +867,21 @@ impl PetController {
         {
             return false;
         }
-        // The native sprite bounds remain usable even before the first layout
-        // report, and immediately after a move onto another monitor.
+        let masked_pet = crate::pet_appearance::experiment(effective_appearance).is_some();
+        // Legacy sprites retain their startup fallback. Bundled AI Niang art
+        // fails closed until a current frame mask arrives: its transparent
+        // padding must never become an invisible mouse-intercepting rectangle.
         let pixels = compute_pet_pixels(prefs.scale, area);
         let (left, top) = clamp_pet_position(prefs.left, prefs.top, pixels, area);
-        (local_x >= left as f64
+        (!masked_pet
+            && local_x >= left as f64
             && local_x < (left + pixels) as f64
             && local_y >= top as f64
             && local_y < (top + pixels + 16) as f64)
-            || pointer
-                .regions
-                .iter()
-                .any(|region| region.id != "pet" && region.contains(local_x, local_y))
+            || pointer.regions.iter().any(|region| {
+                (region.id != "pet" || (masked_pet && region.mask.is_some()))
+                    && region.contains(local_x, local_y)
+            })
     }
 
     pub fn pointer_needs_update(&self, interactive: bool) -> bool {
@@ -858,12 +933,36 @@ impl PetController {
         }
     }
 
-    pub fn pending_canvas(&self) -> Option<WorkArea> {
+    fn fallback_canvas(&self) -> WorkArea {
         let area = self.work_area();
-        self.canvas_synced
-            .lock()
-            .ok()
-            .and_then(|synced| (*synced != Some(area)).then_some(area))
+        let prefs = self.preferences();
+        let pixels = compute_pet_pixels(prefs.scale, area);
+        let (left, top) = clamp_pet_position(prefs.left, prefs.top, pixels, area);
+        WorkArea { x: area.x.saturating_add(left), y: area.y.saturating_add(top), width: pixels, height: pixels + 16 }
+    }
+
+    pub fn desired_canvas(&self) -> WorkArea {
+        let area = self.work_area();
+        let fallback = self.fallback_canvas();
+        if self.is_dragging() {
+            if let Some(relative) = self.drag_crop.lock().ok().and_then(|r| *r) {
+                return crate::pet_crop::crop(area, WorkArea {
+                    x: fallback.x.saturating_add(relative.x), y: fallback.y.saturating_add(relative.y),
+                    width: relative.width, height: relative.height,
+                }, &[]);
+            }
+        }
+        self.pointer_state.lock().ok().and_then(|p| p.crop)
+            .unwrap_or_else(|| crate::pet_crop::crop(area, fallback, &[]))
+    }
+
+    pub fn current_canvas(&self) -> WorkArea {
+        self.canvas_synced.lock().ok().and_then(|c| *c).unwrap_or_else(|| self.desired_canvas())
+    }
+
+    pub fn pending_canvas(&self) -> Option<WorkArea> {
+        let desired = self.desired_canvas();
+        self.canvas_synced.lock().ok().and_then(|synced| (*synced != Some(desired)).then_some(desired))
     }
 
     pub fn is_dragging(&self) -> bool {
@@ -903,6 +1002,8 @@ impl PetController {
         let mut snap =
             sanitize_pet_state(&raw, expanded, &prefs, area, exit.as_ref(), perm.as_ref());
         snap["hitRegionsEpoch"] = json!(self.hit_regions_epoch());
+        snap["workArea"] = json!(area);
+        snap["canvas"] = json!(self.current_canvas());
         snap
     }
 
@@ -916,8 +1017,15 @@ impl PetController {
 
     pub fn update_raw_state(&self, next: Value) -> Value {
         if let Ok(mut page) = self.page_state.lock() {
+            let prefs = self.preferences();
+            let model_mode = prefs.appearance_mode == PetAppearanceMode::Model;
+            let appearance_changed = crate::pet_appearance::effective(&page.raw, &prefs.appearance, model_mode)
+                != crate::pet_appearance::effective(&next, &prefs.appearance, model_mode);
             if pet_context(&page.raw) != pet_context(&next) {
                 page.cancel_pending();
+                self.clear_hit_regions();
+            } else if appearance_changed {
+                // A stale frame mask must never intercept the previous model's silhouette.
                 self.clear_hit_regions();
             }
             if !supports_streaming_speech(&next) {
@@ -1068,17 +1176,29 @@ impl PetController {
 
     pub fn set_appearance(&self, appearance: &str) -> Value {
         if let Ok(mut prefs) = self.prefs.lock() {
-            prefs.appearance = if appearance == "dragon" {
-                "dragon".to_string()
-            } else {
-                "follow".to_string()
-            };
-            self.save_prefs(&prefs);
+            let appearance = crate::pet_appearance::normalize(appearance);
+            if prefs.appearance != appearance {
+                self.clear_hit_regions();
+                prefs.appearance = appearance.to_string();
+                self.save_prefs(&prefs);
+            }
+        }
+        self.snapshot()
+    }
+
+    pub fn set_appearance_mode(&self, mode: PetAppearanceMode) -> Value {
+        if let Ok(mut prefs) = self.prefs.lock() {
+            if prefs.appearance_mode != mode {
+                self.clear_hit_regions();
+                prefs.appearance_mode = mode;
+                self.save_prefs(&prefs);
+            }
         }
         self.snapshot()
     }
 
     pub fn start_drag(&self, cursor_x: i32, cursor_y: i32) {
+        self.freeze_drag_canvas();
         self.drag_moved.store(false, Ordering::Relaxed);
         self.native_drag_tracking.store(false, Ordering::Relaxed);
         self.set_drag_id(None);
@@ -1099,7 +1219,16 @@ impl PetController {
         self.begin_global_drag_with_id(cursor_x, cursor_y, None);
     }
 
+    fn freeze_drag_canvas(&self) {
+        let frame = self.desired_canvas();
+        let anchor = self.fallback_canvas();
+        if let Ok(mut relative) = self.drag_crop.lock() {
+            *relative = Some(WorkArea { x: frame.x - anchor.x, y: frame.y - anchor.y, ..frame });
+        }
+    }
+
     pub fn begin_global_drag_with_id(&self, cursor_x: i32, cursor_y: i32, id: Option<u64>) {
+        self.freeze_drag_canvas();
         self.drag_moved.store(false, Ordering::Relaxed);
         self.native_drag_tracking.store(true, Ordering::Relaxed);
         let area = self.work_area();
@@ -1171,16 +1300,8 @@ impl PetController {
             prefs.monitor_x = Some(monitor.x);
             prefs.monitor_y = Some(monitor.y);
         }
-        let changed = self
-            .canvas_synced
-            .lock()
-            .map(|current| *current != Some(monitor))
-            .unwrap_or(true);
-        if changed {
-            Some(monitor)
-        } else {
-            None
-        }
+        drop(drag_guard);
+        self.pending_canvas()
     }
 
     pub fn update_drag(&self, cursor_x: i32, cursor_y: i32) -> Value {
@@ -1211,8 +1332,15 @@ impl PetController {
     }
 
     pub fn end_drag(&self) -> Value {
+        let final_frame = self.desired_canvas();
         if let Ok(mut drag) = self.drag_origin.lock() {
             *drag = None;
+        }
+        if let Ok(mut relative) = self.drag_crop.lock() { *relative = None; }
+        if let Ok(mut pointer) = self.pointer_state.lock() {
+            // Preserve the visible crop until the released renderer publishes
+            // its new mask, without restoring stale pointer hit targets.
+            if pointer.crop.is_none() { pointer.crop = Some(final_frame); }
         }
         if let Ok(mut prefs) = self.prefs.lock() {
             let area = self.work_area();
@@ -1363,623 +1491,5 @@ where
 mod speech_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::TcpListener;
-    use std::thread;
-
-    pub(super) fn command_controller() -> PetController {
-        let controller = PetController::new(
-            std::env::temp_dir().join(format!("aichat-pet-commands-{}.json", Uuid::new_v4())),
-        );
-        controller.update_raw_state(json!({ "context": "alice", "ready": true }));
-        controller
-    }
-
-    #[test]
-    fn reply_presentation_preserves_owned_silent_completion_and_legacy_snapshots() {
-        let pet = command_controller();
-        let mut raw = json!({ "context": "alice", "petReplyPresentationVersion": 1,
-            "reply": { "text": "", "requestId": "own-turn", "speechText": "" } });
-        let reply = &pet.update_raw_state(raw.clone())["reply"];
-        assert_eq!(reply["requestId"], "own-turn");
-        assert_eq!(reply["speechText"], "");
-        for version in [Value::Null, json!(2)] {
-            raw["petReplyPresentationVersion"] = version;
-            assert!(pet.update_raw_state(raw.clone())["reply"].is_null());
-        }
-        raw["reply"]["text"] = json!("legacy answer");
-        let legacy = pet.update_raw_state(raw);
-        assert_eq!(legacy["reply"]["text"], "legacy answer");
-        assert!(legacy["reply"].get("requestId").is_none());
-        assert!(legacy["reply"].get("speechText").is_none());
-    }
-
-    #[test]
-    fn only_new_media_capture_actions_need_a_visible_owner_page() {
-        let ready = json!({
-            "ready": true, "canCall": true, "compactVoice": true,
-            "classroomRecording": { "enabled": false }
-        });
-        for action in ["dictation", "call", "voice-start", "record-start"] {
-            assert!(starts_media_capture(&ready, action), "{action}");
-            let mut offline = ready.clone();
-            offline["ready"] = json!(false);
-            assert!(!starts_media_capture(&offline, action), "offline {action}");
-        }
-        for action in [
-            "input",
-            "send",
-            "stop",
-            "mute",
-            "hide",
-            "state",
-            "voice-stop",
-            "record-stop",
-            "toggle-target",
-            "exit-info",
-        ] {
-            assert!(!starts_media_capture(&ready, action), "{action}");
-        }
-        let mut dictating = ready.clone();
-        dictating["dictating"] = json!(true);
-        let mut calling = ready.clone();
-        calling["voice"] = json!({ "active": true });
-        for action in ["dictation", "call", "voice-start", "record-start"] {
-            assert!(
-                !starts_media_capture(&dictating, action),
-                "dictating {action}"
-            );
-            assert!(!starts_media_capture(&calling, action), "calling {action}");
-        }
-        let mut recording = ready.clone();
-        recording["classroomRecording"]["enabled"] = json!(true);
-        assert!(!starts_media_capture(&recording, "record-start"));
-        assert!(!starts_media_capture(&recording, "dictation"));
-        assert!(
-            starts_media_capture(&json!({ "ready": true }), "dictation"),
-            "legacy plain dictation remains available"
-        );
-        assert!(!starts_media_capture(&json!({ "ready": true }), "call"));
-        assert!(!starts_media_capture(
-            &json!({ "ready": true }),
-            "record-start"
-        ));
-        let mut rich = ready.clone();
-        rich["richDraft"] = json!(true);
-        assert!(!starts_media_capture(&rich, "dictation"));
-    }
-
-    #[test]
-    fn background_persona_call_requires_explicit_page_support() {
-        let ready = json!({
-            "ready": true, "canCall": true, "target": "persona",
-            "petVoiceAudioVersion": 1
-        });
-        assert!(uses_pet_audio(&ready, "call"));
-        assert!(uses_pet_audio(&ready, "dictation"));
-        for action in ["mute", "voice-stop", "record-start", "voice-start"] {
-            assert!(!uses_pet_audio(&ready, action), "{action}");
-        }
-        for version in [Value::Null, json!(0), json!(2), json!("1")] {
-            let mut older = ready.clone();
-            older["petVoiceAudioVersion"] = version;
-            assert!(!uses_pet_audio(&older, "call"));
-        }
-        for (key, value) in [
-            ("target", json!("chat")),
-            ("ready", json!(false)),
-            ("canCall", json!(false)),
-            ("voice", json!({"active": true})),
-            ("dictating", json!(true)),
-        ] {
-            let mut unsupported = ready.clone();
-            unsupported[key] = value;
-            assert!(!uses_pet_audio(&unsupported, "call"), "{key}");
-        }
-        let controller = command_controller();
-        controller.update_raw_state(ready);
-        assert!(uses_pet_audio(&controller.snapshot(), "call"));
-    }
-
-    #[test]
-    fn native_pointer_hit_testing_recovers_without_renderer_mousemove() {
-        let controller = command_controller();
-        controller.set_work_area(WorkArea {
-            x: -1280,
-            y: -200,
-            width: 1280,
-            height: 800,
-        });
-        controller.update_hit_regions(
-            &json!([
-                {"id":"panel","left":700,"top":100,"width":348,"height":160},
-                {"id":"bubble","left":700,"top":300,"width":348,"height":80}
-            ]),
-            controller.hit_regions_epoch(),
-        );
-        assert!(!controller.pointer_interactive(Some((-1200, -100)), false));
-        controller.record_pointer_interactive(false);
-        // Another app can be foreground throughout: native cursor movement
-        // alone enables input when it re-enters a visible pet surface.
-        assert!(controller.pointer_interactive(Some((-500, -50)), false));
-        assert!(controller.pointer_needs_update(true));
-        controller.record_pointer_interactive(true);
-        assert!(!controller.pointer_needs_update(true));
-        assert!(!controller.pointer_interactive(Some((-500, 80)), false)); // gap
-        assert!(controller.pointer_interactive(Some((-500, 120)), false));
-        controller.update_hit_regions(&json!([]), controller.hit_regions_epoch());
-        assert!(!controller.pointer_interactive(Some((-500, 120)), false));
-        let snap = controller.snapshot();
-        let x = -1280 + snap["petLeft"].as_i64().unwrap() as i32 + 10;
-        let y = -200 + snap["petTop"].as_i64().unwrap() as i32 + 10;
-        assert!(controller.pointer_interactive(Some((x, y)), false));
-        assert!(!controller.pointer_interactive(None, false));
-    }
-
-    #[test]
-    fn pointer_hold_ends_on_release_or_hide_without_a_canvas_grace_period() {
-        let controller = command_controller();
-        let outside = Some((0, 0));
-        controller.set_pointer_hold(true);
-        assert!(controller.pointer_interactive(outside, true));
-        assert!(!controller.pointer_interactive(outside, false));
-        assert!(!controller.pointer_interactive(outside, true));
-        controller.set_pointer_hold(true);
-        controller.suspend_pointer_tracking();
-        assert!(!controller.pointer_interactive(outside, true));
-        controller.start_drag(100, 100);
-        assert!(controller.pointer_interactive(outside, true));
-        assert!(!controller.pointer_interactive(outside, false));
-        controller.end_drag();
-        assert!(!controller.pointer_interactive(outside, true));
-        controller.start_drag(100, 100);
-        controller.suspend_pointer_tracking();
-        assert!(!controller.pointer_interactive(outside, true));
-    }
-
-    #[test]
-    fn monitor_and_scale_changes_clear_old_surface_rectangles() {
-        let controller = command_controller();
-        let regions = json!([{"id":"panel","left":20,"top":20,"width":300,"height":100}]);
-        let old_epoch = controller.hit_regions_epoch();
-        controller.update_hit_regions(&regions, old_epoch);
-        assert!(controller.pointer_interactive(Some((30, 30)), false));
-        controller.set_work_area(WorkArea {
-            x: -1920,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        });
-        assert!(!controller.pointer_interactive(Some((-1890, 30)), false));
-        controller.update_hit_regions(&regions, old_epoch);
-        assert!(!controller.pointer_interactive(Some((-1890, 30)), false));
-        controller.update_hit_regions(&regions, controller.hit_regions_epoch());
-        assert!(controller.pointer_interactive(Some((-1890, 30)), false));
-        controller.set_scale(2.0);
-        assert!(!controller.pointer_interactive(Some((-1890, 30)), false));
-        for scale in [1.0, 1.5, 2.0] {
-            assert_eq!(
-                physical_pet_cursor(
-                    (-1920.0 + 30.0 * scale, 40.0 * scale),
-                    (-1920.0, 0.0),
-                    scale,
-                    controller.work_area()
-                ),
-                Some((-1890, 40))
-            );
-        }
-        assert!(physical_pet_cursor((0.0, 0.0), (0.0, 0.0), 0.0, controller.work_area()).is_none());
-    }
-
-    #[test]
-    fn hit_region_validation_does_not_capture_transparent_or_unbounded_canvas() {
-        let controller = command_controller();
-        for regions in [
-            json!([{"id":"stack","left":0,"top":0,"width":1400,"height":800}]),
-            json!([{"id":"panel","left":0,"top":0,"width":999999,"height":999999}]),
-            json!([{"id":"panel","left":0,"top":0,"width":0,"height":100}]),
-            json!([{"id":"panel","left":0,"top":0,"width":100,"height":-1}]),
-            json!([{"id":"panel","left":2000,"top":2000,"width":100,"height":100}]),
-        ] {
-            controller.update_hit_regions(&regions, controller.hit_regions_epoch());
-            assert!(!controller.pointer_interactive(Some((10, 10)), false));
-        }
-        let invalid = PetHitRegion {
-            id: "panel".into(),
-            left: f64::NAN,
-            top: 0.0,
-            width: 100.0,
-            height: 100.0,
-        };
-        assert!(invalid.clipped(controller.work_area()).is_none());
-    }
-
-    #[tokio::test]
-    async fn commands_use_bridge_v1_and_wait_for_matching_page_acknowledgement() {
-        let controller = command_controller();
-        let (command, mut receiver) = controller
-            .begin_command(
-                "input",
-                &json!({
-                    "context": "alice", "text": "保留输入", "version": 99,
-                    "requestId": "untrusted", "action": "send"
-                }),
-            )
-            .unwrap();
-        assert_eq!(command["version"], 1);
-        assert_eq!(command["action"], "input");
-        assert_eq!(command["context"], "alice");
-        assert_eq!(command["text"], "保留输入");
-        let request_id = command["requestId"].as_str().unwrap();
-        assert_ne!(request_id, "untrusted");
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        assert!(!controller.resolve_command(&json!({ "requestId": "unknown", "ok": true })));
-
-        // Published Bridge v1 pages publish their updated draft before petResult.
-        controller
-            .update_raw_state(json!({ "context": "alice", "ready": true, "draft": "保留输入" }));
-        assert!(controller
-            .resolve_command(&json!({ "requestId": request_id, "ok": true, "additive": 1 })));
-        assert_eq!(
-            controller
-                .wait_for_command(request_id, receiver, Duration::from_secs(1))
-                .await
-                .unwrap(),
-            Value::Null
-        );
-        assert_eq!(controller.snapshot()["draft"], "保留输入");
-        assert!(!controller.resolve_command(&json!({ "requestId": request_id, "ok": true })));
-        let (next, _) = controller
-            .begin_command("send", &json!({ "context": "alice" }))
-            .unwrap();
-        assert_ne!(command["requestId"], next["requestId"]);
-    }
-
-    #[tokio::test]
-    async fn rejected_or_unanswered_commands_fail_without_being_replayed() {
-        let controller = command_controller();
-        let (command, receiver) = controller
-            .begin_command("input", &json!({ "context": "alice", "text": "草稿" }))
-            .unwrap();
-        let request_id = command["requestId"].as_str().unwrap();
-        controller.resolve_command(
-            &json!({ "requestId": request_id, "ok": false, "error": "无法修改输入" }),
-        );
-        assert_eq!(
-            controller
-                .wait_for_command(request_id, receiver, Duration::from_secs(1))
-                .await
-                .unwrap_err(),
-            "无法修改输入"
-        );
-
-        let (command, receiver) = controller
-            .begin_command("send", &json!({ "context": "alice" }))
-            .unwrap();
-        let request_id = command["requestId"].as_str().unwrap();
-        assert!(controller
-            .wait_for_command(request_id, receiver, Duration::from_millis(1))
-            .await
-            .unwrap_err()
-            .contains("检查结果"));
-        assert!(!controller.resolve_command(&json!({ "requestId": request_id, "ok": true })));
-        assert!(controller.page_state.lock().unwrap().pending.is_empty());
-    }
-
-    #[tokio::test]
-    async fn changing_context_or_reloading_cancels_pending_commands() {
-        let controller = command_controller();
-        let (command, receiver) = controller
-            .begin_command("input", &json!({ "context": "alice" }))
-            .unwrap();
-        let request_id = command["requestId"].as_str().unwrap();
-        controller.update_raw_state(json!({ "context": "bob", "ready": true }));
-        assert!(controller
-            .wait_for_command(request_id, receiver, Duration::from_secs(1))
-            .await
-            .unwrap_err()
-            .contains("会话已改变"));
-        assert!(!controller.resolve_command(&json!({ "requestId": request_id, "ok": true })));
-        assert!(controller
-            .begin_command("send", &json!({ "context": "alice" }))
-            .is_err());
-        let (command, receiver) = controller
-            .begin_command("input", &json!({ "context": "bob" }))
-            .unwrap();
-        controller.reset_state();
-        assert!(controller
-            .wait_for_command(
-                command["requestId"].as_str().unwrap(),
-                receiver,
-                Duration::from_secs(1)
-            )
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn target_switch_ack_before_new_context_remains_successful() {
-        let controller = command_controller();
-        let (command, receiver) = controller
-            .begin_command("toggle-target", &json!({ "context": "alice" }))
-            .unwrap();
-        let request_id = command["requestId"].as_str().unwrap();
-        controller.resolve_command(&json!({ "requestId": request_id, "ok": true }));
-        controller.update_raw_state(json!({ "context": "chat", "ready": true }));
-        assert!(controller
-            .wait_for_command(request_id, receiver, Duration::from_secs(1))
-            .await
-            .is_ok());
-    }
-
-    #[test]
-    fn unavailable_or_legacy_pages_cannot_accept_remote_edits() {
-        let controller = command_controller();
-        for state in [
-            json!({ "context": "alice", "ready": false }),
-            json!({ "context": "alice" }),
-        ] {
-            controller.update_raw_state(state);
-            assert!(controller
-                .begin_command("input", &json!({ "context": "alice" }))
-                .is_err());
-            assert!(controller
-                .begin_command("send", &json!({ "context": "alice" }))
-                .is_err());
-            assert!(controller
-                .begin_command("exit-info", &json!({ "context": "alice" }))
-                .is_ok());
-            assert!(controller
-                .begin_command("toggle-target", &json!({ "context": "alice" }))
-                .is_ok());
-        }
-    }
-
-    #[test]
-    fn sanitizes_pet_state_clamps_bounds_and_handles_permission_bridge() {
-        let root = std::env::temp_dir().join(format!("aichat-rust-pet-{}", Uuid::new_v4()));
-        let controller = PetController::new(root.join("pet-prefs.json"));
-        controller.set_work_area(WorkArea {
-            x: 0,
-            y: 0,
-            width: 1280,
-            height: 800,
-        });
-
-        let state = controller.update_raw_state(json!({
-            "context": "ctx-1",
-            "ready": true,
-            "pet": {
-                "name": "小龙",
-                "sheetUrl": "https://cdn.keepwork.com/maisi/pet.webp",
-                "imageData": "javascript:alert(1)"
-            },
-            "messages": [
-                { "role": "system", "text": "secret system prompt" },
-                { "role": "user", "text": "你好" },
-                { "role": "assistant", "text": "你好！我是你的第二大脑。" }
-            ],
-            "reply": {
-                "text": "你好！我是你的第二大脑。",
-                "options": [{ "icon": "✨", "text": "继续" }]
-            }
-        }));
-
-        assert_eq!(state["version"], 1);
-        assert_eq!(state["pet"]["imageData"], "");
-        assert_eq!(
-            state["pet"]["sheetUrl"],
-            "https://cdn.keepwork.com/maisi/pet.webp"
-        );
-        assert_eq!(state["messages"].as_array().unwrap().len(), 2);
-
-        // Test exit prompt lifecycle
-        let (exit_id, exit_snap) = controller.begin_exit_prompt(false);
-        assert_eq!(exit_snap["exitPrompt"]["loading"], true);
-        assert!(controller.verify_exit_confirm(&exit_id).is_err());
-
-        controller.resolve_exit_info(&json!({
-            "personas": [{ "name": "工作助手", "channels": ["飞书", "钉钉"] }]
-        }));
-        assert!(controller.verify_exit_confirm(&exit_id).is_ok());
-
-        // Test TCP permission bridge handshake
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let bridge_file = root.join("pet-permission-bridge.json");
-        atomic_json_write(
-            &bridge_file,
-            &PermissionBridgeRecord {
-                port,
-                token: "secret-bridge-token".to_string(),
-            },
-        )
-        .unwrap();
-
-        let srv = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut hello_line = String::new();
-            reader.read_line(&mut hello_line).unwrap();
-            let hello: Value = serde_json::from_str(&hello_line).unwrap();
-            assert_eq!(hello["role"], "desktop");
-            assert_eq!(hello["token"], "secret-bridge-token");
-
-            let req = json!({ "type": "request", "id": "req-1", "client": "AIChat Agent" });
-            stream.write_all(format!("{req}\n").as_bytes()).unwrap();
-            stream.flush().unwrap();
-
-            let mut resp_line = String::new();
-            reader.read_line(&mut resp_line).unwrap();
-            let resp: Value = serde_json::from_str(&resp_line).unwrap();
-            assert_eq!(resp["id"], "req-1");
-            assert_eq!(resp["choice"], "once");
-        });
-
-        run_permission_bridge_session(&bridge_file, |id, client| {
-            assert_eq!(id, "req-1");
-            assert_eq!(client, "AIChat Agent");
-            "once".to_string()
-        })
-        .unwrap();
-        srv.join().unwrap();
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn native_drag_preserves_click_threshold_and_ignores_old_owners() {
-        let controller = command_controller();
-        let primary = WorkArea {
-            x: 0,
-            y: 0,
-            width: 1710,
-            height: 1107,
-        };
-        let upper = WorkArea {
-            x: -458,
-            y: -1080,
-            width: 1920,
-            height: 1080,
-        };
-        controller.set_work_area(primary);
-        controller.note_canvas(primary);
-        {
-            let mut prefs = controller.prefs.lock().unwrap();
-            prefs.left = Some(100);
-            prefs.top = Some(100);
-        }
-        controller.begin_global_drag_with_id(156, 156, Some(1));
-        let before = controller.placement();
-        assert_eq!(controller.drag_global(160, 156, &[primary, upper]), None);
-        assert_eq!(controller.placement(), before);
-        assert!(!controller.drag_moved());
-        controller.drag_global(161, 156, &[primary, upper]);
-        assert!(controller.drag_moved());
-        assert_eq!(controller.placement(), (primary, Some(105), Some(100)));
-        assert_eq!(
-            controller.drag_global(500, -200, &[primary, upper]),
-            Some(upper)
-        );
-        controller.note_canvas(upper);
-        let placed = controller.placement();
-        let epoch = controller.hit_regions_epoch();
-        assert_eq!(controller.drag_global(500, -200, &[primary, upper]), None);
-        assert_eq!(controller.placement(), placed);
-        assert_eq!(
-            controller.hit_regions_epoch(),
-            epoch,
-            "stationary frames keep the current hit regions"
-        );
-        controller.end_drag();
-        assert!(
-            controller.drag_moved(),
-            "the release frame remembers movement even without DOM pointermove"
-        );
-        assert!(controller.native_drag_tracking());
-        assert_eq!(controller.drag_id(), Some(1));
-        controller.begin_global_drag_with_id(500, -200, Some(2));
-        assert!(
-            !controller.owns_drag(Some(1)),
-            "old drag/end requests cannot finish a new press"
-        );
-        assert!(controller.owns_drag(Some(2)));
-        assert!(
-            controller.owns_drag(None),
-            "legacy renderers keep their historical request shape"
-        );
-        assert!(!controller.drag_moved());
-        controller.end_drag();
-    }
-
-    #[test]
-    fn monitor_gaps_choose_the_nearest_edge_and_keep_the_current_monitor_on_ties() {
-        let wide = WorkArea {
-            x: 0,
-            y: 0,
-            width: 4000,
-            height: 1000,
-        };
-        let right = WorkArea {
-            x: 4100,
-            y: 0,
-            width: 1000,
-            height: 1000,
-        };
-        assert_eq!(monitor_at(&[wide, right], 4010, 100), Some(wide));
-        assert_eq!(
-            monitor_at_preferred(&[wide, right], 4050, 100, Some(wide)),
-            Some(wide)
-        );
-        assert_eq!(
-            monitor_at_preferred(&[wide, right], 4050, 100, Some(right)),
-            Some(right)
-        );
-        assert_eq!(monitor_at(&[wide, right], 4090, 100), Some(right));
-        assert_eq!(monitor_at(&[], 0, 0), None);
-    }
-
-    #[test]
-    fn dragged_pet_crosses_onto_the_monitor_under_the_cursor() {
-        let lower = WorkArea {
-            x: 0,
-            y: 0,
-            width: 1710,
-            height: 1107,
-        };
-        let upper = WorkArea {
-            x: -458,
-            y: -1440,
-            width: 2560,
-            height: 1440,
-        };
-        let monitors = [lower, upper];
-
-        let (monitor, left, top) = place_dragged_pet(&monitors, 800, 40, 56, 56, 1.0).unwrap();
-        assert_eq!(monitor, lower);
-        assert_eq!((left, top), (744, 8));
-
-        let (monitor, left, top) = place_dragged_pet(&monitors, 800, -100, 56, 56, 1.0).unwrap();
-        assert_eq!(monitor, upper);
-        assert_eq!((left, top), (1202, 1284));
-
-        let (monitor, top_edge) = {
-            let (monitor, left, top) = place_dragged_pet(&monitors, 100, -1, 56, 56, 1.0).unwrap();
-            (monitor, (left, top))
-        };
-        assert_eq!(monitor, upper);
-        assert_eq!(top_edge, (502, 1304));
-
-        let root = std::env::temp_dir().join(format!("aichat-rust-pet-drag-{}", Uuid::new_v4()));
-        let controller = PetController::new(root.join("pet-prefs.json"));
-        controller.set_work_area(lower);
-        controller.note_canvas(lower);
-        controller.begin_global_drag(856, 456);
-        assert_eq!(controller.drag_global(900, 500, &monitors), None);
-        assert_eq!(controller.work_area(), lower);
-        assert_eq!(controller.drag_global(800, -100, &monitors), Some(upper));
-        assert_eq!(controller.work_area(), upper);
-        let snap = controller.snapshot();
-        let pet_left = snap["petLeft"].as_i64().unwrap();
-        let pet_top = snap["petTop"].as_i64().unwrap();
-        assert!(pet_left >= 8 && pet_left < upper.width as i64);
-        assert!(pet_top >= 8 && pet_top < upper.height as i64);
-        // A failed native commit must be retried, then a successful commit
-        // allows subsequent same-monitor moves without another canvas resize.
-        assert_eq!(controller.drag_global(820, -140, &monitors), Some(upper));
-        assert_eq!(controller.pending_canvas(), Some(upper));
-        controller.note_canvas(upper);
-        assert_eq!(controller.pending_canvas(), None);
-        assert_eq!(controller.drag_global(830, -150, &monitors), None);
-        controller.end_drag();
-        assert!(!controller.is_dragging());
-        let saved = fs::read_to_string(root.join("pet-prefs.json")).unwrap();
-        assert!(saved.contains("\"monitorX\": -458"));
-        assert!(saved.contains("\"monitorY\": -1440"));
-        let _ = fs::remove_dir_all(&root);
-    }
-}
+#[path = "pet_tests.rs"]
+mod tests;

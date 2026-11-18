@@ -5,11 +5,10 @@ use super::main_window::show_main_window;
 use super::pet_audio_host::{
     notify_pet_audio_stopped, send_pet_audio_to_main, stop_pet_audio, watch_pet_audio,
 };
-use super::platform::open_in_system_browser;
 use super::sender::{verify_main_sender, verify_pet_sender};
 use super::state::AppCore;
 use crate::pet::{PetController, WorkArea};
-use crate::{pet, pet_audio, pet_canvas, pet_menu};
+use crate::{pet, pet_audio, pet_canvas, pet_menu, pet_pointer};
 use crate::remote_voice::{RecordingFeedback, RecordingPhase, RecordingTarget};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -155,15 +154,22 @@ fn drag_snapshot(pet: &crate::pet::PetController) -> Value {
     snap
 }
 
-fn reconcile_pet_canvas(window: &WebviewWindow, pet: &PetController) {
-    if let Some(area) = pet.pending_canvas() {
-        if pet_canvas::sync_pet_canvas(window, area).is_ok() {
-            pet.note_canvas(area);
+fn reconcile_pet_canvas(window: &WebviewWindow, pet: &Arc<PetController>) {
+    let target = window.clone();
+    let pet = Arc::clone(pet);
+    // The frame, acknowledgement and renderer origin must commit in the same
+    // UI transaction. Worker-thread wake order must never rewind the origin.
+    let _ = window.run_on_main_thread(move || {
+        if let Some(area) = pet.pending_canvas() {
+            if pet_canvas::sync_pet_canvas(&target, area).is_ok() {
+                pet.note_canvas(area);
+                let _ = target.app_handle().emit("aichat-desktop:pet-state", &drag_snapshot(&pet));
+            }
         }
-    }
+    });
 }
 
-fn move_with_global_cursor(app: &AppHandle, pet: &crate::pet::PetController) -> bool {
+fn move_with_global_cursor(app: &AppHandle, pet: &Arc<PetController>) -> bool {
     let Some((x, y)) = logical_cursor(app) else {
         return false;
     };
@@ -182,7 +188,7 @@ fn move_with_global_cursor(app: &AppHandle, pet: &crate::pet::PetController) -> 
 
 fn apply_pet_drag(
     app: &AppHandle,
-    pet: &crate::pet::PetController,
+    pet: &Arc<PetController>,
     args: &Value,
     force_end: bool,
 ) -> Value {
@@ -209,12 +215,12 @@ fn apply_pet_drag(
     drag_snapshot(pet)
 }
 
-fn sync_pet_pointer(window: &WebviewWindow, pet: &PetController, app: &AppHandle) {
+fn sync_pet_pointer(window: &WebviewWindow, pet: &Arc<PetController>, app: &AppHandle) {
     if app
         .try_state::<Arc<AppCore>>()
         .is_some_and(|core| core.pet_menu.is_showing())
     {
-        if window.set_ignore_cursor_events(false).is_ok() {
+        if pet_pointer::set_interactive(window, true).is_ok() {
             pet.record_pointer_interactive(true);
         }
         return;
@@ -247,12 +253,14 @@ fn sync_pet_pointer(window: &WebviewWindow, pet: &PetController, app: &AppHandle
             (point.x, point.y),
             (origin.x as f64, origin.y as f64),
             window.scale_factor().ok()?,
-            pet.work_area(),
+            pet.current_canvas(),
         )
     })();
     let interactive = pet.pointer_interactive(cursor, primary_down);
-    if pet.pointer_needs_update(interactive)
-        && window.set_ignore_cursor_events(!interactive).is_ok()
+    // AppKit mode can be changed outside this loop (notably native menus).
+    // Its asynchronous Tauri setter cannot be acknowledged by an enqueue cache.
+    if (cfg!(target_os = "macos") || pet.pointer_needs_update(interactive))
+        && pet_pointer::set_interactive(window, interactive).is_ok()
     {
         pet.record_pointer_interactive(interactive);
     }
@@ -508,7 +516,9 @@ fn ensure_pet_window_on_ui(app: &AppHandle, core: &Arc<AppCore>, show_now: bool)
         if show_now {
             #[cfg(target_os = "macos")]
             super::pet_home_overlay::finish(&existing, core);
-            let _ = existing.show();
+            if existing.show().is_ok() {
+                let _ = existing.eval("window.__aichatPetHidden=false;window.dispatchEvent(new Event('aichat:pet-shown'))");
+            }
             #[cfg(target_os = "macos")]
             watch_pet_ok(&existing);
             super::remote_phone_view::sync(app);
@@ -520,12 +530,14 @@ fn ensure_pet_window_on_ui(app: &AppHandle, core: &Arc<AppCore>, show_now: bool)
 
     let area = initial_pet_work_area(app, &core.pet);
     core.pet.set_work_area(area);
+    let canvas = core.pet.desired_canvas();
 
     if let Ok(builder) = WebviewWindowBuilder::new(app, "pet", WebviewUrl::App("pet.html".into()))
         .title("桌面宠物")
         .initialization_script(super::main_window::HOME_TEXT_GUARD)
-        .position(area.x as f64, area.y as f64)
-        .inner_size(area.width as f64, area.height as f64)
+        .initialization_script(format!("window.__aichatPetHidden={};", !show_now))
+        .position(canvas.x as f64, canvas.y as f64)
+        .inner_size(canvas.width as f64, canvas.height as f64)
         .decorations(false)
         .transparent(true)
         .shadow(false)
@@ -536,11 +548,11 @@ fn ensure_pet_window_on_ui(app: &AppHandle, core: &Arc<AppCore>, show_now: bool)
         .visible(show_now)
         .build()
     {
-        if pet_canvas::sync_pet_canvas(&builder, area).is_ok() {
-            core.pet.note_canvas(area);
+        if pet_canvas::sync_pet_canvas(&builder, canvas).is_ok() {
+            core.pet.note_canvas(canvas);
         }
         let _ = builder.set_shadow(false);
-        let _ = builder.set_ignore_cursor_events(true);
+        let _ = pet_pointer::set_interactive(&builder, false);
         core.pet.clear_hit_regions();
         core.pet.suspend_pointer_tracking();
         let controller = Arc::clone(&core.pet);
@@ -798,7 +810,7 @@ pub(super) fn dismiss_pet_view(window: &WebviewWindow) -> tauri::Result<()> {
     super::pet_home_overlay::finish(window, &app.state::<Arc<AppCore>>());
     super::remote_phone_view::sync(app);
     cancel_pet_speech(app, &app.state::<Arc<AppCore>>());
-    let _ = window.eval("window.dispatchEvent(new Event('aichat:pet-hidden'))");
+    let _ = window.eval("window.__aichatPetHidden=true;window.dispatchEvent(new Event('aichat:pet-hidden'))");
     Ok(())
 }
 
@@ -880,11 +892,14 @@ fn execute_pet_menu_action(
             core.pet.set_scale(scale);
             broadcast_pet_state(app, core);
         }
+        pet_menu::Action::AppearanceMode(mode) => {
+            core.pet.set_appearance_mode(mode);
+            broadcast_pet_state(app, core);
+        }
         pet_menu::Action::Appearance(appearance) => {
             core.pet.set_appearance(appearance);
             broadcast_pet_state(app, core);
         }
-        pet_menu::Action::ChooseAppearance => open_in_system_browser(pet_menu::APPEARANCE_URL)?,
         pet_menu::Action::Open => show_main_window(app, core),
         pet_menu::Action::Hide => hide_pet_window(app, core),
         pet_menu::Action::RequestExit => {
@@ -918,7 +933,7 @@ pub(super) async fn desktop_pet_action(
         "menu" => {
             let menu = pet_menu::build(&app, &state.pet.preferences(), &state.pet.snapshot())
                 .map_err(|error| error.to_string())?;
-            let result = state.pet_menu.popup(&window, menu);
+            let result = state.pet_menu.popup(&window, &state.pet, menu);
             let target = window.clone();
             let handle = app.clone();
             let controller = Arc::clone(&state.pet);
@@ -967,10 +982,23 @@ pub(super) async fn desktop_pet_action(
             Ok(json!({ "ok": true }))
         }
         "hit-regions" => {
-            if let Some(epoch) = args["epoch"].as_u64() {
-                state.pet.update_hit_regions(&args["regions"], epoch);
-            }
-            Ok(json!({ "ok": true }))
+            let pet = Arc::clone(&state.pet);
+            let handle = app.clone();
+            let (done, completed) = tokio::sync::oneshot::channel();
+            app.run_on_main_thread(move || {
+                let current = pet.current_canvas();
+                let measured = serde_json::from_value::<WorkArea>(args["canvas"].clone()).ok();
+                if measured == Some(current) || args.get("canvas").is_none() {
+                    if let Some(epoch) = args["epoch"].as_u64() {
+                        pet.update_layout(&args["regions"], &args["visualRegions"], epoch);
+                        if let Some(window) = handle.get_webview_window("pet") {
+                            reconcile_pet_canvas(&window, &pet);
+                        }
+                    }
+                }
+                let _ = done.send(json!({ "ok": true, "canvas": pet.current_canvas(), "workArea": pet.work_area() }));
+            }).map_err(|error| error.to_string())?;
+            completed.await.map_err(|_| "宠物窗口布局更新中断".to_string())
         }
         "pointer-hold" => {
             state.pet.set_pointer_hold(

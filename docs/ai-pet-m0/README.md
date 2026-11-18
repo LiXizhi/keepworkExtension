@@ -1,5 +1,11 @@
 # AI Pet M0 implementation tracking
 
+## 2026-11-17 — Rust AI Niang appearance experiment
+
+Rust desktop 0.2.184 adds nine explicitly selected, locally bundled video-derived appearances from pinned AINiangAssets sources, including DeepSeek by the user's follow-up instruction. All upstream portraits are excluded. The host separately records the user's experimental authorization, pins resource and provenance digests, and retains DeepSeek's MIT notice in the application resources. This is an appearance experiment: selection preserves the current AIChat persona/conversation; it does not supply a production official catalog, mobile integration or amplitude-driven mouth animation. Development contracts 0.1.0-dev.6 honestly distinguish `prerecorded` from `amplitude`.
+
+See [scope, usage and build details](../../apps/aichat-rust/docs/ainiang-experiment.md). Independent verification passed 105 JavaScript checks, 28 relevant Rust tests (one existing physical-mouse test ignored), and the existing 102 contract checks plus one new prerecorded-admission case. Safari/WebKit decoded all 63 pose strips in the local preview. Full real-account native use and production M0 gates remain separate.
+
 Started: 2026-11-13, Asia/Tokyo. Scope: implement the accepted plan's backend-independent foundation and make external M0 gates concrete. The [accepted plan](../ai-pet-cross-platform-plan.md) and [implementation specification](../ai-pet-implementation-spec.md) remain the product baseline.
 
 Status: slices 1–3 are complete and reviewed. Slice 4 implementation, native builds, offline checks and scoped Android emulator/iOS Simulator acceptance are complete. Android's final-APK targeted checks and full smoke passed on 2026-11-15 with verified hardware GLES; iOS feature checks and review-app restoration passed previously. **M0 overall remains open** for canonical external contracts, ownership, rights, real-device and service evidence.

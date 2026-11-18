@@ -1,0 +1,97 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-minimax",
+  "appearanceVersion": "1",
+  "characterId": "minimax",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:minimax",
+    "licenseRef": "experiment-user-attested-seedance-video-only",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 192,
+  "height": 192,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 12713,
+    "sha256": "cf8af51c6cce61e4f662abd331193a7e86d913450d549d38bfb481266ee59bb8"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 185110,
+        "sha256": "4b571045ecd0eedfbef7f8b48ea5266b46ba1d4a70cf3ca3d2bc556c7b16bde2"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 188422,
+        "sha256": "6bdb96ad6092535998a319d5544ef6162ac4125c5d54c827272e89f597d1f4be"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 184044,
+        "sha256": "fcde52033ce5c42697b65733723c2f7039708cccef7b51080a2d2b03f845232f"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 173733,
+        "sha256": "570ecd370a8b323141b35e4b72e542ad2838ddf97f6875351e38bb53ca6cd0c2"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 192899,
+        "sha256": "dca8da58d8412193c7ec208befdab3fa5d215374e15f80f0b44006305d56028d"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 185110,
+        "sha256": "4b571045ecd0eedfbef7f8b48ea5266b46ba1d4a70cf3ca3d2bc556c7b16bde2"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 191211,
+        "sha256": "c104d1851c532e3da22f4c9219abb9a761330d0665cdabcfb65921095e826301"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "MiniMax",
+    "en-US": "MiniMax",
+    "es-ES": "MiniMax",
+    "ko-KR": "MiniMax",
+    "ja-JP": "MiniMax",
+    "fr-FR": "MiniMax"
+  }
+}

@@ -54,6 +54,8 @@ pub fn build_main_window_init_script_with_launch_capability(
     let local_mcp_fetch =
         include_str!("../../src/localMcpFetch.js").replacen("export function", "function", 1);
 
+    let pet_model = include_str!("../../src/petModel.js").replacen("export function", "function", 1);
+
     format!(
         r#"(() => {{
   if (window !== window.top) return;
@@ -63,6 +65,7 @@ pub fn build_main_window_init_script_with_launch_capability(
   {chrome_theme}
   {page_theme}
   {local_mcp_fetch}
+  {pet_model}
   installLocalMcpFetch(bootstrap);
   installPageTheme(bootstrap.entryUrl);
   window.__AICHAT_DESKTOP_BOOTSTRAP__ = bootstrap;
@@ -174,6 +177,7 @@ pub fn build_main_window_init_script_with_launch_capability(
   }});
 
   if (!window.aichatDesktop) {{
+    const petModelPublisher = createPetModelPublisher(state => invoke("desktop_publish_pet_state", {{ state, document: petAudioDocument }}));
     const bridge = Object.freeze({{
       version: 1,
       capabilities,
@@ -205,7 +209,7 @@ pub fn build_main_window_init_script_with_launch_capability(
       }},
       reportStartupSignIn: (signedIn) => invoke("desktop_report_startup_signin", {{ signedIn: !!signedIn }}),
       closeRemoteDialogue: (id) => invoke("remote_voice_dialogue_closed", {{ id }}),
-      publishPetState: (state) => invoke("desktop_publish_pet_state", {{ state: state || {{}}, document: petAudioDocument }}),
+      publishPetState: (state) => petModelPublisher.publish(state),
       petResult: (result) => invoke("desktop_pet_result", {{ result: result || {{}} }}),
       petAudio: (op, id, seq) => invoke("desktop_pet_audio", {{ op: String(op || ""), id: String(id || ""), ...(seq == null ? {{}} : {{ seq }}), document: petAudioDocument }}),
       onPetAudio: (cb) => {{

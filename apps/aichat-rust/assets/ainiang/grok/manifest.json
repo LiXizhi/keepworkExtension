@@ -1,0 +1,97 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-grok",
+  "appearanceVersion": "1",
+  "characterId": "grok",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:grok",
+    "licenseRef": "experiment-user-attested-seedance-video-only",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 192,
+  "height": 192,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 13702,
+    "sha256": "6865924dc965febebb194ba54a09fe576852496c244c5fafbe7bc514d4a7a37a"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 204444,
+        "sha256": "8586821a024bfc9f0d83bbfec44d9237ca729b1bc87abf6b29527563b2d22863"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 228590,
+        "sha256": "dadf70de1db118136c55f398676d53651f2ddf074089ddf4432545e38c737037"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 232328,
+        "sha256": "70ab8e41e48fa68b2499035d07e05f38a252f553365c176348eafe86fb0ad409"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 225728,
+        "sha256": "ec26e28c4e6df0745706e318e433d7c984fe7bd64ddb6073ca2284362d942cb9"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 221178,
+        "sha256": "6e0039a7ae825bc4dfb10a3790b594ff40911d94b7db1845729cc51ac5984dd0"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 204444,
+        "sha256": "8586821a024bfc9f0d83bbfec44d9237ca729b1bc87abf6b29527563b2d22863"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 233312,
+        "sha256": "44063d5a9b99bcd57078bde8358652539ef2d8282b93680cc6d407106bbd2b6e"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "Grok",
+    "en-US": "Grok",
+    "es-ES": "Grok",
+    "ko-KR": "Grok",
+    "ja-JP": "Grok",
+    "fr-FR": "Grok"
+  }
+}

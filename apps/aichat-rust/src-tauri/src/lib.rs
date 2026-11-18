@@ -17,9 +17,14 @@ pub mod navigation;
 pub mod page_connection;
 pub mod permissions;
 pub mod pet;
+pub mod pet_appearance;
+#[cfg(test)]
+mod pet_appearance_tests;
 pub mod pet_audio;
 pub mod pet_canvas;
+pub mod pet_crop;
 pub mod pet_menu;
+mod pet_pointer;
 pub mod runtime;
 pub mod remote_voice;
 pub mod security;

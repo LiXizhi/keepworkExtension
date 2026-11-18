@@ -23,7 +23,7 @@ const snapshot = (extra = {}) => ({
   ...extra,
 });
 
-async function renderer(initial = snapshot(), { speech, readiness = () => "" } = {}) {
+async function renderer(initial = snapshot(), { speech, readiness = () => "", ainiangShape, ainiangCrop, virtualLayout = false, hitReply = () => ({ ok: true }) } = {}) {
   const elements = new Map();
   const documentListeners = new Map();
   const windowListeners = new Map();
@@ -42,6 +42,7 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
   let current = initial;
   let publish;
   let handler;
+  let shapeChanged = () => {};
   const calls = [];
   const regionCalls = [];
   const pointerHolds = [];
@@ -103,8 +104,11 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
           click() { if (!this.disabled) return this.onclick?.({ preventDefault() {}, stopPropagation() {} }); },
           fire(type, event = {}) { return dispatch(listeners, type, { target: this, ...event }); },
           getBoundingClientRect() {
-            return { ...this.rect, x: this.rect.left, y: this.rect.top,
-              right: this.rect.left + this.rect.width, bottom: this.rect.top + this.rect.height };
+            const translated = virtualLayout && elements.get("pet-viewport")?.style.transform.match(/translate3d\((-?[\d.]+)px, (-?[\d.]+)px/);
+            const left = this.rect.left + (translated ? Number(translated[1]) : 0);
+            const top = this.rect.top + (translated ? Number(translated[2]) : 0);
+            return { ...this.rect, left, top, x: left, y: top,
+              right: left + this.rect.width, bottom: top + this.rect.height };
           },
           getClientRects() { return visible(this) ? [this.getBoundingClientRect()] : []; },
           closest(selector) {
@@ -128,7 +132,7 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
     async action(name, args = {}) {
       if (name === "state") return current;
       if (name === "remote-voice-readiness") return { readiness: readiness() };
-      if (name === "hit-regions") { regionCalls.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
+      if (name === "hit-regions") { regionCalls.push(JSON.parse(JSON.stringify(args))); return hitReply(args); }
       if (name === "pointer-hold") { pointerHolds.push(JSON.parse(JSON.stringify(args))); return { ok: true }; }
       calls.push({ name, args: JSON.parse(JSON.stringify(args)) });
       if (handler) return handler(name, args);
@@ -159,6 +163,19 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
     require(name) {
       if (name === "@tauri-apps/api/core") return {
         async invoke(command, args) { nativeCalls.push({ command, args: JSON.parse(JSON.stringify(args)) }); },
+      };
+      // AI Niang lifecycle is exercised independently in ainiang-integration.test.cjs.
+      if (name === "./ainiangPet") return {
+        ainiangAppearanceName: () => ainiangShape !== undefined ? "Claude fixture" : undefined,
+        maskContains(mask, x, y) {
+          if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= 1 || y >= 1) return false;
+          const bit = Math.floor(y * mask.height) * mask.width + Math.floor(x * mask.width);
+          return !!(parseInt(mask.bits.slice((bit >> 3) * 2, (bit >> 3) * 2 + 2), 16) & (128 >> (bit & 7)));
+        },
+        createAiniangRenderer: (_art, _style, onShapeChanged) => {
+          shapeChanged = onShapeChanged ?? (() => {});
+          return { update: () => ainiangShape !== undefined, hitShape: () => ainiangShape ?? null, cropBounds: () => ainiangCrop ?? ainiangShape?.bounds, dispose() {} };
+        },
       };
       if (name === "./petAudio") return { installPetAudioCapture() {} };
       if (!name.startsWith("./")) return {};
@@ -191,6 +208,7 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
     await settle();
   }
   async function flushLayout() {
+    await settle();
     for (let i = 0; frames.size && i < 10; i++) {
       await flushFrame();
     }
@@ -198,6 +216,7 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
   await flushLayout();
   return {
     element: id => document.getElementById(id),
+    setAiniangShape(shape) { ainiangShape = shape; shapeChanged(); },
     calls,
     regionCalls,
     nativeCalls,
@@ -217,6 +236,8 @@ async function renderer(initial = snapshot(), { speech, readiness = () => "" } =
       dispatch(documentListeners, "visibilitychange");
     },
     windowEvent(type, event) { dispatch(windowListeners, type, event); },
+    setViewport(width, height) { window.innerWidth = width; window.innerHeight = height; dispatch(windowListeners, "resize"); },
+    handleHitReply(callback) { hitReply = callback; },
     resizeObserved() {
       for (const observer of resizeObservers) observer.callback([...observer.observed].map(target => ({ target })));
     },
@@ -1273,7 +1294,6 @@ test("the pet keeps the entire composer hidden during each phone phase, regardle
         paused: "已暂停", discussing: "学生讨论中…", stopping: "正在结束…" };
       assert.equal(phase.hidden, false, source + ": " + state);
       assert.equal(phase.textContent, labels[state]);
-      assert.equal(pet.element("badge").hidden, true);
       assert.equal(icon.hidden, false);
       assert.match(icon["aria-label"], /挂断|结束通话/);
       await pet.flushLayout();
@@ -2454,5 +2474,235 @@ for (const firstMoved of [false, true]) {
     await settle();
     assert.equal(pet.calls.filter(call => call.name === "expand").length, 0, "the superseded single click must never toggle the panel");
     assert.equal(pet.calls.filter(call => call.name === "open").length, firstMoved ? 0 : 1);
+  });
+}
+
+
+test("AI Niang transparent padding neither captures native clicks nor starts pet actions", async () => {
+  const shape = { mask: { width: 4, height: 4, bits: "0620" }, bounds: { left: .25, top: .25, width: .5, height: .5 } };
+  const pet = await renderer(snapshot({ expanded: false, petLeft: 100, petTop: 100, petPixels: 448,
+    preferences: { appearance: "ainiang:claude" } }), { ainiangShape: shape });
+  pet.setRect("pet", { left: 100, top: 100, width: 448, height: 464 });
+  pet.setRect("art", { left: 100, top: 100, width: 448, height: 448 });
+  pet.resizeObserved();
+  await pet.flushLayout();
+  const region = pet.regionCalls.at(-1).regions.find(region => region.id === "pet");
+  assert.ok(region, "visible body must remain a native target");
+  assert.deepEqual(region.mask, shape.mask, "native target must use the body alpha mask instead of the whole padded button");
+  assert.equal(region.width, 448, "hit mask coordinates must preserve the existing visual scale");
+  assert.equal(region.height, 448, "the extra button footer must not enlarge art hit coordinates");
+  const blank = { button: 0, pointerId: 1, clientX: 110, clientY: 110, screenX: 110, screenY: 110 };
+  for (const point of [blank, { ...blank, clientX: 268, clientY: 380, screenX: 268, screenY: 380 }]) {
+    pet.element("pet").fire("pointerdown", point);
+    pet.element("pet").fire("contextmenu", { ...point, button: 2 });
+    pet.documentEvent("pointerdown", { ...point, target: pet.element("pet") });
+  }
+  await settle();
+  assert.deepEqual(pet.calls, [], "transparent pixels must not start dragging or open the menu");
+  assert.deepEqual(pet.pointerHolds, [], "transparent pixels must not acquire native pointer hold");
+  pet.element("pet").fire("pointerdown", { ...blank, pointerId: 2, clientX: 324, clientY: 324, screenX: 324, screenY: 324 });
+  await settle();
+  assert.equal(pet.calls.at(-1)?.name, "drag-start", "opaque body remains draggable");
+});
+
+
+test("AI Niang unavailable alpha geometry fails closed while composer and keyboard remain usable", async () => {
+  const pet = await renderer(snapshot({ preferences: { appearance: "ainiang:claude" } }), { ainiangShape: null });
+  assert.ok(!pet.regionCalls.at(-1).regions.some(region => region.id === "pet"), "loading or undecodable character must not intercept its entire transparent square");
+  assert.ok(pet.regionCalls.at(-1).regions.some(region => region.id === "panel"), "composer remains interactive independently of artwork loading");
+  pet.element("pet").fire("pointerdown", { button: 0, pointerId: 1, clientX: 850, clientY: 700, screenX: 850, screenY: 700 });
+  await settle();
+  assert.deepEqual(pet.calls, [], "unknown opacity must not start a drag");
+  pet.element("pet").fire("click", { button: 0, detail: 0 });
+  await settle();
+  assert.equal(pet.calls.at(-1)?.name, "expand", "keyboard activation stays accessible");
+});
+
+test("AI Niang animation masks publish changes without mouse movement and clear when decoding becomes unavailable", async () => {
+  const first = { mask: { width: 4, height: 4, bits: "0660" }, bounds: { left: .25, top: .25, width: .5, height: .5 } };
+  const pet = await renderer(snapshot({ expanded: false, petLeft: 100, petTop: 100, petPixels: 448, preferences: { appearance: "ainiang:claude" } }), { ainiangShape: first });
+  pet.setRect("art", { left: 100, top: 100, width: 448, height: 448 });
+  pet.resizeObserved(); await pet.flushLayout();
+  const count = pet.regionCalls.length;
+  const next = { mask: { width: 4, height: 4, bits: "0330" }, bounds: { left: .5, top: .25, width: .5, height: .5 } };
+  pet.setAiniangShape(next);
+  await pet.flushLayout();
+  assert.equal(pet.regionCalls.length, count + 1, "animation opacity changes must notify native hit testing");
+  assert.deepEqual(pet.regionCalls.at(-1).regions.find(region => region.id === "pet")?.mask, next.mask);
+  pet.setAiniangShape(null);
+  await pet.flushLayout();
+  assert.ok(!pet.regionCalls.at(-1).regions.some(region => region.id === "pet"), "old character geometry must not survive a failed decode");
+});
+
+
+test("explicit dialogue control remains clickable outside a masked pet body", async () => {
+  const pet = await renderer(snapshot({ expanded: false, ready: true, phoneState: "listening", compactVoice: true,
+    petLeft: 100, petTop: 100, petPixels: 448, preferences: { appearance: "ainiang:claude" } }), { ainiangShape: null });
+  pet.setRect("dialogue-icon", { left: 80, top: 80, width: 32, height: 32 });
+  pet.resizeObserved(); await pet.flushLayout();
+  assert.deepEqual(pet.regionCalls.at(-1).regions.find(region => region.id === "dialogue-icon"),
+    { id: "dialogue-icon", left: 80, top: 80, width: 32, height: 32 });
+  assert.ok(!pet.regionCalls.at(-1).regions.some(region => region.id === "pet"));
+  pet.documentEvent("pointerdown", { button: 0, clientX: 90, clientY: 90, target: pet.element("dialogue-icon") });
+  assert.deepEqual(pet.pointerHolds, [{ active: true }], "visible call control owns its own pointer hold");
+  pet.element("dialogue-icon").click(); await settle();
+  assert.equal(pet.calls.at(-1)?.name, "voice-stop");
+});
+
+
+test("masked native taps keep body click and double-click actions but reject transparent click completion", async () => {
+  const shape = { mask: { width: 4, height: 4, bits: "0620" }, bounds: { left: .25, top: .25, width: .5, height: .5 } };
+  const base = dragState({ expanded: false, petLeft: 100, petTop: 100, petPixels: 448, preferences: { appearance: "ainiang:claude" } });
+  for (const [clientX, clientY] of [[110, 110], [268, 380]]) {
+    const pet = await renderer(base, { ainiangShape: shape });
+    pet.setRect("art", { left: 100, top: 100, width: 448, height: 448 });
+    pet.handle((name,args)=>({ ...base, nativeDragTracking: true, dragId: args.dragId, dragging: name !== "drag-end", dragMoved: false }));
+    pointer(pet, "pointerdown", 1, 324, 324, { clientX: 324, clientY: 324 }); await settle();
+    pointer(pet, "pointerup", 1, 324, 324, { clientX: 324, clientY: 324 });
+    pet.element("pet").fire("click", { button: 0, detail: 1, clientX, clientY });
+    pet.element("pet").fire("click", { button: 0, detail: 2, clientX, clientY });
+    await settle();
+    assert.ok(!pet.calls.some(call=>["expand","open"].includes(call.name)), "transparent margins and holes cannot complete a pet click");
+  }
+  const pet = await renderer(base, { ainiangShape: shape });
+  pet.setRect("art", { left: 100, top: 100, width: 448, height: 448 });
+  pet.handle((name,args)=>({ ...base, nativeDragTracking: true, dragId: args.dragId, dragging: name !== "drag-end", dragMoved: false }));
+  for (const detail of [1,2]) {
+    pointer(pet, "pointerdown", detail, 324, 324, { clientX: 324, clientY: 324 }); await settle();
+    pointer(pet, "pointerup", detail, 324, 324, { clientX: 324, clientY: 324 });
+    pet.element("pet").fire("click", { button: 0, detail, clientX: 324, clientY: 324 }); await settle();
+  }
+  assert.equal(pet.calls.filter(call=>call.name==="expand").length,1);
+  assert.equal(pet.calls.filter(call=>call.name==="open").length,1);
+});
+
+
+test("cropped native canvas keeps monitor layout and reports global-relative hit coordinates", async () => {
+  const workArea = { x: -1920, y: -1080, width: 1920, height: 1080 };
+  const canvas = { x: -520, y: -430, width: 400, height: 350 };
+  const shape = { mask: { width: 4, height: 4, bits: "0660" }, bounds: { left: .25, top: .25, width: .5, height: .5 } };
+  const pet = await renderer(snapshot({ ready: true, petLeft: 1450, petTop: 720, petPixels: 448,
+    workArea, canvas, hitRegionsEpoch: 9, effectiveAppearance: "ainiang:claude" }),
+    { ainiangShape: shape, virtualLayout: true });
+  pet.setRect("art", { left: 1450, top: 720, width: 448, height: 448 });
+  pet.setRect("panel", { left: 1300, top: 490, width: 348, height: 190 });
+  pet.setViewport(400, 350);
+  await pet.flushLayout();
+  const root = pet.element("pet-viewport");
+  assert.equal(root.style.width, "1920px"); assert.equal(root.style.height, "1080px");
+  assert.equal(root.style.transform, "translate3d(-1400px, -650px, 0)");
+  assert.equal(pet.element("pet").style.transform, "translate3d(1450px, 720px, 0)");
+  assert.equal(pet.element("stack").style.width, "348px", "native crop cannot squeeze the composer");
+  assert.equal(pet.element("stack").style.bottom, "256px", "panel placement uses monitor height, not350px native height");
+  const report = pet.regionCalls.at(-1);
+  assert.deepEqual(report.canvas, canvas);
+  assert.deepEqual(report.regions.find(region => region.id === "panel"), { id: "panel", left: 1300, top: 490, width: 348, height: 190 });
+  assert.deepEqual(report.regions.find(region => region.id === "pet"), { id: "pet", left: 1450, top: 720, width: 448, height: 448, mask: shape.mask });
+  assert.equal(pet.element("art").getBoundingClientRect().left, 50, "the actual DOM is cropped into native client coordinates");
+  pet.element("pet").fire("contextmenu", { button: 2, clientX: 274, clientY: 294 });
+  await settle();
+  assert.equal(pet.calls.at(-1)?.name, "menu", "body hit events continue using local client coordinates");
+});
+
+test("canvas-only acknowledgements reproject and re-report without resetting conversation or accepting stale geometry", async () => {
+  const workArea = { x: 0, y: 0, width: 1000, height: 800 };
+  const full = { ...workArea };
+  const crop = { x: 500, y: 400, width: 420, height: 360 };
+  const pet = await renderer(snapshot({ ready: true, draft: "Keep my draft", petLeft: 800, petTop: 650,
+    canvas: full, workArea, hitRegionsEpoch: 1 }), { virtualLayout: true });
+  const before = pet.regionCalls.at(-1).regions;
+  pet.handleHitReply(() => ({ ok: true, canvas: crop, workArea, version: 1, expanded: false, draft: "Wrong", context: "Wrong" }));
+  pet.publish({ hitRegionsEpoch: 2 });
+  await pet.flushLayout();
+  assert.equal(pet.element("pet-viewport").style.transform, "translate3d(-500px, -400px, 0)");
+  assert.deepEqual(pet.regionCalls.at(-1).canvas, crop);
+  assert.deepEqual(pet.regionCalls.at(-1).regions, before, "reprojection does not shift monitor-space hits");
+  assert.equal(pet.element("draft").value, "Keep my draft");
+  assert.equal(pet.element("panel").hidden, false);
+  let finish;
+  pet.handleHitReply(() => new Promise(resolve => { finish = resolve; }));
+  pet.publish({ canvas: crop, hitRegionsEpoch: 3 }); await pet.flushFrame();
+  pet.handleHitReply(() => ({ ok: true }));
+  const newer = { x: 200, y: 100, width: 430, height: 370 };
+  pet.publish({ canvas: newer, hitRegionsEpoch: 4 }); await pet.flushLayout();
+  finish({ ok: true, canvas: full, workArea }); await pet.flushLayout();
+  assert.equal(pet.element("pet-viewport").style.transform, "translate3d(-200px, -100px, 0)", "late replies cannot rewind a newer native frame");
+});
+
+test("native drag across a cropped monitor updates viewport while preserving screen-coordinate drag and composer width", async () => {
+  const workArea = { x: 0, y: 0, width: 1440, height: 900 };
+  const canvas = { x: 700, y: 600, width: 240, height: 190 };
+  const base = dragState({ expanded: false, workArea, canvas });
+  const pet = await renderer(base, { virtualLayout: true });
+  pet.handle((name, args) => ({ ...base, nativeDragTracking: true, dragging: true, dragId: args.dragId }));
+  pointer(pet, "pointerdown", 41, 810, 660); await settle();
+  const start = pet.calls.find(call => call.name === "drag-start");
+  assert.equal(start.args.screenX, 810); assert.equal(start.args.screenY, 660);
+  const nextArea = { x: -1920, y: -1080, width: 1920, height: 1080 };
+  const nextCanvas = { x: -1750, y: -920, width: 300, height: 260 };
+  pet.publish({ nativeDragTracking: true, dragging: true, dragMoved: true, dragId: start.args.dragId,
+    workArea: nextArea, canvas: nextCanvas, petLeft: 200, petTop: 210 });
+  pet.setViewport(300, 260); await pet.flushLayout();
+  assert.equal(pet.element("pet").style.transform, "translate3d(200px, 210px, 0)");
+  assert.equal(pet.element("pet-viewport").style.transform, "translate3d(-170px, -160px, 0)");
+  assert.equal(pet.element("stack").style.width, "348px");
+  assert.equal(pet.calls.some(call => call.name === "drag"), false, "native drag does not depend on a shrinking renderer viewport");
+  pet.publish({ nativeDragTracking: true, dragging: false, dragMoved: true, dragId: start.args.dragId });
+  await pet.flushLayout();
+  assert.deepEqual(pet.releasedCaptures, [41, 41], "matching release retires native drag capture");
+});
+
+test("passive captions and stable pose bounds affect cropping without authorizing rectangular clicks", async () => {
+  const shape = { mask: { width: 4, height: 4, bits: "0660" }, bounds: { left: .25, top: .25, width: .5, height: .5 } };
+  const crop = { left: .125, top: .125, width: .75, height: .75 };
+  const workArea = { x: 0, y: 0, width: 1000, height: 800 }, canvas = { x: 80, y: 80, width: 500, height: 500 };
+  const pet = await renderer(snapshot({ expanded: false, petLeft: 100, petTop: 100, petPixels: 448,
+    effectiveAppearance: "ainiang:claude", workArea, canvas }), { ainiangShape: shape, ainiangCrop: crop, virtualLayout: true });
+  pet.setRect("art", { left: 100, top: 100, width: 448, height: 448 });
+  const caption = pet.element("dialogue-caption"); caption.hidden = false;
+  pet.setRect("dialogue-caption", { left: 110, top: 40, width: 240, height: 40 });
+  pet.resizeObserved(); await pet.flushLayout();
+  const report = pet.regionCalls.at(-1);
+  assert.deepEqual(report.visualRegions.find(region => region.id === "pet"), { id: "pet", left: 156, top: 156, width: 336, height: 336 });
+  assert.deepEqual(report.visualRegions.find(region => region.id === "dialogue-caption"), { id: "dialogue-caption", left: 110, top: 40, width: 240, height: 40 });
+  assert.ok(!report.regions.some(region => region.id === "dialogue-caption"));
+  assert.deepEqual(report.regions.find(region => region.id === "pet").mask, shape.mask);
+});
+
+
+for (const failFirst of [false, true]) {
+  test(`hit geometry has one in-flight request and coalesces latest changes after ${failFirst ? "failure" : "success"}`, async () => {
+    const requests = [];
+    let active = 0, maximum = 0;
+    const pet = await renderer(snapshot({ hitRegionsEpoch: 7, petLeft: 800, petTop: 650 }), {
+      hitReply: () => {
+        maximum = Math.max(maximum, ++active);
+        return new Promise((resolve, reject) => requests.push({
+          resolve: value => { active--; resolve(value); },
+          reject: error => { active--; reject(error); },
+        }));
+      },
+    });
+    assert.equal(requests.length, 1);
+    pet.setRect("panel", { left: 400, top: 100 }); pet.resizeObserved(); await pet.flushFrame();
+    pet.setRect("panel", { left: 500, top: 80 }); pet.publish({ attention: "Intermediate state" }); await pet.flushFrame();
+    pet.setRect("panel", { left: 600, top: 60 }); pet.windowEvent("resize"); await pet.flushLayout();
+    assert.equal(requests.length, 1, "same-epoch layout changes wait for the outstanding submission");
+    if (failFirst) requests[0].reject(new Error("temporary IPC failure"));
+    else requests[0].resolve({ ok: true });
+    await pet.flushLayout();
+    assert.equal(requests.length, 2);
+    assert.equal(maximum, 1, "native receives no concurrent geometry writes");
+    assert.equal(pet.regionCalls[1].epoch, 7);
+    assert.deepEqual(pet.regionCalls[1].regions.find(region => region.id === "panel"),
+      { id: "panel", left: 600, top: 60, width: 348, height: 190 }, "only the latest geometry is measured after completion");
+    pet.resizeObserved(); pet.publish({ attention: "Unchanged layout" });
+    requests[1].reject(new Error("same-layout failure")); await pet.flushLayout();
+    assert.equal(requests.length, 2, "failure and queued identical layout must not create a retry loop");
+    assert.equal(pet.frameCount(), 0);
+    pet.setRect("panel", { left: 620 }); pet.resizeObserved(); await pet.flushLayout();
+    assert.equal(requests.length, 3, "later changed geometry remains publishable after rejection");
+    requests[2].resolve({ ok: true }); await pet.flushLayout();
+    assert.equal(maximum, 1); assert.equal(active, 0);
   });
 }

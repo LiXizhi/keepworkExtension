@@ -20,9 +20,19 @@ function bridgeFixture(implementation, platform, subframe = false) {
   const window = {
     location: new URL('https://keepwork.com/chat'),
     __AICHAT_DESKTOP_BOOTSTRAP__: { platform },
-    addEventListener: (name, callback) => listeners.set(name, callback),
+    addEventListener: (name, callback) => {
+      const callbacks = listeners.get(name)?.callbacks || new Set();
+      callbacks.add(callback);
+      const dispatch = event => { for (const cb of [...callbacks]) cb(event); };
+      dispatch.callbacks = callbacks;
+      listeners.set(name, dispatch);
+    },
     postMessage() {},
   };
+  window.document = { getElementById: () => null };
+  window.setInterval = callback => callback;
+  window.clearInterval = () => {};
+  window.removeEventListener = (name, callback) => listeners.get(name)?.callbacks.delete(callback);
   window.top = subframe ? {} : window;
   const exports = {};
   const source = ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '../src/bridge.ts'), 'utf8'), {
@@ -30,7 +40,9 @@ function bridgeFixture(implementation, platform, subframe = false) {
   }).outputText;
   vm.runInNewContext(source, {
     exports, window, URL,
-    require: name => name.endsWith('/core')
+    require: name => name === './petModel.js'
+      ? { createPetModelPublisher: vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../src/petModel.js'), 'utf8').replace('export function', 'function') + '\ncreatePetModelPublisher', { window }) }
+      : name.endsWith('/core')
       ? { invoke: (command, args = {}) => { calls.push(JSON.parse(JSON.stringify({ command, args }))); return Promise.resolve(true); } }
       : { listen: () => Promise.resolve(() => {}) },
   });

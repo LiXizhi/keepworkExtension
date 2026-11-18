@@ -1,0 +1,97 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-kimi",
+  "appearanceVersion": "1",
+  "characterId": "kimi",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:kimi",
+    "licenseRef": "experiment-user-attested-seedance-video-only",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 192,
+  "height": 192,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 15586,
+    "sha256": "00c9d6d40fcbefb40564cbed6bed58f520acee789333da1c095f65cb9f0a9174"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 235519,
+        "sha256": "e6d2cc235a3beed85da373a5ea84466a3b541e0efa83a3d1dc3c0dd3a627d16f"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 219026,
+        "sha256": "3561b933afb2d94b8c3f1be0f13e0bf92739d3dc4ea89e86fb17d7abad52e0cd"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 230935,
+        "sha256": "1c8312d253eb2c3d57c08f78f9921b22caf2f99dc66b7018916f128bfa8c684e"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 244514,
+        "sha256": "44d8b5644f5bb9113c2f0a81c1f37b2d97a58f542c478b6741ba4f185f919310"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 225242,
+        "sha256": "f626a34e543aa547a58044fc589bfa02928fb0738591ebededf14b194f4085a8"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 235519,
+        "sha256": "e6d2cc235a3beed85da373a5ea84466a3b541e0efa83a3d1dc3c0dd3a627d16f"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 227678,
+        "sha256": "e7b246b6f127dcfa584074e169a5883695ea66f654f5a35d77b8f07797b031d0"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "Kimi",
+    "en-US": "Kimi",
+    "es-ES": "Kimi",
+    "ko-KR": "Kimi",
+    "ja-JP": "Kimi",
+    "fr-FR": "Kimi"
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-gemini",
+  "appearanceVersion": "1",
+  "characterId": "gemini",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:gemini",
+    "licenseRef": "experiment-user-attested-seedance-video-only",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 192,
+  "height": 192,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 16391,
+    "sha256": "8a7731734c13512bfc34f378906a916199c559d7be5349e17433973ab974a903"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 244953,
+        "sha256": "2439bb5d879c7389d98fcf2757a69b33309b3f91bf806514d31474038b4ea5dc"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 242024,
+        "sha256": "dd1a6857f55a8db554b4e029a124dcca0bfa1a596092b9e1e8e31770de91542c"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 247404,
+        "sha256": "ebbb534cfea5179dd242c7449ab455f20c6e8ee96793b08509c58ff0779c6626"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 240522,
+        "sha256": "98329c8ccc79b1a23a70e4f3b49861d2163bd5103a10c76a7e7dd366dbc4cd25"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 237280,
+        "sha256": "9646a33ad57cb6ca7797e33cec3a4f7ec19b7a4796f7fcf0bafa8a8dec7ac361"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 244953,
+        "sha256": "2439bb5d879c7389d98fcf2757a69b33309b3f91bf806514d31474038b4ea5dc"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 233899,
+        "sha256": "57f1fc1ecb6afeb46ee0736e5e6c797cdb74c89c818fc24011fe8e04b37cace8"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "Gemini",
+    "en-US": "Gemini",
+    "es-ES": "Gemini",
+    "ko-KR": "Gemini",
+    "ja-JP": "Gemini",
+    "fr-FR": "Gemini"
+  }
+}

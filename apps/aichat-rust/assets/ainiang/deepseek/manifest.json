@@ -1,0 +1,97 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-deepseek",
+  "appearanceVersion": "1",
+  "characterId": "deepseek",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:deepseek",
+    "licenseRef": "dsh-pet-mit-video-experiment",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 192,
+  "height": 192,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 13061,
+    "sha256": "7aa6879bf27b7bef38686901065ba2a4b6634714e0e2b4f18a4fe4d805841c1a"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 187411,
+        "sha256": "367c725faa4d6aa02cde04b98eb81d0a6e2fb16ca3b9e428462e725e82833345"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 201497,
+        "sha256": "375a2f7450e6e371b755bf6a709c046b9eb2132072a1629dcedfe39d4e9ab6f1"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 187411,
+        "sha256": "367c725faa4d6aa02cde04b98eb81d0a6e2fb16ca3b9e428462e725e82833345"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 186694,
+        "sha256": "c8e5a57a4cdf8783cd28d51ad56c0a45a03539a5740af67dac82ea539b72d524"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 181377,
+        "sha256": "95a4e4be339cd39bfc8a56370f9cab40ee72218c890c490d90e0f0b3671f81d1"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 194263,
+        "sha256": "7cd73e411d098527671b3af5642d47dbbb712b3b99e58452e07ce79b968bdc4a"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 195331,
+        "sha256": "9b613082db457d6d902c3e9cb9bd984f7fc833f12334886560f2431f6d83115a"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "DeepSeek",
+    "en-US": "DeepSeek",
+    "es-ES": "DeepSeek",
+    "ko-KR": "DeepSeek",
+    "ja-JP": "DeepSeek",
+    "fr-FR": "DeepSeek"
+  }
+}

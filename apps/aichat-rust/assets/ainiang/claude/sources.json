@@ -1,0 +1,97 @@
+{
+  "commit": "72e804d87394fdb998244251a4e21bbb4fd3e932",
+  "clips": {
+    "breath_release": {
+      "path": "videos/claude/breath_release.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/claude/breath_release.webm",
+      "sha256": "efc5acfc483fdc8d27070b16a551a4ffd2ec98259a881f6df5db02f43b9c6115",
+      "bytes": 1040122,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "width": 640,
+      "height": 360
+    },
+    "blow_kiss": {
+      "path": "videos/claude/blow_kiss.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/claude/blow_kiss.webm",
+      "sha256": "f44eae2c03942fe49a50cb8d881c597169dd1e5179b7f82f11cddf2f6012acc6",
+      "bytes": 617792,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "width": 640,
+      "height": 360
+    },
+    "binoculars": {
+      "path": "videos/claude/binoculars.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/claude/binoculars.webm",
+      "sha256": "1438020ce6cc82a1382ee76cf943c01347f45c74e0430b9d758e60ba743774b1",
+      "bytes": 763759,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "width": 640,
+      "height": 360
+    },
+    "balance_scale": {
+      "path": "videos/claude/balance_scale.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/claude/balance_scale.webm",
+      "sha256": "bfd050987504c0b102d5ac2384980c66e8a4762f986ffac743af3adcf8896897",
+      "bytes": 669778,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "width": 640,
+      "height": 360
+    },
+    "air_quote": {
+      "path": "videos/claude/air_quote.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/claude/air_quote.webm",
+      "sha256": "d0cd10c262b9483679a0d7d4f593b05a20ec08855dad10d3c7f1fcf1eb7e8868",
+      "bytes": 713505,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "width": 640,
+      "height": 360
+    },
+    "backstep": {
+      "path": "videos/claude/backstep.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/claude/backstep.webm",
+      "sha256": "fec8eda4fda00ebff4de445556f40353bc3a109683abd217ed9e14627c3f15d7",
+      "bytes": 702059,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "width": 640,
+      "height": 360
+    }
+  },
+  "approximateStateMapping": {
+    "idle": "breath_release",
+    "happy": "blow_kiss",
+    "listening": "binoculars",
+    "thinking": "balance_scale",
+    "speaking": "air_quote",
+    "sleeping": "breath_release",
+    "error": "backstep"
+  },
+  "posterSource": {
+    "clip": "breath_release",
+    "sampleIndex": 0
+  },
+  "extraction": {
+    "profile": "desktop-native-grid-v1",
+    "width": 640,
+    "height": 360,
+    "columns": 4,
+    "rows": 4,
+    "frameCount": 16,
+    "frameDurationMs": 250,
+    "spatialProcessing": "Native decoded RGBA; no spatial resize, padding, crop or enhancement",
+    "pngEncoding": "FFmpeg PNG mixed prediction, compression level 9; only IHDR/IDAT/IEND",
+    "decoder": "libvpx-vp9",
+    "ffmpegVersion": "ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers"
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "commit": "72e804d87394fdb998244251a4e21bbb4fd3e932",
+  "clips": {
+    "breath_release": {
+      "path": "videos/grok/breath_release.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/grok/breath_release.webm",
+      "sha256": "53d4ee5cbf4783ccb4bd69e2b8b2690c9f665eaa04d3170a04d760c9d48a5383",
+      "bytes": 543559,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255
+    },
+    "blow_kiss": {
+      "path": "videos/grok/blow_kiss.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/grok/blow_kiss.webm",
+      "sha256": "3d46ef5357debb0f820dade70cf709ae8ed347a103aeaf2681eebe56d2706ed4",
+      "bytes": 660896,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255
+    },
+    "binoculars": {
+      "path": "videos/grok/binoculars.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/grok/binoculars.webm",
+      "sha256": "2e0d4fe129ed8ffa737ebd3caa533d683cdc516ac726eecda032e2bcfd80230c",
+      "bytes": 695958,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255
+    },
+    "balance_scale": {
+      "path": "videos/grok/balance_scale.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/grok/balance_scale.webm",
+      "sha256": "0f0f5ef8f4e8088a242672580bdc2bda7b64625d79703431c766a7c990f16965",
+      "bytes": 695775,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255
+    },
+    "air_quote": {
+      "path": "videos/grok/air_quote.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/grok/air_quote.webm",
+      "sha256": "5879e59dc89bd460b8195d1779bd17bbfbcbc53c5e8735eb9665a252cb18aaea",
+      "bytes": 624873,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255
+    },
+    "backstep": {
+      "path": "videos/grok/backstep.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/grok/backstep.webm",
+      "sha256": "856e48eb673051afbe1c955041d911b39d8b5192eb834106a3705a0e93651a55",
+      "bytes": 606554,
+      "durationSeconds": 5.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255
+    }
+  },
+  "approximateStateMapping": {
+    "idle": "breath_release",
+    "happy": "blow_kiss",
+    "listening": "binoculars",
+    "thinking": "balance_scale",
+    "speaking": "air_quote",
+    "sleeping": "breath_release",
+    "error": "backstep"
+  },
+  "posterSource": {
+    "clip": "breath_release",
+    "sampleIndex": 0
+  }
+}

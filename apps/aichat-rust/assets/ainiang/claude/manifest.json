@@ -1,0 +1,104 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-claude",
+  "appearanceVersion": "2",
+  "characterId": "claude",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:claude",
+    "licenseRef": "experiment-user-attested-seedance-video-only",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 640,
+  "height": 360,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 137420,
+    "sha256": "8e3c35ac208617b7adc91894472a6c75e310f758613c886d139b2c4b36871c85"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 2321671,
+        "sha256": "2c267b599a8de57fa3b43deb8cc3c489bd15a27ec70d13ab85ce8e4230da23ad"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250,
+      "columns": 4
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 2349058,
+        "sha256": "07fd49314ffb4a95f9be5a9eadfbaf28fbfa5b0dbcd6d2d52fc6789aa9dd720d"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250,
+      "columns": 4
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 2327484,
+        "sha256": "8a3d94f199a22c9795e17421891c0735d78d7f8ea88306b1469c6cd98e4b8132"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250,
+      "columns": 4
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 2270458,
+        "sha256": "4f5ae5061b89c8745397419e87439f7e77968f07b1614750b43601d167618595"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250,
+      "columns": 4
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 2341632,
+        "sha256": "eaea47da3dc2e313fbaada67d995cb5dc88782a1898f24f523c12b40dd6ae8a7"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250,
+      "columns": 4
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 2321671,
+        "sha256": "2c267b599a8de57fa3b43deb8cc3c489bd15a27ec70d13ab85ce8e4230da23ad"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250,
+      "columns": 4
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 2179227,
+        "sha256": "536eec6481617665b6e742c65cf2a7029a07d8b26d2f24723341ca9542fc3fd0"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250,
+      "columns": 4
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "Claude",
+    "en-US": "Claude",
+    "es-ES": "Claude",
+    "ko-KR": "Claude",
+    "ja-JP": "Claude",
+    "fr-FR": "Claude"
+  }
+}

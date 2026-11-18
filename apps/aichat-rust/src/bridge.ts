@@ -1,3 +1,4 @@
+import { createPetModelPublisher } from "./petModel.js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -151,6 +152,7 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     );
   });
 
+  const petModelPublisher = createPetModelPublisher(state => invoke<boolean>("desktop_publish_pet_state", { state }));
   const bridge: AIChatDesktopBridge = Object.freeze({
     version: 1,
     capabilities,
@@ -187,7 +189,7 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     },
     closeRemoteDialogue(id: string): Promise<boolean> { return invoke("remote_voice_dialogue_closed", { id }); },
     publishPetState(state: Record<string, unknown>): Promise<boolean> {
-      return invoke<boolean>("desktop_publish_pet_state", { state: state || {} });
+      return petModelPublisher.publish(state);
     },
     petResult(result: Record<string, unknown>): Promise<boolean> {
       return invoke<boolean>("desktop_pet_result", { result: result || {} });

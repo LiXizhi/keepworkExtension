@@ -1,0 +1,97 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-gpt",
+  "appearanceVersion": "1",
+  "characterId": "gpt",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:gpt",
+    "licenseRef": "experiment-user-attested-seedance-video-only",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 192,
+  "height": 192,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 15378,
+    "sha256": "f8442fa8fe351763a0ef5520576f09b660f73794c9048c08dcb407fc11772b39"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 222429,
+        "sha256": "691b338c0098b356a609b8dcb2ab549e7cc4ad96e7603ce7b3563a95c8c50df7"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 227648,
+        "sha256": "bdf9347cab7b8dc5faa981840e5ccfba4cbe47b84a78a08ac7525ddaceabd66a"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 233210,
+        "sha256": "bea4f0259ea12982bd4e1cf8a1e2adb229f2bb68ba61f85b1f9355fde1421fbd"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 211262,
+        "sha256": "e84549ab53dbd07142cbae39ac2cf0fe8f030c4dd6e138c4e36ae2ddd86f0861"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 217982,
+        "sha256": "0b6ab66069165f5b4ddf810045717a7f922c7272e9a3f1d7041dad596a201eb2"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 222429,
+        "sha256": "691b338c0098b356a609b8dcb2ab549e7cc4ad96e7603ce7b3563a95c8c50df7"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 222114,
+        "sha256": "7684c422c4c375e27a7b3f4625b6c5edc3e2239d065bcbc51a712315630604cb"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "GPT",
+    "en-US": "GPT",
+    "es-ES": "GPT",
+    "ko-KR": "GPT",
+    "ja-JP": "GPT",
+    "fr-FR": "GPT"
+  }
+}

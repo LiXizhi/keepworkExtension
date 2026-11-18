@@ -57,7 +57,7 @@ test("bundles the staged MCP runtime into the Tauri resource layout", () => {
   assert.ok(fs.existsSync(path.join(out, "x64", "runtime.json")));
   assert.ok(fs.existsSync(path.join(out, "x64", "app", "cli.cjs")));
   assert.ok(fs.existsSync(path.join(out, "x64", ".keep")));
-  assert.deepEqual(tauriConf.bundle.resources, ["resources/mcp-runtime"]);
+  assert.deepEqual(tauriConf.bundle.resources, ["resources/mcp-runtime", "resources/ainiang-attribution.txt"]);
 });
 
 for (const target of ['aarch64-apple-darwin', 'x86_64-pc-windows-msvc']) test(`legacy Node stage produces a self-contained Rust-readable manifest for ${target}`, t => {

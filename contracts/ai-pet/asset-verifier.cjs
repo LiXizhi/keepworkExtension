@@ -4,6 +4,9 @@ const {createHash}=require('node:crypto');
 const {inflateSync}=require('node:zlib');
 const {shape}=require('./index.cjs');
 const LIMITS=Object.freeze({fileBytes:2*1024*1024,totalBytes:8*1024*1024,dimension:2048,sheetWidth:4096,pixels:4194304,frames:32,chunks:64,minFrameMs:20,maxFrameMs:10000,maxCycleMs:60000});
+// Higher compressed-byte allowance is desktop-only and requires an independent
+// host approval. Decoded dimensions/pixels and all other checks stay identical.
+const ASSET_PROFILES=Object.freeze({standard:Object.freeze({fileBytes:LIMITS.fileBytes,totalBytes:LIMITS.totalBytes}),'desktop-native-grid-v1':Object.freeze({fileBytes:5*1024*1024/2,totalBytes:16*1024*1024})});
 const fail=(ok,reason)=>{if(!ok)throw new Error(`asset:${reason}`);};
 const canonical=x=>Array.isArray(x)?x.map(canonical):x && typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,canonical(x[k])])):x;
 const sha256=b=>createHash('sha256').update(b).digest('hex');
@@ -35,9 +38,11 @@ function inspectPng(b){
   for(let y=0;y<height;y++)fail(decoded.buffer[y*(1+4*width)]<=4,'png-filter');
   return {width,height};
 }
-function verifyAssetBundle(manifest,{approval,resources,nowMs}={}){
+function verifyAssetBundle(manifest,{approval,resources,nowMs,profile='standard'}={}){
   shape('assetManifest',manifest);
   fail(approval && approval.usage==='development-preview' && approval.status==='approved','independent-approval-required');
+  fail(Object.hasOwn(ASSET_PROFILES,profile) && (approval.assetProfile ?? 'standard')===profile,'asset-profile-approval');
+  const byteLimits=ASSET_PROFILES[profile];
   fail(Number.isSafeInteger(nowMs) && nowMs>=0 && Number.isSafeInteger(approval.validUntilMs) && approval.validUntilMs>nowMs,'approval-expired-or-time-invalid');
   const identity=['appearanceId','appearanceVersion','characterId','characterVersion'];
   fail(identity.every(k=>approval.identity?.[k]===manifest[k]),'identity-binding');
@@ -46,15 +51,17 @@ function verifyAssetBundle(manifest,{approval,resources,nowMs}={}){
   fail(approval.manifestSha256===digest,'manifest-binding');
   fail(manifest.width<=LIMITS.dimension && manifest.height<=LIMITS.dimension,'frame-dimensions');
   fail(resources instanceof Map && resources.size>=1 && resources.size<=8,'resource-map');
-  const refs=[{file:manifest.poster,frames:1},...Object.values(manifest.poses).map(p=>{
+  const refs=[{file:manifest.poster,frames:1,columns:1,rows:1},...Object.values(manifest.poses).map(p=>{
     fail(p.frameCount<=LIMITS.frames && p.frameDurationMs>=LIMITS.minFrameMs && p.frameDurationMs<=LIMITS.maxFrameMs && p.frameCount*p.frameDurationMs<=LIMITS.maxCycleMs,'frame-timing');
-    return {file:p.file,frames:p.frameCount};
+    const columns=p.columns ?? p.frameCount;
+    fail(Number.isInteger(columns) && columns>=1 && columns<=p.frameCount,'grid-columns');
+    return {file:p.file,frames:p.frameCount,columns,rows:Math.ceil(p.frameCount/columns)};
   })];
   const descriptors=new Map(),folded=new Set();
-  for(const {file,frames} of refs){
+  for(const {file,frames,columns,rows} of refs){
     fail(file.path.length<=256 && file.path.endsWith('.png'),'unsupported-path-or-format');
-    const descriptor={...file,width:manifest.width*frames,height:manifest.height};
-    fail(descriptor.width<=LIMITS.sheetWidth && descriptor.width*descriptor.height<=LIMITS.pixels,'sheet-dimensions');
+    const descriptor={...file,frames,columns,rows,width:manifest.width*columns,height:manifest.height*rows};
+    fail(descriptor.width<=LIMITS.sheetWidth && descriptor.height<=LIMITS.dimension && descriptor.width*descriptor.height<=LIMITS.pixels,'sheet-dimensions');
     if(descriptors.has(file.path))fail(JSON.stringify(canonical(descriptors.get(file.path)))===JSON.stringify(canonical(descriptor)),'ambiguous-resource-reference');
     else{fail(!folded.has(file.path.toLowerCase()),'case-alias');folded.add(file.path.toLowerCase());descriptors.set(file.path,descriptor);}
   }
@@ -64,13 +71,13 @@ function verifyAssetBundle(manifest,{approval,resources,nowMs}={}){
   for(const [path,d] of descriptors){
     const supplied=resources.get(path);
     fail(supplied instanceof Uint8Array && !(supplied.buffer instanceof SharedArrayBuffer),'resource-bytes');
-    fail(d.bytes<=LIMITS.fileBytes && supplied.byteLength===d.bytes,'resource-size');
-    total+=d.bytes;fail(total<=LIMITS.totalBytes,'bundle-size');
+    fail(d.bytes<=byteLimits.fileBytes && supplied.byteLength===d.bytes,'resource-size');
+    total+=d.bytes;fail(total<=byteLimits.totalBytes,'bundle-size');
     const bytes=Buffer.from(supplied);
     fail(sha256(bytes)===d.sha256,'resource-digest');
     const info=inspectPng(bytes);fail(info.width===d.width && info.height===d.height,'resource-dimensions');
     admitted.set(path,bytes);
   }
-  return {format:'ai-pet.dev.asset-admission.v1',manifestSha256:digest,identity:Object.fromEntries(identity.map(k=>[k,manifest[k]])),manifest:structuredClone(manifest),resources:admitted};
+  return {format:'ai-pet.dev.asset-admission.v1',assetProfile:profile,manifestSha256:digest,identity:Object.fromEntries(identity.map(k=>[k,manifest[k]])),manifest:structuredClone(manifest),resources:admitted};
 }
-module.exports={verifyAssetBundle,manifestDigest,LIMITS};
+module.exports={verifyAssetBundle,manifestDigest,LIMITS,ASSET_PROFILES};

@@ -4,6 +4,8 @@ import { createRequire } from "node:module";
 
 // Keep this CommonJS helper outside Vite's bundled ESM configuration.
 const devServer = createRequire(import.meta.url)("./scripts/dev-server.cjs");
+// A reviewed host record pins experiment resources before either dev serving or bundling.
+createRequire(import.meta.url)("./scripts/check-ainiang-assets.cjs").verifyAiniangAssets();
 
 // Three desktop windows: main fallback/shell, floating pet, and update center.
 export default defineConfig({

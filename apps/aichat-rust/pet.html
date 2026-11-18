@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/src/pet.css">
 </head>
 <body>
+  <div id="pet-viewport">
   <div id="stack">
     <section id="permission-bubble" role="alertdialog" aria-modal="true" aria-labelledby="permission-title" hidden>
       <strong id="permission-title">允许截取主屏幕？</strong>
@@ -97,11 +98,11 @@
   </div>
   <button id="pet" type="button" title="单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动">
     <span id="art">🐉</span>
-    <span id="badge" hidden>●</span>
   </button>
   <button id="dialogue-icon" type="button" title="挂断通话" aria-label="挂断通话" hidden>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 13a13 13 0 0 1 18 0l-1.5 3.5-4-1 .1-3a12 12 0 0 0-7.2 0l.1 3-4 1L3 13Z"/></svg>
   </button>
+  </div>
   <script type="module" src="/src/pet.ts"></script>
 </body>
 </html>

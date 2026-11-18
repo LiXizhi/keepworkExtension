@@ -2,7 +2,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <objidl.h>
-#include <shellapi.h>
 #include <algorithm>
 // GDI+ headers use unqualified min/max even in NOMINMAX builds.
 namespace Gdiplus { using std::min; using std::max; }
@@ -347,8 +346,6 @@ class DesktopPet {
     if (appearance) {
       AppendMenuW(appearance, MF_STRING | (appearance_ == L"follow" ? MF_CHECKED : 0), 4, L"跟随 AIChat 宠物");
       AppendMenuW(appearance, MF_STRING | (appearance_ == L"dragon" ? MF_CHECKED : 0), 5, L"抱抱龙");
-      AppendMenuW(appearance, MF_SEPARATOR, 0, nullptr);
-      AppendMenuW(appearance, MF_STRING, 6, L"在哈奇星球更换宠物…");
       if (!AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(appearance), L"外观")) DestroyMenu(appearance);
       AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
@@ -365,8 +362,6 @@ class DesktopPet {
     PostMessageW(window_, WM_NULL, 0, 0);
     if (selected == 2) SetEnabled(false);
     else if (selected == 4 || selected == 5) SetAppearance(selected == 5 ? L"dragon" : L"follow");
-    else if (selected == 6) ShellExecuteW(window_, L"open",
-      L"https://keepwork.com/api/raw/official/apps/MagicHaqi/release/MagicHaqi_v1.html", nullptr, nullptr, SW_SHOWNORMAL);
     else {
       const auto action = selected == 1 ? open_ : selected == 3 ? quit_ : std::function<void()>{};
       if (action) action();

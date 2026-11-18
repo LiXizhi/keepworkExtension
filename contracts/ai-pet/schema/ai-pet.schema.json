@@ -725,6 +725,11 @@
         "file": {
           "$ref": "#/$defs/assetFile"
         },
+        "columns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
         "frameCount": {
           "type": "integer",
           "minimum": 1,
@@ -858,7 +863,7 @@
           "additionalProperties": false
         },
         "mouthMode": {
-          "const": "amplitude"
+          "enum": ["amplitude", "prerecorded"]
         },
         "labels": {
           "type": "object",

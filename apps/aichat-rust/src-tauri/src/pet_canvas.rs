@@ -1,7 +1,7 @@
 use crate::pet::WorkArea;
 use tauri::WebviewWindow;
 
-/// Commit one monitor's canvas before acknowledging it to the drag controller.
+/// Commit the cropped native viewport before acknowledging its global bounds.
 pub fn sync_pet_canvas(window: &WebviewWindow, area: WorkArea) -> Result<(), String> {
     let _ = window.set_shadow(false);
     #[cfg(target_os = "macos")]

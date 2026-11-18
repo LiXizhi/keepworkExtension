@@ -1,3 +1,5 @@
+import { createAiniangRenderer, ainiangAppearanceName, maskContains } from "./ainiangPet";
+import type { PetAlphaMask } from "./ainiangPet";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DesktopPetBridge } from "./types";
@@ -43,6 +45,7 @@ interface PetSpeech {
 }
 
 type PhoneCaption = { role: "user" | "assistant"; text: string };
+type PetFrame = { x: number; y: number; width: number; height: number };
 
 interface PetSnapshot {
   version?: number;
@@ -52,11 +55,14 @@ interface PetSnapshot {
   petTop?: number;
   petPixels?: number;
   hitRegionsEpoch?: number;
+  canvas?: PetFrame;
+  workArea?: PetFrame;
   dragging?: boolean;
   dragId?: number;
   dragMoved?: boolean;
   nativeDragTracking?: boolean;
-  preferences?: { appearance?: string; scale?: number };
+  effectiveAppearance?: string;
+  preferences?: { appearance?: string; appearanceMode?: "model" | "manual"; scale?: number };
   pet?: {
     name?: string;
     imageData?: string;
@@ -195,42 +201,148 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   let waiting: PendingTurn | null = null;
   let choosing = false;
   let hitRegionsQueued = false;
+  let hitRegionsInFlight = false;
+  let hitRegionsPending = false;
   let hitRegionsSignature = "";
+  let viewportSignature = "";
+  let viewportRevision = 0;
   let jelly: Animation | undefined;
   const artStyle: Record<string, string> = {};
-  const hitSurfaceIds = ["pet", "panel", "bubble", "exit-bubble", "permission-bubble"];
-  const hitSurfaceSelector = [...hitSurfaceIds, "dialogue-icon"].map((id) => `#${id}`).join(", ");
+  const hitSurfaceIds = ["pet", "panel", "bubble", "exit-bubble", "permission-bubble", "dialogue-icon"];
+  const hitSurfaceSelector = hitSurfaceIds.map((id) => `#${id}`).join(", ");
+  const hasBodyMask = () => !!ainiangAppearanceName(state.effectiveAppearance ?? state.preferences?.appearance);
+
+  function validFrame(frame: unknown): frame is PetFrame {
+    if (!frame || typeof frame !== "object") return false;
+    const rect = frame as PetFrame;
+    return [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
+      && rect.width > 0 && rect.height > 0;
+  }
+
+  function viewport() {
+    const workArea = validFrame(state.workArea) ? state.workArea
+      : { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight };
+    const canvas = validFrame(state.canvas) ? state.canvas : undefined;
+    return { workArea, canvas,
+      x: canvas && validFrame(state.workArea) ? canvas.x - workArea.x : 0,
+      y: canvas && validFrame(state.workArea) ? canvas.y - workArea.y : 0 };
+  }
+
+  function syncViewport(): void {
+    const { workArea, canvas, x, y } = viewport();
+    const signature = JSON.stringify([workArea, canvas]);
+    if (signature !== viewportSignature) {
+      viewportSignature = signature;
+      viewportRevision++;
+    }
+    // Native cropping must not resize the logical monitor or move the pet in it.
+    const root = $("pet-viewport");
+    root.style.width = `${workArea.width}px`;
+    root.style.height = `${workArea.height}px`;
+    root.style.transform = `translate3d(${-x}px, ${-y}px, 0)`;
+  }
+
+  function adoptCanvasReply(reply: Record<string, unknown> | null, revision: number, epoch: number | undefined): void {
+    if (revision !== viewportRevision || epoch !== state.hitRegionsEpoch
+      || !validFrame(reply?.canvas) || !validFrame(reply?.workArea)) return;
+    const signature = JSON.stringify([reply.workArea, reply.canvas]);
+    if (signature === viewportSignature) return;
+    // This acknowledgement contains geometry only; it cannot reset the draft,
+    // conversation, expansion or a newer native drag snapshot.
+    state = { ...state, canvas: reply.canvas, workArea: reply.workArea };
+    positionLayers();
+    scheduleHitRegions();
+  }
 
   function scheduleHitRegions(): void {
+    if (hitRegionsInFlight) { hitRegionsPending = true; return; }
     if (hitRegionsQueued) return;
     hitRegionsQueued = true;
     requestAnimationFrame(() => {
       hitRegionsQueued = false;
-      const regions = hitSurfaceIds.flatMap((id) => {
-        const el = $(id);
-        if (!el.getClientRects().length) return [];
+      if (hitRegionsInFlight) { hitRegionsPending = true; return; }
+      syncViewport();
+      const { workArea, canvas, x, y } = viewport();
+      const revision = viewportRevision;
+      const regions: Array<{ id: string; left: number; top: number; width: number; height: number; mask?: PetAlphaMask }> = [];
+      for (const id of hitSurfaceIds) {
+        const masked = id === "pet" && hasBodyMask();
+        const shape = masked ? ainiang.hitShape() : null;
+        if (masked && !shape) continue;
+        const el = $(masked ? "art" : id);
+        if (!el.getClientRects().length) continue;
         const { left, top, width, height } = el.getBoundingClientRect();
-        if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return [];
-        return [{ id, left, top, width, height }];
-      });
+        if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) continue;
+        regions.push({ id, left: left + x, top: top + y, width, height, ...(shape && { mask: shape.mask }) });
+      }
+      // Native clipping includes painted captions and the union of the current
+      // pose's decoded frames. These rectangles never authorize mouse input.
+      const visualRegions: Array<{ id: string; left: number; top: number; width: number; height: number }> = [];
+      for (const id of ["dialogue-caption", "dialogue-status", "compact-status"]) {
+        const element = $(id);
+        if (!element.getClientRects().length) continue;
+        const rect = element.getBoundingClientRect();
+        if ([rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0) {
+          visualRegions.push({ id, left: rect.left + x, top: rect.top + y, width: rect.width, height: rect.height });
+        }
+      }
+      if (hasBodyMask()) {
+        const bounds = ainiang.cropBounds?.() || ainiang.hitShape()?.bounds;
+        const rect = $("art").getBoundingClientRect();
+        if (bounds && $("art").getClientRects().length && rect.width > 0 && rect.height > 0) {
+          visualRegions.push({ id: "pet", left: rect.left + x + bounds.left * rect.width,
+            top: rect.top + y + bounds.top * rect.height,
+            width: bounds.width * rect.width, height: bounds.height * rect.height });
+        }
+      }
+      // Jelly scaling changes the actual artwork rectangle between atlas frames.
+      if (hasBodyMask() && jelly?.playState === "running") scheduleHitRegions();
       const epoch = state.hitRegionsEpoch;
-      const signature = JSON.stringify([epoch, regions]);
+      const signature = JSON.stringify([epoch, workArea, canvas, regions, visualRegions]);
       if (signature === hitRegionsSignature) return;
       hitRegionsSignature = signature;
-      void api.action("hit-regions", { epoch, regions }).catch(() => {
-        if (hitRegionsSignature === signature) hitRegionsSignature = "";
-      });
+      hitRegionsInFlight = true;
+      void (async () => {
+        try {
+          const reply = await api.action("hit-regions", { epoch, regions, visualRegions, ...(canvas && { canvas }) });
+          adoptCanvasReply(reply, revision, epoch);
+        } catch {
+          // A failed submission does not retry itself. A genuinely different
+          // frame/epoch/geometry can still be published on the next update.
+        } finally {
+          hitRegionsInFlight = false;
+          if (hitRegionsPending) {
+            hitRegionsPending = false;
+            // Re-measure after the acknowledgement: queued rectangles would
+            // otherwise describe an old frame or an intermediate animation.
+            scheduleHitRegions();
+          }
+        }
+      })();
     });
   }
 
-  function setArtStyle(key: "backgroundImage" | "backgroundSize" | "backgroundPosition", value: string): void {
+  function setArtStyle(key: "backgroundImage" | "backgroundSize" | "backgroundPosition" | "clipPath", value: string): void {
     if (artStyle[key] !== value) {
       artStyle[key] = value;
       $("art").style[key] = value;
     }
   }
 
+  const ainiang = createAiniangRenderer($("art"), setArtStyle, positionLayers);
+
+  function isPetBodyEvent(event: MouseEvent): boolean {
+    if (!hasBodyMask()) return true;
+    const shape = ainiang.hitShape();
+    if (!shape) return false;
+    const rect = $("art").getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 &&
+      maskContains(shape.mask, (event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
+  }
+
   function positionLayers(): void {
+    syncViewport();
+    const { workArea } = viewport();
     if (typeof state.petLeft !== "number" || typeof state.petTop !== "number") return;
     const petPixels = state.petPixels || 112;
     // Composite the moving sprite with a transform; changing left/top plus the
@@ -239,20 +351,30 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const transform = `translate3d(${state.petLeft}px, ${state.petTop}px, 0)`;
     $("pet").style.transform = transform;
     $("dialogue-icon").style.transform = transform;
+    // The poster gives controls a stable anchor while the animation's mask
+    // follows each frame. Panels must not jump when the character changes pose.
+    const bounds = hasBodyMask() ? ainiang.bodyBounds?.() || ainiang.hitShape()?.bounds : undefined;
+    const x = bounds ? ($("art").offsetLeft || 0) + bounds.left * petPixels : 0;
+    const y = bounds ? ($("art").offsetTop || 0) + bounds.top * petPixels : 0;
+    const bodyLeft = state.petLeft + x, bodyTop = state.petTop + y;
+    const bodyWidth = bounds ? bounds.width * petPixels : petPixels;
+    const bodyHeight = bounds ? bounds.height * petPixels : petPixels;
+    $("dialogue-icon").style.left = bounds ? `${x - 8}px` : "";
+    $("dialogue-icon").style.top = bounds ? `${y - 8}px` : "";
     const stack = $("stack");
-    const width = Math.min(348, window.innerWidth - 12);
-    const above = Math.max(0, state.petTop - 12);
-    const below = Math.max(0, window.innerHeight - state.petTop - petPixels - 28);
+    const width = Math.max(0, Math.min(348, workArea.width - 12));
+    const above = Math.max(0, bodyTop - 12);
+    const below = Math.max(0, workArea.height - bodyTop - bodyHeight - 28);
     const onTop = above >= Math.min(stack.scrollHeight, 360) || above >= below;
     stack.style.width = `${width}px`;
     stack.style.left = `${Math.max(
       6,
-      Math.min(state.petLeft + petPixels - width, window.innerWidth - width - 6)
+      Math.min(bodyLeft + bodyWidth - width, workArea.width - width - 6)
     )}px`;
     stack.style.right = "auto";
     stack.style.maxHeight = `${onTop ? above : below}px`;
-    stack.style.bottom = onTop ? `${window.innerHeight - state.petTop + 8}px` : "auto";
-    stack.style.top = onTop ? "auto" : `${state.petTop + petPixels + 24}px`;
+    stack.style.bottom = onTop ? `${workArea.height - bodyTop + 8}px` : "auto";
+    stack.style.top = onTop ? "auto" : `${bodyTop + bodyHeight + 24}px`;
     scheduleHitRegions();
   }
 
@@ -570,7 +692,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     if (staleDrag) {
       // The native thread may have queued a last snapshot before this press.
       // Keep ordinary chat state current without rewinding the new drag.
-      next = { ...next, petLeft: state.petLeft, petTop: state.petTop };
+      next = { ...next, petLeft: state.petLeft, petTop: state.petTop, canvas: state.canvas, workArea: state.workArea };
     }
     const openingExit = !!next.exitPrompt && !state.exitPrompt;
     const closingExit = !next.exitPrompt && !!state.exitPrompt;
@@ -599,14 +721,16 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     }
     $("panel").hidden = !expanded || !!callPhase();
     if ($("panel").hidden) $("panel").classList.remove("remote-voice-open");
-    const pet = state.preferences?.appearance === "dragon" ? {} : state.pet || {};
+    const pet = (state.effectiveAppearance ?? state.preferences?.appearance) === "dragon" ? {} : state.pet || {};
     if ($("art").textContent !== "") $("art").textContent = "";
     const image = pet.imageData || pet.sheetUrl;
-    setArtStyle("backgroundImage", image ? `url(${JSON.stringify(image)})` : "");
-    setArtStyle("backgroundSize", image ? pet.bgSize || "400% 400%" : "");
-    setArtStyle("backgroundPosition", image ? pet.bgPos || "0% 0%" : "");
+    if (!ainiang.update(state)) {
+      setArtStyle("backgroundImage", image ? `url(${JSON.stringify(image)})` : "");
+      setArtStyle("backgroundSize", image ? pet.bgSize || "400% 400%" : "");
+      setArtStyle("backgroundPosition", image ? pet.bgPos || "0% 0%" : "");
+    }
     document.body.style.setProperty("--pet-pixels", `${state.petPixels || 112}px`);
-    $("pet").title = `${pet.name || "宠物"}${localError ? ` · ${localError}` : ""} · 单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动`;
+    $("pet").title = `${ainiangAppearanceName(state.effectiveAppearance ?? state.preferences?.appearance) || pet.name || "宠物"}${localError ? ` · ${localError}` : ""} · 单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动`;
 
     const title = state.target === "persona" ? state.title || "我的分身" : `会话 · ${state.title || "AIChat"}`;
     $("target-title").textContent = title;
@@ -621,8 +745,6 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       state.folder ? `\n${state.folder}` : ""
     }`;
     target.setAttribute("aria-description", target.dataset.hint);
-    $("badge").hidden = !!callPhase() ||
-      !(state.busy || state.attention || state.error || localError);
 
     if (!edits && !unsynced) draftEl.value = state.draft || "";
     draftEl.disabled = !!state.richDraft || !!state.dictating;
@@ -1319,7 +1441,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   };
 
   $("pet").addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || event.ctrlKey) return;
+    if (event.button !== 0 || event.ctrlKey || !isPetBodyEvent(event)) return;
     dragEpoch += 1;
     previousRelease = lastRelease?.epoch === dragEpoch - 1 ? lastRelease : null;
     pendingRelease = null;
@@ -1479,6 +1601,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       void expand(!expanded);
       return;
     }
+    if (!isPetBodyEvent(event)) return;
     const epoch = dragEpoch;
     const waiting = pendingRelease;
     const previous = previousRelease;
@@ -1503,6 +1626,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   $("pet").addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    if (!isPetBodyEvent(event)) return;
     const context = state.context;
     void api.action("menu").then(() => {
       if (context !== state.context) return;
@@ -1529,7 +1653,9 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
   document.addEventListener("animationend", scheduleHitRegions, true);
   document.addEventListener("transitionend", scheduleHitRegions, true);
   document.addEventListener("pointerdown", (event) => {
-    if (event.button === 0 && !event.ctrlKey && (event.target as HTMLElement | null)?.closest(hitSurfaceSelector)) {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("#pet") && !isPetBodyEvent(event)) return;
+    if (event.button === 0 && !event.ctrlKey && target?.closest(hitSurfaceSelector)) {
       void api.action("pointer-hold", { active: true });
     }
   }, true);

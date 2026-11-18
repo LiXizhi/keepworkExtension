@@ -1,0 +1,97 @@
+{
+  "contractVersion": "ai-pet.dev.v1",
+  "appearanceId": "ainiang-qwen",
+  "appearanceVersion": "1",
+  "characterId": "qwen",
+  "characterVersion": "1",
+  "provenance": {
+    "sourceRef": "ainiangassets:72e804d87394fdb998244251a4e21bbb4fd3e932:qwen",
+    "licenseRef": "experiment-user-attested-seedance-video-only",
+    "rightsEvidenceRef": "user-attestation-2026-11-17-ainiang-experiment"
+  },
+  "width": 192,
+  "height": 192,
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "poster": {
+    "path": "poster.png",
+    "bytes": 16115,
+    "sha256": "03087d4461c28200d27b7514386646c9c4f2abed366f633a29f5bc2c73fd73ed"
+  },
+  "poses": {
+    "idle": {
+      "file": {
+        "path": "idle.png",
+        "bytes": 264566,
+        "sha256": "e30bddbc4a4c39b92de0a9f116dec2b646458aa65ca1b48779ff86533f2cd21a"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "happy": {
+      "file": {
+        "path": "happy.png",
+        "bytes": 233434,
+        "sha256": "bd9d8c2eb7ad44a430ef0e02273283aac29264c51d10b86ec600bf47e4053ece"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "listening": {
+      "file": {
+        "path": "listening.png",
+        "bytes": 234831,
+        "sha256": "ab64e955736bb0dfcf8f3d16374643a8be1b81d5e648127866f0b7264dae0f5c"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "thinking": {
+      "file": {
+        "path": "thinking.png",
+        "bytes": 243223,
+        "sha256": "9c7fe20f14fd2611d77dab76b2478bb3106aeddf583e9fe32e2f00fe199647dd"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "speaking": {
+      "file": {
+        "path": "speaking.png",
+        "bytes": 233435,
+        "sha256": "e40c80a0dd1ba6c76c980527b29a370d5866921f7010783e6c7aff53b318cbd4"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "sleeping": {
+      "file": {
+        "path": "sleeping.png",
+        "bytes": 264566,
+        "sha256": "e30bddbc4a4c39b92de0a9f116dec2b646458aa65ca1b48779ff86533f2cd21a"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    },
+    "error": {
+      "file": {
+        "path": "error.png",
+        "bytes": 233794,
+        "sha256": "c47026ee06df8296a91592897e052e572d0cc4788f378623e2d4ec8e47acbbe4"
+      },
+      "frameCount": 16,
+      "frameDurationMs": 250
+    }
+  },
+  "mouthMode": "prerecorded",
+  "labels": {
+    "zh-CN": "Qwen",
+    "en-US": "Qwen",
+    "es-ES": "Qwen",
+    "ko-KR": "Qwen",
+    "ja-JP": "Qwen",
+    "fr-FR": "Qwen"
+  }
+}

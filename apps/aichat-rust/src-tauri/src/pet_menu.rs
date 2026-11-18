@@ -1,5 +1,5 @@
 //! Local pet settings stay available even when the retained chat is offline.
-use crate::pet::{PetPreferences, ALLOWED_SCALES};
+use crate::pet::{PetAppearanceMode, PetPreferences, ALLOWED_SCALES};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -7,14 +7,12 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuIte
 use tauri::{AppHandle, WebviewWindow};
 
 pub const PREFIX: &str = "pet-menu:";
-pub const APPEARANCE_URL: &str =
-    "https://keepwork.com/api/raw/official/apps/MagicHaqi/release/MagicHaqi_v1.html";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
     Scale(f64),
     Appearance(&'static str),
-    ChooseAppearance,
+    AppearanceMode(PetAppearanceMode),
     Open,
     Hide,
     RequestExit,
@@ -29,13 +27,16 @@ pub fn action(id: &str) -> Option<Action> {
         "scale:3" => Some(Action::Scale(ALLOWED_SCALES[3])),
         "scale:4" => Some(Action::Scale(ALLOWED_SCALES[4])),
         "scale:5" => Some(Action::Scale(ALLOWED_SCALES[5])),
+        "appearance-mode:model" | "appearance:follow-model" => Some(Action::AppearanceMode(PetAppearanceMode::Model)),
+        "appearance-mode:manual" => Some(Action::AppearanceMode(PetAppearanceMode::Manual)),
         "appearance:follow" => Some(Action::Appearance("follow")),
         "appearance:dragon" => Some(Action::Appearance("dragon")),
-        "appearance:choose" => Some(Action::ChooseAppearance),
         "open" => Some(Action::Open),
         "hide" => Some(Action::Hide),
         "exit-request" => Some(Action::RequestExit),
-        _ => None,
+        candidate => candidate.strip_prefix("appearance:")
+            .and_then(crate::pet_appearance::experiment)
+            .map(|(id, _)| Action::Appearance(id)),
     }
 }
 
@@ -63,8 +64,11 @@ fn item(id: &str, label: &str, checked: Option<bool>) -> Entry {
 }
 
 pub fn entries(preferences: &PetPreferences, snapshot: &Value) -> Vec<Entry> {
-    let name = if preferences.appearance == "dragon" {
+    let appearance = snapshot["effectiveAppearance"].as_str().unwrap_or(&preferences.appearance);
+    let name = if appearance == "dragon" {
         "抱抱龙"
+    } else if let Some((_, name)) = crate::pet_appearance::experiment(appearance) {
+        name
     } else {
         snapshot["pet"]["name"]
             .as_str()
@@ -89,21 +93,28 @@ pub fn entries(preferences: &PetPreferences, snapshot: &Value) -> Vec<Entry> {
                 .collect(),
         },
         Entry::Submenu {
-            label: "外观",
+            label: "外观模式",
             entries: vec![
-                item(
-                    "appearance:follow",
-                    "跟随 AIChat 宠物",
-                    Some(preferences.appearance == "follow"),
-                ),
-                item(
-                    "appearance:dragon",
-                    "抱抱龙",
-                    Some(preferences.appearance == "dragon"),
-                ),
-                Entry::Separator,
-                item("appearance:choose", "在哈奇星球更换宠物…", None),
+                item("appearance-mode:model", "跟随当前模型（默认）", Some(preferences.appearance_mode == PetAppearanceMode::Model)),
+                item("appearance-mode:manual", "始终使用自选宠物", Some(preferences.appearance_mode == PetAppearanceMode::Manual)),
             ],
+        },
+        Entry::Submenu {
+            label: "自选宠物",
+            entries: {
+                let mut choices = vec![item(
+                    "appearance:follow-model", "跟随模型", None,
+                )];
+                let experiments = crate::pet_appearance::EXPERIMENTS;
+                choices.extend(experiments.iter()
+                    .filter(|(id, _)| *id == "ainiang:deepseek")
+                    .chain(experiments.iter().filter(|(id, _)| *id != "ainiang:deepseek"))
+                    .map(|(id, label)| {
+                        item(&format!("appearance:{id}"), label, Some(preferences.appearance == *id))
+                    }));
+                choices.push(item("appearance:dragon", "抱抱龙", Some(preferences.appearance == "dragon")));
+                choices
+            },
         },
         Entry::Separator,
         item("open", "打开桌面", None),
@@ -173,12 +184,29 @@ impl Drop for Showing<'_> {
     }
 }
 
+// Record the override only after the native operation succeeds. Cached
+// platforms then restore pass-through even if it was already cached before
+// opening the menu. The injected operation also exposes this policy to tests.
+fn activate_menu_pointer(
+    pet: &crate::pet::PetController,
+    activate: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    activate()?;
+    pet.record_pointer_interactive(true);
+    Ok(())
+}
+
 impl Session {
     pub fn is_showing(&self) -> bool {
         self.showing.load(Ordering::Acquire)
     }
 
-    pub fn popup(&self, window: &WebviewWindow, menu: Menu<tauri::Wry>) -> Result<(), String> {
+    pub fn popup(
+        &self,
+        window: &WebviewWindow,
+        pet: &crate::pet::PetController,
+        menu: Menu<tauri::Wry>,
+    ) -> Result<(), String> {
         if self
             .showing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -188,9 +216,7 @@ impl Session {
         }
         let _showing = Showing(&self.showing);
         *self.retained.lock().map_err(|_| "宠物菜单不可用，请重试")? = Some(menu.clone());
-        window
-            .set_ignore_cursor_events(false)
-            .map_err(|error| error.to_string())?;
+        activate_menu_pointer(pet, || crate::pet_pointer::set_interactive(window, true))?;
         window.popup_menu(&menu).map_err(|error| error.to_string())
     }
 }
@@ -234,18 +260,19 @@ mod tests {
                     )
                 );
                 let choices = actions(&menu);
-                assert_eq!(choices.len(), 12);
+                assert_eq!(choices.len(), 22);
                 let checked: Vec<_> = choices
                     .iter()
                     .filter(|(_, checked)| *checked == Some(true))
                     .collect();
-                assert_eq!(checked.len(), 2);
+                assert_eq!(checked.len(), if appearance == "dragon" { 3 } else { 2 });
                 assert!(checked
                     .iter()
                     .any(|(id, _)| action(id) == Some(Action::Scale(*scale))));
-                assert!(checked
-                    .iter()
-                    .any(|(id, _)| action(id) == Some(Action::Appearance(appearance))));
+                if appearance == "dragon" {
+                    assert!(checked.iter().any(|(id, _)| action(id) == Some(Action::Appearance(appearance))));
+                }
+                assert_eq!(action("pet-menu:appearance:follow"), Some(Action::Appearance("follow")));
                 assert!(choices.iter().all(|(id, _)| action(id).is_some()));
                 assert_eq!(action(choices.last().unwrap().0), Some(Action::RequestExit));
             }
@@ -265,11 +292,74 @@ mod tests {
             "pet-menu:scale:-1",
             "pet-menu:scale:1.5",
             "pet-menu:appearance:current",
+            "pet-menu:appearance:choose",
+            "pet-menu:appearance-mode:unknown",
             "pet-menu:appearance:https://evil.invalid",
+            "pet-menu:appearance:ainiang:unknown",
+            "pet-menu:appearance:ainiang:claude/../gpt",
         ] {
             assert_eq!(action(id), None, "{id}");
         }
-        assert!(APPEARANCE_URL.starts_with("https://keepwork.com/"));
+    }
+
+    #[test]
+    fn experimental_choice_is_local_and_has_exactly_one_selected_appearance() {
+        for (id, label) in crate::pet_appearance::EXPERIMENTS {
+            let prefs = PetPreferences { appearance: id.to_string(), ..Default::default() };
+            let menu = entries(&prefs, &json!({"target":"persona","title":"Unchanged persona","pet":{"name":"Web pet"}}));
+            assert_eq!(menu[0], Entry::Title(label.to_string()));
+            let choices = menu.iter().find_map(|entry| match entry {
+                Entry::Submenu { label, entries } if label.starts_with("自选宠物") => Some(entries),
+                _ => None,
+            }).unwrap();
+            assert!(choices.iter().all(|entry| matches!(entry, Entry::Action { .. })));
+            let labels: Vec<_> = choices.iter().filter_map(|entry| match entry {
+                Entry::Action { label, .. } => Some(label.as_str()), _ => None,
+            }).collect();
+            assert_eq!(labels, ["跟随模型", "大肥鱼 · DeepSeek", "圣女果 · Claude", "小龙女 · GPT",
+                "哈基米 · Gemini", "大小姐 · Grok", "千金金 · Qwen", "小狐狸 · Kimi",
+                "嘎拉吗 · GLM", "小田螺 · MiniMax", "抱抱龙"]);
+            assert_eq!(action("pet-menu:appearance:follow-model"), Some(Action::AppearanceMode(PetAppearanceMode::Model)));
+            assert!(choices.iter().any(|entry| matches!(entry,
+                Entry::Action { id: choice, checked: Some(true), .. }
+                    if choice == &format!("{PREFIX}appearance:{id}"))));
+            let checked: Vec<_> = actions(&menu).into_iter().filter(|(key, checked)| matches!(action(key), Some(Action::Appearance(_))) && *checked == Some(true)).collect();
+            assert_eq!(checked.len(), 1);
+            assert_eq!(action(checked[0].0), Some(Action::Appearance(id)));
+        }
+    }
+
+    #[test]
+    fn mode_checks_are_independent_of_the_user_fallback_and_title_uses_effective_art() {
+        let prefs = PetPreferences { appearance: "ainiang:kimi".into(), ..Default::default() };
+        let menu = entries(&prefs, &json!({"effectiveAppearance":"ainiang:claude"}));
+        assert_eq!(menu[0], Entry::Title("圣女果 · Claude".into()));
+        let choices = actions(&menu);
+        assert!(choices.contains(&("pet-menu:appearance-mode:model", Some(true))));
+        assert!(choices.contains(&("pet-menu:appearance-mode:manual", Some(false))));
+        assert!(choices.contains(&("pet-menu:appearance:ainiang:kimi", Some(true))));
+        let manual = PetPreferences { appearance_mode: PetAppearanceMode::Manual, ..prefs };
+        let menu = entries(&manual, &json!({"effectiveAppearance":"ainiang:kimi"}));
+        assert!(actions(&menu).contains(&("pet-menu:appearance-mode:manual", Some(true))));
+    }
+
+    #[test]
+    fn menu_override_invalidates_cached_pass_through_only_after_native_success() {
+        let pet = crate::pet::PetController::new(
+            std::env::temp_dir().join("keepwork-pet-menu-pointer-test-missing.json"),
+        );
+        pet.record_pointer_interactive(false);
+        assert!(!pet.pointer_needs_update(false));
+        let actual_interactive = std::cell::Cell::new(false);
+        activate_menu_pointer(&pet, || {
+            actual_interactive.set(true);
+            Ok(())
+        }).unwrap();
+        assert!(actual_interactive.get());
+        assert!(pet.pointer_needs_update(false), "dismissal must restore the native override");
+        pet.record_pointer_interactive(false);
+        assert!(activate_menu_pointer(&pet, || Err("native failure".into())).is_err());
+        assert!(!pet.pointer_needs_update(false), "failed native changes must not be acknowledged");
     }
 
     #[test]

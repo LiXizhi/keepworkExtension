@@ -15,6 +15,7 @@ const rawBridge = bridgeSource.match(/r#"([\s\S]*?)"#/)[1];
 const menuSource = fs.readFileSync(path.join(appRoot, "src/menuChrome.js"), "utf8").replace("export function", "function");
 const themeSource = fs.readFileSync(path.join(appRoot, "src/chromeTheme.js"), "utf8").replace("export function", "function");
 const pageThemeSource = fs.readFileSync(path.join(appRoot, "src/pageTheme.js"), "utf8").replace("export function", "function");
+const petModelSource = fs.readFileSync(path.join(appRoot, "src/petModel.js"), "utf8").replace("export function", "function");
 const localMcpSource = fs.readFileSync(path.join(appRoot, "src/localMcpFetch.js"), "utf8").replace("export function", "function");
 
 // Model composed event bubbling across a CLOSED shadow root: listeners inside
@@ -139,6 +140,9 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
   document.getElementById = id => [document.documentElement, ...descendants(document.documentElement)]
     .find(el => el.id === id) || null;
   const window = new Target();
+  window.document = document;
+  window.setInterval = callback => callback;
+  window.clearInterval = () => {};
   document.parentNode = window;
   window.top = subframe ? {} : window;
   if (config.shell) window.__AICHAT_PAGE_CONNECTION__ = {};
@@ -200,7 +204,7 @@ function renderer(implementation, platform = "darwin", subframe = false, menuErr
     const javascript = rawBridge.replaceAll("{{", "{").replaceAll("}}", "}")
       .replace("{bootstrap}", JSON.stringify(bootstrap)).replace("{menu_chrome}", menuSource)
       .replace("{chrome_theme}", themeSource).replace("{page_theme}", pageThemeSource)
-      .replace("{local_mcp_fetch}", localMcpSource);
+      .replace("{local_mcp_fetch}", localMcpSource).replace("{pet_model}", petModelSource);
     const launchJavascript = javascript.replace("{launch_capability}", JSON.stringify(config.launchCapability ?? "fixture-launch-token"));
     vm.runInNewContext(launchJavascript, context);
   }

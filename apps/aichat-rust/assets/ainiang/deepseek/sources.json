@@ -1,0 +1,90 @@
+{
+  "commit": "72e804d87394fdb998244251a4e21bbb4fd3e932",
+  "clips": {
+    "\u4e1c\u5f20\u897f\u671b": {
+      "path": "videos/deepseek/\u4e1c\u5f20\u897f\u671b.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/deepseek/\u4e1c\u5f20\u897f\u671b.webm",
+      "sha256": "a20ed02ccc5e72075a3ca83fabb57d9aac5ded699f52d00ec6de72069799fcd5",
+      "bytes": 427005,
+      "durationSeconds": 10.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "originalSourceUrl": "https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/31aa345b11a18fc16d5fd35c42b8b9441071170e/dsh-pet/assets/webm/%E4%B8%9C%E5%BC%A0%E8%A5%BF%E6%9C%9B.webm",
+      "originalSourceCommit": "31aa345b11a18fc16d5fd35c42b8b9441071170e",
+      "attribution": "Copyright (c) 2026 PC2005-cloud; MIT License; see DEEPSEEK-LICENSE.txt"
+    },
+    "\u51ed\u7a7a\u751f\u82b1": {
+      "path": "videos/deepseek/\u51ed\u7a7a\u751f\u82b1.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/deepseek/\u51ed\u7a7a\u751f\u82b1.webm",
+      "sha256": "d1c336bc54c57a282bec180859c7b7b58912b70b5bca7b2f49495cd30cc7d5d6",
+      "bytes": 620252,
+      "durationSeconds": 10.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "originalSourceUrl": "https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/31aa345b11a18fc16d5fd35c42b8b9441071170e/dsh-pet/assets/webm/%E5%87%AD%E7%A9%BA%E7%94%9F%E8%8A%B1.webm",
+      "originalSourceCommit": "31aa345b11a18fc16d5fd35c42b8b9441071170e",
+      "attribution": "Copyright (c) 2026 PC2005-cloud; MIT License; see DEEPSEEK-LICENSE.txt"
+    },
+    "\u5199\u4ee3\u7801": {
+      "path": "videos/deepseek/\u5199\u4ee3\u7801.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/deepseek/\u5199\u4ee3\u7801.webm",
+      "sha256": "0441287737cdbb993ce90dfa74c67ea4ea3549d8c8ea98946604668464589ed7",
+      "bytes": 383960,
+      "durationSeconds": 10.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "originalSourceUrl": "https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/31aa345b11a18fc16d5fd35c42b8b9441071170e/dsh-pet/assets/webm/%E5%86%99%E4%BB%A3%E7%A0%81.webm",
+      "originalSourceCommit": "31aa345b11a18fc16d5fd35c42b8b9441071170e",
+      "attribution": "Copyright (c) 2026 PC2005-cloud; MIT License; see DEEPSEEK-LICENSE.txt"
+    },
+    "\u539f\u5730\u6572\u51fb\u684c\u9762\u4e92\u52a8": {
+      "path": "videos/deepseek/\u539f\u5730\u6572\u51fb\u684c\u9762\u4e92\u52a8.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/deepseek/\u539f\u5730\u6572\u51fb\u684c\u9762\u4e92\u52a8.webm",
+      "sha256": "a40f481e89abcc726c89f30b01d085ca8c17a090e71facdd5e7f747e771093eb",
+      "bytes": 403033,
+      "durationSeconds": 10.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "originalSourceUrl": "https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/31aa345b11a18fc16d5fd35c42b8b9441071170e/dsh-pet/assets/webm/%E5%8E%9F%E5%9C%B0%E6%95%B2%E5%87%BB%E6%A1%8C%E9%9D%A2%E4%BA%92%E5%8A%A8.webm",
+      "originalSourceCommit": "31aa345b11a18fc16d5fd35c42b8b9441071170e",
+      "attribution": "Copyright (c) 2026 PC2005-cloud; MIT License; see DEEPSEEK-LICENSE.txt"
+    },
+    "\u539f\u5730\u5c0f\u61a9\u6c89\u7720": {
+      "path": "videos/deepseek/\u539f\u5730\u5c0f\u61a9\u6c89\u7720.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/deepseek/\u539f\u5730\u5c0f\u61a9\u6c89\u7720.webm",
+      "sha256": "31d4a6b36a29b2a4fe097384173d3bbeb3fa2f40f526b13191791456bf7507a1",
+      "bytes": 433769,
+      "durationSeconds": 10.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "originalSourceUrl": "https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/31aa345b11a18fc16d5fd35c42b8b9441071170e/dsh-pet/assets/webm/%E5%8E%9F%E5%9C%B0%E5%B0%8F%E6%86%A9%E6%B2%89%E7%9C%A0.webm",
+      "originalSourceCommit": "31aa345b11a18fc16d5fd35c42b8b9441071170e",
+      "attribution": "Copyright (c) 2026 PC2005-cloud; MIT License; see DEEPSEEK-LICENSE.txt"
+    },
+    "\u5077\u5403\u96f6\u98df\u88ab\u6293\u4f4f": {
+      "path": "videos/deepseek/\u5077\u5403\u96f6\u98df\u88ab\u6293\u4f4f.webm",
+      "url": "https://raw.githubusercontent.com/hodokoshitsunagu-arch/AINiangAssets/72e804d87394fdb998244251a4e21bbb4fd3e932/videos/deepseek/\u5077\u5403\u96f6\u98df\u88ab\u6293\u4f4f.webm",
+      "sha256": "c3b783351ad38fdd931e80b188ecb12d273f21e4794aed2c41f267bdb75ff897",
+      "bytes": 432201,
+      "durationSeconds": 10.042,
+      "decodedAlphaMin": 0,
+      "decodedAlphaMax": 255,
+      "originalSourceUrl": "https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/31aa345b11a18fc16d5fd35c42b8b9441071170e/dsh-pet/assets/webm/%E5%81%B7%E5%90%83%E9%9B%B6%E9%A3%9F%E8%A2%AB%E6%8A%93%E4%BD%8F.webm",
+      "originalSourceCommit": "31aa345b11a18fc16d5fd35c42b8b9441071170e",
+      "attribution": "Copyright (c) 2026 PC2005-cloud; MIT License; see DEEPSEEK-LICENSE.txt"
+    }
+  },
+  "approximateStateMapping": {
+    "idle": "\u4e1c\u5f20\u897f\u671b",
+    "happy": "\u51ed\u7a7a\u751f\u82b1",
+    "listening": "\u4e1c\u5f20\u897f\u671b",
+    "thinking": "\u5199\u4ee3\u7801",
+    "speaking": "\u539f\u5730\u6572\u51fb\u684c\u9762\u4e92\u52a8",
+    "sleeping": "\u539f\u5730\u5c0f\u61a9\u6c89\u7720",
+    "error": "\u5077\u5403\u96f6\u98df\u88ab\u6293\u4f4f"
+  },
+  "posterSource": {
+    "clip": "\u4e1c\u5f20\u897f\u671b",
+    "sampleIndex": 0
+  }
+}
