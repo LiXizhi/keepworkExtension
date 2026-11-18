@@ -9,6 +9,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
  if (!m.method && waiting.has(m.id)) { const caller = waiting.get(m.id); waiting.delete(m.id); return send({id:caller,result:m.result}); }
  if (['thread/start','thread/resume','turn/start'].includes(m.method)) calls.push({method:m.method,params:p});
  if (m.method === 'initialize') return send({id:m.id,result:{userAgent:'fixture'}});
+ if (m.method === 'session/new') return send({id:m.id,result:{sessionId:'approval-thread',modes:{currentModeId:'default',availableModes:[{id:'default',name:'Default'}]}}});
  if (m.method === 'thread/start' || m.method === 'thread/resume') return send({id:m.id,result:{thread:{id:p.threadId || 'approval-thread',turns:[]},sandbox:p.sandbox}});
  if (m.method === 'turn/start') return send({id:m.id,result:{turn:{id:'native-turn'}}});
  if (m.method === 'fixture/log') return send({id:m.id,result:{calls}});
@@ -22,13 +23,22 @@ async fn attach(
     child: &Arc<Harness>,
     root: &Path,
 ) -> tokio::task::JoinHandle<()> {
+    attach_backend(manager, child, root, "codex").await
+}
+
+async fn attach_backend(
+    manager: &Arc<AgentManager>,
+    child: &Arc<Harness>,
+    root: &Path,
+    backend: &str,
+) -> tokio::task::JoinHandle<()> {
     // The fixture cache key must match checked_roots(), including on Windows.
     assert_eq!(root, canonical_root(&root.to_string_lossy()).unwrap());
     manager
         .harnesses
         .lock()
         .await
-        .insert(format!("codex\0{}", root.display()), child.clone());
+        .insert(format!("{backend}\0{}", root.display()), child.clone());
     let mut events = child.subscribe();
     let manager = manager.clone();
     let child = child.clone();
@@ -188,7 +198,7 @@ async fn explicit_policies_validate_before_dispatch_and_cannot_replace_an_active
             .await
             .is_err());
     }
-    assert!(manager.create(&owner, &json!({"backend":"claude","conversationId":"invalid","roots":[root],"approvalMode":"on-request"})).await.unwrap_err().contains("Independent approvals require Codex"));
+    assert!(manager.create(&owner, &json!({"backend":"claude","conversationId":"invalid","roots":[root],"approvalMode":"on-request"})).await.unwrap_err().contains("Unsupported agent approval mode"));
     assert!(log(&child).await.is_empty());
     let session = manager
         .create(
@@ -430,6 +440,305 @@ async fn dedicated_approval_routes_require_semantics_and_support_image_limits() 
         manager.view(session_id, &owner).unwrap()["approvalMode"],
         "read-only"
     );
+    manager.close().await;
+    consumer.abort();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn every_interactive_backend_app_selection_waits_for_the_owned_decision() {
+    for backend in BACKENDS
+        .iter()
+        .filter(|backend| approval::scope(backend) == "tool" && **backend != "codex")
+    {
+        let directory = std::env::temp_dir().join(format!("kp-app-tools-{backend}-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let root = canonical_root(&directory.to_string_lossy()).unwrap();
+        let manager = AgentManager::open(root.join("sessions.json"), 0);
+        let owner = "a".repeat(64);
+        // Normalize provider requests through a deterministic RPC peer. Native
+        // ACP mode selection and option mappings have separate protocol tests.
+        let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
+        let consumer = attach_backend(&manager, &child, &root, backend).await;
+        let session = manager.create(&owner, &json!({"conversationId":"app-tools","backend":backend,"roots":[root],"approvalMode":"app"})).await.unwrap();
+        let session_id = session["id"].as_str().unwrap();
+        manager
+            .turn(
+                session_id,
+                &owner,
+                &json!({"requestId":"run","text":"change fixture"}),
+            )
+            .await
+            .unwrap();
+        let request = child.submit("fixture/approval", json!({"method":"item/commandExecution/requestApproval","params":{"command":"fixture mutation"}}), Duration::from_secs(3)).await.unwrap();
+        let pending = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let view = manager.view(session_id, &owner).unwrap();
+                if let Some(pending) = view["pending"].as_array().unwrap().first() {
+                    break pending.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pending["decisionCapabilities"]["autoApproval"], false);
+        assert!(manager
+            .respond(
+                session_id,
+                &"b".repeat(64),
+                &json!({"id":pending["id"],"decision":"accept"})
+            )
+            .await
+            .is_err());
+        manager
+            .respond(
+                session_id,
+                &owner,
+                &json!({"id":pending["id"],"decision":"decline"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            request.result().await.unwrap(),
+            json!({"decision":"decline"})
+        );
+        assert!(manager
+            .respond(
+                session_id,
+                &owner,
+                &json!({"id":pending["id"],"decision":"accept"})
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            manager.view(session_id, &owner).unwrap()["approvalMode"],
+            "app"
+        );
+        manager.close().await;
+        consumer.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn headless_app_gate_does_not_dispatch_until_accept_and_never_replays() {
+    for backend in ["gemini", "trae"] {
+        let directory = std::env::temp_dir().join(format!("kp-app-turn-{backend}-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let root = canonical_root(&directory.to_string_lossy()).unwrap();
+        let registry = root.join("sessions.json");
+        let manager = AgentManager::open(registry.clone(), 0);
+        let owner = "a".repeat(64);
+        let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
+        let consumer = attach_backend(&manager, &child, &root, backend).await;
+        let session = manager.create(&owner, &json!({"conversationId":"app-turn","backend":backend,"roots":[root],"approvalMode":"app"})).await.unwrap();
+        let session_id = session["id"].as_str().unwrap();
+        for decision in ["decline", "cancel", "interrupt", "accept", "restart"] {
+            let input = json!({"requestId":decision,"text":"execute native task"});
+            let waiting = manager.turn(session_id, &owner, &input).await.unwrap();
+            let pending = waiting["session"]["pending"][0].clone();
+            assert_eq!(waiting["submission"]["state"], "accepted");
+            assert_eq!(waiting["session"]["status"], "waiting");
+            assert_eq!(pending["params"]["approvalScope"], "turn");
+            assert_eq!(pending["params"]["requiresUserDecision"], true);
+            assert_eq!(
+                pending["params"]["availableDecisions"],
+                json!(["accept", "decline", "cancel"])
+            );
+            assert_eq!(
+                log(&child)
+                    .await
+                    .iter()
+                    .filter(|call| call["method"] == "turn/start")
+                    .count(),
+                usize::from(decision == "restart")
+            );
+            assert!(manager
+                .respond(
+                    session_id,
+                    &owner,
+                    &json!({"id":pending["id"],"decision":"acceptForSession"})
+                )
+                .await
+                .is_err());
+            if decision == "restart" {
+                break;
+            }
+            if decision == "interrupt" {
+                assert_eq!(
+                    manager.interrupt(session_id, &owner).await.unwrap()["status"],
+                    "interrupted"
+                );
+            } else {
+                let result = manager
+                    .respond(
+                        session_id,
+                        &owner,
+                        &json!({"id":pending["id"],"decision":decision}),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result["status"],
+                    if decision == "accept" {
+                        "running"
+                    } else {
+                        "interrupted"
+                    }
+                );
+            }
+            assert!(manager
+                .respond(
+                    session_id,
+                    &owner,
+                    &json!({"id":pending["id"],"decision":"accept"})
+                )
+                .await
+                .is_err());
+            manager.turn(session_id, &owner, &input).await.unwrap();
+            assert_eq!(
+                log(&child)
+                    .await
+                    .iter()
+                    .filter(|call| call["method"] == "turn/start")
+                    .count(),
+                usize::from(decision == "accept")
+            );
+            if decision == "accept" {
+                complete(&manager, session_id);
+            }
+        }
+        let restored = AgentManager::open(registry, 0);
+        let restored_view = restored.view(session_id, &owner).unwrap();
+        assert_eq!(restored_view["status"], "interrupted");
+        assert_eq!(restored_view["pending"], json!([]));
+        restored
+            .turn(
+                session_id,
+                &owner,
+                &json!({"requestId":"restart","text":"must not replay"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            log(&child)
+                .await
+                .iter()
+                .filter(|call| call["method"] == "turn/start")
+                .count(),
+            1
+        );
+        manager.close().await;
+        restored.close().await;
+        consumer.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn headless_app_approval_rechecks_revoked_page_before_dispatch() {
+    let directory = std::env::temp_dir().join(format!("kp-app-revoked-{}", id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let root = canonical_root(&directory.to_string_lossy()).unwrap();
+    let manager = AgentManager::open(root.join("sessions.json"), 0);
+    let owner = "a".repeat(64);
+    let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
+    let consumer = attach_backend(&manager, &child, &root, "gemini").await;
+    let session = manager.create(&owner, &json!({"conversationId":"app-revoked","backend":"gemini","roots":[root],"approvalMode":"app"})).await.unwrap();
+    let session_id = session["id"].as_str().unwrap();
+    let waiting = manager
+        .turn(
+            session_id,
+            &owner,
+            &json!({"requestId":"run","text":"execute task"}),
+        )
+        .await
+        .unwrap();
+    manager.context.register(&owner, "app-revoked", &json!({"pageId":"page","generation":"generation","instructions":"fixture context","revision":"1","tools":[]})).unwrap();
+    let marker = manager.context.marker(&owner, "app-revoked").unwrap();
+    manager
+        .edit(session_id, |s| {
+            s.data["aichatContext"] = json!(true);
+            s.context_marker = Some(marker);
+            Ok(())
+        })
+        .unwrap();
+    manager.context.revoke(&owner);
+    let error = manager
+        .respond(
+            session_id,
+            &owner,
+            &json!({"id":waiting["session"]["pending"][0]["id"],"decision":"accept"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("page changed before approval"));
+    assert_eq!(
+        log(&child)
+            .await
+            .iter()
+            .filter(|call| call["method"] == "turn/start")
+            .count(),
+        0
+    );
+    assert_eq!(
+        manager.view(session_id, &owner).unwrap()["lastSubmission"]["state"],
+        "rejected"
+    );
+    manager.close().await;
+    consumer.abort();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn stop_during_native_configuration_stays_immediately_retryable() {
+    let directory = std::env::temp_dir().join(format!("kp-stop-configuration-{}", id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let root = canonical_root(&directory.to_string_lossy()).unwrap();
+    let manager = AgentManager::open(root.join("sessions.json"), 0);
+    let owner = "a".repeat(64);
+    let (child, _fixture) = harness::fixture(PEER, Protocol::Codex).await;
+    let consumer = attach(&manager, &child, &root).await;
+    let session = manager
+        .create(
+            &owner,
+            &json!({"conversationId":"stop-configuration","roots":[root]}),
+        )
+        .await
+        .unwrap();
+    let session_id = session["id"].as_str().unwrap();
+    let configuration = manager.sessions.lock().unwrap()[session_id]
+        .configuration
+        .clone();
+    let guard = configuration.lock().await;
+    manager
+        .edit(session_id, |s| {
+            s.data["status"] = json!("starting");
+            Ok(())
+        })
+        .unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_millis(100),
+        manager.interrupt(session_id, &owner),
+    )
+    .await
+    .expect("Stop must not wait for native configuration")
+    .unwrap_err();
+    assert!(error.contains("starting; retry Stop"));
+    assert_eq!(
+        manager.view(session_id, &owner).unwrap()["status"],
+        "starting"
+    );
+    assert_eq!(
+        log(&child)
+            .await
+            .iter()
+            .filter(|call| call["method"] == "turn/start")
+            .count(),
+        0
+    );
+    drop(guard);
     manager.close().await;
     consumer.abort();
     std::fs::remove_dir_all(directory).unwrap();

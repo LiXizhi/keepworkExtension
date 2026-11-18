@@ -107,47 +107,59 @@ test('invalid or conflicting tag identities fail before planning uploads or crea
   }
 });
 
-test('the publication workflow creates standard-tag drafts and only reuses existing historical releases', {
-  skip: process.platform === 'win32' && 'CI publication runs on an Ubuntu Bash runner',
-}, t => {
-  const directory = fixture(t);
-  const workflow = fs.readFileSync(path.join(__dirname, '../../../.github/workflows/aichat-rust-windows-release.yml'), 'utf8');
-  const step = workflow.split('      - name: Ensure the GitHub release exists\n')[1]?.split('\n      - ')[0];
-  assert.ok(step, 'publication workflow must ensure the selected GitHub release exists');
-  const run = step.split('        run: |\n')[1]?.split('\n').map(line => line.replace(/^          /, '')).join('\n')
-    .replaceAll('${{ steps.release.outputs.version }}', version);
-  assert.ok(run, 'release creation step must execute a shell script');
-  const callsFile = path.join(directory, 'github-calls.txt');
-  const fakeGh = `
-gh() {
-  printf '%s\\n' "$*" >> "$GH_CALLS"
-  case "$1 $2" in
-    'release view') [[ "$FIXTURE_EXISTS" == 1 ]] ;;
-    'release create') return 0 ;;
-    *) return 97 ;;
-  esac
-}
-`;
+test('the local publisher creates standard-tag drafts and only reuses existing historical releases', () => {
+  const { ensureDesktopRelease } = require('../../../.github/skills/rust-release/scripts/publish-local.cjs');
   for (const tag of [canonical, legacy]) {
     for (const exists of [false, true]) {
-      fs.writeFileSync(callsFile, '');
-      const result = spawnSync('/bin/bash', ['-e', '-o', 'pipefail', '-c', `${fakeGh}\n${run}`], {
-        encoding: 'utf8', env: { TAG: tag, GH_CALLS: callsFile, FIXTURE_EXISTS: exists ? '1' : '0' },
-      });
-      const calls = fs.readFileSync(callsFile, 'utf8').trim().split('\n');
-      assert.equal(calls[0], `release view ${tag}`);
+      const calls = [];
+      const exec = (file, args) => {
+        assert.equal(file, 'gh');
+        calls.push(args);
+        if (args[0] === 'api') return 'c'.repeat(40) + '\n';
+        if (args[0] === 'release' && args[1] === 'view') {
+          if (exists) return JSON.stringify({ isDraft: false });
+          throw Object.assign(new Error('HTTP 404: Not Found'), { status: 1, stderr: 'HTTP 404: Not Found' });
+        }
+        assert.deepEqual(args.slice(0, 2), ['release', 'create']);
+        return '';
+      };
+      const run = () => ensureDesktopRelease({ tag, version, repository: 'fixture/repository', commit: 'c'.repeat(40) }, { exec, env: {} });
       if (tag === legacy && !exists) {
-        assert.equal(result.status, 1);
-        assert.equal(calls.length, 1, 'a missing historical release must never be created');
-        assert.match(result.stdout, /Historical tags may only rerun an existing GitHub release/);
+        assert.throws(run, /Historical tags may only rerun an existing GitHub release/);
       } else {
-        assert.equal(result.status, 0, result.stderr);
-        if (exists) assert.equal(calls.length, 1, 'an existing release must retain its identity');
-        else assert.deepEqual(calls, [
-          `release view ${tag}`,
-          `release create ${tag} --verify-tag --draft --title KeepWork 第二大脑 ${version}（Windows / macOS） --generate-notes`,
-        ]);
+        run();
+      }
+      const creations = calls.filter(args => args[0] === 'release' && args[1] === 'create');
+      assert.equal(creations.length, !exists && tag === canonical ? 1 : 0);
+      if (creations.length) {
+        assert.ok(creations[0].includes('--verify-tag'));
+        assert.ok(creations[0].includes('--draft'));
+        assert.ok(creations[0].includes(tag));
+        assert.ok(creations[0].includes('fixture/repository'));
       }
     }
   }
+});
+
+test('authentication and GitHub outages cannot be mistaken for a missing desktop release', () => {
+  const { ensureDesktopRelease } = require('../../../.github/skills/rust-release/scripts/publish-local.cjs');
+  for (const status of [401, 403, 500]) {
+    const calls = [];
+    const exec = (_file, args) => {
+      calls.push(args);
+      if (args[0] === 'api') return 'c'.repeat(40) + '\n';
+      throw Object.assign(new Error(`HTTP ${status}`), { status: 1, stderr: `HTTP ${status}` });
+    };
+    assert.throws(() => ensureDesktopRelease({ tag: canonical, version, repository: 'fixture/repository', commit: 'c'.repeat(40) }, { exec, env: {} }));
+    assert.equal(calls.some(args => args[1] === 'create'), false);
+  }
+});
+
+test('a tag pointing at another commit never creates or edits a GitHub release', () => {
+  const { ensureDesktopRelease } = require('../../../.github/skills/rust-release/scripts/publish-local.cjs');
+  const calls = [];
+  const exec = (_file, args) => { calls.push(args); return 'b'.repeat(40); };
+  assert.throws(() => ensureDesktopRelease({ tag: canonical, version, repository: 'fixture/repository', commit: 'c'.repeat(40) }, { exec, env: {} }), /source commit/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'api');
 });

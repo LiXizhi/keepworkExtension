@@ -87,6 +87,10 @@ async fn run(args: cli::Args) -> i32 {
         token,
         identity,
     ));
+    // Prewarm optional terminal readiness only after owning the loopback port.
+    // The legacy backend probes on its own worker, so HTTP and cloud chat can
+    // start immediately and an attaching process never spawns another agent.
+    let _ = keepwork_mcp::terminal::health();
 
     let _ = config::write_instance(&InstanceInfo {
         pid: std::process::id(),
@@ -115,6 +119,7 @@ async fn run(args: cli::Args) -> i32 {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             mcp::prune_idle(&prune_state);
+            prune_state.terminals.prune();
         }
     });
 

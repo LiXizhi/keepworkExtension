@@ -2,76 +2,84 @@
 use serde::Serialize;
 use std::sync::Mutex;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ButtonAction {
-    Clear,
-}
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ButtonStatus {
     pub supported: bool,
     pub ready: bool,
+    pub home_ready: bool,
+    pub clear_key: String,
     pub device: String,
     pub error: String,
 }
 
+fn default_clear_key() -> String {
+    if cfg!(target_os = "macos") {
+        "返回键".into()
+    } else if cfg!(windows) {
+        "菜单键".into()
+    } else {
+        String::new()
+    }
+}
+
 pub struct Buttons {
-    owned: Mutex<bool>,
+    listener: Mutex<Option<platform::Listener>>,
     last_error: Mutex<String>,
 }
 
 impl Buttons {
     pub fn new() -> Self {
         Self {
-            owned: Mutex::new(false),
+            listener: Mutex::new(None),
             last_error: Mutex::new(String::new()),
         }
     }
 
     pub fn start(&self) -> Result<(), String> {
-        let mut owned = self.owned.lock().map_err(|_| "遥控器按键状态不可用")?;
-        if *owned {
+        let mut listener = self.listener.lock().map_err(|_| "遥控器按键状态不可用")?;
+        if listener.is_some() {
             return Ok(());
         }
-        if let Err(error) = platform::start() {
-            if let Ok(mut last_error) = self.last_error.lock() {
-                *last_error = error.clone();
+        match platform::start() {
+            Ok(active) => {
+                *listener = Some(active);
+                self.last_error.lock().unwrap().clear();
+                Ok(())
             }
-            return Err(error);
+            Err(error) => {
+                *self.last_error.lock().unwrap() = error.clone();
+                Err(error)
+            }
         }
-        if let Ok(mut last_error) = self.last_error.lock() {
-            last_error.clear();
-        }
-        *owned = true;
-        Ok(())
     }
 
     pub fn stop(&self) {
-        if let Ok(mut owned) = self.owned.lock() {
-            if *owned {
-                platform::stop();
-                *owned = false;
-            }
-            if let Ok(mut last_error) = self.last_error.lock() {
-                last_error.clear();
-            }
+        if let Ok(mut listener) = self.listener.lock() {
+            listener.take();
+            self.last_error.lock().unwrap().clear();
         }
     }
 
-    pub fn poll(&self) -> Option<ButtonAction> {
-        let owned = self.owned.lock().ok()?;
-        if *owned && platform::poll() {
-            Some(ButtonAction::Clear)
-        } else {
-            None
-        }
+    pub fn poll_clear(&self) -> bool {
+        self.listener
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(platform::poll_clear)
+    }
+
+    pub fn poll_home(&self) -> bool {
+        self.listener
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(platform::poll_home)
     }
 
     pub fn status(&self) -> ButtonStatus {
-        let owned = self.owned.lock().map(|value| *value).unwrap_or(false);
-        if owned {
-            platform::status()
+        if let Some(listener) = self.listener.lock().unwrap().as_ref() {
+            platform::status(listener)
         } else {
             let last_error = self
                 .last_error
@@ -79,12 +87,14 @@ impl Buttons {
                 .map(|value| value.clone())
                 .unwrap_or_default();
             ButtonStatus {
-                supported: cfg!(target_os = "macos"),
+                supported: cfg!(any(target_os = "macos", windows)),
                 ready: false,
+                home_ready: false,
+                clear_key: default_clear_key(),
                 device: String::new(),
                 error: if !last_error.is_empty() {
                     last_error
-                } else if cfg!(target_os = "macos") {
+                } else if cfg!(any(target_os = "macos", windows)) {
                     String::new()
                 } else {
                     "当前平台未接管遥控器清空键，可说“清除提示词”；OK 键保持系统原生回车。".into()
@@ -100,12 +110,6 @@ impl Default for Buttons {
     }
 }
 
-impl Drop for Buttons {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
 #[cfg(target_os = "macos")]
 mod platform {
     use super::ButtonStatus;
@@ -116,6 +120,7 @@ mod platform {
         ready: u32,
         registry: u64,
         device: [c_char; 128],
+        home_ready: u32,
     }
     #[link(name = "IOKit", kind = "framework")]
     #[link(name = "Foundation", kind = "framework")]
@@ -123,11 +128,14 @@ mod platform {
         fn keepwork_remote_buttons_start() -> i32;
         fn keepwork_remote_buttons_stop();
         fn keepwork_remote_buttons_poll() -> bool;
+        fn keepwork_remote_home_poll() -> bool;
         fn keepwork_remote_buttons_status(out: *mut Snapshot);
     }
-    pub fn start() -> Result<(), String> {
+    pub struct Listener;
+
+    pub fn start() -> Result<Listener, String> {
         match unsafe { keepwork_remote_buttons_start() } {
-            0 => Ok(()),
+            0 => Ok(Listener),
             1 => Err("另一个遥控器按键监听正在运行".into()),
             2 => Err(
                 "请在系统设置 → 隐私与安全性 → 输入监控中允许 Keepwork，再重新启动语音输入".into(),
@@ -135,20 +143,24 @@ mod platform {
             _ => Err("无法启动设备限定的遥控器按键监听，语音口令仍可使用".into()),
         }
     }
-    pub fn stop() {
-        unsafe {
-            keepwork_remote_buttons_stop();
+    impl Drop for Listener {
+        fn drop(&mut self) {
+            unsafe { keepwork_remote_buttons_stop() };
         }
     }
-    pub fn poll() -> bool {
+    pub fn poll_home(_: &Listener) -> bool {
+        unsafe { keepwork_remote_home_poll() }
+    }
+    pub fn poll_clear(_: &Listener) -> bool {
         unsafe { keepwork_remote_buttons_poll() }
     }
-    pub fn status() -> ButtonStatus {
+    pub fn status(_: &Listener) -> ButtonStatus {
         let mut out = Snapshot {
             code: 0,
             ready: 0,
             registry: 0,
             device: [0; 128],
+            home_ready: 0,
         };
         unsafe {
             keepwork_remote_buttons_status(&mut out);
@@ -159,6 +171,8 @@ mod platform {
         ButtonStatus {
             supported: true,
             ready: out.ready != 0,
+            home_ready: out.home_ready != 0,
+            clear_key: "返回键".into(),
             device,
             error: match out.code {
                 0 | 1 => "",
@@ -176,20 +190,44 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod platform {
+    pub(super) use super::super::home_windows::HomeListener as Listener;
+    use super::ButtonStatus;
+
+    pub fn start() -> Result<Listener, String> {
+        Listener::start()
+    }
+    pub fn poll_home(listener: &Listener) -> bool {
+        listener.poll()
+    }
+    pub fn poll_clear(listener: &Listener) -> bool {
+        listener.poll_clear()
+    }
+    pub fn status(listener: &Listener) -> ButtonStatus {
+        listener.status()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
     use super::ButtonStatus;
-    pub fn start() -> Result<(), String> {
-        Err("当前平台无法安全接管遥控器返回键，可说“清除提示词”；OK 键保持系统原生回车。".into())
+    pub struct Listener;
+    pub fn start() -> Result<Listener, String> {
+        Err("当前平台不支持遥控器按键。".into())
     }
-    pub fn stop() {}
-    pub fn poll() -> bool {
+    pub fn poll_home(_: &Listener) -> bool {
         false
     }
-    pub fn status() -> ButtonStatus {
+    pub fn poll_clear(_: &Listener) -> bool {
+        false
+    }
+    pub fn status(_listener: &Listener) -> ButtonStatus {
         ButtonStatus {
             supported: false,
             ready: false,
+            home_ready: false,
+            clear_key: String::new(),
             device: String::new(),
             error: "当前平台不支持遥控器清空键。".into(),
         }
@@ -202,19 +240,22 @@ mod tests {
     #[test]
     fn inactive_buttons_have_no_action_and_no_native_listener() {
         let buttons = Buttons::new();
-        assert_eq!(buttons.poll(), None);
+        assert!(!buttons.poll_clear());
+        assert!(!buttons.poll_home());
         assert!(!buttons.status().ready);
         buttons.stop();
-        assert_eq!(buttons.poll(), None);
+        assert!(!buttons.poll_clear());
+        assert!(!buttons.poll_home());
     }
     #[test]
     fn unsupported_platform_never_installs_a_keyboard_hook() {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let buttons = Buttons::new();
             assert!(buttons.start().is_err());
             assert!(!buttons.status().supported);
-            assert_eq!(buttons.poll(), None);
+            assert!(!buttons.poll_clear());
+            assert!(!buttons.poll_home());
         }
     }
 }

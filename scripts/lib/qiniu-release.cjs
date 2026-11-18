@@ -5,9 +5,29 @@ const https = require('node:https');
 
 const REFRESH_URL = 'https://fusion.qiniuapi.com/v2/tune/refresh';
 const MULTIPART_THRESHOLD = 4 * 1024 * 1024;
-const PART_SIZE = 8 * 1024 * 1024;
-const PART_CONCURRENCY = 4;
-const PART_TIMEOUT_MS = 120_000;
+const DEFAULT_PART_SIZE = 8 * 1024 * 1024;
+const DEFAULT_PART_CONCURRENCY = 4;
+const DEFAULT_PART_TIMEOUT_MS = 120_000;
+
+function readBoundedEnvInt(env, name, fallback, min, max) {
+  const raw = env[name];
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}, got: ${raw}`);
+  }
+  return value;
+}
+
+// Cross-border uploads (GitHub-hosted runners → Qiniu z2) are limited by
+// per-connection throughput; CI raises these via KP_QINIU_PART_* env vars.
+function resolveUploadTuning(env = process.env) {
+  return {
+    partSize: readBoundedEnvInt(env, 'KP_QINIU_PART_SIZE_MB', DEFAULT_PART_SIZE / (1024 * 1024), 1, 1024) * 1024 * 1024,
+    partConcurrency: readBoundedEnvInt(env, 'KP_QINIU_PART_CONCURRENCY', DEFAULT_PART_CONCURRENCY, 1, 32),
+    partTimeoutMs: readBoundedEnvInt(env, 'KP_QINIU_PART_TIMEOUT_MS', DEFAULT_PART_TIMEOUT_MS, 10_000, 600_000),
+  };
+}
 const PART_ATTEMPTS = 3;
 
 function required(value, name) {
@@ -116,7 +136,7 @@ function streamFormUpload(uploadHost, token, remoteKey, entry) {
       }));
     });
     request.on('error', reject);
-    request.setTimeout(PART_TIMEOUT_MS, () => request.destroy(new Error(`Qiniu upload timed out for ${entry.name}`)));
+    request.setTimeout(DEFAULT_PART_TIMEOUT_MS, () => request.destroy(new Error(`Qiniu upload timed out for ${entry.name}`)));
     request.write(header);
 
     let uploaded = 0;
@@ -136,7 +156,7 @@ function streamFormUpload(uploadHost, token, remoteKey, entry) {
   });
 }
 
-function createPartRanges(size, partSize = PART_SIZE) {
+function createPartRanges(size, partSize = DEFAULT_PART_SIZE) {
   const parts = [];
   for (let start = 0, partNumber = 1; start < size; start += partSize, partNumber += 1) {
     const end = Math.min(size, start + partSize) - 1;
@@ -166,7 +186,7 @@ function requestBuffer(requestUrl, options, body) {
       }));
     });
     request.on('error', reject);
-    request.setTimeout(PART_TIMEOUT_MS, () => request.destroy(new Error(`Qiniu request timed out: ${requestUrl}`)));
+    request.setTimeout(DEFAULT_PART_TIMEOUT_MS, () => request.destroy(new Error(`Qiniu request timed out: ${requestUrl}`)));
     request.end(body);
   });
 }
@@ -184,7 +204,7 @@ async function requestBufferWithRetry(requestUrl, options, body) {
   throw lastError;
 }
 
-function uploadPartOnce(config, entry, token, uploadId, part, totalParts) {
+function uploadPartOnce(config, entry, token, uploadId, part, totalParts, tuning) {
   const requestUrl = new URL(
     `${multipartBasePath(config, entry)}/${encodeURIComponent(uploadId)}/${part.partNumber}`,
     config.uploadHost,
@@ -215,7 +235,7 @@ function uploadPartOnce(config, entry, token, uploadId, part, totalParts) {
       });
     });
     request.on('error', reject);
-    request.setTimeout(PART_TIMEOUT_MS, () => request.destroy(new Error(
+    request.setTimeout(tuning.partTimeoutMs, () => request.destroy(new Error(
       `Qiniu part ${part.partNumber} upload timed out for ${entry.name}`,
     )));
     const fileStream = fs.createReadStream(entry.filePath, { start: part.start, end: part.end });
@@ -224,11 +244,11 @@ function uploadPartOnce(config, entry, token, uploadId, part, totalParts) {
   });
 }
 
-async function uploadPart(config, entry, createToken, uploadId, part, totalParts) {
+async function uploadPart(config, entry, createToken, uploadId, part, totalParts, tuning) {
   let lastError;
   for (let attempt = 1; attempt <= PART_ATTEMPTS; attempt += 1) {
     try {
-      return await uploadPartOnce(config, entry, createToken(), uploadId, part, totalParts);
+      return await uploadPartOnce(config, entry, createToken(), uploadId, part, totalParts, tuning);
     } catch (error) {
       lastError = error;
       if (attempt < PART_ATTEMPTS) {
@@ -263,6 +283,7 @@ async function mapConcurrent(values, concurrency, task) {
 }
 
 async function uploadLargeEntry(config, entry, createToken) {
+  const tuning = resolveUploadTuning();
   const metadata = uploadMetadata(entry);
   const basePath = multipartBasePath(config, entry);
   const initResponse = await requestBufferWithRetry(new URL(basePath, config.uploadHost), {
@@ -271,13 +292,13 @@ async function uploadLargeEntry(config, entry, createToken) {
   });
   const initResult = parseQiniuResponse(initResponse, `Qiniu multipart initialization failed for ${entry.name}`);
   const uploadId = required(initResult.uploadId, 'Qiniu uploadId');
-  const parts = createPartRanges(entry.size);
+  const parts = createPartRanges(entry.size, tuning.partSize);
 
   try {
     const uploadedParts = await mapConcurrent(
       parts,
-      PART_CONCURRENCY,
-      (part) => uploadPart(config, entry, createToken, uploadId, part, parts.length),
+      tuning.partConcurrency,
+      (part) => uploadPart(config, entry, createToken, uploadId, part, parts.length, tuning),
     );
     const body = Buffer.from(JSON.stringify({
       parts: uploadedParts,
@@ -388,4 +409,5 @@ module.exports = {
   required, normalizeHttpsUrl, normalizePrefix, normalizeVersion, sha256, readArgs,
   createMultipartParts, createPartRanges, createQBoxAuthorization, createUploadToken,
   multipartBasePath, uploadLargeEntry, uploadEntry, refreshUrls, verifyEntriesWithRetry,
+  resolveUploadTuning,
 };

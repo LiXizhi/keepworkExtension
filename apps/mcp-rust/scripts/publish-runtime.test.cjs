@@ -11,6 +11,21 @@ const evidence = require('../../../scripts/rust-validation-evidence.cjs');
 const { readRuntimeArchive } = require('../../../scripts/lib/runtime-archive.cjs');
 const digest = data => crypto.createHash('sha256').update(data).digest('hex');
 
+test('new publication rejects Linux before reading files or contacting the CDN', () => {
+  const nonexistent = path.join(os.tmpdir(), 'nonexistent-rust-publication-directory');
+  for (const target of ['linux-x64', 'linux-arm64']) {
+    assert.throws(() => collectRelease(nonexistent, { target, version: '0.3.0', commit: 'a'.repeat(40) }),
+      /^Error: Unsupported Rust publication target$/);
+    const child = spawnSync(process.execPath, [path.join(__dirname, 'publish-runtime.cjs'),
+      '--release-dir', nonexistent, '--target', target, '--version', '0.3.0', '--commit', 'a'.repeat(40),
+      '--publish', 'true'], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(child.status, 1, child.stdout + child.stderr);
+    assert.match(child.stderr, /Unsupported Rust publication target/);
+    assert.doesNotMatch(child.stderr, /ENOENT|KP_QINIU_|fetch|HTTP/);
+    assert.equal(child.stdout, '');
+  }
+});
+
 function fixture(t, buildTime = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kp-rust-publication-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

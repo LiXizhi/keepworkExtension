@@ -18,7 +18,7 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
         }
         const parts = url.pathname.split('/').filter(Boolean);
         if ((parts[1] === 'approval-sessions' || ['approval-turns', 'approval-image-turns'].includes(parts[3]))
-            && req.method === 'POST' && input.approvalMode === undefined) throw new Error('Codex approvalMode required');
+            && req.method === 'POST' && input.approvalMode === undefined) throw new Error('approvalMode required');
         if (parts.join('/') === 'agents/approval-sessions' && req.method === 'POST') {
             send(200, await manager.create(owner, input)); return;
         }

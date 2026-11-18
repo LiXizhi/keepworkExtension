@@ -3,10 +3,11 @@ import { AICHAT_TOOL_PROXY_SOURCE } from './aichatToolProxy';
 import { randomUUID } from 'node:crypto';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv-provider.js';
 import { AichatNativeTools } from './aichatNativeTools';
+import { toolApprovalDecision } from './agentApproval';
 
 export type WebTool = { name: string; description: string; inputSchema: any; execution?: string };
 type Pending = { resolve: (value: any) => void; timer: NodeJS.Timeout; pageId: string; generation: string };
-type Binding = { owner: string; conversationId: string; pageId: string; generation: string; instructions: string; revision: string; tools: WebTool[]; stream?: http.ServerResponse; pending: Map<string, Pending>; capability: string; backend?: (name: string, args: any) => Promise<any>; backendTools?: WebTool[] };
+type Binding = { owner: string; conversationId: string; pageId: string; generation: string; instructions: string; revision: string; tools: WebTool[]; stream?: http.ServerResponse; pending: Map<string, Pending>; capability: string; executionEpoch?: number; backend?: (name: string, args: any) => Promise<any>; backendTools?: WebTool[] };
 const errorResult = (error: string) => ({ isError: true, content: [{ type: 'text', text: error }] });
 const schemas = new AjvJsonSchemaValidator();
 export function validateToolArguments(schema: any, value: any): void {
@@ -27,6 +28,8 @@ function validateResult(value: any) {
 export class AichatToolBridge {
     private policy = (_owner: string, _id: string, _name: string, _execution: string, _args?: any) => true;
     setPolicy(policy: typeof this.policy) { this.policy = policy; }
+    private approvalPolicy: (_owner: string, _id: string) => string | undefined = () => undefined;
+    setApprovalPolicy(policy: typeof this.approvalPolicy) { this.approvalPolicy = policy; }
     private nativeConnection?: () => { url: string; token: string };
     private native = new Map<string, AichatNativeTools>();
     configureNative(connection: () => { url: string; token: string }) { this.nativeConnection = connection; }
@@ -65,7 +68,11 @@ export class AichatToolBridge {
     }
     has(owner: string, id: string) { return this.bindings.has(this.key(owner, id)); }
     context(owner: string, id: string) { const b = this.get(owner, id); return { instructions: b.instructions, revision: b.revision }; }
-    setBackend(owner: string, id: string, tools: WebTool[], execute: Binding['backend']) { const b = this.get(owner, id); b.backendTools = tools; b.backend = execute; }
+    setBackend(owner: string, id: string, tools: WebTool[], execute: Binding['backend']) {
+        const b = this.get(owner, id);
+        b.executionEpoch = (b.executionEpoch || 0) + 1;
+        b.backendTools = tools; b.backend = execute;
+    }
     private get(owner: string, id: string) { const b = this.bindings.get(this.key(owner, id)); if (!b) throw new Error('Reconnect AIChat to restore tool context'); return b; }
     attach(owner: string, id: string, pageId: string, generation: string, res: http.ServerResponse) {
         const b = this.get(owner, id);
@@ -78,6 +85,7 @@ export class AichatToolBridge {
         res.on('close', () => { clearInterval(timer); if (b.stream === res) this.disconnect(b); });
     }
     private disconnect(b: Binding) {
+        b.executionEpoch = (b.executionEpoch || 0) + 1;
         const stream = b.stream; b.stream = undefined; stream?.end();
         for (const p of b.pending.values()) { clearTimeout(p.timer); p.resolve(errorResult('web_result_unknown: page disconnected after dispatch; do not repeat a mutation without checking its result')); }
         b.pending.clear();
@@ -91,21 +99,57 @@ export class AichatToolBridge {
     }
     async invoke(owner: string, id: string, name: string, args: any, signal?: AbortSignal) {
         const b = this.get(owner, id);
+        // Hold the original arguments while the owned page handles consent.
+        args = args === undefined ? undefined : JSON.parse(JSON.stringify(args));
         const backend = b.backendTools?.find(t => t.name === name);
         const definition = backend || b.tools.find(t => t.name === name);
         if (!this.policy(owner, id, name, backend ? 'backend' : definition ? 'web' : 'native', args)) return errorResult('Tool is unavailable in the current agent mode');
         if (!definition) {
             const native = this.nativeFor(owner, id);
-            try { const tools = await native?.list(); if (tools?.some(t => t.name === name)) return await native!.call(name, args, signal); } catch { return errorResult('Keepwork native MCP tool unavailable'); }
+            try { const tools = await native?.list(); if (tools?.some(t => t.name === name)) {
+                if (!await this.authorize(b, name, args, 'native', signal)) return errorResult('Tool approval denied or expired; no operation executed');
+                return await native!.call(name, args, signal);
+            } } catch { return errorResult('Keepwork native MCP tool unavailable'); }
             return errorResult('Tool not registered for this conversation');
         }
         try { validateToolArguments(definition.inputSchema, args); } catch (e) { return errorResult((e as Error).message); }
-        if (backend) { try { return await b.backend!(name, args); } catch (e) { return errorResult((e as Error).message); } }
+        if (backend) { try {
+            if (!await this.authorize(b, name, args, 'backend', signal)) return errorResult('Tool approval denied or expired; no operation executed');
+            return await b.backend!(name, args);
+        } catch (e) { return errorResult((e as Error).message); } }
+        return this.dispatchWeb(b, name, args, signal);
+    }
+    private async authorize(b: Binding, name: string, args: any, execution: string, signal?: AbortSignal) {
+        const mode = this.approvalPolicy(b.owner, b.conversationId);
+        if (!['ask', 'edit', 'auto', 'readonly'].includes(mode || '')) return !signal?.aborted;
+        const kind = execution === 'backend' && name === 'workspace_file'
+            ? ['read', 'list', 'search'].includes(args?.operation) ? 'read' : ['write', 'replace', 'delete', 'rename'].includes(args?.operation) ? 'edit' : 'other'
+            : ['web_search', 'fetch_url', 'grep', 'grep_files', 'mcp_status'].includes(name) ? 'read' : name === 'run_terminal' ? 'command' : 'other';
+        const decision = toolApprovalDecision(mode!, { method: 'item/commandExecution/requestApproval', params: { approvalKind: kind } });
+        if (decision === 'decline') return false;
+        if (decision === 'accept') return !signal?.aborted && this.policy(b.owner, b.conversationId, name, execution, args);
+        const binding = JSON.stringify([b.pageId, b.generation, b.revision, b.executionEpoch]);
+        const result = await this.dispatchWeb(b, 'aichat_approve_tool', { name, arguments: args, execution, approvalKind: kind, approvalMode: mode }, signal);
+        const approved = !result?.isError && result?.content?.some((part: any) => {
+            if (part.type !== 'text') return false;
+            try { return JSON.parse(part.text)?.approved === true; } catch { return false; }
+        });
+        return approved && !signal?.aborted && this.bindings.get(this.key(b.owner, b.conversationId)) === b
+            && binding === JSON.stringify([b.pageId, b.generation, b.revision, b.executionEpoch])
+            && mode === this.approvalPolicy(b.owner, b.conversationId) && this.policy(b.owner, b.conversationId, name, execution, args);
+    }
+    private async dispatchWeb(b: Binding, name: string, args: any, signal?: AbortSignal): Promise<any> {
         if (!b.stream || b.stream.destroyed) return errorResult('web_offline: reopen the original AIChat conversation and tool');
         if (b.pending.size >= 16) return errorResult('Too many pending webpage tool calls');
         const callId = randomUUID();
         return new Promise(resolve => {
-            const timer = setTimeout(() => { const pending = b.pending.get(callId); b.pending.delete(callId); pending?.resolve(errorResult('web_result_unknown: tool timed out after dispatch; do not automatically retry')); }, this.timeoutMs);
+            const timer = setTimeout(() => {
+                const pending = b.pending.get(callId); b.pending.delete(callId);
+                if (!pending) return;
+                if (b.pageId === pending.pageId && b.generation === pending.generation)
+                    b.stream?.write(`event: cancel\ndata: ${JSON.stringify({ callId, pageId: pending.pageId, generation: pending.generation })}\n\n`);
+                pending.resolve(errorResult('web_result_unknown: tool timed out after dispatch; do not automatically retry'));
+            }, this.timeoutMs);
             const onAbort = () => {
                 if (!b.pending.delete(callId)) return;
                 clearTimeout(timer);
@@ -115,7 +159,7 @@ export class AichatToolBridge {
             if (signal?.aborted) { clearTimeout(timer); resolve(errorResult('Tool call cancelled before dispatch')); return; }
             signal?.addEventListener('abort', onAbort, { once: true });
             b.pending.set(callId, { resolve: value => { signal?.removeEventListener('abort', onAbort); resolve(value); }, timer, pageId: b.pageId, generation: b.generation });
-            if (!b.stream!.write(`event: tool\ndata: ${JSON.stringify({ callId, pageId: b.pageId, generation: b.generation, conversationId: id, name, arguments: args })}\n\n`)) this.disconnect(b);
+            if (!b.stream!.write(`event: tool\ndata: ${JSON.stringify({ callId, pageId: b.pageId, generation: b.generation, conversationId: b.conversationId, name, arguments: args, approvalMode: this.approvalPolicy(b.owner, b.conversationId) })}\n\n`)) this.disconnect(b);
         });
     }
     list(owner: string, id: string) { const b = this.get(owner, id); return [...(b.backendTools || []).filter(t => this.policy(owner, id, t.name, 'backend')).map(t => ({ ...t, online: true })), ...b.tools.filter(t => !b.backendTools?.some(x => x.name === t.name) && this.policy(owner, id, t.name, 'web')).map(t => ({ ...t, online: !!b.stream && !b.stream.destroyed }))]; }
@@ -157,6 +201,7 @@ export class AichatToolBridge {
     }
     cancel(owner: string, id: string) {
         const b = this.bindings.get(this.key(owner, id)); if (!b) return;
+        b.executionEpoch = (b.executionEpoch || 0) + 1;
         for (const [callId, pending] of b.pending) {
             b.stream?.write(`event: cancel\ndata: ${JSON.stringify({ callId, pageId: b.pageId, generation: b.generation })}\n\n`);
             clearTimeout(pending.timer); pending.resolve(errorResult('web_result_unknown: CLI cancelled after dispatch; verify any mutation before retrying'));

@@ -157,7 +157,9 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
             if (m.request?.subtype === 'can_use_tool' && c.run) {
                 c.permissions.set(m.request_id, m.request);
                 const questions = m.request.tool_name === 'AskUserQuestion' ? (m.request.input?.questions || []).map((q: any, i: number) => ({ ...q, id: String(i) })) : undefined;
-                this.emit('request', { id: m.request_id, method: questions ? 'item/tool/requestUserInput' : 'item/commandExecution/requestApproval', params: { threadId: thread.id, readOnly: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'].includes(m.request.tool_name), requiresUserDecision: m.request.tool_name === 'ExitPlanMode', command: `${m.request.tool_name}\n${JSON.stringify(cacheValue(m.request.input))}`, ...(questions ? { questions } : {}) } });
+                const name = m.request.tool_name;
+                const approvalKind = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'].includes(name) ? 'read' : ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(name) ? 'edit' : name === 'Bash' ? 'command' : 'other';
+                this.emit('request', { id: m.request_id, method: questions ? 'item/tool/requestUserInput' : 'item/commandExecution/requestApproval', params: { threadId: thread.id, approvalKind, readOnly: approvalKind === 'read', requiresUserDecision: name === 'ExitPlanMode', command: `${name}\n${JSON.stringify(cacheValue(m.request.input))}`, ...(questions ? { questions } : {}) } });
             } else this.write(c, { type: 'control_response', response: { subtype: 'error', request_id: m.request_id, error: 'Client control method unsupported' } });
             return;
         }

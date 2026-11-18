@@ -14,7 +14,6 @@ const BASE = 'https://cdn.keepwork.com/keepwork/mcp-stable-rs';
 const TRIPLES = {
   'macos-arm64': 'aarch64-apple-darwin', 'macos-x64': 'x86_64-apple-darwin',
   'windows-arm64': 'aarch64-pc-windows-msvc', 'windows-x64': 'x86_64-pc-windows-msvc',
-  'linux-arm64': 'aarch64-unknown-linux-gnu', 'linux-x64': 'x86_64-unknown-linux-gnu',
 };
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const entry = (filePath, url) => ({ name: path.basename(filePath), filePath, url,

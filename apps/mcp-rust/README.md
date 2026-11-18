@@ -30,6 +30,25 @@ v2, independent update streams and ownership boundaries, and the
 durable evidence. Dated validation below records its exact source/environment;
 it does not certify a current installed package, every platform or a real account.
 
+## Release platforms and independent CDN publication
+
+`Rust MCP daemon` (`.github/workflows/mcp-rust.yml`) builds three distribution
+groups matching the Rust desktop packages: Windows x64, Windows ARM64 and
+macOS Universal. The Mac group contains two native runtime slices; it does not
+claim to produce one fat daemon. The existing `macos-arm64` and `macos-x64`
+ZIP/feed contracts remain separate so installed clients can keep updating.
+Each ZIP has its own `report-<target>.json` acceptance report.
+
+After a successful build, explicitly run **Review or publish an accepted Rust
+MCP runtime** (`mcp-rust-publish.yml`) with its run ID, artifact, matching target,
+`report_path=report-<target>.json` and `publish=true`. Building or bundling MCP
+inside a desktop installer does not publish the independent CDN feed.
+New distribution excludes Linux; existing Linux CDN objects and historical
+manifest readers remain intact. The Ubuntu publisher runner is an upload host,
+not a Linux runtime product. See the maintained
+[release skill](../../.github/skills/rust-release/SKILL.md) for the complete
+publication, verification and merge-to-main procedure.
+
 ## Native CLI sessions
 
 The Rust daemon now implements `/agents/backends`, executable-only inventory,
@@ -508,3 +527,25 @@ real account, clean-machine and published-feed checks remain separate pending ga
 
 
 DingTalk manual image attachments use the additive conversation `replyImage` contract and `POST /agents/personas/:id/reply-image`. One PNG/JPEG/GIF/WebP up to 5 MiB is validated, staged privately under the binding root, sent through current-user DWS file transport, and cleaned after the attempt. Images arrive as downloadable attachments. Text replies keep their legacy request shape; Feishu and older services keep text usable without advertising this optional capability. The persistent request ledger prevents replay of unknown sends. See [manual image attachments](../../docs/message-autoreply.md#manual-image-attachments).
+
+## Windows 7 / 8 compatibility edition (preview)
+
+A separate `variant: "win7-win8"` build targets Windows 7 SP1 x64, Windows 8 x64 and Windows 8.1 x64 from the same Rust sources. The technical target `x86_64-win7-windows-msvc` names the minimum OS; it does not certify all three systems. This edition retains basic files, folder browsing, search and noninteractive `run_terminal`. Starting with runtime `0.2.67`, the complete compatibility package also includes pinned WinPTY `0.4.3` x64 `bin/winpty.dll`, `bin/winpty-agent.exe` and their license/provenance. It provides a real interactive shell through the existing HTTP `pty-session-v1` routes, including input, output cursor replay, resize, interrupt and close, without Node. Its legacy Windows path does not require system ConPTY support.
+
+The running service advertises `terminalApi` only after verifying its adjacent backend files, loading the DLL and passing a backend readiness probe. The first probe opens and frees a WinPTY backend without starting a user shell or running commands. Missing, modified or unloadable dependencies and failed readiness leave the optional capability absent and return HTTP `501` / `UNSUPPORTED_FEATURE` from terminal routes; ordinary MCP operations keep working. Runtime `0.2.66` and older compatibility services still omit PTY support, so a disabled Terminal entry when attached to one is expected. Client and runtime versions remain independent; do not kill another application's daemon or treat `cmd.exe /c` as an interactive-terminal substitute.
+
+Runtime `0.2.81` selects the compatibility session's native backend from the running OS's APIs: this edition uses ConPTY on modern Windows with the required system exports, while Windows 7/8 without those exports keeps the pinned WinPTY path. This compatibility adapter resolves ConPTY functions only from the already loaded `kernel32.dll`, without searching for an additional `conpty.dll` or adding static ConPTY imports to the legacy binary. The ordinary modern MCP build's existing native adapter and the Unix path are unchanged. The `win7-win8` variant, minimum OS, signed packages and independent `mcp-win7-win8-rs` channel remain the same. The complete package must still pass its pinned WinPTY dependency integrity, loading and readiness checks, including when running on a modern host. Once a backend attempts to spawn a shell, a failure does not silently start another shell through the other backend. No terminal input is replayed.
+
+The optional `terminalBackend: "conpty" | "winpty"` diagnostic in `/health` is emitted only after readiness succeeds and identifies the backend selected for new sessions. The same optional field in a session snapshot records the backend that successfully spawned that session. Neither field replaces `terminalApi` or proves that a particular shell command executed; Unix omits it, and missing or unknown values mean unknown. A passing ConPTY smoke on a modern build host does not verify WinPTY Unicode, including non-BMP characters and UTF-16 cursor behavior, on Windows 7 SP1, Windows 8 or Windows 8.1. Those systems retain their separate native acceptance records or the release's explicitly recorded user waiver; a waiver never marks the tests passed.
+
+Runtime `0.2.68` probes readiness in the background and retries transient startup failures with a bounded per-attempt timeout and backoff, instead of permanently caching the first timeout. Concurrent health requests share one probe and return without waiting for it; no user shell or command starts during a probe. Dependency integrity or loading failures remain closed until the dependencies are repaired and the service is restarted. Optional health fields `terminalStatus` (`initializing`, `ready`, `unavailable`) and failure-only `terminalReason` explain the current state using fixed, bounded messages without local paths or raw backend errors. Only `ready` advertises the existing `terminalApi: "pty-session-v1"`; absent or unknown diagnostic fields mean unknown, not success. Each 25-second SSE heartbeat recomputes health capabilities so existing clients can discover recovery without changing the terminal protocol. A disabled menu screenshot alone does not identify which peer is running or why its terminal is unavailable; inspect that peer's actual `/health` response.
+
+Installing the new desktop package does not replace an already running daemon. To activate the bundled backend after an upgrade, finish work in other connected clients, review the local MCP dashboard and explicitly confirm **Stop service**, which disconnects clients and ends work running in that daemon. Then use the compatibility client's **启动本地服务** action; it invokes the installed launcher's fixed `--start-mcp` operation without closing or reloading the chat window. Reopening the webpage's **+** menu probes the actual service capabilities again. This action starts a verified runtime only when the shared port is free; it attaches to existing Keepwork peers and never stops another process or starts a second listener. The native action is hidden when no valid compatibility launcher was supplied.
+
+Desktop `0.2.149` reports the actual service health after this action, including the reported runtime version and whether the terminal is ready, initializing, unavailable or not declared. This is a read-only result, not a replacement of the running peer or a request to upgrade solely because of its version.
+
+Loopback, Origin/authentication, session ownership, concurrency limits, the 30-minute idle cleanup policy, cursor replay and daemon lifecycle rules remain in force. Relative terminal working directories reject `..` components and validate the real path of an existing ancestor before creating a missing leaf; failed canonicalization cannot bypass confinement. Existing absolute and `~` directories remain allowed. Reconnecting does not replay uncertain input, and closing one terminal does not stop the shared daemon. This iteration cross-built the legacy target; real WinPTY startup, Unicode input/output, resize, Ctrl+C and cleanup still need native verification on each supported legacy OS.
+
+Build/package instructions and the independent `mcp-win7-win8-rs` channel are documented in the [Win7/Win8 release flow](../../.github/skills/rust-release/references/windows7.md); the [Windows compatibility contract](../aichat-rust/docs/windows-cef.md) defines the shared client/server scope. The ordinary modern MCP release does not include this edition. Native MCP smoke and client/CEF/update acceptance must be recorded separately for each legacy OS; a modern Windows build is not native legacy acceptance. No compatibility release was published as part of this development task.
+
+Run `apps/aichat-rust/scripts/win7-native-smoke.ps1` with `-RequireTerminal` when accepting a complete current package. Both authentication cases must exercise the real PTY and report `ptyVerified: true`; the default mode intentionally retains legacy unsupported-feature checks, so a successful smoke that accepted HTTP `501` is not proof of terminal support. Keep those native results separate from cross-compilation and fixture tests.

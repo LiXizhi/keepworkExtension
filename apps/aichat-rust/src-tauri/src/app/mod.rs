@@ -8,10 +8,16 @@ mod host_menu;
 mod launch;
 mod main_window;
 mod native_startup;
+mod pet_approval;
 mod pet_audio_host;
 mod pet_host;
+#[cfg(target_os = "macos")]
+mod pet_home_overlay;
 mod platform;
 mod remote_voice_host;
+mod remote_dialogue;
+mod remote_phone_view;
+mod screenshot;
 mod sender;
 mod startup;
 #[cfg(all(feature = "dev-bins", target_os = "macos"))]

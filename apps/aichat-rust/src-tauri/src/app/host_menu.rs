@@ -2,8 +2,8 @@
 
 use super::events::broadcast_to_main;
 use super::main_window::{
-    current_entry_url, hide_main_window, reload_main_window, reset_zoom, show_main_window,
-    start_local_source, step_zoom, use_published_site,
+    current_entry_url, dismiss_main_window, reload_main_window, reset_zoom, show_main_window,
+    start_local_source, step_zoom, use_published_site, DismissAction,
 };
 use super::pet_audio_host::stop_pet_audio;
 use super::pet_host::{ensure_pet_window, hide_pet_window};
@@ -158,15 +158,11 @@ pub async fn execute_host_command(
                 }
             }
         }
-        "close-window" => {
-            hide_main_window(app, core);
-            if core.settings().pet_visible {
-                ensure_pet_window(app, core, true);
-            }
-        }
+        "close-window" => dismiss_main_window(app, core, DismissAction::Close),
         "reload" => reload_main_window(app, core),
         "remote-voice" => super::remote_voice_host::open_remote_voice_window(app),
         "fullscreen" => {
+            core.pet_approval_return.lock().unwrap().take();
             if let Some(win) = app.get_webview_window("main") {
                 let cur = win.is_fullscreen().unwrap_or(false);
                 let _ = win.set_fullscreen(!cur);
@@ -176,6 +172,7 @@ pub async fn execute_host_command(
         "zoom-out" => step_zoom(app, core, 1.0 / 1.1)?,
         "zoom-reset" => reset_zoom(app, core)?,
         "toggle-pet" => {
+            core.pet_approval_return.lock().unwrap().take();
             let next = core.update_settings(|s| {
                 s.pet_visible = !s.pet_visible;
             });

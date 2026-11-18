@@ -161,18 +161,34 @@ pub fn build_main_window_init_script_with_launch_capability(
     defaultBrainFolder: true,
     gitSetup: true,
     floatingPet: true,
+    petReplyPresentationVersion: 1,
+    petStreamingSpeechVersion: 1,
+    ...(bootstrap.platform === "darwin" ? {{ remoteNarrationPauseVersion: 1 }} : {{}}),
     petDictationAudioVersion: 1,
     petVoiceAudioVersion: 1,
     startupSignIn: true,
-    ...(launchEnabled ? {{ launchIntents: true }} : {{}}),
-    ...(bootstrap.platform === "darwin" ? {{ browserSurfaceVersion: 1, browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
+    ...(launchEnabled && ["darwin", "win32"].includes(bootstrap.platform) ? {{ desktopScreenshotVersion: 1 }} : {{}}),
+    ...(launchEnabled ? {{ launchIntents: true, petApprovalRevealVersion: 1, petApprovalReturnVersion: 1 }} : {{}}),
+    ...(["darwin", "win32"].includes(bootstrap.platform) ? {{ browserSurfaceVersion: 1, remoteDialogueVersion: 1, remotePhoneVersion: 1, remotePhoneCaptionVersion: 1, remotePhoneActivityVersion: 1 }} : {{}}),
+    ...(bootstrap.platform === "darwin" ? {{ browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
   }});
 
   if (!window.aichatDesktop) {{
     const bridge = Object.freeze({{
       version: 1,
       capabilities,
+      ...(capabilities.desktopScreenshotVersion === 1 ? {{
+        captureScreenshot: async () => {{
+          const shot = await invokeLaunch("desktop_capture_screenshot");
+          if (!launchLive) throw new Error("Screenshot document is no longer active");
+          return shot;
+        }},
+        getScreenshotPermission: () => invokeLaunch("desktop_get_screenshot_permission"),
+        setScreenshotPermission: (enabled) => invokeLaunch("desktop_set_screenshot_permission", {{ enabled }}),
+      }} : {{}}),
       ...(launchEnabled ? {{
+        revealPetApproval: (options) => invokeLaunch("desktop_reveal_pet_approval", options?.returnToPet === true ? {{ returnToPet: true }} : {{}}),
+        returnToPetAfterApproval: () => invokeLaunch("desktop_return_to_pet_after_approval"),
         getLaunchIntent: () => invokeLaunch("desktop_get_launch_intent"),
         acknowledgeLaunchIntent: (id) => invokeLaunch("desktop_acknowledge_launch_intent", {{ id: String(id || "") }}),
         onLaunchIntent: (cb) => {{
@@ -188,6 +204,7 @@ pub fn build_main_window_init_script_with_launch_capability(
         return () => browserListeners.delete(cb);
       }},
       reportStartupSignIn: (signedIn) => invoke("desktop_report_startup_signin", {{ signedIn: !!signedIn }}),
+      closeRemoteDialogue: (id) => invoke("remote_voice_dialogue_closed", {{ id }}),
       publishPetState: (state) => invoke("desktop_publish_pet_state", {{ state: state || {{}}, document: petAudioDocument }}),
       petResult: (result) => invoke("desktop_pet_result", {{ result: result || {{}} }}),
       petAudio: (op, id, seq) => invoke("desktop_pet_audio", {{ op: String(op || ""), id: String(id || ""), ...(seq == null ? {{}} : {{ seq }}), document: petAudioDocument }}),

@@ -30,34 +30,77 @@
       </div>
     </section>
     <section id="bubble" hidden>
+      <button id="phone-error" type="button" title="打开 AIChat 查看通话" hidden></button>
+      <div id="thinking" role="status" hidden>正在思考<span aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></div>
       <div id="reply" role="button" tabindex="0" title="点击打开桌面查看完整回复"></div>
-      <div id="options"></div>
     </section>
-    <section id="compact-controls" aria-label="语音控制" hidden>
-      <output id="compact-status"></output>
-      <button id="compact-record" type="button" hidden>开始录音</button>
-      <button id="compact-call" type="button">开始语音</button>
-    </section>
+    <output id="dialogue-caption" aria-live="off" hidden></output>
+    <output id="dialogue-status" role="status" aria-live="polite" aria-atomic="true" hidden></output>
+    <output id="compact-status" aria-label="语音状态" hidden></output>
     <section id="panel" hidden>
       <header>
-        <button id="target" type="button"><span id="target-title">AIChat</span><span id="target-detail"></span></button>
-        <button id="collapse" type="button" title="收起面板" aria-label="收起面板">−</button>
-        <button id="open" type="button" title="打开桌面窗口" aria-label="打开桌面窗口">□</button>
+        <div id="target" role="group" aria-labelledby="target-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <g class="persona"><circle cx="12" cy="8" r="3.2"/><path d="M5 20v-1a7 7 0 0 1 14 0v1"/></g>
+            <path class="session" d="M20.5 11.5a8.5 8.5 0 0 1-8.5 8.2 9.2 9.2 0 0 1-4-.9L3.5 20l1.2-4.2a8.1 8.1 0 0 1-1.2-4.3A8.5 8.5 0 0 1 12 3.3a8.5 8.5 0 0 1 8.5 8.2Z"/>
+          </svg>
+          <span class="target-text"><span id="target-title">AIChat</span><span id="target-detail"></span></span>
+        </div>
+        <span id="remote-voice-indicator" role="status" aria-atomic="true" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <g class="link"><path d="m7 7 9 10-4 4V3l4 4-9 10"/></g>
+            <g class="prepare"><circle cx="12" cy="12" r="7.5" opacity=".24"/><path d="M12 4.5a7.5 7.5 0 0 1 7.5 7.5"/></g>
+            <g class="ready"><path d="m5 12 4.5 4.5L19 7"/></g>
+            <g class="record"><path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 7v10"/><path d="M20 10v4"/></g>
+            <g class="transcribe" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></g>
+            <g class="retry"><path d="M4.5 10a7.5 7.5 0 1 1 1.1 7.2M4.5 4.5V10H10"/></g>
+            <g class="permission"><rect x="5.5" y="10" width="13" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></g>
+          </svg>
+          <span id="remote-voice-label"></span>
+        </span>
+        <button id="minimize" class="window-control" type="button" title="临时隐藏桌宠" aria-label="临时隐藏桌宠">−</button>
+        <button id="open" class="window-control" type="button" title="打开 AIChat 主窗口" aria-label="打开 AIChat 主窗口">□</button>
+        <button id="collapse" class="window-control" type="button" title="关闭对话框" aria-label="关闭对话框">×</button>
       </header>
       <div id="status"></div>
       <div id="error"></div>
-      <textarea id="draft" rows="3" maxlength="32000" placeholder="和宠物说点什么…"></textarea>
+      <div id="remote-voice-preview" aria-label="语音预览" hidden></div>
+      <div id="options"></div>
+      <textarea id="draft" aria-label="聊天草稿" rows="3" maxlength="32000" placeholder="和宠物说点什么…"></textarea>
       <div class="actions">
-        <button id="dictation" type="button">语音输入</button>
-        <button id="call" type="button">通话</button>
-        <button id="mute" type="button" hidden>静音</button>
-        <button id="send" type="button">发送</button>
+        <button id="mute" type="button" hidden>
+          <span id="mute-label" class="action-label">静音</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path class="normal" d="m16 9 5 6m0-6-5 6"/><path class="alternate" d="M15 9a4 4 0 0 1 0 6m3-9a8 8 0 0 1 0 12"/></svg>
+        </button>
+        <button id="call" type="button">
+          <span id="call-label" class="action-label">通话</span>
+          <span class="normal" aria-hidden="true">☎</span>
+          <svg class="alternate" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 13a13 13 0 0 1 18 0l-1.5 3.5-4-1 .1-3a12 12 0 0 0-7.2 0l.1 3-4 1L3 13Z"/></svg>
+        </button>
+        <button id="dictation" type="button">
+          <span id="dictation-label" class="action-label">语音输入</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <g class="normal" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 1 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/></g>
+            <rect class="alternate" x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="send" type="button">
+          <span id="send-label" class="action-label">发送</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path class="normal" fill="none" stroke="currentColor" stroke-width="2.5" d="M5 12h14M13 6l6 6-6 6"/>
+            <rect class="alternate" x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/>
+          </svg>
+        </button>
       </div>
     </section>
   </div>
   <button id="pet" type="button" title="单击聊天 · 双击打开桌面 · 右键设置 · 拖动移动">
     <span id="art">🐉</span>
     <span id="badge" hidden>●</span>
+  </button>
+  <button id="dialogue-icon" type="button" title="挂断通话" aria-label="挂断通话" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 13a13 13 0 0 1 18 0l-1.5 3.5-4-1 .1-3a12 12 0 0 0-7.2 0l.1 3-4 1L3 13Z"/></svg>
   </button>
   <script type="module" src="/src/pet.ts"></script>
 </body>

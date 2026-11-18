@@ -6,15 +6,16 @@ import { execFileSync } from 'node:child_process';
 import { CodexHarness, HarnessAdapter } from './codexHarness';
 import { AcpHarness } from './acpHarness';
 import { AntigravityHarness } from './antigravityHarness';
+import { TraeHarness } from './traeHarness';
 import { CopilotHarness } from './copilotHarness';
 import { ClaudeHarness } from './claudeHarness';
 import { agentAccountDisplay } from './agentAccount';
-import { approvalDecision, execpolicyDecisions, canAutoApprove } from './agentApproval';
+import { approvalDecision, execpolicyDecisions, canAutoApprove, toolApprovalDecision } from './agentApproval';
 import { AGENT_BACKENDS, AGENT_CLI } from './agentCliBackends';
 import { resolveAgentCli } from './agentCliProcess';
 import { AichatToolBridge } from './aichatToolBridge';
 import { AichatWorkspaceFiles, WORKSPACE_FILE_TOOL } from './aichatWorkspaceFiles';
-import { agentMode, agentAccess, agentApprovalMode, CODEX_APPROVAL_MODES, CodexApprovalMode, AgentMode, PLAN_FALLBACK } from './agentModes';
+import { agentMode, agentAccess, agentApprovalMode, agentApprovalCapabilities, usesToolApproval, AgentApprovalMode, AgentMode, PLAN_FALLBACK } from './agentModes';
 import { visibleReasoning, mergeStreamItem, isItemDelta, applyItemDelta } from './agentItemStream';
 export { AGENT_BACKENDS } from './agentCliBackends';
 type Backend = typeof AGENT_BACKENDS[number];
@@ -23,7 +24,7 @@ type Item = { id: string; type: string; [key: string]: any };
 type Session = {
     native?: boolean; externalBusy?: boolean; backend: Backend; id: string; owner: string; conversationId: string; threadId: string; title: string;
     roots: string[]; nativeWorkspace?: NativeWorkspace; rootNames?: string[]; worktrees: string[]; sandboxPolicy?: any; model?: string; effort?: string; archived: boolean; removed: boolean; aichatContext?: boolean;
-    status: string; mode?: AgentMode; approvalMode?: CodexApprovalMode; nativePlan?: boolean; turnId?: string; error?: string; retrying?: boolean; cursor: number; items: Item[]; pending: any[];
+    status: string; mode?: AgentMode; approvalMode?: AgentApprovalMode; nativePlan?: boolean; turnId?: string; error?: string; retrying?: boolean; cursor: number; items: Item[]; pending: any[];
     submissions: Record<string, { state: string; turnId?: string }>;
     events: any[]; updatedAt: number;
 };
@@ -38,7 +39,7 @@ function visibleItem(item: any) {
 export function agentImageParts(backend: Backend, images: unknown) {
     if (images === undefined) return [];
     if (!Array.isArray(images) || !images.length || images.length > 4) throw new Error('Attach 1 to 4 images');
-    if (AGENT_CLI[backend].protocol === 'antigravity') throw new Error('This CLI accepts text only; remove the images or switch agents.');
+    if (['antigravity', 'trae'].includes(AGENT_CLI[backend].protocol)) throw new Error('This CLI accepts text only; remove the images or switch agents.');
     let bytes = 0;
     return images.map(url => {
         if (typeof url !== 'string' || url.length > 5_600_000) throw new Error('Image too large');
@@ -120,6 +121,7 @@ export class AgentSessions {
     }
     private sessions = new Map<string, Session>();
     private autoApproval = new Set<string>();
+    private turnApprovals = new Map<string, { requestId: string; execute: () => Promise<any> }>();
     private listeners = new Map<string, Set<(event: any) => void>>();
     private loaded = new Set<string>();
     private loading = new Map<string, Promise<void>>();
@@ -129,23 +131,35 @@ export class AgentSessions {
     private closing = false;
     private adapters: Record<string, HarnessAdapter>;
     private capabilities = new Map<string, Promise<any>>();
+    private contextSessions(owner: string, id: string) {
+        const sessions = [...this.sessions.values()].filter(s => s.owner === owner && s.conversationId === id && !s.removed && !s.archived);
+        const active = sessions.filter(s => ACTIVE.has(s.status));
+        return active.length ? active : sessions.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 1);
+    }
     constructor(private file: string, adapter: HarnessAdapter = new CodexHarness(), adapters?: Record<string, HarnessAdapter>) {
+        this.toolBridge.setApprovalPolicy((owner, id) => {
+            // Legacy clients may reuse a context across backends. Concurrent
+            // sessions share the strictest policy rather than an earlier grant.
+            const rank = ['read-only', 'readonly', 'ask', 'edit', 'app', 'on-request', 'untrusted', 'auto', 'never'];
+            return this.contextSessions(owner, id).map(s => s.approvalMode).filter((mode): mode is AgentApprovalMode => !!mode)
+                .sort((a, b) => rank.indexOf(a) - rank.indexOf(b))[0];
+        });
         this.toolBridge.setPolicy((owner, id, name, execution, args) => {
-            const readOnly = [...this.sessions.values()].some(s => s.owner === owner && s.conversationId === id && !s.removed
-                && s.approvalMode && (s.approvalMode === 'read-only' || s.mode !== 'craft'));
+            const sessions = this.contextSessions(owner, id);
+            const readOnly = sessions.some(s => s.approvalMode && (s.approvalMode === 'read-only' || s.approvalMode === 'readonly' || s.mode !== 'craft'));
             if (readOnly) {
-                if (execution === 'native') return ['web_search', 'fetch_url', 'grep', 'grep_files'].includes(name);
+                if (execution === 'native') return ['web_search', 'fetch_url', 'grep', 'grep_files', 'mcp_status'].includes(name);
                 if (execution === 'backend') return name === 'workspace_file' && (!args || ['read', 'list', 'search'].includes(args.operation));
                 return ['read_file', 'list_dir', 'search_files'].includes(name);
             }
-            const planning = [...this.sessions.values()].some(s => s.owner === owner && s.conversationId === id && !s.removed && s.mode === 'plan');
+            const planning = sessions.some(s => s.mode === 'plan');
             if (!planning) return true;
             if (execution === 'native') return ['web_search', 'fetch_url', 'grep', 'grep_files'].includes(name);
             if (execution === 'backend') return name === 'workspace_file' && (!args || ['read', 'list', 'search'].includes(args.operation));
             return ['read_file', 'list_dir', 'search_files', 'create_file', 'replace_string_in_file'].includes(name);
         });
         this.workspaceFiles = new AichatWorkspaceFiles(path.join(path.dirname(file), 'agent-git-drafts'));
-        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'gemini' ? new AntigravityHarness(file + '.gemini') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
+        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'gemini' ? new AntigravityHarness(file + '.gemini') : backend === 'trae' ? new TraeHarness(file + '.trae') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
         try {
             const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
             for (const row of rows) if (row.id && row.owner && row.threadId) this.sessions.set(row.id, { ...row, backend: row.backend || 'codex', status: ACTIVE.has(row.status) ? 'interrupted' : row.status, pending: [], events: [], items: [] });
@@ -159,6 +173,7 @@ export class AgentSessions {
                 for (const s of this.sessions.values()) {
                     if (s.backend !== backend) continue;
                     if (scope && (Array.isArray(scope) ? !scope.includes(s.threadId) : scope.exclude.includes(s.threadId))) continue;
+                    this.turnApprovals.delete(s.id);
                     this.loaded.delete(s.id); this.loading.delete(s.id); s.pending = [];
                     if (ACTIVE.has(s.status)) { s.status = 'interrupted'; this.emit(s); }
                 }
@@ -194,9 +209,9 @@ export class AgentSessions {
             const spec = AGENT_CLI[backend];
             try {
                 const cli = resolveAgentCli(backend, spec.args);
-                return [backend, { name: spec.name, installUrl: spec.installUrl, available: true, authenticated: null, probe: 'executable', cli: { path: cli.path, source: cli.source }, models: [] }];
+                return [backend, { name: spec.name, installUrl: spec.installUrl, ...agentApprovalCapabilities(backend), ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), available: true, authenticated: null, probe: 'executable', cli: { path: cli.path, source: cli.source }, models: [] }];
             } catch (error) {
-                return [backend, { name: spec.name, installUrl: spec.installUrl, available: false, probe: 'executable', models: [], error: (error as Error).message }];
+                return [backend, { name: spec.name, installUrl: spec.installUrl, ...agentApprovalCapabilities(backend), ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), available: false, probe: 'executable', models: [], error: (error as Error).message }];
             }
         }));
     }
@@ -258,12 +273,12 @@ export class AgentSessions {
             modelsError ||= result.modelsError;
             const loginRequired = !!modelsError && /^Authentication required[.!]?$/i.test(modelsError.trim());
             const authenticated = loginRequired ? false : account.authUnknown ? null : !!account.account || account.requiresOpenaiAuth === false;
-            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, probe: account.probe || 'protocol', account: loginRequired ? undefined : agentAccountDisplay(account.account), available: true, cli: adapter.cliInfo?.(), authenticated, authState: authenticated === null ? 'unknown' : authenticated ? 'verified' : 'required', models: bounded(result.data || []), ...(backend === 'codex' ? { approvalModes: CODEX_APPROVAL_MODES } : {}), ...(modelsError ? { modelsError } : {}) };
-        } catch (error) { return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, available: false, cli: adapter?.cliInfo?.(), authenticated: false, models: [], error: (error as Error).message }; }
+            return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), probe: account.probe || 'protocol', account: loginRequired ? undefined : agentAccountDisplay(account.account), available: true, cli: adapter.cliInfo?.(), authenticated, authState: authenticated === null ? 'unknown' : authenticated ? 'verified' : 'required', models: bounded(result.data || []), ...agentApprovalCapabilities(backend), ...(modelsError ? { modelsError } : {}) };
+        } catch (error) { return { name: AGENT_CLI[backend as Backend]?.name, protocol: AGENT_CLI[backend as Backend]?.protocol, installUrl: AGENT_CLI[backend as Backend]?.installUrl, ...(backend === 'trae' ? { aichatContext: false, executionMode: 'one-shot', supportedModes: ['craft'] } : {}), available: false, cli: adapter?.cliInfo?.(), authenticated: false, models: [], error: (error as Error).message }; }
     }
     async login(backend: string = 'codex') {
         this.clearCapabilities(backend);
-        if (backend !== 'codex') { this.adapterFor(backend); return { command: AGENT_CLI[backend as Backend].login, message: 'Run this command in your terminal to sign in, then reconnect.' }; }
+        if (backend !== 'codex') { this.adapterFor(backend); return { command: AGENT_CLI[backend as Backend].login, message: backend === 'trae' ? 'Configure trae_config.yaml or TRAE_CONFIG_FILE with your model provider and API key, then reconnect. Trae Agent has no CLI account login.' : 'Run this command in your terminal to sign in, then reconnect.' }; }
         const result = await this.adapterFor(backend).call('account/login/start', { type: 'chatgpt' });
         if (typeof result.authUrl !== 'string' || !result.authUrl.startsWith('https://')) throw new Error('Codex did not return a browser login URL');
         return { url: result.authUrl };
@@ -343,7 +358,7 @@ export class AgentSessions {
         const backend: Backend = input.backend || 'codex';
         const bridgeOptions = aichatContext ? await this.bridgeOptions(owner, input.conversationId, backend) : {};
         const approvalMode = agentApprovalMode(input.approvalMode, backend);
-        const mode = agentMode(input.mode), { sandbox, approvalPolicy } = agentAccess(mode, approvalMode, roots);
+        const mode = agentMode(input.mode), { sandbox, approvalPolicy } = agentAccess(mode, approvalMode, roots, backend);
         const accessConfig = sandbox === 'workspace-write' ? { config: { ...(bridgeOptions as any).config,
             sandbox_workspace_write: { writable_roots: roots, network_access: false } } } : {};
         const result = await this.adapterFor(backend).call('thread/start', { cwd: roots[0], roots, catalogKey: owner + ':' + input.conversationId, ...bridgeOptions, ...accessConfig, sandbox, approvalPolicy, ...(input.model ? { model: String(input.model) } : {}) });
@@ -354,7 +369,9 @@ export class AgentSessions {
     }
     revokeContext(owner: string) {
         this.toolBridge.revoke(owner); this.workspaceFiles.revoke(owner);
-        for (const session of this.sessions.values()) if (session.owner === owner && session.aichatContext) this.loaded.delete(session.id);
+        for (const session of this.sessions.values()) if (session.owner === owner && session.aichatContext) {
+            this.cancelTurnApproval(session); this.loaded.delete(session.id);
+        }
     }
     private async bridgeOptions(owner: string, conversationId: string, backend: string) {
         const server = await this.toolBridge.descriptor(owner, conversationId);
@@ -373,7 +390,7 @@ export class AgentSessions {
                 return; // History is readable without restoring a capability or resuming execution.
             }
             const bridgeOptions = s.aichatContext && !s.archived ? await this.bridgeOptions(s.owner, s.conversationId, s.backend) : {};
-            const access = agentAccess(agentMode(s.mode), s.approvalMode, s.roots);
+            const access = agentAccess(agentMode(s.mode), s.approvalMode, s.roots, s.backend);
             const accessConfig = access.sandbox === 'workspace-write' ? { config: { ...(bridgeOptions as any).config,
                 sandbox_workspace_write: { writable_roots: s.roots, network_access: false } } } : {};
             const result = await this.forSession(s).call(s.archived ? 'thread/read' : 'thread/resume', { threadId: s.threadId, cwd: s.roots[0], includeTurns: true, ...bridgeOptions,
@@ -431,15 +448,42 @@ export class AgentSessions {
         s.mode = mode; s.approvalMode = approvalMode; s.status = 'starting'; s.error = ''; s.retrying = false; s.turnId = undefined;
         if (Object.keys(s.submissions).length > 500) s.submissions = Object.fromEntries(Object.entries(s.submissions).slice(-250));
         s.submissions[input.requestId] = { state: 'starting' }; this.emit(s);
+        if (approvalMode === 'app' && ['trae', 'gemini'].includes(s.backend)) {
+            const gateId = 'turn:' + input.requestId;
+            const binding = s.aichatContext ? this.contextMarker(s) : undefined;
+            this.turnApprovals.set(s.id, { requestId: input.requestId,
+                execute: () => this.executeTurn(s, input, text, images, context, warnings, binding) });
+            s.pending.push({ id: gateId, method: 'item/commandExecution/requestApproval', params: {
+                threadId: s.threadId, requestId: input.requestId, requiresUserDecision: true, approvalScope: 'turn',
+                availableDecisions: ['accept', 'decline', 'cancel'],
+                command: `${AGENT_CLI[s.backend].name}: approve the entire turn in ${s.roots.join(', ')}. Once approved, this CLI may run all its native tools without further App prompts.`,
+            } });
+            s.submissions[input.requestId] = { state: 'accepted' }; s.status = 'waiting'; this.emit(s);
+            return { submission: s.submissions[input.requestId], session: this.view(s), warnings };
+        }
+        return this.executeTurn(s, input, text, images, context, warnings);
+    }
+    private contextMarker(s: Session) {
+        const binding = this.toolBridge.snapshot(s.owner, s.conversationId) as any;
+        return JSON.stringify([binding.pageId, binding.generation, binding.revision]);
+    }
+    private async executeTurn(s: Session, input: any, text: string, images: any[], context: any, warnings: any[], binding?: string) {
+        const { mode, approvalMode } = s;
         let dispatched = false;
         try {
+            verifyRoots(s.roots);
+            if (s.aichatContext && !this.toolBridge.has(s.owner, s.conversationId)) throw new Error('Reconnect AIChat context before execution');
+            if (binding !== undefined && binding !== this.contextMarker(s)) throw new Error('AIChat context changed while awaiting approval; submit a new request');
             await this.load(s);
-            const configured = await this.forSession(s).call('thread/mode/set', { threadId: s.threadId, mode, model: input.model || s.model, effort: input.effort });
+            const configured = await this.forSession(s).call('thread/mode/set', { threadId: s.threadId, mode, approvalMode, model: input.model || s.model, effort: input.effort });
             s.nativePlan = mode === 'plan' && configured?.nativePlan === true;
-            const { sandboxPolicy, approvalPolicy } = agentAccess(mode, approvalMode, s.roots);
+            const { sandboxPolicy, approvalPolicy } = agentAccess(agentMode(mode), approvalMode, s.roots, s.backend);
             const prompt = mode === 'plan' && !s.nativePlan ? (context
                 ? text.replace('\n</aichat_context>', PLAN_FALLBACK + '\n</aichat_context>')
                 : PLAN_FALLBACK + text) : text;
+            if (binding !== undefined && (!this.toolBridge.has(s.owner, s.conversationId) || binding !== this.contextMarker(s)))
+                throw new Error('AIChat context changed while awaiting approval; submit a new request');
+            verifyRoots(s.roots);
             dispatched = true;
             const result = await this.forSession(s).call('turn/start', { threadId: s.threadId, input: [{ type: 'text', text: prompt }, ...images], cwd: s.roots[0], sandboxPolicy, approvalPolicy, ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}), ...configured?.turnOverrides, ...(approvalMode ? { sandboxPolicy, approvalPolicy } : {}) });
             s.turnId = result.turn?.id; s.model = input.model || s.model; s.effort = input.effort;
@@ -455,10 +499,17 @@ export class AgentSessions {
     }
     async interrupt(id: string, owner: string) {
         const s = this.get(id, owner);
+        if (this.turnApprovals.has(s.id)) { this.cancelTurnApproval(s); return this.view(s); }
         if (s.status === 'starting' && !s.turnId) throw new Error('Turn is starting; retry Stop shortly');
         if (s.aichatContext) this.toolBridge.cancel(owner, s.conversationId);
         if (ACTIVE.has(s.status) && s.turnId) await this.forSession(s).call('turn/interrupt', { threadId: s.threadId, turnId: s.turnId });
         return this.view(s);
+    }
+    private cancelTurnApproval(s: Session) {
+        const gate = this.turnApprovals.get(s.id);
+        if (!gate) return;
+        this.turnApprovals.delete(s.id); s.pending = []; s.status = 'interrupted';
+        s.submissions[gate.requestId] = { state: 'rejected' }; this.emit(s);
     }
     async update(id: string, owner: string, input: any) {
         const s = this.get(id, owner);
@@ -487,7 +538,7 @@ export class AgentSessions {
     configureAutoApproval(id: string, owner: string, enabled: boolean) {
         const s = this.get(id, owner);
         if (!enabled) { this.autoApproval.delete(id); return; }
-        if (s.approvalMode) throw Error('Independent Codex approval cannot be overridden by automatic approval');
+        if (s.approvalMode) throw Error('Independent approval cannot be overridden by automatic approval');
         if (s.mode === 'plan') throw Error('Plan sessions cannot auto-approve operations');
         this.autoApproval.add(id);
         for (const request of [...s.pending]) {
@@ -512,6 +563,14 @@ export class AgentSessions {
         } else {
             result = { decision: approvalDecision(s.backend, p, input.decision) };
         }
+        const gate = this.turnApprovals.get(s.id);
+        if (gate && p.id === 'turn:' + gate.requestId) {
+            if (result.decision !== 'accept') { this.cancelTurnApproval(s); return this.view(s); }
+            // Consume the authorization synchronously before any provider I/O.
+            this.turnApprovals.delete(s.id); s.pending = s.pending.filter(x => x !== p); s.status = 'starting'; this.emit(s);
+            void gate.execute().catch(() => { /* executeTurn publishes a definite error or uncertain receipt. */ });
+            return this.view(s);
+        }
         this.forSession(s).respond(p.id, result); s.pending = s.pending.filter(x => x !== p); s.status = s.pending.length ? 'waiting' : 'running'; this.emit(s); return this.view(s);
     }
     subscribe(id: string, owner: string, listener: (event: any) => void) {
@@ -528,15 +587,25 @@ export class AgentSessions {
             // Unknown interactive requests cannot hang or silently gain privileges.
             this.adapterFor(backend).respond(message.id, message.method === 'item/tool/call' ? { success: false, contentItems: [] } : { decision: 'decline' }); return;
         }
-        const explicitApproval = s.backend === 'codex' && !!s.approvalMode;
-        const readOnly = explicitApproval && (s.approvalMode === 'read-only' || s.mode !== 'craft');
+        const explicitApproval = !!s.approvalMode;
+        if (s.backend !== 'codex' && usesToolApproval(s.approvalMode)) {
+            const decision = toolApprovalDecision(s.approvalMode!, message);
+            // Ask/Plan restrictions still take precedence over automatic approval.
+            if (decision && !(decision === 'accept' && s.mode !== 'craft' && message.params?.approvalKind !== 'read')) {
+                this.forSession(s).respond(message.id, message.method === 'item/permissions/requestApproval'
+                    ? { permissions: decision === 'accept' ? message.params?.permissions || {} : {}, scope: 'turn' }
+                    : { decision });
+                return;
+            }
+        }
+        const readOnly = s.backend === 'codex' && explicitApproval && (s.approvalMode === 'read-only' || s.mode !== 'craft');
         if (readOnly && message.method !== 'item/tool/requestUserInput') {
             this.forSession(s).respond(message.id, message.method === 'item/permissions/requestApproval'
                 ? { permissions: {}, scope: 'turn' }
                 : { decision: message.method === 'item/commandExecution/requestApproval' && message.params?.readOnly === true && !message.params?.requiresUserDecision ? 'accept' : 'decline' });
             return;
         }
-        if ((!explicitApproval && this.autoApproval.has(s.id) || explicitApproval && s.approvalMode === 'never') && canAutoApprove(message)) {
+        if ((!explicitApproval && this.autoApproval.has(s.id) || explicitApproval && s.approvalMode === 'never' && s.mode === 'craft') && canAutoApprove(message)) {
             this.forSession(s).respond(message.id, message.method === 'item/permissions/requestApproval'
                 ? { permissions: message.params?.permissions || {}, scope: 'turn' }
                 : { decision: 'accept' });
@@ -545,7 +614,7 @@ export class AgentSessions {
         // AIChat sessions default to Full access across all adapters. ACP and
         // Claude can still request tool approval despite approvalPolicy=never.
         // Actual questions remain interactive; unknown requests stay rejected.
-        if (!explicitApproval && agentMode(s.mode) === 'craft' && message.method !== 'item/tool/requestUserInput' && !message.params?.requiresUserDecision) {
+        if (!explicitApproval && agentMode(s.mode) === 'craft' && canAutoApprove(message)) {
             this.forSession(s).respond(message.id, message.method === 'item/permissions/requestApproval'
                 ? { permissions: message.params?.permissions || {}, scope: 'turn' }
                 : { decision: 'accept' });
@@ -596,6 +665,7 @@ export class AgentSessions {
         for (const timer of this.flushTimers.values()) clearTimeout(timer);
         this.flushTimers.clear();
         for (const listeners of this.listeners.values()) for (const listener of listeners) listener({ closed: true });
+        this.turnApprovals.clear();
         this.listeners.clear(); for (const adapter of Object.values(this.adapters)) adapter.close();
     }
 }

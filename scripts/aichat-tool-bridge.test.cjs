@@ -146,3 +146,67 @@ test('GitLab and Bitbucket directory listings follow pagination without forwardi
         assert.deepEqual(pages, [1,2]); assert.ok(JSON.stringify(result).includes('2-0'));
     }
 });
+
+for (const scenario of ['approve', 'reject', 'cancel', 'abort', 'revoke', 'disconnect', 'revision', 'policy', 'backend', 'timeout']) {
+    test(`daemon backend approval ${scenario} retains original arguments and dispatches at most once`, async t => {
+        const bridge = new AichatToolBridge(40); t.after(() => bridge.close());
+        bridge.register('owner', 'chat', binding());
+        let mode = 'ask', executions = [];
+        bridge.setApprovalPolicy(() => mode);
+        bridge.setBackend('owner', 'chat', [{ name: 'workspace_file', description: 'files', inputSchema: { type: 'object' } }], async (_name, args) => {
+            executions.push(args); return { content: [{ type: 'text', text: 'executed' }] };
+        });
+        const stream = new Stream(); bridge.attach('owner', 'chat', 'page', 'gen', stream);
+        const controller = new AbortController(), args = { operation: 'write', path: 'file.txt', content: 'original' };
+        const pending = bridge.invoke('owner', 'chat', 'workspace_file', args, controller.signal);
+        args.content = 'changed after dispatch';
+        const request = stream.requests()[0];
+        assert.equal(request.name, 'aichat_approve_tool');
+        assert.equal(request.arguments.approvalKind, 'edit');
+        assert.equal(request.arguments.approvalMode, 'ask');
+        assert.equal(request.approvalMode, 'ask');
+        assert.equal(executions.length, 0);
+        if (scenario === 'cancel') bridge.cancel('owner', 'chat');
+        else if (scenario === 'abort') controller.abort();
+        else if (scenario === 'revoke') bridge.revoke('owner');
+        else if (scenario === 'disconnect') stream.end();
+        else if (scenario === 'revision') bridge.register('owner', 'chat', { ...binding(), revision: 'v2' });
+        else if (scenario === 'policy') mode = 'readonly';
+        else if (scenario === 'backend') bridge.setBackend('owner', 'chat', [{ name: 'workspace_file', description: 'replacement files', inputSchema: { type: 'object' } }], async () => { executions.push('replacement'); return {}; });
+        if (['approve', 'reject', 'revision', 'policy', 'backend'].includes(scenario)) {
+            assert.throws(() => bridge.result('other-owner', 'chat', { ...request, result: { content: [{ type: 'text', text: '{"approved":true}' }] } }), /context|Reconnect|Expired/i);
+            bridge.result('owner', 'chat', { ...request, result: { content: [{ type: 'text', text: JSON.stringify({ approved: scenario !== 'reject' }) }] } });
+            assert.throws(() => bridge.result('owner', 'chat', { ...request, result: { content: [{ type: 'text', text: '{"approved":true}' }] } }), /Expired/);
+        }
+        const result = await pending;
+        assert.equal(executions.length, scenario === 'approve' ? 1 : 0);
+        if (scenario === 'timeout') {
+            const frames = stream.writes.filter(frame => frame.startsWith('event: cancel')).map(frame => JSON.parse(frame.split('data: ')[1]));
+            assert.deepEqual(frames, [{ callId: request.callId, pageId: request.pageId, generation: request.generation }]);
+            assert.throws(() => bridge.result('owner', 'chat', { ...request, result: { content: [{ type: 'text', text: '{"approved":true}' }] } }), /Expired/);
+        }
+        if (scenario === 'approve') assert.equal(executions[0].content, 'original');
+        else assert.equal(result.isError, true);
+    });
+}
+
+test('backend edit/auto grants only expected kinds; readonly blocks mutations without contacting page', async t => {
+    const bridge = new AichatToolBridge(40); t.after(() => bridge.close());
+    bridge.register('owner', 'chat', binding());
+    let mode = 'readonly', count = 0;
+    bridge.setApprovalPolicy(() => mode);
+    bridge.setBackend('owner', 'chat', [{ name: 'workspace_file', description: 'files', inputSchema: { type: 'object' } }], async () => {
+        count++; return { content: [{ type: 'text', text: 'done' }] };
+    });
+    assert.equal((await bridge.invoke('owner', 'chat', 'workspace_file', { operation: 'write' })).isError, true);
+    assert.equal(count, 0);
+    for (const value of ['readonly', 'ask', 'edit', 'auto']) {
+        mode = value;
+        assert.equal((await bridge.invoke('owner', 'chat', 'workspace_file', { operation: 'read' })).isError, undefined);
+    }
+    for (const value of ['edit', 'auto']) {
+        mode = value;
+        assert.equal((await bridge.invoke('owner', 'chat', 'workspace_file', { operation: 'write' })).isError, undefined);
+    }
+    assert.equal(count, 6);
+});

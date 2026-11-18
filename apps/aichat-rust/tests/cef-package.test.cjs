@@ -41,6 +41,34 @@ function minimalManifest() {
     version: '0.2.41', cefVersion: '109.1.2', chromiumMajor: 109, minWindows: [6, 1, 7601], size: 100, unpackedSize: 5, sha256: 'a'.repeat(64), files };
 }
 
+test('service-only launcher arguments are advertised only by hosts implementing that optional contract', t => {
+  for (const value of [undefined, 1, 2, true, '1']) {
+    const f = fixture(t);
+    if (value !== undefined) f.host.serviceLauncher = value;
+    fs.writeFileSync(f.hostFile, JSON.stringify(f.host));
+    const result = packageCef(f.options);
+    assert.equal(result.manifest.serviceLauncher, value === 1 ? 1 : undefined);
+    assert.deepEqual(verifyEnvelope(result.envelope, key.publicKey), result.manifest);
+  }
+});
+
+test('native restart and updater actions require a separately signed supported maintenance contract', t => {
+  for (const value of [undefined, null, 1, 2, true, '1']) {
+    const f = fixture(t);
+    if (value !== undefined) f.host.maintenance = value;
+    fs.writeFileSync(f.hostFile, JSON.stringify(f.host));
+    const result = packageCef(f.options);
+    assert.equal(result.manifest.maintenance, value === 1 ? 1 : undefined);
+    assert.equal(result.manifest.serviceLauncher, undefined, 'optional host contracts remain independent');
+    assert.deepEqual(verifyEnvelope(result.envelope, key.publicKey), result.manifest);
+    if (value === 1) {
+      const altered = { ...result.envelope, payload: result.envelope.payload.replace('"maintenance":1', '"maintenance":2') };
+      assert.throws(() => verifyEnvelope(altered, key.publicKey), /signature/,
+        'editing a capability cannot grant unsigned native maintenance actions');
+    }
+  }
+});
+
 test('release signatures authenticate exact payload bytes and reject tampering and other keys', () => {
   const manifest = minimalManifest(), envelope = signManifest(manifest, key.privateKey);
   assert.deepEqual(verifyEnvelope(envelope, key.publicKey), manifest);

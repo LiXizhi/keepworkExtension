@@ -5,6 +5,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
+// Windows PowerShell can take over 10 seconds to start on ARM64.
+// Keep failures bounded without reporting an incomplete folder list as success.
+const WINDOWS_QUERY_TIMEOUT_MS = process.arch === 'arm64' ? 60000 : 10000;
 export const FOLDER_BROWSER_API = 'folders-v1';
 async function directory(p: string): Promise<boolean> {
     try { return (await fs.stat(p)).isDirectory(); } catch { return false; }
@@ -12,7 +15,7 @@ async function directory(p: string): Promise<boolean> {
 // Fixed scripts only: browser input is never interpolated into a shell command.
 async function windowsInfo(): Promise<{ folders: Record<string, string>; drives: string[] }> {
     const script = "$k=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders'; $f=@{}; foreach($p in $k.PSObject.Properties){if($p.Value -is [string]){$f[$p.Name]=[Environment]::ExpandEnvironmentVariables($p.Value)}}; @{folders=$f;drives=@([System.IO.DriveInfo]::GetDrives() | ForEach-Object {$_.Name})} | ConvertTo-Json -Compress";
-    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' + script], { windowsHide: true, timeout: 10000 });
+    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();' + script], { windowsHide: true, timeout: WINDOWS_QUERY_TIMEOUT_MS });
     return JSON.parse(stdout);
 }
 export async function folderLocations() {
@@ -62,7 +65,7 @@ export async function browseFolders(raw: string, options: { hidden?: boolean; fi
     let hiddenNames = new Set<string>();
     if (process.platform === 'win32') {
         // Pass the path as environment data, never as PowerShell source.
-        const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); ConvertTo-Json -Compress -InputObject @([System.IO.DirectoryInfo]::new($env:KEEPWORK_BROWSE_PATH).EnumerateFileSystemInfos() | Where-Object {($_.Attributes -band [System.IO.FileAttributes]::Hidden) -ne 0} | ForEach-Object {$_.Name})"], { windowsHide: true, timeout: 10000, env: { ...process.env, KEEPWORK_BROWSE_PATH: current } });
+        const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); ConvertTo-Json -Compress -InputObject @([System.IO.DirectoryInfo]::new($env:KEEPWORK_BROWSE_PATH).EnumerateFileSystemInfos() | Where-Object {($_.Attributes -band [System.IO.FileAttributes]::Hidden) -ne 0} | ForEach-Object {$_.Name})"], { windowsHide: true, timeout: WINDOWS_QUERY_TIMEOUT_MS, env: { ...process.env, KEEPWORK_BROWSE_PATH: current } });
         hiddenNames = new Set(JSON.parse(stdout || '[]'));
     }
     const entries: { name: string; path: string; hidden: boolean; symlink: boolean }[] = [];

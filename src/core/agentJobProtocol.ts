@@ -7,6 +7,14 @@ export type AgentJobCapability = {
     source?:'built-in'|'grant'|string;
 };
 
+export type AgentJobActionSpec = {
+    requiredNodes?:string[];
+    requiredOutputFields?:string[];
+    defaultMaxSteps?:number;
+    defaultTokenBudget?:number;
+    requiresEvidence?:boolean;
+};
+
 export type AgentJobCapabilities = {
     protocol?:typeof AGENT_JOB_PROTOCOL|string;
     roles?:AgentJobCapability[];
@@ -14,6 +22,17 @@ export type AgentJobCapabilities = {
     statuses?:string[];
     actions?:string[];
     result?:{schemaVersion?:number;evidenceRequired?:boolean};
+    actionSpecs?:Record<string,AgentJobActionSpec>;
+    budgetEnforcement?:boolean;
+};
+
+export type AgentJobContext = {
+    recentMessages?:Array<Record<string,unknown>>;
+    leadScore?:Record<string,unknown>|null;
+    knowledgeCandidates?:Array<Record<string,unknown>>;
+    customerMemories?:Array<Record<string,unknown>>;
+    budget?:{maxSteps?:number;stepsUsed?:number;tokenBudget?:number;tokensUsed?:number};
+    actionSpec?:AgentJobActionSpec|null;
 };
 
 export type AgentJobRecord = {
@@ -24,8 +43,11 @@ export type AgentJobRecord = {
     version?:number;
     subject_module?:string;
     subject_id?:string;
+    parent_job_id?:string|null;
+    cause_event?:string|null;
     payload_json?:string;
     payload?:Record<string,unknown>;
+    context?:AgentJobContext;
     [key:string]:unknown;
 };
 

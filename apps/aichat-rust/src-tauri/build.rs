@@ -31,18 +31,29 @@ fn main() {
             .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+        println!("cargo:rustc-link-lib=framework=ImageIO");
+        println!("cargo:rerun-if-changed=src/app/screenshot_macos.m");
         let mut native = cc::Build::new();
         if std::env::var_os("CARGO_FEATURE_DEV_BINS").is_some() {
+            native.file("src/app/screenshot_fixture_macos.m");
+            println!("cargo:rerun-if-changed=src/app/screenshot_fixture_macos.m");
             native.file("src/app/startup_smoke_macos.m");
             println!("cargo:rerun-if-changed=src/app/startup_smoke_macos.m");
         }
         native
+            .file("src/app/screenshot_macos.m")
             .file("src/navigation_macos.m")
             .file("src/local_mcp_macos.m")
             .file("src/browser_surface_macos.m")
             .file("src/app/native_startup_macos.m")
+            .file("src/app/main_minimize_macos.m")
+            .file("src/app/pet_overlay_macos.m")
+            .file("src/app/remote_phone_macos.m")
             .file("src/remote_voice/native_input_macos.m")
+            .file("src/remote_voice/highlight_macos.m")
             .file("src/remote_voice/buttons_macos.m")
+            .file("src/remote_voice/power_macos.m")
             .file("src/remote_voice/paired_macos.m")
             .flag("-fobjc-arc")
             .compile("keepwork_frame_navigation");
@@ -50,8 +61,15 @@ fn main() {
         println!("cargo:rerun-if-changed=src/local_mcp_macos.m");
         println!("cargo:rerun-if-changed=src/browser_surface_macos.m");
         println!("cargo:rerun-if-changed=src/app/native_startup_macos.m");
+        println!("cargo:rerun-if-changed=src/app/main_minimize_macos.m");
+        println!("cargo:rerun-if-changed=src/app/pet_overlay_macos.m");
+        println!("cargo:rerun-if-changed=src/app/remote_phone_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/native_input_macos.m");
+        println!("cargo:rerun-if-changed=src/remote_voice/highlight_macos.m");
+        println!("cargo:rerun-if-changed=src/remote_voice/chromium_ax_macos.h");
         println!("cargo:rerun-if-changed=src/remote_voice/buttons_macos.m");
+        println!("cargo:rerun-if-changed=src/remote_voice/hid_transport_macos.h");
+        println!("cargo:rerun-if-changed=src/remote_voice/power_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/paired_macos.m");
     }
     #[cfg(windows)]

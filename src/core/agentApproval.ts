@@ -6,6 +6,19 @@ export function canAutoApprove(request: any): boolean {
     return !Array.isArray(options) || options.includes('accept');
 }
 
+/** Adapter-provided protocol kinds, never guessed from shell text or titles. */
+export function toolApprovalKind(request: any): 'read' | 'edit' | 'command' | 'other' {
+    const kind = request.params?.approvalKind;
+    return ['read', 'edit', 'command'].includes(kind) ? kind : 'other';
+}
+export function toolApprovalDecision(mode: string, request: any): 'accept' | 'decline' | undefined {
+    if (request.method === 'item/tool/requestUserInput') return;
+    const kind = toolApprovalKind(request);
+    if (mode === 'readonly' && kind !== 'read') return 'decline';
+    if (request.params?.requiresUserDecision || !canAutoApprove(request)) return;
+    if (kind === 'read' || mode === 'auto' || mode === 'edit' && kind === 'edit') return 'accept';
+}
+
 function prefix(decision: any): string[] | undefined {
     if (!decision || typeof decision !== 'object' || Array.isArray(decision)
         || Object.keys(decision).length !== 1) return;

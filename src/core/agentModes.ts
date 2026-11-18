@@ -1,17 +1,31 @@
 export type AgentMode = 'craft' | 'ask' | 'plan';
 export const CODEX_APPROVAL_MODES = ['default', 'on-request', 'untrusted', 'never', 'read-only'] as const;
 export type CodexApprovalMode = Exclude<typeof CODEX_APPROVAL_MODES[number], 'default'>;
-export function agentApprovalMode(value: unknown, backend = 'codex'): CodexApprovalMode | undefined {
+export const APP_APPROVAL_MODES = ['default', 'app', 'never'] as const;
+export const TOOL_APPROVAL_MODES = ['default', 'app', 'never', 'ask', 'edit', 'auto', 'readonly'] as const;
+export type AgentApprovalMode = CodexApprovalMode | Exclude<typeof TOOL_APPROVAL_MODES[number], 'default'>;
+export function usesToolApproval(mode?: AgentApprovalMode) {
+    return mode === 'ask' || mode === 'edit' || mode === 'auto' || mode === 'readonly';
+}
+export function agentApprovalCapabilities(backend: string) {
+    return backend === 'codex' ? { approvalModes: CODEX_APPROVAL_MODES } : {
+        approvalModes: ['trae', 'gemini'].includes(backend) ? APP_APPROVAL_MODES : TOOL_APPROVAL_MODES,
+        approvalScope: ['trae', 'gemini'].includes(backend) ? 'turn' : 'tool',
+    };
+}
+export function agentApprovalMode(value: unknown, backend = 'codex'): AgentApprovalMode | undefined {
     if (value === undefined) return;
-    if (backend !== 'codex') throw new Error('UNSUPPORTED_FEATURE: independent approval is only available for Codex');
-    if (!CODEX_APPROVAL_MODES.includes(value as any)) throw new Error('Unsupported Codex approval mode');
-    return value === 'default' ? undefined : value as CodexApprovalMode;
+    const modes = agentApprovalCapabilities(backend).approvalModes;
+    if (!(modes as readonly unknown[]).includes(value)) throw new Error('UNSUPPORTED_FEATURE: Unsupported agent approval mode');
+    return value === 'default' ? undefined : value as AgentApprovalMode;
 }
 export function agentMode(value: unknown = 'craft'): AgentMode {
     if (value === 'craft' || value === 'ask' || value === 'plan') return value;
     throw new Error('Unsupported agent mode');
 }
-export function agentAccess(mode: AgentMode, approvalMode?: CodexApprovalMode, roots: string[] = []) {
+export function agentAccess(mode: AgentMode, approvalMode?: AgentApprovalMode, roots: string[] = [], backend = 'codex') {
+    // Other providers retain their native permissions; these are Codex sandbox policies.
+    if (backend !== 'codex') approvalMode = undefined;
     if (approvalMode) {
         // Explicit choices never turn Ask/Plan into write-capable modes.
         if (mode !== 'craft' || approvalMode === 'read-only')

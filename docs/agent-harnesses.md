@@ -3,7 +3,7 @@
 Optional image contract: health advertises `agentImageTurnApi: "v1"`. POST `/agents/sessions/{id}/image-turns` uses the existing authenticated turn contract plus a required `images` array of 1–4 inline PNG/JPEG/WebP/GIF data URLs, 4 MiB combined. ACP requires `promptCapabilities.image`; text-only adapters reject before submitting. The legacy `turns` request remains unchanged.
 
 `src/core/agentSessions.ts` owns sessions; `codexHarness.ts` implements the stdio
-Codex adapter; `acpHarness.ts` adapts native ACP servers; `claudeHarness.ts` adapts Claude bidirectional stream-json; `antigravityHarness.ts` adapts native agy NDJSON under the stable `gemini` persistence key. `src/mcp/agentHttp.ts` exposes the API on the shared daemon.
+Codex adapter; `acpHarness.ts` adapts native ACP servers; `claudeHarness.ts` adapts Claude bidirectional stream-json; `antigravityHarness.ts` adapts native agy NDJSON under the stable `gemini` persistence key; `traeHarness.ts` adapts open-source Trae Agent one-shot runs under the stable `trae` key. `src/mcp/agentHttp.ts` exposes the API on the shared daemon.
 Native CLI sessions have no KP Local Helper or editor-window dependency. Optional
 Copilot custom-model sessions require the VS Code model bridge described below.
 
@@ -40,11 +40,12 @@ flowchart LR
     Browser[AIChat browser] --> HTTP[Shared loopback /agents API]
     Desktop[AIChat Desktop] --> HTTP
     HTTP --> Sessions[AgentSessions registry and overlap warnings]
-    Sessions --> Adapter[HarnessAdapter / CodexHarness / AcpHarness / ClaudeHarness / AntigravityHarness]
+    Sessions --> Adapter[HarnessAdapter / CodexHarness / AcpHarness / ClaudeHarness / AntigravityHarness / TraeHarness]
     Adapter -->|hidden stdio| Codex[Codex App Server]
     Adapter -->|Claude stream-json| Claude[Claude Code native CLI]
-    Adapter -->|ACP stdio| CLIs[Cursor / Trae / Qwen / Kimi / OpenCode / CodeBuddy / Copilot / DeepSeek]
+    Adapter -->|ACP stdio| CLIs[Cursor / Qwen / Kimi / OpenCode / CodeBuddy / Copilot / DeepSeek]
     Adapter -->|native NDJSON| Antigravity[Antigravity CLI: agy]
+    Adapter -->|run + trajectory| Trae[Trae Agent: trae-cli]
     Adapter --> CopilotRouter[CopilotHarness: native + optional editor models]
     CopilotRouter -->|isolated BYOK ACP process| EditorCLI[Copilot CLI tools and sessions]
     EditorCLI -->|authenticated loopback Chat Completions| EditorBridge[VS Code modelBridge]
@@ -300,8 +301,8 @@ Offline mode coverage: `node --test scripts/agent-modes.test.cjs`.
 Codex additionally supports optional independent approval. Health advertises
 `agentApprovalApi: "codex-v1"` and its targeted backend status includes
 `approvalModes: ["default", "on-request", "untrusted", "never", "read-only"]`.
-Session creation and turns accept `approvalMode`; other backends and unknown
-values fail explicitly. Omitted creation retains legacy mode behavior. Omitted
+Session creation and turns accept `approvalMode`; unsupported backend/mode
+combinations and unknown values fail explicitly. Omitted creation retains legacy mode behavior. Omitted
 turns retain the saved session policy; `default` deliberately resets it. Resume
 uses the saved policy. A running turn never changes policy or replays on a menu
 change. Existing clients and sessions with no explicit policy retain their prior
@@ -327,6 +328,68 @@ downgrade after the health check: an older handler rejects the route, never
 silently ignores the policy. Unsupported routes are definite rejections with no
 legacy fallback or automatic retry. Original routes still accept the optional
 field for compatible integrations.
+
+Other supported backends advertise
+`approvalModes` together with `approvalScope` in
+their backend status. Negotiate these fields for the selected backend; the
+existing `agentApprovalApi: "codex-v1"` alone does not establish support for
+another backend. `default` retains the legacy behavior above. Explicit `app`
+disables legacy Craft/programmatic auto-accept, and explicit `never` keeps
+automatic approval subject to the selected conversation mode and native policy.
+These modes do not provide Codex's workspace sandbox, network restrictions or
+native command classification. Ask/Plan and operating-system restrictions
+continue to apply; approval never grants access beyond an existing capability.
+
+WorkBuddy/CodeBuddy, DeepSeek Harness, Qwen Code, Kimi CLI, Cursor, Copilot,
+Claude Code and OpenCode use `approvalScope: "tool"` and advertise
+`["default", "app", "never", "ask", "edit", "auto", "readonly"]`.
+The four new choices match Keepwork tool approval: `ask` automatically accepts
+known reads and asks about edits, commands and unknown operations; `edit` also
+automatically accepts known file edits; `auto` accepts ordinary permissions;
+`readonly` rejects all commands, writes and unknown operations. Classification
+uses ACP protocol kinds or fixed Claude tool identifiers, never a shell string,
+tool title or model description. Required native questions and decisions remain
+interactive, and no automatic response expands a once-only grant into persistent
+permission. `app` and `never` retain their historical semantics for older clients.
+
+With `app`, `ask`, `edit` or `readonly`, the adapter
+selects an advertised mode that permits native confirmation rather than a
+bypass/YOLO mode. Native tool permission requests become owned pending requests
+in AIChat and pause until the user responds. Native questions remain interactive.
+The CLI determines which operations request permission: this is not a promise
+that every internal read, edit or command produces a prompt.
+
+The original AIChat page applies the captured turn policy to browser tools.
+Daemon-executed workspace file changes and Node native bridge tools that need
+consent emit an owned `aichat_approve_tool` event with the server's `approvalMode`
+and classified `approvalKind`. The page returns only `{approved:true}` inside a
+normal MCP text result; the daemon retains and executes the original arguments.
+Cancellation, timeout, revocation, page/context replacement or a changed policy
+invalidates consent before execution. A missing/offline original page denies
+the operation. `readonly` also filters and rejects writes at the daemon bridge
+boundary, including background `workspace_file` mutations.
+
+Trae Agent and Antigravity CLI use `approvalScope: "turn"` because their current
+headless protocols cannot return interactive tool permission responses. Their
+advertised modes remain `["default", "app", "never"]`; they do not advertise
+the four per-tool policies or imply that whole-turn consent enforces read-only
+execution. Their
+App menu and approval prompt must say that authorization covers the entire
+turn. With `app`, the prompt is held before submission to the CLI; acceptance
+allows that turn and its native tools to run, while rejection or interruption
+does not submit it. This is execution approval, not per-tool interception.
+Native permission denials remain denials; approval does not bypass them.
+
+Non-Codex explicit selections use the same dedicated approval routes. Omission
+on a later turn preserves the saved selection; `default` deliberately resets it.
+A policy cannot change during a running or waiting turn. Responses are bound to
+the owner, session and pending request; an answered request cannot execute twice.
+Disconnect, restart or an uncertain response never automatically submits or
+replays an approved turn. When a peer lacks the selected mode or scope, the UI
+disables that choice and reports the unsupported action without interrupting
+ordinary/default conversations. A rejected dedicated route never falls back to
+an ordinary turn with weaker semantics. Existing clients that omit these fields
+keep their historical behavior.
 
 Transient provider retry errors clear when item output resumes; pending requests
 keep their waiting state even during retry. Raw command results and exit codes
@@ -540,10 +603,10 @@ Paths with spaces are passed as arguments, never concatenated into a shell comma
   under Program Files, LocalAppData and LocalAppData/Programs. Codex versioned
   desktop binaries use the newest file. npm `.cmd` launchers resolve to Node entries,
   including extensionless `bin/codebuddy` files.
-  Cursor also uses `%LOCALAPPDATA%/cursor-agent`. Trae's official locations are
-  `%LOCALAPPDATA%/Programs/TraeCLI/bin` (or `TraeX/bin`), the legacy
-  `%LOCALAPPDATA%/trae-cli/bin`, and `TRAECLI_INSTALL_DIR`. Its `traex.exe` alias
-  and simple sibling-EXE `.cmd` wrapper are resolved without a shell.
+  Cursor also uses `%LOCALAPPDATA%/cursor-agent`. Open-source Trae Agent uses
+  `trae-cli` from PATH or common user executable locations such as `.local/bin`.
+  `KEEPWORK_TRAE_PATH` can select a nonstandard installation. Proprietary
+  `traecli` / `traex` and `TRAECLI_INSTALL_DIR` are not Trae Agent discovery evidence.
 - macOS: `.local/bin`, npm prefixes, Volta, NVM Node versions, `/opt/homebrew/bin`,
   `/usr/local/bin`, `/usr/bin`, `/Applications` and `~/Applications`. Known Codex /
   ChatGPT resource binaries and WorkBuddy / CodeBuddy unpacked CLI entries are checked.
@@ -619,13 +682,56 @@ CodeBuddy use the same engine but have separate backend identities and host cach
 | --- | --- | --- |
 | claude | `claude --print --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio` | [Official headless guide](https://code.claude.com/docs/en/headless), [official SDK transport](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/transport/subprocess_cli.py) |
 | cursor | `agent acp` (also discovers `cursor-agent`) | [Cursor ACP](https://cursor.com/docs/cli/acp) |
-| trae | `traecli acp serve` | [TraeCode ACP](https://docs.trae.cn/cli_agent-client-protocol) |
+| trae | `trae-cli run --file <task> --working-dir <root> --trajectory-file <result> --console-type simple` | [Open-source Trae Agent CLI](https://github.com/bytedance/trae-agent/blob/main/trae_agent/cli.py) |
 | qwen | `qwen --acp` | [Official CLI source](https://github.com/QwenLM/qwen-code/blob/main/packages/cli/src/config/config.ts) |
 | gemini | `agy --input-format stream-json --output-format stream-json` (stable backend key; legacy Gemini histories stay readable) | [Antigravity installation](https://antigravity.google/docs/cli/install/) |
 | kimi | `kimi acp` | [Kimi commands](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html) |
 | codebuddy | `codebuddy --acp` | [CodeBuddy ACP](https://www.codebuddy.cn/docs/cli/acp) |
 | opencode | `opencode acp` | [OpenCode ACP](https://opencode.ai/v2/docs/cli/acp/) |
 | deepseek | `dsh --profile acp` | [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) |
+
+### Open-source Trae Agent
+
+The `trae` backend selects [ByteDance Trae Agent](https://github.com/bytedance/trae-agent),
+whose Python package exports `trae-cli`. It does not select the TRAE IDE or the
+enterprise TraeCode `traecli` / `traex` products. Upstream requires Python 3.12
+or newer; its source setup is `git clone`, then `uv sync --all-extras`. The
+catalog also provides an isolated `uv tool install --python 3.12
+git+https://github.com/bytedance/trae-agent.git` recipe, derived from the package
+entry point and [uv tool documentation](https://docs.astral.sh/uv/guides/tools/).
+These recipes are documented source/package contracts, not native Windows/macOS
+installation acceptance. Git and uv must be installed separately when needed.
+
+Configure the chosen model provider through upstream `trae_config.yaml` or an
+absolute `TRAE_CONFIG_FILE`. Credentials and model selection remain provider
+owned; Keepwork does not read or return the configuration, run `show-config`,
+or accept model-service keys from the browser. `trae-cli --help` is help, not a
+login or a credential check. Authentication remains unknown until supported
+native evidence establishes it. No TRAE enterprise login is required by this
+open-source package.
+
+Trae reports additive backend fields `aichatContext: false`,
+`executionMode: "one-shot"` and `supportedModes: ["craft"]`. A new AIChat client
+uses those explicit fields for plain local-folder Craft tasks and shows the
+limitation before submission. Missing fields retain older peer behavior; the
+client does not infer protocol semantics from product versions. Every explicit
+turn creates an independent native run. Previous prompts, results and native
+tool state are not replayed into the next task. AIChat's owner-scoped transcript
+and request receipts remain readable and reconnect does not repeat a task.
+Existing sessions requiring the former scoped AIChat tool contract cannot
+silently downgrade into independent runs.
+
+Trae's upstream CLI has no ACP, native catalog/load/resume, per-tool approval
+callback, enforced Ask/Plan mode, image-turn or reasoning-effort contract. Those
+requests fail before launch with a bounded feature error. AIChat webpage tools,
+cloud-only workspaces and scoped MCP server binding are unavailable for Trae;
+other harnesses and ordinary operations retain their existing behavior. Older
+AIChat clients that request scoped tools receive an explicit feature error,
+without an automatic plain-task retry. Native task success must be established
+from the completed trajectory, not merely a zero process exit. Interrupted,
+invalid or missing trajectory results do not become successful executions.
+
+### Claude native stream-json
 
 Claude uses one child per native session, `--session-id` for new sessions and
 `--resume` on recovery. Selected reference roots are forwarded with `--add-dir`.
@@ -830,7 +936,8 @@ Generic endpoints: `GET /agents/native-sessions/{backend}?cursor=` and
 | --- | --- |
 | WorkBuddy / CodeBuddy | Read `$CODEBUDDY_CONFIG_DIR/projects` (default `~/.codebuddy/projects`) JSONL; existing ACP load/prompt with original ID/cwd. Shared namespace prevents duplicate owner attachments. |
 | Claude Code | Read `$CLAUDE_CONFIG_DIR/projects` (default `~/.claude/projects`) JSONL; native `--resume` through the stream-json adapter. |
-| Copilot / Cursor / Trae / Qwen / Kimi / OpenCode | Installed ACP v1 must advertise `sessionCapabilities.list` and `loadSession`; list metadata, replay via load, prompt same ID. Unsupported versions fail explicitly. |
+| Copilot / Cursor / Qwen / Kimi / OpenCode | Installed ACP v1 must advertise `sessionCapabilities.list` and `loadSession`; list metadata, replay via load, prompt same ID. Unsupported versions fail explicitly. |
+| Trae Agent (trae key) | No native session catalog/load/resume contract. Existing AIChat transcripts remain readable; every explicit turn launches an independent task. |
 | Antigravity (gemini key) | Native discovery not implemented: installed CLI exposes conversation resume but no verified metadata catalog including cwd. Existing AIChat sessions remain supported. |
 
 Disk projection is bounded to 1,000 recent valid records per provider and the last

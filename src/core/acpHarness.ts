@@ -153,7 +153,12 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         if (m.id !== undefined && this.replaying.has(m.params?.sessionId)) { this.write({id:m.id,error:{code:-32601,message:'Actions are unavailable during history replay'}}); return; }
         if (m.method === 'session/request_permission' && this.active.has(m.params?.sessionId)) {
             this.permissions.set(m.id, m.params);
-            this.emit('request', { id: m.id, method: 'item/commandExecution/requestApproval', params: { threadId: m.params.sessionId, readOnly: ['read', 'search'].includes(m.params.toolCall?.kind), command: m.params.toolCall?.title || 'CLI tool', toolCall: cacheValue(m.params.toolCall || {}), options: m.params.options } });
+            const kinds = (Array.isArray(m.params.options) ? m.params.options : []).map((option: any) => option.kind);
+            const availableDecisions = [...(kinds.includes('allow_once') ? ['accept'] : []),
+                ...(kinds.includes('allow_always') ? ['acceptForSession'] : []), 'decline', 'cancel'];
+            const kind = m.params.toolCall?.kind;
+            const approvalKind = ['read', 'search', 'fetch'].includes(kind) ? 'read' : ['edit', 'delete', 'move'].includes(kind) ? 'edit' : kind === 'execute' ? 'command' : 'other';
+            this.emit('request', { id: m.id, method: 'item/commandExecution/requestApproval', params: { threadId: m.params.sessionId, approvalKind, readOnly: approvalKind === 'read', command: m.params.toolCall?.title || 'CLI tool', toolCall: cacheValue(m.params.toolCall || {}), options: m.params.options, availableDecisions } });
         } else this.write({ id: m.id, error: { code: -32601, message: 'Client method unsupported' } });
     }
     private notify(method: string, threadId: string, params: any) { if (this.replaying.has(threadId)) return; this.emit('notification', { method, params: { threadId, ...params } }); }
@@ -334,10 +339,17 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             const current = option?.currentValue || thread.modes?.currentModeId;
             const plan = choices.find((m: any) => /^(plan(?:[-_]mode)?|architect)$/i.test(m.id) || /^plan(?: mode)?$/i.test(m.name));
             if (!thread.normalMode && current && current !== plan?.id) thread.normalMode = current;
-            const ids = p.mode === 'craft' ? ['bypassPermissions', 'yolo', 'full-access', 'code', 'build', 'agent', 'default', 'ask'] : ['ask', 'default', 'code', 'build', 'agent'];
-            const normal = ids.map(id => choices.find((m: any) => m.id === id)).find(Boolean)
-                || choices.find((m: any) => m.id === thread.normalMode && m.id !== plan?.id && (p.mode === 'craft' || !/bypass|yolo|full.?access|auto.?approve|acceptEdits/i.test(m.id)));
+            const manual = ['app', 'ask', 'edit', 'readonly'].includes(p.approvalMode);
+            const automatic = (m: any) => /bypass|yolo|fullaccess|autoapprove|acceptedits/i.test(`${m.id} ${m.name || ''}`.replace(/[^a-z0-9]/gi, ''));
+            const safe = choices.filter((m: any) => !manual || !automatic(m));
+            const ids = p.mode === 'craft'
+                ? manual ? ['default', 'code', 'build', 'agent', 'ask'] : ['bypassPermissions', 'yolo', 'full-access', 'code', 'build', 'agent', 'default', 'ask']
+                : ['ask', 'default', 'code', 'build', 'agent'];
+            const normal = ids.map(id => safe.find((m: any) => m.id === id)).find(Boolean)
+                || safe.find((m: any) => m.id === thread.normalMode && m.id !== plan?.id && (p.mode === 'craft' || !automatic(m)));
             const selected = p.mode === 'plan' ? plan || normal : normal;
+            if (manual && !selected && (choices.length || current && automatic({ id: current })))
+                throw Object.assign(new Error('UNSUPPORTED_FEATURE: CLI does not advertise a manual permission mode for App approval'), { rpcRejected: true });
             if (!selected && choices.length && p.mode !== 'craft') throw new Error('CLI does not advertise a mode for manual access or planning');
             if (!selected && current && current === plan?.id && p.mode !== 'plan') throw new Error('CLI does not advertise a mode to leave Plan');
             if (selected && selected.id !== current) {
@@ -480,8 +492,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             this.write({ id, result: { outcome } }); this.permissions.delete(id); return;
         }
         const kind = result.decision === 'acceptForSession' ? 'allow_always' : result.decision === 'accept' ? 'allow_once' : 'reject_once';
-        const option = (p.options || []).find((o: any) => o.kind === kind)
-            || (kind === 'allow_once' ? (p.options || []).find((o: any) => o.kind === 'allow_always') : undefined);
+        const option = result.decision === 'cancel' ? undefined : (p.options || []).find((o: any) => o.kind === kind);
         this.write({ id, result: { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } } });
         this.permissions.delete(id);
     }

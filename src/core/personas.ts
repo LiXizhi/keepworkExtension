@@ -344,7 +344,7 @@ export class Personas {
             }
             if(signal.aborted)throw Error('已取消');if(!answer.trim())throw Error('执行器未返回答案');
             if(agentJob && agentJob.reported && !agentJob.asked && !agentJob.finishedJob)throw Error('CRM 作业尚未完成，请核查或提交具体请示后继续');
-            if(agentJob && !agentJob.reported)throw Error('本轮未取得 CRM 作业回执，请核查后恢复');
+            if(agentJob && !agentJob.reported)throw Error(execution?.requested===0?'本轮未调用工具且未取得 CRM 作业回执（已拦截防幻觉），请核查后恢复':'本轮未取得 CRM 作业回执，请核查后恢复');
             if(agentJob && agentJob.state.enabled){agentJob.state.status=agentJob.state.pending?'等你决定':'待巡查';if(!agentJob.asked && agentJob.state.decision && agentJob.state.decision.id===decisionId)agentJob.state.decision.applied=true;}
             job.state='done';job.pending=[];delete job.output;
             p.messages.push({id:job.id+'-answer',role:'assistant',text:answer.slice(0,60000),time:Math.max(Date.now(),(p.messages.at(-1)?.time||0)+1),...(execution?{execution}:{})});

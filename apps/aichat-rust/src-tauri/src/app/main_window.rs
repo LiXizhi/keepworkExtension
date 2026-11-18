@@ -14,6 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{webview::PageLoadEvent, AppHandle, Manager, WebviewWindow};
 
+// Protect both editable WebViews if AppKit supplies the Home function character
+// without a device identity that the native event tap can verify.
+pub(super) const HOME_TEXT_GUARD: &str = include_str!("home_text_guard.js");
+
 pub(super) fn handle_main_page_load(
     event: PageLoadEvent,
     terminals: &TerminalSessionManager,
@@ -28,35 +32,225 @@ pub(super) fn handle_main_page_load(
 }
 
 pub fn show_main_window(app: &AppHandle, core: &AppCore) {
+    core.pet_approval_return.lock().unwrap().take();
     stop_pet_audio(app, core, None, "已打开主窗口，语音输入已停止", false);
     core.page_connection.lock().unwrap().set_foreground(true);
+    super::remote_phone_view::sync(app);
     sync_window_presentation(app, true);
-    if let Some(pet_win) = app.get_webview_window("pet") {
-        let _ = pet_win.hide();
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn handle_dock_reopen(app: &AppHandle, event: &tauri::RunEvent) {
+    // AppKit counts the pet and settings as visible windows. Every explicit
+    // Dock reopen should bring the retained chat window to the front.
+    if matches!(event, tauri::RunEvent::Reopen { .. }) {
+        let handle = app.clone();
+        let _ = run_on_window_thread(app, move || {
+            let core = handle.state::<Arc<AppCore>>();
+            if !core.quitting.load(Ordering::Relaxed) {
+                show_main_window(&handle, &core);
+            }
+        });
     }
 }
 
 pub(super) fn hide_main_window(app: &AppHandle, core: &AppCore) {
+    core.pet_approval_return.lock().unwrap().take();
     core.page_connection.lock().unwrap().set_foreground(false);
     sync_window_presentation(app, false);
+}
+
+pub(super) enum DismissAction {
+    Close,
+    Minimize,
+    RemoteHome,
+}
+
+pub(super) fn dismiss_main_window(app: &AppHandle, core: &Arc<AppCore>, action: DismissAction) {
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
+    }
+    let show_pet = core.settings().pet_visible;
+    if !show_pet {
+        match action {
+            DismissAction::Minimize => return, // Already minimized by the OS.
+            DismissAction::RemoteHome => {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.minimize();
+                }
+                return;
+            }
+            DismissAction::Close => {}
+        }
+    }
+    hide_main_window(app, core);
+    if show_pet {
+        super::pet_host::ensure_pet_window(app, core, true);
+    }
+}
+
+/// Runs on the UI thread so consecutive Home taps see the previous transition.
+pub(super) fn toggle_remote_home(app: &AppHandle) {
+    let core = app.state::<Arc<AppCore>>();
+    if core.quitting.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    if super::pet_home_overlay::handle_home(app, &core, &main) {
+        return;
+    }
+    if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
+        dismiss_main_window(app, &core, DismissAction::RemoteHome);
+    } else {
+        show_main_window(app, &core);
+    }
+}
+
+fn main_did_minimize(app: &AppHandle) {
+    let core = app.state::<Arc<AppCore>>();
+    if core.page_connection.lock().unwrap().presentation() != Presentation::Hidden {
+        dismiss_main_window(app, &core, DismissAction::Minimize);
+    }
+}
+
+// A native restore (for example from the taskbar) can bypass show_main_window.
+fn observe_main_focus(main: &WebviewWindow) {
+    let window = main.clone();
+    main.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Focused(true)) {
+            return;
+        }
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            let app = window.app_handle().clone();
+            let _ = run_on_window_thread(&app, move || {
+                let app = window.app_handle();
+                if !window.is_focused().unwrap_or(false)
+                    || !window.is_visible().unwrap_or(false)
+                    || window.is_minimized().unwrap_or(true)
+                    || !app.get_webview_window("pet")
+                        .is_some_and(|pet| pet.is_visible().unwrap_or(false))
+                {
+                    return;
+                }
+                show_main_window(app, &app.state::<Arc<AppCore>>());
+            });
+        });
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn observe_main_minimize(main: &WebviewWindow) -> Result<(), String> {
+    use std::ffi::c_void;
+
+    extern "C" {
+        fn keepwork_observe_main_minimize(
+            window: *mut c_void,
+            context: *mut c_void,
+            notify: extern "C" fn(*mut c_void),
+            release: extern "C" fn(*mut c_void),
+        );
+    }
+    extern "C" fn notify(context: *mut c_void) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            main_did_minimize(&*context.cast::<AppHandle>());
+        }));
+    }
+    extern "C" fn release(context: *mut c_void) {
+        unsafe { drop(Box::from_raw(context.cast::<AppHandle>())) };
+    }
+
+    let native = main.ns_window().map_err(|error| error.to_string())?;
+    observe_main_focus(main);
+    // Called on the setup thread. The NSWindow owns the observer and its context.
+    let context = Box::into_raw(Box::new(main.app_handle().clone()));
+    unsafe { keepwork_observe_main_minimize(native, context.cast(), notify, release) };
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn observe_main_minimize(main: &WebviewWindow) -> Result<(), String> {
+    let window = main.clone();
+    observe_main_focus(main);
+    // Tao reports both Win32 WM_SIZE and GTK iconification via Resized.
+    main.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Resized(_))
+            || !window.is_minimized().unwrap_or(false)
+        {
+            return;
+        }
+        // Let the native resize callback finish before creating a WebView2
+        // window. A restore can overtake the queued notification.
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            let app = window.app_handle().clone();
+            let _ = app.run_on_main_thread(move || {
+                if window.is_minimized().unwrap_or(false) {
+                    main_did_minimize(window.app_handle());
+                }
+            });
+        });
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn run_on_window_thread<F: FnOnce() + Send + 'static>(
+    _app: &AppHandle,
+    action: F,
+) -> tauri::Result<()> {
+    use std::ffi::c_void;
+
+    extern "C" {
+        fn keepwork_run_window_action(context: *mut c_void, invoke: extern "C" fn(*mut c_void));
+    }
+    extern "C" fn invoke<F: FnOnce()>(context: *mut c_void) {
+        let action = unsafe { Box::from_raw(context.cast::<F>()) };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action));
+    }
+    // The AppKit queue invokes the action exactly once, releasing this box.
+    unsafe { keepwork_run_window_action(Box::into_raw(Box::new(action)).cast(), invoke::<F>) };
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn run_on_window_thread<F: FnOnce() + Send + 'static>(
+    app: &AppHandle,
+    action: F,
+) -> tauri::Result<()> {
+    app.run_on_main_thread(action)
 }
 
 /// Always read the latest visibility intent on the UI thread. Ready, timeout,
 /// single-instance wake and close may have been queued in a different order.
 pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    let _ = run_on_window_thread(app, move || {
         let core = handle.state::<Arc<AppCore>>();
         if core.quitting.load(Ordering::Relaxed) {
             return;
         }
-        let (presentation, failed) = {
+        let (foreground, presentation, failed) = {
             let connection = core.page_connection.lock().unwrap();
             (
+                connection.wants_foreground(),
                 connection.presentation(),
                 connection.snapshot("").phase == Phase::Unavailable,
             )
         };
+        if foreground {
+            if let Some(pet) = handle.get_webview_window("pet")
+                .filter(|pet| pet.is_visible().unwrap_or(true))
+            {
+                if let Err(err) = super::pet_host::dismiss_pet_view(&pet) {
+                    eprintln!("[desktop] Cannot hide desktop pet before showing chat: {err}");
+                    return;
+                }
+            }
+        }
         let main = handle.get_webview_window("main");
         match presentation {
             Presentation::Hidden => {
@@ -77,9 +271,11 @@ pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
                 }
                 if let Some(window) = main {
                     let was_visible = window.is_visible().unwrap_or(false);
-                    let _ = window.show();
                     if focus || !was_visible {
                         let _ = window.unminimize();
+                    }
+                    let _ = window.show();
+                    if focus || !was_visible {
                         let _ = window.set_focus();
                     }
                 }
@@ -93,9 +289,13 @@ pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
                         eprintln!("[desktop] Cannot remove native startup: {error}");
                         return;
                     }
+                    // Restore first: ordering a miniaturized NSWindow front can
+                    // synchronously re-enter Tao's redraw handler from the Dock.
+                    if focus || !was_visible {
+                        let _ = window.unminimize();
+                    }
                     if window.show().is_ok() {
                         if focus || !was_visible {
-                            let _ = window.unminimize();
                             let _ = window.set_focus();
                             if let Some(webview) = handle.get_webview("main") {
                                 let _ = webview.set_focus();

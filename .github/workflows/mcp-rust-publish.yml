@@ -14,7 +14,7 @@ on:
       target:
         type: choice
         required: true
-        options: [macos-arm64, macos-x64, windows-x64, windows-arm64, linux-x64, linux-arm64]
+        options: [macos-arm64, macos-x64, windows-x64, windows-arm64]
       version:
         description: Independent MCP product version (X.Y.Z)
         type: string
@@ -37,7 +37,7 @@ on:
         type: string
         default: package
       report_path:
-        description: Complete portable acceptance report inside the artifact
+        description: Portable report inside the artifact (report-<target>.json for new builds; report.json for legacy artifacts)
         type: string
         default: report.json
 
@@ -105,6 +105,10 @@ jobs:
           ACCEPTANCE: ${{ inputs.acceptance }}
           KP_QINIU_ACCESS_KEY: ${{ secrets.KP_QINIU_ACCESS_KEY }}
           KP_QINIU_SECRET_KEY: ${{ secrets.KP_QINIU_SECRET_KEY }}
+          # Cross-border upload to Qiniu z2: bigger parts, more concurrency.
+          KP_QINIU_PART_SIZE_MB: '16'
+          KP_QINIU_PART_CONCURRENCY: '12'
+          KP_QINIU_PART_TIMEOUT_MS: '300000'
         run: >-
           node apps/mcp-rust/scripts/publish-runtime.cjs
           --release-dir "accepted-runtime/$PACKAGE_PATH" --target "$TARGET"

@@ -3,8 +3,9 @@ const fs = require('node:fs');
 const authMarker = process.argv.find(a => a.startsWith('--auth-marker='))?.slice(14);
 // Cursor snapshots the native login state when its ACP process starts.
 const authenticatedAtStartup = !authMarker || fs.existsSync(authMarker);
-let currentModel = 'fixture', effort = 'medium', mode = 'code';
-const modes = () => ({ currentModeId: mode, availableModes: ['code', 'ask', 'plan'].map(id => ({ id, name: id })) });
+const unsafeModeName = process.argv.find(arg => arg.startsWith('--unsafe-mode-name='))?.slice(19);
+let currentModel = 'fixture', effort = 'medium', mode = unsafeModeName ? 'default' : process.argv.includes('--unsafe-modes') || process.argv.includes('--only-unsafe-modes') ? 'yolo' : 'code';
+const modes = () => ({ currentModeId: mode, availableModes: unsafeModeName ? [{ id: 'default', name: unsafeModeName }] : [...(process.argv.includes('--unsafe-modes') || process.argv.includes('--only-unsafe-modes') ? ['yolo', 'bypassPermissions', 'full-access', 'acceptEdits'] : []), ...(process.argv.includes('--only-unsafe-modes') ? [] : ['code', 'ask', 'plan'])].map(id => ({ id, name: id })) });
 const config = () => [
   ...(process.argv.includes('--mode-config') ? [{id:'mode-config',category:'mode',type:'select',currentValue:mode,options:modes().availableModes.map(m=>({value:m.id,name:m.name}))}] : []),
   {id:'model-config',category:'model',type:'select',currentValue:currentModel,options:[{group:'models',name:'Models',options:[{value:'fixture',name:'Fixture model'},{value:'fast',name:'Fast model'}]}]},
@@ -45,7 +46,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:'中文😀'}});
    if(m.params.prompt[0].text.includes('cursor-question'))return send({id:'cursor-question',method:'cursor/ask_question',params:{toolCallId:'tool',questions:[{id:'q',prompt:'Choose?',options:[{id:'yes',label:'Yes'}]}]}});
    if(m.params.prompt[0].text.includes('cursor-plan'))return send({id:'cursor-plan',method:'cursor/create_plan',params:{toolCallId:'tool',plan:'Review this plan'}});
-   if(m.params.prompt[0].text.includes('permission')) return send({id:'approval',method:'session/request_permission',params:{sessionId:'same-thread',toolCall:{title:'Read local file'},options:[{optionId:'yes',kind:'allow_once'},{optionId:'no',kind:'reject_once'}]}});
+   if(m.params.prompt[0].text.includes('permission')) return send({id:'approval',method:'session/request_permission',params:{sessionId:'same-thread',toolCall:{title:'Read local file'},options:[process.argv.includes('--always-permission') ? {optionId:'persistent',kind:'allow_always'} : {optionId:'yes',kind:'allow_once'},{optionId:'no',kind:'reject_once'}]}});
    if(m.params.prompt[0].text.includes('wait')) return;
    return setTimeout(()=>{
      if(cancelled) return;

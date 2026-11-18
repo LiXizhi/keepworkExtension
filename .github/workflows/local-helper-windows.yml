@@ -21,6 +21,11 @@ env:
   KP_QINIU_DOMAIN: https://cdn.keepwork.com
   KP_QINIU_UPLOAD_HOST: https://up-z2.qiniup.com
   KP_QINIU_PREFIX: keepwork/KeepworkExtension-Windows-Setup/
+  # GitHub-hosted runners upload cross-border; larger parts and more
+  # concurrency raise throughput to Qiniu z2.
+  KP_QINIU_PART_SIZE_MB: '16'
+  KP_QINIU_PART_CONCURRENCY: '12'
+  KP_QINIU_PART_TIMEOUT_MS: '300000'
 
 jobs:
   release-gate:

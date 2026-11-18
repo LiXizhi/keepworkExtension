@@ -7,6 +7,16 @@ export interface DesktopCapabilities {
   readonly defaultBrainFolder: true;
   readonly gitSetup: true;
   readonly floatingPet: true;
+  readonly petApprovalReturnVersion?: 1;
+  readonly desktopScreenshotVersion?: 1;
+  readonly petApprovalRevealVersion?: 1;
+  readonly petReplyPresentationVersion?: 1;
+  readonly petStreamingSpeechVersion?: 1;
+  readonly remoteNarrationPauseVersion?: 1;
+  readonly remoteDialogueVersion?: 1;
+  readonly remotePhoneVersion?: 1;
+  readonly remotePhoneCaptionVersion?: 1;
+  readonly remotePhoneActivityVersion?: 1;
   readonly petDictationAudioVersion?: 1;
   readonly petVoiceAudioVersion?: 1;
   readonly startupSignIn: true;
@@ -120,6 +130,12 @@ export interface AIChatDesktopBridge {
   acknowledgeLaunchIntent?(id: string): Promise<boolean>;
   onLaunchIntent?(callback: () => void): () => void;
   reportStartupSignIn(signedIn: boolean): Promise<boolean>;
+  closeRemoteDialogue?(id: string): Promise<boolean>;
+  captureScreenshot?(): Promise<DesktopScreenshot>;
+  getScreenshotPermission?(): Promise<ScreenshotPermission>;
+  setScreenshotPermission?(enabled: boolean): Promise<ScreenshotPermission>;
+  revealPetApproval?(options?: { returnToPet?: boolean }): Promise<boolean>;
+  returnToPetAfterApproval?(): Promise<boolean>;
   publishPetState(state: Record<string, unknown>): Promise<boolean>;
   petResult(result: Record<string, unknown>): Promise<boolean>;
   petAudio?(op: "start" | "activate" | "stop" | "ack", id: string, seq?: number): Promise<Record<string, unknown>>;
@@ -172,4 +188,12 @@ declare global {
       entryUrl?: string;
     };
   }
+}
+
+export interface DesktopScreenshot {
+  content: [{type: "text"; text: string}, {type: "image"; mimeType: "image/jpeg"; data: string}];
+}
+export interface ScreenshotPermission {
+  alwaysAllowScreenshots: boolean;
+  pending: boolean;
 }

@@ -16,6 +16,11 @@ fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn main() {
+    // The build identity must track every Git state change (new commits, branch
+    // switches, worktree moves). File watching cannot cover all of those, so
+    // always re-run this script; the crate itself still recompiles only when
+    // its sources change.
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -103,10 +108,18 @@ fn main() {
     if let Some(commit) = &commit {
         println!("cargo:rustc-env=KEEPWORK_MCP_BUILD_COMMIT={commit}");
     }
+    let target = std::env::var("TARGET").unwrap();
+    let legacy = target == "x86_64-win7-windows-msvc"
+        || std::env::var_os("CARGO_FEATURE_WIN7_COMPAT").is_some();
+    let variant = if legacy {
+        "\"variant\":\"win7-win8\",\"minWindows\":[6,1,7601],"
+    } else {
+        ""
+    };
     let document = format!(
-        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",\"builtAtUnix\":{},\"builtAtSource\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\",\"agentImageTurnApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
+        "{{\"marker\":\"keepwork-mcp-build-v1\",\"product\":\"keepwork-mcp-runtime\",\"engine\":\"rust\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{}\",\"sourceHash\":\"{}\",{}\"builtAtUnix\":{},\"builtAtSource\":\"{}\",\"capabilities\":{{\"agentSessionApi\":\"v1\",\"agentInventoryApi\":\"v1\",\"agentContextApi\":\"v1\",\"agentModeApi\":\"v1\",\"agentImageTurnApi\":\"v1\"}},\"endMarker\":\"keepwork-mcp-build-end\"}}",
         std::env::var("CARGO_PKG_VERSION").unwrap(), commit.unwrap_or_default(),
-        std::env::var("TARGET").unwrap(), source_hash, built_at_unix, built_at_source
+        target, source_hash, variant, built_at_unix, built_at_source
     );
     std::fs::write(
         Path::new(&std::env::var("OUT_DIR").unwrap()).join("build-info.json"),

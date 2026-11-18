@@ -22,6 +22,17 @@ function validateDesktopPayload(directory, arch) {
   const files = payloadFiles(directory);
   assert.equal(peMachine(path.join(directory, 'aichat-rust.exe')), machines[arch], 'Desktop architecture mismatch');
   for (const file of files) if (/\.(exe|dll)$/i.test(file)) assert.equal(peMachine(file), machines[arch], 'Payload binary architecture mismatch');
+  const runtimeRoot = path.join(directory, 'resources', 'mcp-runtime');
+  const nested = path.join(runtimeRoot, arch);
+  const runtimeDir = fs.existsSync(path.join(nested, 'runtime.json')) ? nested : runtimeRoot;
+  const metadata = path.join(runtimeDir, 'runtime.json');
+  assert.ok(fs.statSync(metadata).size <= 2 * 1024 * 1024, 'Bundled MCP metadata exceeds size limit');
+  const runtime = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+  assert.ok(runtime.schemaVersion === 2 && runtime.product === 'keepwork-mcp-runtime'
+    && runtime.engine === 'rust' && runtime.platform === 'windows' && runtime.arch === arch
+    && runtime.entry === 'bin/keepwork-mcp.exe' && typeof runtime.version === 'string' && runtime.version.trim(),
+    'Compatible installer requires the matching bundled Rust MCP');
+  assert.equal(peMachine(path.join(runtimeDir, 'bin', 'keepwork-mcp.exe')), machines[arch], 'Bundled MCP architecture mismatch');
   return files;
 }
 function main(options) {

@@ -11,11 +11,14 @@ struct Manifest {
   unsigned chromium_major;
   std::uint64_t size, unpacked_size;
   std::vector<FileRecord> files;
+  bool service_launcher = false;
+  bool maintenance = false;
 };
 // Empty means use the existing WebView2 desktop. Unknown/unsupported OS fails.
 std::string select_channel(WindowsVersion os, bool webview_ready);
 Manifest validate_manifest(const std::string& payload, const std::string& channel,
                            const std::string& arch, WindowsVersion os);
+bool newer_cef_host(const Manifest& candidate, const Manifest& current);
 // Returns a normalized relative path, or throws. Directory entries are optional.
 std::string zip_path(const std::string& path, bool directory);
 bool is_sha256(const std::string& value);

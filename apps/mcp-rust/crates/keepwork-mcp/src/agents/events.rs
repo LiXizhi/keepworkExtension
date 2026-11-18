@@ -18,7 +18,7 @@ impl AgentManager {
                     self.acp_update(&session_id, &params["update"]);
                 } else if matches!(
                     harness.protocol(),
-                    Protocol::Codex | Protocol::Claude | Protocol::Antigravity
+                    Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae
                 ) {
                     self.codex_update(&session_id, &method, &params);
                 }
@@ -357,6 +357,9 @@ impl AgentManager {
         let mut visible = params.clone();
         visible["threadId"] = data["threadId"].clone();
         visible["turnId"] = data["turnId"].clone();
+        if data["backend"] != "codex" {
+            visible["approvalKind"] = json!(approval::kind(normalized, params));
+        }
         if acp {
             visible["command"] = params["toolCall"]["rawInput"]
                 .get("command")
@@ -444,6 +447,10 @@ impl AgentManager {
         input: &Value,
     ) -> Result<Value, String> {
         self.view(session_id, owner)?;
+        let configuration = self.sessions.lock().unwrap()[session_id]
+            .configuration
+            .clone();
+        let _configuration = configuration.lock().await;
         let pending_id = input["id"].as_str().ok_or("Request ID required")?;
         // Remove the capability before I/O so simultaneous clicks cannot answer twice.
         let (native_id, native, harness) = {
@@ -461,6 +468,37 @@ impl AgentManager {
                 s.harness.clone().ok_or("Native CLI disconnected")?,
             )
         };
+        if native["method"] == "_aichat/turnApproval" {
+            let decision = input["decision"]
+                .as_str()
+                .ok_or("Invalid approval decision")?;
+            let request_id = native["requestId"].as_str().ok_or("Missing turn receipt")?;
+            self.edit(session_id, |s| {
+                s.data["pending"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|p| p["id"] != pending_id);
+                s.data["status"] = json!(if decision == "accept" {
+                    "starting"
+                } else {
+                    "interrupted"
+                });
+                if decision != "accept" {
+                    s.data["submissions"][request_id]["state"] = json!("rejected");
+                }
+                Ok(())
+            })?;
+            if decision == "accept" {
+                self.dispatch_native_turn(
+                    session_id,
+                    request_id,
+                    &harness,
+                    native["turnParams"].clone(),
+                )
+                .await?;
+            }
+            return self.view(session_id, owner);
+        }
         let result = permission_result(&native, input)?;
         if let Err(error) = harness.respond(native_id, result).await {
             let _ = self.edit(session_id, |s| {
@@ -560,6 +598,9 @@ fn permission_result(native: &Value, input: &Value) -> Result<Value, String> {
         .filter(|d| ["accept", "acceptForSession", "decline", "cancel"].contains(d))
         .ok_or("Invalid approval decision")?;
     if method == "session/request_permission" {
+        if decision == "cancel" {
+            return Ok(json!({"outcome":{"outcome":"cancelled"}}));
+        }
         let kind = match decision {
             "accept" => "allow_once",
             "acceptForSession" => "allow_always",
@@ -1024,6 +1065,11 @@ mod tests {
             permission_result(&native, &json!({"decision":"decline"})).unwrap()["outcome"]
                 ["outcome"],
             "cancelled"
+        );
+        let cancellable = json!({"method":"session/request_permission","params":{"options":[{"kind":"allow_once","optionId":"once"},{"kind":"reject_once","optionId":"reject"}]}});
+        assert_eq!(
+            permission_result(&cancellable, &json!({"decision":"cancel"})).unwrap(),
+            json!({"outcome":{"outcome":"cancelled"}})
         );
         let native = json!({"method":"item/permissions/requestApproval","params":{"permissions":{"network":{"enabled":true}}}});
         assert_eq!(

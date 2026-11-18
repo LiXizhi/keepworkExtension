@@ -1,5 +1,8 @@
 pub mod brain_folder;
 pub mod bridge;
+pub mod browser_surface_policy;
+#[cfg(windows)]
+pub mod browser_surface_windows;
 pub mod deployment;
 pub mod desktop_identity;
 pub mod desktop_lock;

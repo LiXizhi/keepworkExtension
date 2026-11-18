@@ -16,7 +16,11 @@ pub(super) fn broadcast_update_status(app: &AppHandle, core: &AppCore) {
 }
 
 pub fn open_updates_window(app: &AppHandle, core: &Arc<AppCore>) {
+    let theme = core.theme.current();
     if let Some(existing) = app.get_webview_window("updates") {
+        let _ = existing.set_theme(Some(theme.native()));
+        let _ = existing.set_background_color(Some(theme.background()));
+        let _ = existing.eval(theme.document_theme_script());
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
@@ -30,6 +34,9 @@ pub fn open_updates_window(app: &AppHandle, core: &Arc<AppCore>) {
             .inner_size(680.0, 660.0)
             .min_inner_size(560.0, 480.0)
             .resizable(true)
+            .theme(Some(theme.native()))
+            .background_color(theme.background())
+            .initialization_script(&theme.document_theme_script())
             .visible(true)
             .build()
     {

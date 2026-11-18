@@ -21,8 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -48,10 +46,13 @@ jobs:
         run: node scripts/rust-validation-evidence.cjs run --id source-checks-build --level source --output .test-runtime/rust-desktop -- node apps/aichat-rust/scripts/build.mjs
       - name: Native Rust unit tests (host architecture)
         run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-rust --level fixture --output .test-runtime/rust-desktop -- cargo test --locked --manifest-path apps/aichat-rust/src-tauri/Cargo.toml --features dev-bins
+      - name: Check standalone Windows remote voice companion
+        if: runner.os == 'Windows'
+        run: node scripts/rust-validation-evidence.cjs run --id source-checks-windows-companion --level source --output .test-runtime/rust-desktop -- cargo check --locked --manifest-path apps/aichat-rust/windows/remote-voice/Cargo.toml --all-targets
       - name: Node contracts and Windows installer regressions
         # The Windows matrix runs the Windows-only process ownership and NSIS
         # cases, rather than counting macOS platform skips as Windows coverage.
-        run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-node --level fixture --output .test-runtime/rust-desktop -- node --test --test-reporter=tap apps/aichat-rust/tests/*.test.cjs
+        run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-node --level fixture --output .test-runtime/rust-desktop -- node --test --test-concurrency=1 --test-reporter=tap apps/aichat-rust/tests/*.test.cjs scripts/rust-local-release.test.cjs
       - name: Native PTY and lifecycle smoke fixtures
         run: node scripts/rust-validation-evidence.cjs run --id fixture-contracts-smoke --level fixture --output .test-runtime/rust-desktop -- node apps/aichat-rust/scripts/smoke.cjs
       - name: Save honest release acceptance summary

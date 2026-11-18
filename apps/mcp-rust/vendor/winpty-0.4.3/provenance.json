@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "product": "winpty",
+  "version": "0.4.3",
+  "license": "MIT",
+  "project": "https://github.com/rprichard/winpty",
+  "source": "https://github.com/rprichard/winpty/releases/download/0.4.3/winpty-0.4.3-msvc2015.zip",
+  "sourceSize": 2375169,
+  "sourceSha256": "35a48ece2ff4acdcbc8299d4920de53eb86b1fb41e64d2fe5ae7898931bcee89",
+  "archiveDirectory": "x64/bin",
+  "conversion": "Unmodified official x64 MSVC 2015 release binaries, statically linked CRT; no Node or ConPTY dependency.",
+  "files": {
+    "x64/winpty.dll": {
+      "size": 640000,
+      "sha256": "936f611c2129600d35ab7aad45546a837f4f3a9ca7f673e5d66b48c313b9cd75"
+    },
+    "x64/winpty-agent.exe": {
+      "size": 727552,
+      "sha256": "9add1a61155ec47cf6f347faf776b746eebbde1dc9360d81b8a909da34650642"
+    },
+    "LICENSE": {
+      "size": 1085,
+      "sha256": "c39e428064b4f3e4fe81a975bf0fd3b845922b431bc4d9a7ffc8bfb091981836"
+    }
+  }
+}

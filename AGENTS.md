@@ -233,7 +233,7 @@ Commands: `keepwork.openMcpWorkspace`, `keepwork.changeMcpWorkspace`, `keepwork.
 ### Rust desktop release tags (`apps/aichat-rust`)
 
 - Standing user requirement (2026-11-13): new AIChat Rust desktop releases use standard `v<major>.<minor>.<patch>` Git tags, for example `v0.2.112`, matching the desktop version in all four manifests. Do not create new `aichat-rust-v*` tags.
-- Record the release procedure in [apps/aichat-rust/README.md](apps/aichat-rust/README.md#github-release-与-cdn-下载地址). Keep `.github/workflows/aichat-rust-windows-release.yml` as the single desktop workflow: it validates PRs and `main` pushes through `rust-desktop-validation.yml` and builds installers there, but publication still requires manual dispatch on the release tag. Changing this naming convention does not authorize a push or publication and must not add automatic publication triggers.
+- Record the release procedure in [apps/aichat-rust/README.md](apps/aichat-rust/README.md#github-release-与-cdn-下载地址). Keep `.github/workflows/aichat-rust-windows-release.yml` as the single desktop workflow: PRs use `rust-desktop-validation.yml`; manual dispatch builds installers and, on a release tag, prepares the combined release artifact. For `rust-release`, download desktop and MCP artifacts on this device through `http://127.0.0.1:7890`, then publish to Qiniu directly from this device using the local helpers in [.github/skills/rust-release](.github/skills/rust-release/SKILL.md). GitHub builds must not publish desktop CDN assets or expose a Release before local verification. Changing the procedure does not authorize a push or publication and must not add automatic publication triggers.
 - Preserve historical `aichat-rust-v*` tags, Releases and download URLs. Keep explicit legacy-tag support for rerunning an existing historical release; do not rename, move, delete or recreate historical tags or Releases to change their display order. A standard tag improves version recognition but does not guarantee GitHub's ordering of all historical releases; the `Latest` marker is separate from list order.
 - This convention applies only to `apps/aichat-rust`. Other products retain their independent versions and tag conventions (including the extension's `keepwork-v*` tags).
 
@@ -378,7 +378,9 @@ loopback model bridge (never the terminal credential). Validate with
 
 `src/core/agentSessions.ts` and `src/mcp/agentHttp.ts` expose the shared owned `/agents`
 surface. `codexHarness.ts` handles Codex; `acpHarness.ts` handles WorkBuddy (CodeBuddy
-ACP engine), Copilot, Cursor, Trae, Qwen, Kimi and OpenCode.
+ACP engine), Copilot, Cursor, Qwen, Kimi and OpenCode.
+`traeHarness.ts` adapts open-source Trae Agent (`trae-cli run`) as independent local
+Craft tasks under the stable `trae` key; it does not use proprietary `traecli` ACP.
 `antigravityHarness.ts` implements native `agy` stream-json under the stable `gemini`
 backend key. Legacy Gemini ACP history stays readable and cannot resume in agy.
 Windows discovery uses `%LOCALAPPDATA%/agy/bin`; the override is `KEEPWORK_ANTIGRAVITY_PATH`.

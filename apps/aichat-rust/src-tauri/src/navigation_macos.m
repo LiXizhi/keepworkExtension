@@ -2,6 +2,11 @@
 #import <objc/runtime.h>
 #include <stdbool.h>
 
+bool keepwork_webview_url(void *raw, char *buffer, size_t size) {
+    WKWebView *view = (__bridge WKWebView *)raw;
+    return [view.URL.absoluteString getCString:buffer maxLength:size encoding:NSUTF8StringEncoding];
+}
+
 extern bool keepwork_allowed_subframe_navigation(const char *url);
 extern void keepwork_reset_local_mcp(void *webview);
 
