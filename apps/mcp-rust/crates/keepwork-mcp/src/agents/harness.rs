@@ -160,6 +160,22 @@ impl Harness {
         Ok(call)
     }
     pub async fn start(backend: &str, cwd: &Path) -> Result<Arc<Self>, String> {
+        Self::start_profiled(backend, cwd, None).await
+    }
+
+    pub(super) async fn start_with_claude_profiles(
+        backend: &str,
+        cwd: &Path,
+        profiles: Arc<super::claude_profiles::ClaudeProfiles>,
+    ) -> Result<Arc<Self>, String> {
+        Self::start_profiled(backend, cwd, Some(profiles)).await
+    }
+
+    async fn start_profiled(
+        backend: &str,
+        cwd: &Path,
+        profiles: Option<Arc<super::claude_profiles::ClaudeProfiles>>,
+    ) -> Result<Arc<Self>, String> {
         let spec = definition(backend).ok_or_else(|| "Unsupported agent backend".to_string())?;
         if !spec.protocol.supported() {
             return Err(format!(
@@ -171,14 +187,25 @@ impl Harness {
             return Err("Existing absolute local folder required".to_string());
         }
         let launch = discover(backend)?;
-        Self::start_launch(backend, spec.protocol, launch, cwd).await
+        Self::start_launch_profiled(backend, spec.protocol, launch, cwd, profiles).await
     }
 
+    #[cfg(test)]
     async fn start_launch(
         backend: &str,
         protocol: Protocol,
         launch: CliLaunch,
         cwd: &Path,
+    ) -> Result<Arc<Self>, String> {
+        Self::start_launch_profiled(backend, protocol, launch, cwd, None).await
+    }
+
+    async fn start_launch_profiled(
+        backend: &str,
+        protocol: Protocol,
+        launch: CliLaunch,
+        cwd: &Path,
+        profiles: Option<Arc<super::claude_profiles::ClaudeProfiles>>,
     ) -> Result<Arc<Self>, String> {
         if matches!(
             protocol,
@@ -187,7 +214,7 @@ impl Harness {
             let (events, _) = broadcast::channel(128);
             let (shutdown, _) = watch::channel(false);
             let claude = (protocol == Protocol::Claude)
-                .then(|| super::claude::Claude::new(launch.clone(), cwd, events.clone()));
+                .then(|| super::claude::Claude::new(launch.clone(), cwd, events.clone(), profiles));
             let antigravity = (protocol == Protocol::Antigravity)
                 .then(|| super::antigravity::Antigravity::new(launch.clone(), cwd, events.clone()));
             let trae = (protocol == Protocol::Trae)

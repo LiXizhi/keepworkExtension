@@ -192,6 +192,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         agentApprovalApi: 'codex-v1',
         agentImageTurnApi: 'v1',
         agentInventoryApi: 'v1',
+        claudeConfigApi: 'profiles-v1',
         aichatPresenceApi: 'post-sse-v1',
         messagingApi: 'messaging-v1',
         personasApi: 'personas-v1',

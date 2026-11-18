@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 const BUILD_SCRIPT: &str = include_str!("../build.rs");
 const BUILD_TIMESTAMP: &str = include_str!("../src/build_timestamp.rs");
 const WORKSPACE_LOCK: &str = include_str!("../../../Cargo.lock");
+const SHARED_DASHBOARD: &str = "export const dashboardCliStyles = `fixture CSS`;\nexport const dashboardCliHtml = `<div>fixture</div>`;\nexport const dashboardCliScript = String.raw`fixture();`;\n";
 
 struct Fixture {
     root: PathBuf,
@@ -74,9 +75,12 @@ impl Fixture {
     }
 
     fn compile_in_a(&self) -> (PathBuf, PathBuf) {
-        let workspace = self.root.join("A compile 空格");
+        let repo = self.root.join("A compile 空格");
+        let workspace = repo.join("apps/mcp-rust");
         let crate_dir = workspace.join("crates/keepwork-mcp");
         fs::create_dir_all(crate_dir.join("src")).unwrap();
+        fs::create_dir_all(repo.join("src/mcp")).unwrap();
+        fs::write(repo.join("src/mcp/dashboardCli.ts"), SHARED_DASHBOARD).unwrap();
         fs::write(
             workspace.join("Cargo.toml"),
             "[workspace]\nmembers = [\"crates/keepwork-mcp\"]\nresolver = \"2\"\n",
@@ -131,8 +135,15 @@ impl Fixture {
     }
 
     fn copy_inputs(&self, source: &Path, name: &str) -> PathBuf {
-        let destination = self.root.join(name);
+        let repo = self.root.join(name);
+        let destination = repo.join("apps/mcp-rust");
         fs::create_dir_all(destination.join("crates/keepwork-mcp/src")).unwrap();
+        fs::create_dir_all(repo.join("src/mcp")).unwrap();
+        fs::copy(
+            source.join("../../src/mcp/dashboardCli.ts"),
+            repo.join("src/mcp/dashboardCli.ts"),
+        )
+        .unwrap();
         for relative in [
             "Cargo.toml",
             "Cargo.lock",
@@ -180,7 +191,7 @@ impl Drop for Fixture {
 }
 
 fn check_runtime_paths(output: &Output, workspace: &Path, has_git: bool, errors: &mut Vec<String>) {
-    let root = workspace.canonicalize().unwrap();
+    let root = workspace.join("../..").canonicalize().unwrap();
     let crate_dir = workspace.join("crates/keepwork-mcp");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let paths = stdout

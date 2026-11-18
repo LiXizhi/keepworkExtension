@@ -2,6 +2,7 @@
 //! process; neither prompt-free discovery nor a failed thread can reuse another
 //! conversation's native state. Prompts are written once, never replayed.
 
+use super::claude_profiles::{ClaudeProfiles, Selection};
 use super::discovery::{child_path, CliLaunch};
 use super::harness::HarnessEvent;
 use serde_json::{json, Value};
@@ -26,6 +27,7 @@ pub(super) struct Claude {
     events: broadcast::Sender<HarnessEvent>,
     connections: AsyncMutex<HashMap<String, Arc<Connection>>>,
     closing: AtomicBool,
+    profiles: Option<Arc<ClaudeProfiles>>,
 }
 
 struct Run {
@@ -51,6 +53,7 @@ struct Connection {
     native: AtomicBool,
     terminated: AtomicBool,
     stopped: Notify,
+    profile_key: String,
 }
 
 fn rejected(message: &str) -> String {
@@ -65,6 +68,7 @@ impl Claude {
         launch: CliLaunch,
         cwd: &Path,
         events: broadcast::Sender<HarnessEvent>,
+        profiles: Option<Arc<ClaudeProfiles>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             launch,
@@ -72,7 +76,15 @@ impl Claude {
             events,
             connections: AsyncMutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
+            profiles,
         })
+    }
+
+    fn selection(&self) -> Result<Selection, String> {
+        self.profiles
+            .as_ref()
+            .map(|profiles| profiles.selection())
+            .unwrap_or_else(|| Ok(Selection::default()))
     }
 
     async fn boot(
@@ -122,8 +134,15 @@ impl Claude {
         if config["cwd"].is_null() {
             config["cwd"] = json!(self.cwd);
         }
-        let connection =
-            Connection::start(&self.launch, thread, config, resume, self.events.clone()).await?;
+        let connection = Connection::start(
+            &self.launch,
+            thread,
+            config,
+            resume,
+            self.events.clone(),
+            self.selection()?,
+        )
+        .await?;
         connections.insert(thread.into(), connection.clone());
         Ok(connection)
     }
@@ -156,6 +175,8 @@ impl Claude {
         match method {
             "account/read" => return self.account().await,
             "model/list" => {
+                let selection = self.selection()?;
+                let configured = selection.configured_models();
                 let config = json!({"cwd":self.cwd});
                 let thread = {
                     let connections = self.connections.lock().await;
@@ -166,7 +187,11 @@ impl Claude {
                 };
                 // The metadata process receives initialize only, never a user turn.
                 let mut connections = self.connections.lock().await;
-                if params["refresh"] == true {
+                if params["refresh"] == true
+                    || connections
+                        .get("metadata")
+                        .is_some_and(|c| c.profile_key != selection.key)
+                {
                     if let Some(previous) = connections.remove("metadata") {
                         previous.close(
                             "Claude metadata refreshed; conversation processes remain active",
@@ -203,12 +228,20 @@ impl Claude {
                         config,
                         false,
                         self.events.clone(),
+                        selection,
                     )
                     .await?;
                     connections.insert("metadata".into(), c.clone());
                     c
                 };
-                let data = normalize_models(&c.initialized.lock().unwrap()["models"]);
+                let mut raw = c.initialized.lock().unwrap()["models"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                raw.extend(configured);
+                let mut data = normalize_models(&json!(raw));
+                let mut ids = std::collections::HashSet::new();
+                data.retain(|model| ids.insert(model["id"].as_str().unwrap_or("").to_string()));
                 return Ok(json!({"data":data}));
             }
             "thread/start" | "thread/resume" => {
@@ -260,6 +293,8 @@ impl Claude {
 
     async fn account(&self) -> Result<Value, String> {
         let mut command = command(&self.launch, &self.cwd);
+        let provider = self.selection()?.prepare()?;
+        provider.apply(&mut command);
         command.args(["auth", "status"]);
         let mut child = command
             .spawn()
@@ -453,6 +488,7 @@ impl Connection {
         config: Value,
         resume: bool,
         events: broadcast::Sender<HarnessEvent>,
+        selection: Selection,
     ) -> Result<Arc<Self>, String> {
         let cwd = config["cwd"]
             .as_str()
@@ -513,6 +549,8 @@ impl Connection {
         if let Some(instructions) = config["aichatInstructions"].as_str() {
             command.args(["--append-system-prompt", instructions]);
         }
+        let provider = selection.prepare()?;
+        provider.apply(&mut command);
         let mut child = command.spawn().map_err(|error| {
             format!(
                 "Claude CLI could not start ({}); inspect installation and native login",
@@ -540,6 +578,7 @@ impl Connection {
             native: AtomicBool::new(resume),
             terminated: AtomicBool::new(false),
             stopped: Notify::new(),
+            profile_key: selection.key,
         });
         let weak = Arc::downgrade(&c);
         let mut output = tokio::spawn(async move {
@@ -591,6 +630,8 @@ impl Connection {
         });
         let weak = Arc::downgrade(&c);
         tokio::spawn(async move {
+            // Keep the private settings file until this exact child has exited.
+            let _provider = provider;
             let message = tokio::select! { result=child.wait()=>format!("Claude exited ({}); inspect outcome before retrying; prompts were not rerun",result.map(|s|s.to_string()).unwrap_or_else(|_|"unknown".into())), _=stopped.changed()=>{super::harness::stop_child(&mut child).await;"Claude closed; prompts were not rerun".into()} };
             // Drain complete frames before marking exit; a final result can be
             // written immediately before the process exits.

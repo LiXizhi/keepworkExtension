@@ -18,8 +18,24 @@ pub fn serve_dashboard() -> Response {
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::CONTENT_SECURITY_POLICY, DASHBOARD_CSP)
         .header("x-content-type-options", "nosniff")
-        .body(Body::from(DASHBOARD_HTML))
+        .body(Body::from(dashboard_html()))
         .expect("valid dashboard response")
+}
+
+fn dashboard_html() -> String {
+    DASHBOARD_HTML
+        .replace(
+            "/* KEEPWORK_CLI_STYLES */",
+            include_str!(concat!(env!("OUT_DIR"), "/dashboard-cli.css")),
+        )
+        .replace(
+            "<!-- KEEPWORK_CLI_HTML -->",
+            include_str!(concat!(env!("OUT_DIR"), "/dashboard-cli.html")),
+        )
+        .replace(
+            "/* KEEPWORK_CLI_SCRIPT */",
+            include_str!(concat!(env!("OUT_DIR"), "/dashboard-cli.js")),
+        )
 }
 
 pub fn serve_skill(port: u16, channel: &str) -> Response {
@@ -119,6 +135,11 @@ pub fn api_docs(state: &AppState) -> Response {
         ("GET", "/agents/backends", "Native CLI inventory or targeted protocol/account/model discovery. Installation and ACP initialization do not verify an account.", "Query: probe=executable (read-only; no child processes), backend, cwd, conversationId or owned sessionId, model, refresh=1. Missing optional capability is unknown; unsupported provider semantics return a bounded error."),
         ("GET", "/agents/accounts", "Read-only native account login/logout command catalog. Commands are displayed for user-operated terminals; this request does not execute them.", "No parameters. Reuse the original owner for later requests."),
         ("POST", "/agents/login", "Start native Codex browser login, or return another provider's reviewed terminal login command.", "JSON: {backend?}. Non-Codex terminal commands are not executed by this endpoint."),
+        ("GET", "/agents/claude/config", "Read Claude provider configuration contract version 1, saved profile metadata and the active selection. Credential values are never returned.", "No parameters. /health advertises claudeConfigApi: profiles-v1. Profiles are shared by this daemon user; confirm the response version before writing."),
+        ("POST", "/agents/claude/config/profiles", "Create a named Claude provider profile with an Anthropic-compatible endpoint, write-only credential and optional model mappings. Saving does not activate or verify a provider.", "JSON: name, baseUrl, authType (apiKey|authToken), secret, optional model, sonnetModel, opusModel, haikuModel. Native Claude settings and permissions are unchanged."),
+        ("PATCH", "/agents/claude/config/profiles/:id", "Edit a Claude provider profile. An omitted credential preserves its saved value. Existing processes retain their configuration.", "Path: saved profile id. JSON: any supported profile fields. Changes affect only subsequently started Claude processes; credentials are never returned."),
+        ("DELETE", "/agents/claude/config/profiles/:id", "Delete an inactive Claude provider profile without interrupting existing processes.", "Path: saved profile id. Select another profile or native configuration before deleting the active profile."),
+        ("POST", "/agents/claude/config/activate", "Select a Claude provider for subsequently started processes. Existing conversations keep their configuration; prompts are never replayed.", "JSON: {profileId: saved id}, or {profileId: null} to use native CLI configuration. This selection is shared by this daemon user."),
         ("GET", "/agents/native-codex", "List native Codex CLI/editor/exec/app-server threads across providers without resuming them. Excludes threads managed by another owner.", "Query: cursor (opaque string from nextCursor). Returns sessions with threadId, title, workspace, updatedAt in milliseconds, busy; and nextCursor."),
         ("GET", "/agents/native-codex/:threadId", "Read native Codex history and attach it to one owned wrapper. Existing turn endpoints continue the original thread only after explicit submission.", "Path: native thread id. Read-only thread/read; default mode Ask. External active tasks remain read-only. Missing or invalid history never creates an empty replacement."),
         ("GET", "/agents/native-sessions/:backend", "Alias for native Codex listing when backend=codex. Other providers' history import remains explicitly unsupported.", "Query: cursor (opaque string). Same owner, Origin and optional bearer checks as native-codex."),
@@ -189,9 +210,11 @@ th{white-space:nowrap}.empty{opacity:.65}.pager{margin-top:12px}
 body.chat-view main{padding:0;max-width:none;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
 body.chat-view #view-title,body.chat-view #notice:empty{display:none}body.chat-view #view-chat{flex:1;min-height:0}
 #chat-frame{display:block;width:100%;height:100%;border:0;background:white}
+.channel-actions{display:flex;gap:6px;align-items:center}.channel-actions button{font:inherit}select{font:inherit;color:inherit;background:transparent;padding:6px;border:1px solid #777;border-radius:3px}
+/* KEEPWORK_CLI_STYLES */
 </style></head><body>
 <aside><div class="brand">Keepwork<br>local MCP (Rust)</div><nav class="tree" aria-label="Dashboard navigation">
-<a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#personas">Personas / 分身</a><a href="#chat">AI 对话</a>
+<a href="#overview">Overview / 概览</a><a href="#history">History</a><a href="#clients">Clients</a><a href="#personas">Personas / 分身</a><a href="#cli-accounts">CLI 账号</a><a href="#chat">AI 对话</a>
 <details open><summary>Developer</summary><a href="#api-docs">API docs</a><a href="#tools-skills">Tools &amp; skills</a></details>
 </nav></aside><main>
 <h1 id="view-title">Overview / 概览</h1>
@@ -207,15 +230,16 @@ body.chat-view #view-title,body.chat-view #notice:empty{display:none}body.chat-v
 <div class="pager"><button id="prev" disabled>Newer</button><span id="range">0 of 0</span><button id="next" disabled>Older</button></div></section>
 <section class="view" id="view-api-docs" hidden><p>HTTP APIs, authentication, parameters and JavaScript fetch examples.</p><label for="api-filter">Filter APIs</label><input id="api-filter" type="search" placeholder="Method, path, or description"><div id="api-docs"></div></section>
 <section class="view" id="view-tools-skills" hidden><p>Built-in MCP tool calls and input schemas.</p><label for="catalog-filter">Filter tools</label><input id="catalog-filter" type="search" placeholder="Name or description"><div id="tools-skills"></div></section>
+<!-- KEEPWORK_CLI_HTML -->
 <section class="view" id="view-chat" hidden><iframe id="chat-frame" title="Keepwork MCP AI 对话" referrerpolicy="no-referrer" allow="clipboard-write"></iframe></section>
 </main>
 <script>
 const byId = id => document.getElementById(id);
 let token = '', offset = 0, busy = false, stopped = false, view = 'overview', apiCatalog = null;
 const limit = 20;
-const viewNames = { overview: 'Overview / 概览', history: 'History', clients: 'Clients', personas: 'Personas / 分身', 'api-docs': 'API docs', 'tools-skills': 'Tools & skills', chat: 'AI 对话' };
-async function request(path, method = 'GET', body) {
-  const response = await fetch(path, { method, cache: 'no-store', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+const viewNames = { overview: 'Overview / 概览', history: 'History', clients: 'Clients', personas: 'Personas / 分身', 'cli-accounts': 'CLI 账号', 'api-docs': 'API docs', 'tools-skills': 'Tools & skills', chat: 'AI 对话' };
+async function request(path, method = 'GET', body, signal) {
+  const response = await fetch(path, { method, signal, cache: 'no-store', headers: { ...(path.startsWith('/agents/') ? {'X-Agent-Owner':cliOwner} : {}), ...(token ? { Authorization: 'Bearer ' + token } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   if (response.status === 401) { byId('auth').hidden = false; throw new Error('Pairing token required. Use the token from ~/.keepwork-mcp/token.'); }
   if (!response.ok) { const detail = await response.json().catch(() => ({})); throw new Error(detail.error || ('Request failed (' + response.status + ')')); }
   return response.json();
@@ -326,18 +350,19 @@ async function refresh() {
 }
 function selectView() {
   const next = location.hash.slice(1); view = Object.hasOwn(viewNames, next) ? next : 'overview';
-  for (const name of Object.keys(viewNames)) byId('view-' + name).hidden = name !== view;
+  for (const name of Object.keys(viewNames)) { const pane = byId('view-' + name); if (pane) pane.hidden = name !== view; }
   for (const link of document.querySelectorAll('.tree a')) { if (link.hash === '#' + view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); }
   byId('view-title').textContent = viewNames[view];
   document.body.classList.toggle('chat-view', view === 'chat');
   if (view === 'chat' && !byId('chat-frame').hasAttribute('src')) startChat();
+  if (view === 'cli-accounts' && !cliCatalog) void loadCliAccounts();
   refresh();
 }
 window.addEventListener('hashchange', selectView);
 byId('api-filter').oninput = renderApis;
 byId('catalog-filter').oninput = renderCatalog;
 byId('refresh').onclick = () => { stopped = false; refresh(); };
-byId('auth').onsubmit = e => { e.preventDefault(); token = byId('token').value.trim(); byId('token').value = ''; refresh(); };
+byId('auth').onsubmit = e => { e.preventDefault(); token = byId('token').value.trim(); byId('token').value = ''; refresh(); if (view === 'cli-accounts') void loadCliAccounts(); };
 byId('copy').onclick = async () => { try { await navigator.clipboard.writeText(location.origin + '/mcp'); byId('notice').textContent = 'MCP URL copied.'; } catch { byId('notice').textContent = 'Could not copy URL.'; } };
 byId('prev').onclick = () => { if (!busy) { offset = Math.max(0, offset - limit); refresh(); } };
 byId('next').onclick = () => { if (!busy) { offset += limit; refresh(); } };
@@ -347,7 +372,21 @@ byId('stop').onclick = async () => {
   try { await request('/admin/stop', 'POST'); metadata({ Status: 'Stopped' }); byId('notice').textContent = 'Service stopped.'; }
   catch (e) { stopped = false; byId('stop').disabled = false; byId('notice').textContent = e.message; }
 };
+/* KEEPWORK_CLI_SCRIPT */
 setInterval(() => { if (!document.hidden) refresh(); }, 2000);
 selectView();
 </script></body></html>
 "###;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generated_cli_assets_are_embedded_without_runtime_build_dependencies() {
+        let html = super::dashboard_html();
+        assert!(html.contains("id=\"view-cli-accounts\""));
+        assert!(html.contains("id=\"claude-config-panel\""));
+        assert!(html.contains("/agents/claude/config/activate"));
+        assert!(html.contains(".claude-profile-grid"));
+        assert!(!html.contains("KEEPWORK_CLI_"));
+    }
+}

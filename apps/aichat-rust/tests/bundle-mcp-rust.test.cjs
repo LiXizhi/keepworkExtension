@@ -14,8 +14,9 @@ const targets = [
 ];
 
 function fixture(t, arch) {
-  const rustRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-rust-target-'));
-  t.after(() => fs.rmSync(rustRoot, { recursive: true, force: true }));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat-rust-target-'));
+  const rustRoot = path.join(directory, 'apps/mcp-rust');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const name = arch.platform === 'windows' ? 'keepwork-mcp.exe' : 'keepwork-mcp';
   const expected = path.join(rustRoot, 'target', arch.triple, 'release', name);
   const generic = path.join(rustRoot, 'target', 'release', name);
@@ -180,6 +181,7 @@ test('runtime validation requires the supported capability contract rather than 
 });
 
 function writeRustSources(f) {
+  f.write(path.resolve(f.rustRoot, '../../src/mcp/dashboardCli.ts'), 'export const dashboardCliHtml = `fixture UI`;\n');
   f.write(path.join(f.rustRoot, 'Cargo.toml'), '[workspace]\nmembers = ["crates/keepwork-mcp"]\n');
   f.write(path.join(f.rustRoot, 'Cargo.lock'), 'version = 4\n');
   f.write(path.join(f.rustRoot, 'crates/keepwork-mcp/Cargo.toml'), `[package]\nname = "keepwork-mcp"\nversion = "${expectedIdentity.version}"\n`);
@@ -200,6 +202,9 @@ test('source fingerprints detect uncommitted Rust changes and ignore generated t
   assert.notEqual(modified, original, 'same-version local changes require a rebuilt binary');
   f.write(path.join(f.rustRoot, 'crates/keepwork-mcp/src/agents/new.rs'), 'pub fn new_protocol() {}\n');
   assert.notEqual(sourceFingerprint(f.rustRoot), modified, 'new untracked Rust modules must enter the fingerprint');
+  const withModule = sourceFingerprint(f.rustRoot);
+  f.write(path.resolve(f.rustRoot, '../../src/mcp/dashboardCli.ts'), 'export const dashboardCliHtml = `updated shared UI`;\n');
+  assert.notEqual(sourceFingerprint(f.rustRoot), withModule, 'shared dashboard changes require rebuilding the Rust binary');
 });
 
 function treeBytes(directory) {

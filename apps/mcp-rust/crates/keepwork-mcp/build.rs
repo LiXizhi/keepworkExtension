@@ -4,6 +4,34 @@ use std::process::Command;
 #[path = "src/build_timestamp.rs"]
 mod build_timestamp;
 
+// The account panel is shared with the Node daemon. Keep these exports static:
+// this deliberately rejects JavaScript evaluation, interpolation and escaped
+// ordinary templates rather than silently shipping a different Rust UI.
+fn dashboard_literal<'a>(source: &'a str, name: &str) -> &'a str {
+    let declaration = format!("export const {name} = ");
+    let (_, value) = source
+        .split_once(&declaration)
+        .unwrap_or_else(|| panic!("Missing shared dashboard export {name}"));
+    let (value, raw) = if let Some(value) = value.strip_prefix("String.raw`") {
+        (value, true)
+    } else {
+        (
+            value.strip_prefix('`').unwrap_or_else(|| {
+                panic!("Shared dashboard export {name} must be a static template")
+            }),
+            false,
+        )
+    };
+    let (literal, remainder) = value
+        .split_once('`')
+        .unwrap_or_else(|| panic!("Unterminated shared dashboard export {name}"));
+    assert!(
+        remainder.starts_with(';') && !literal.contains("${") && (raw || !literal.contains('\\')),
+        "Shared dashboard export {name} contains an unsupported template expression or escape"
+    );
+    literal
+}
+
 fn source_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).expect("read Rust sources") {
         let path = entry.expect("source entry").path();
@@ -58,6 +86,20 @@ fn main() {
     for name in ["Cargo.toml", "Cargo.lock"] {
         entries.push((format!("workspace/{name}"), workspace.join(name)));
     }
+    let shared_cli = crate_dir.join("../../../../src/mcp/dashboardCli.ts");
+    let shared_source = std::fs::read_to_string(&shared_cli).expect("read shared CLI dashboard");
+    for (name, filename) in [
+        ("dashboardCliStyles", "dashboard-cli.css"),
+        ("dashboardCliHtml", "dashboard-cli.html"),
+        ("dashboardCliScript", "dashboard-cli.js"),
+    ] {
+        std::fs::write(
+            Path::new(&std::env::var("OUT_DIR").unwrap()).join(filename),
+            dashboard_literal(&shared_source, name),
+        )
+        .expect("write shared CLI dashboard asset");
+    }
+    entries.push(("shared/src/mcp/dashboardCli.ts".into(), shared_cli));
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let mut hash = Sha256::new();
     println!("cargo:rerun-if-changed=src");

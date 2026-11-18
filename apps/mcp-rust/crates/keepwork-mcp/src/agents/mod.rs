@@ -6,6 +6,7 @@ mod approval;
 mod approval_tests;
 mod body;
 mod claude;
+mod claude_profiles;
 pub mod context;
 pub mod discovery;
 mod events;
@@ -84,6 +85,7 @@ struct Session {
 
 pub struct AgentManager {
     file: PathBuf,
+    claude_profiles: Arc<claude_profiles::ClaudeProfiles>,
     port: u16,
     sessions: Mutex<HashMap<String, Session>>,
     harnesses: AsyncMutex<HashMap<String, Arc<Harness>>>,
@@ -416,8 +418,14 @@ impl AgentManager {
                 },
             );
         }
+        let claude_profiles = Arc::new(claude_profiles::ClaudeProfiles::new(
+            file.parent()
+                .unwrap_or(Path::new("."))
+                .join("claude-profiles-v1.json"),
+        ));
         Arc::new(Self {
             file,
+            claude_profiles,
             port,
             sessions: Mutex::new(sessions),
             harnesses: AsyncMutex::new(HashMap::new()),
@@ -730,7 +738,9 @@ impl AgentManager {
                 return Err("Native CLI process limit reached".into());
             }
         }
-        let harness = Harness::start(backend, cwd).await?;
+        let harness =
+            Harness::start_with_claude_profiles(backend, cwd, Arc::clone(&self.claude_profiles))
+                .await?;
         let mut events = harness.subscribe();
         let weak = Arc::downgrade(self);
         let child = Arc::clone(&harness);
@@ -834,7 +844,13 @@ pub fn handle<'a>(
     headers: &'a HeaderMap,
     req: Request,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'a>> {
-    Box::pin(handle_request(manager, method, path, query, headers, req))
+    Box::pin(async move {
+        let mut response = handle_request(manager, method, path, query, headers, req).await;
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        response
+    })
 }
 
 async fn handle_request(
@@ -887,6 +903,32 @@ async fn handle_request(
         json!({})
     };
     let result: Result<Value, String> = match (method, parts.as_slice()) {
+        ("GET", ["agents", "claude", "config"]) => {
+            manager.claude_profiles.call("read", None, &input)
+        }
+        ("POST", ["agents", "claude", "config", "profiles"]) => {
+            manager.claude_profiles.call("create", None, &input)
+        }
+        ("POST", ["agents", "claude", "config", "activate"]) => {
+            manager.claude_profiles.call("activate", None, &input)
+        }
+        ("PATCH" | "DELETE", ["agents", "claude", "config", "profiles", id]) if valid_id(id) => {
+            manager.claude_profiles.call(
+                if method == "PATCH" {
+                    "update"
+                } else {
+                    "delete"
+                },
+                Some(id),
+                &input,
+            )
+        }
+        (_, ["agents", "claude", "config", ..]) => {
+            return crate::http::json_response(
+                StatusCode::NOT_FOUND,
+                &json!({"error":"Unknown Claude configuration operation"}),
+            )
+        }
         ("GET", ["agents", "backends"]) => manager.backends(&owner, query).await,
         ("GET", ["agents", "accounts"]) => Ok(manager.accounts()),
         ("POST", ["agents", "login"]) => manager.login(&input).await,

@@ -744,6 +744,58 @@ errors, invalid output, process crashes and timeouts do not cause prompt replay.
 occurs at native session creation. An executable check alone leaves authentication
 unknown; the separate read-only native auth-status query may confirm it.
 
+### Claude provider configuration
+
+The Node and Rust daemons support the same Claude provider configuration API for
+named profiles with a base URL, a write-only credential, a default model and optional
+Sonnet, Opus and Haiku model mappings. Choose either bearer-token authentication
+(`ANTHROPIC_AUTH_TOKEN`) or API-key authentication (`ANTHROPIC_API_KEY`), according
+to the provider's Anthropic-compatible endpoint. This feature configures the
+native Claude process; it does not translate other providers' API protocols.
+
+Profiles and the active selection persist locally for this daemon user and are
+shared by its Harness clients. **使用本机默认配置** restores the normal native CLI
+configuration. Activating or editing a profile affects only Claude processes
+started afterwards. Existing processes retain their original configuration;
+resuming a conversation after its process exits uses the current selection.
+An explicit session model takes precedence over the profile's default model.
+Leaving the profile model empty selects Claude's `default` model setting, rather
+than inheriting a model ID from a previous provider's native settings. Configured
+model IDs appear in discovery as choices; this does not verify provider support.
+Delete an active profile only after selecting another profile or native
+configuration. Switching never interrupts work or replays a prompt.
+
+The configuration API uses the existing allowed-Origin, `X-Agent-Owner` and
+optional bearer-authentication checks. Local profiles are saved in
+`~/.keepwork-mcp/claude-profiles-v1.json` with mode `0600`; credentials are stored
+there in plain text. Credentials are accepted only on writes; list and mutation
+responses expose `hasSecret`, never the credential value. Launches use a private
+temporary `--settings` file, removed when its process exits, so native settings
+cannot overwrite the selected endpoint or credential. Unrelated native settings
+remain loaded, and managed policy keeps its native precedence. Native mode adds
+no provider override. The daemon does not edit the user's Claude settings, login
+or permission files. Saving a profile does not establish successful authentication
+or inference; native account checks remain the authority for account status.
+
+| Endpoint | Request / result |
+| --- | --- |
+| `GET /agents/claude/config` | Contract `version: 1`, saved profile metadata and active selection; no credential values |
+| `POST /agents/claude/config/profiles` | `{name, baseUrl, authType: "apiKey" \| "authToken", secret, model?, sonnetModel?, opusModel?, haikuModel?}` creates a profile |
+| `PATCH /agents/claude/config/profiles/:id` | Edit the same fields; an omitted `secret` preserves its saved value |
+| `DELETE /agents/claude/config/profiles/:id` | Delete an inactive profile |
+| `POST /agents/claude/config/activate` | `{profileId: "<ID>"}` activates a profile; `{profileId: null}` selects native configuration |
+
+This is an additive Node and Rust Harness feature. `/health` advertises
+`claudeConfigApi: "profiles-v1"`; clients confirm the contract through a successful
+`GET /agents/claude/config` response with supported `version: 1`. An older runtime
+without the capability or route keeps ordinary Claude chat and account
+operations available. Do not infer support from product versions. Model caches
+must be invalidated when the active configuration changes, and model data from
+processes started under an older configuration must not enter the current catalog.
+
+Reference contracts: [CC Switch configuration](https://github.com/farion1231/cc-switch-website/blob/main/public/docs/en/5-faq/5.1-config-files.md)
+and [Claude gateway credentials and settings precedence](https://code.claude.com/docs/en/llm-gateway-connect).
+
 Cursor question and plan extension calls become interactive cards. Answers map
 labels to native option IDs; invalid answers remain pending. A plan is not approved
 without the user's response. Ambiguous extension session routing is rejected.

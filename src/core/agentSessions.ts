@@ -165,6 +165,7 @@ export class AgentSessions {
             for (const row of rows) if (row.id && row.owner && row.threadId) this.sessions.set(row.id, { ...row, backend: row.backend || 'codex', status: ACTIVE.has(row.status) ? 'interrupted' : row.status, pending: [], events: [], items: [] });
         } catch { /* first run */ }
         for (const [backend, adapter] of Object.entries(this.adapters)) {
+            adapter.on('capabilitiesChanged', () => this.clearCapabilities(backend));
             adapter.on('notification', m => this.notification(m, backend));
             adapter.on('request', m => this.request(m, backend));
             adapter.on('exit', (_message, scope?: string[] | { exclude: string[] }) => {
@@ -202,6 +203,9 @@ export class AgentSessions {
     }
     async backends() {
         return Object.fromEntries(await Promise.all(AGENT_BACKENDS.map(async backend => [backend, await this.status(backend)])));
+    }
+    async claudeConfig(method: 'read' | 'create' | 'update' | 'delete' | 'activate', input: any = {}) {
+        return this.adapterFor('claude').call('config/' + method, input);
     }
     inventory() {
         // Installation discovery only: never start eleven native servers for a picker.

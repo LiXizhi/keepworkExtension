@@ -1,9 +1,19 @@
 const readline=require('node:readline');
+// Explicit test-only logging: credentials that are not fixture values stay redacted.
+const profileLog=process.argv.find(a=>a.startsWith('--log-profile-env='))?.slice('--log-profile-env='.length);
+if(profileLog){
+ const settingsIndex=process.argv.indexOf('--settings'),settingsFile=settingsIndex>=0?process.argv[settingsIndex+1]:undefined;
+ const settings=settingsFile?JSON.parse(require('node:fs').readFileSync(settingsFile,'utf8')):undefined;
+ if(settings?.env)Object.assign(process.env,settings.env);
+ const names=['ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','CLAUDE_CODE_OAUTH_TOKEN','CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR','ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_MODEL','ANTHROPIC_DEFAULT_FABLE_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY','CLAUDE_CODE_USE_ANTHROPIC_AWS','CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD','CLAUDE_CODE_USE_MANTLE'];
+ const env=Object.fromEntries(names.filter(name=>process.env[name]!==undefined).map(name=>[name,/(?:KEY|TOKEN)$/.test(name)&&process.env[name]&&!process.env[name].startsWith('fixture-')?'REDACTED':process.env[name]]));
+ require('node:fs').appendFileSync(profileLog,JSON.stringify({argv:process.argv.slice(2),env,...(settings?{settingsKeys:Object.keys(settings),model:settings.model,apiKeyHelper:settings.apiKeyHelper,settingsMode:require('node:fs').statSync(settingsFile).mode&0o777}:{})})+'\n');
+}
 if(process.argv.includes('--version')){console.log('fixture Claude 1.0');process.exit(0);}
 if(process.argv.includes('auth') && process.argv.includes('status')){
  if(!process.argv.includes('--auth-status'))process.exit(2);
  const loggedIn=!process.argv.includes('--signed-out');
- console.log(JSON.stringify({loggedIn,email:loggedIn?'claude@example.test':null,authMethod:'oauth_token',accessToken:'DO-NOT-EXPOSE'}));
+ console.log(JSON.stringify({loggedIn,email:loggedIn?'claude@example.test':null,authMethod:process.argv.includes('--auth-from-profile')&&[process.env.ANTHROPIC_API_KEY,process.env.ANTHROPIC_AUTH_TOKEN].some(value=>value?.startsWith('fixture-'))?'api_key':'oauth_token',accessToken:'DO-NOT-EXPOSE'}));
  process.exit(loggedIn?0:1);
 }
 const session=process.argv.find(a=>a.startsWith('--session-id=')||a.startsWith('--resume='))?.split('=')[1];
@@ -23,7 +33,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(m.type==='control_request'){
   if(m.request.subtype==='initialize'&&process.argv.includes('--startup-result-error'))return send({type:'result',subtype:'error_during_execution',is_error:true,result:'Authentication required'});
   if(m.request.subtype==='initialize'&&process.argv.includes('--auth-required'))return send({type:'control_response',response:{subtype:'error',request_id:m.request_id,error:'Authentication required'}});
-  send({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:{models:[
+  send({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:{models:process.argv.includes('--models-from-profile')?[{value:process.env.ANTHROPIC_MODEL||'native-fixture',displayName:'Profile model'}]:[
    {value:'fixture',displayName:'Fixture model',isDefault:true,supportsEffort:true,supportedEffortLevels:['low','medium','high']},
    {value:'fast',displayName:'Fast model',supportsEffort:false}
   ]}}});

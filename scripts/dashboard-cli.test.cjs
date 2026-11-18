@@ -25,7 +25,7 @@ test('CLI dashboard filters identities, executes owned terminal steps once, refr
  return r.fulfill({json:{ok:true}});
  });
  await page.goto('http://127.0.0.1:8080/dashboard#cli-accounts');
- await page.locator('[data-cli="gemini"]').waitFor();assert.equal(await page.locator('[data-cli]').count(),11);
+ await page.locator('[data-cli="gemini"]').waitFor();assert.equal(await page.locator('[data-cli]').count(),Object.keys(catalog).length);
  const gemini=page.locator('[data-cli="gemini"]');
  await gemini.getByRole('button',{name:'检测账号',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('[data-cli="gemini"] .cli-identity').textContent.includes('<img'));
@@ -69,5 +69,113 @@ test('CLI dashboard filters identities, executes owned terminal steps once, refr
    await page.screenshot({path:'out/cli-dashboard/compact-'+width+'.png',fullPage:true});
  }
  assert.deepEqual(errors,[]);
+ }finally{await browser.close();}
+});
+
+test('Claude dashboard creates, edits and switches write-only provider profiles without replaying failed changes',{timeout:60000},async()=>{
+ const browser=await chromium.launch({headless:true,...(process.env.DASHBOARD_BROWSER?{executablePath:process.env.DASHBOARD_BROWSER}:{})});
+ try{
+  const page=await browser.newPage(),errors=[],mutations=[];let state={version:1,activeProfileId:null,profiles:[]},failActivate=false,holdAccount=false,releaseAccount,accountPending;
+  const accountStarted=new Promise(resolve=>accountPending=resolve);
+  page.on('pageerror',error=>errors.push(error.message));page.on('dialog',dialog=>dialog.accept());
+  const catalog=agentAccountCatalog((id,args)=>({executable:'/fixture/'+id,args,path:'/fixture/'+id,source:'test'}),'darwin');
+  await page.route('**/*',async route=>{
+   const request=route.request(),url=new URL(request.url()),method=request.method(),pathname=url.pathname;
+   if(pathname==='/dashboard')return route.fulfill({contentType:'text/html',body:dashboardHtml()});
+   if(pathname==='/admin/status')return route.fulfill({json:{clients:[],uptimeMs:0}});
+   if(pathname==='/agents/accounts')return route.fulfill({json:catalog});
+   if(pathname==='/agents/backends'){
+    if(holdAccount){const wait=new Promise(resolve=>releaseAccount=resolve);accountPending();await wait;}
+    return route.fulfill({json:{claude:{available:true,authenticated:true,account:{email:'stale-before-switch@example.test'}}}});
+   }
+   if(pathname==='/agents/claude/config'&&method==='GET')return route.fulfill({json:state});
+   if(pathname.startsWith('/agents/claude/config/')){
+    const body=method==='DELETE'?undefined:request.postDataJSON();mutations.push({method,path:pathname,body});
+    if(pathname.endsWith('/activate')){
+     if(failActivate)return route.abort('failed');
+     state={...state,activeProfileId:body.profileId};
+    }else if(method==='POST'){
+     const {secret,...profile}=body;state={...state,profiles:[...state.profiles,{id:'provider-1',...profile,hasSecret:!!secret}]};
+    }else if(method==='PATCH'){
+     const {secret,...profile}=body;state={...state,profiles:state.profiles.map(saved=>({...saved,...profile,...(secret?{hasSecret:true}:{})}))};
+    }else if(method==='DELETE')state={...state,profiles:[]};
+    return route.fulfill({json:state});
+   }
+   return route.fulfill({json:{ok:true}});
+  });
+  await page.goto('http://127.0.0.1:8080/dashboard#cli-accounts');
+  await page.locator('#claude-config-open').click();await page.locator('#claude-config-panel').waitFor();
+  await page.locator('#claude-profile-new').click();
+  await page.locator('#claude-profile-name').fill('<img src=x onerror=alert(1)>');
+  await page.locator('#claude-profile-base-url').fill('https://gateway.example.test/anthropic');
+  await page.locator('#claude-profile-auth-type').selectOption('authToken');
+  await page.locator('#claude-profile-secret').fill('fixture-dashboard-secret');
+  await page.locator('#claude-profile-model').fill('provider-model');
+  await page.locator('#claude-profile-form summary').click();
+  await page.locator('#claude-profile-sonnet-model').fill('provider-sonnet');
+  await page.locator('#claude-profile-opus-model').fill('provider-opus');
+  await page.locator('#claude-profile-haiku-model').fill('provider-haiku');
+  await page.locator('#claude-profile-save').click();
+  const row=page.locator('[data-profile-id="provider-1"]');await row.waitFor();
+  assert.equal(await row.locator('img').count(),0);assert.ok(!(await page.locator('#claude-config-panel').innerText()).includes('fixture-dashboard-secret'));
+  const created=mutations.find(change=>change.method==='POST'&&change.path.endsWith('/profiles'));
+  assert.equal(created.body.secret,'fixture-dashboard-secret');assert.equal(created.body.opusModel,'provider-opus');
+  assert.equal(await page.locator('#claude-profile-secret').inputValue(),'');
+  holdAccount=true;await page.locator('[data-cli="claude"]').getByRole('button',{name:'检测账号',exact:true}).click();await accountStarted;
+  await row.getByRole('button',{name:'启用',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('[data-profile-id="provider-1"] button').disabled);
+  holdAccount=false;releaseAccount();await page.waitForFunction(()=>!cliChecks.has('claude'));
+  assert.equal(await page.locator('[data-cli="claude"]').getAttribute('data-status'),'unknown','the previous provider account result is discarded after switching');
+  assert.equal(await row.getByRole('button',{name:'删除',exact:true}).isDisabled(),true);
+  await row.getByRole('button',{name:'编辑',exact:true}).click();
+  assert.equal(await page.locator('#claude-profile-secret').inputValue(),'');
+  await page.locator('#claude-profile-name').fill('Renamed gateway');await page.locator('#claude-profile-model').fill('updated-model');
+  await page.locator('#claude-profile-save').click();await page.waitForFunction(()=>document.querySelector('#claude-profile-list').textContent.includes('Renamed gateway'));
+  const edited=mutations.find(change=>change.method==='PATCH');assert.equal('secret' in edited.body,false);assert.equal(edited.body.model,'updated-model');
+  await page.locator('#claude-profile-native').click();
+  await page.waitForFunction(()=>document.querySelector('[data-profile-id="provider-1"] button').disabled===false);
+  failActivate=true;const before=mutations.length;await row.getByRole('button',{name:'启用',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#claude-config-notice').textContent.includes('刷新'));
+  await page.waitForTimeout(120);assert.equal(mutations.length,before+1,'uncertain activation is not replayed');
+  assert.equal(await page.locator('#claude-profile-new').isDisabled(),true);assert.equal(await row.getByRole('button',{name:'启用',exact:true}).isDisabled(),true);
+  failActivate=false;await page.locator('#claude-config-refresh').click();
+  await row.getByRole('button',{name:'删除',exact:true}).click();await row.waitFor({state:'detached'});
+  assert.ok(mutations.some(change=>change.method==='DELETE'));
+  assert.ok(!(await page.evaluate(()=>JSON.stringify({local:{...localStorage},session:{...sessionStorage}}))).includes('fixture-dashboard-secret'));
+  for(const width of [1280,390]){
+   await page.setViewportSize({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }
+  assert.deepEqual(errors,[]);
+ }finally{await browser.close();}
+});
+
+test('Missing Claude configuration capability leaves account checks available',{timeout:60000},async()=>{
+ const browser=await chromium.launch({headless:true,...(process.env.DASHBOARD_BROWSER?{executablePath:process.env.DASHBOARD_BROWSER}:{})});
+ try{
+  const page=await browser.newPage(),errors=[];let unsupported='missing';
+  page.on('pageerror',error=>errors.push(error.message));
+  const catalog=agentAccountCatalog((id,args)=>({executable:'/fixture/'+id,args,path:'/fixture/'+id,source:'test'}),'darwin');
+  await page.route('**/*',route=>{
+   const pathname=new URL(route.request().url()).pathname;
+   if(pathname==='/dashboard')return route.fulfill({contentType:'text/html',body:dashboardHtml()});
+   if(pathname==='/admin/status')return route.fulfill({json:{clients:[],uptimeMs:0}});
+   if(pathname==='/agents/accounts')return route.fulfill({json:catalog});
+   if(pathname==='/agents/claude/config')return unsupported==='missing'?route.fulfill({status:404,json:{error:'Unknown agent endpoint'}}):route.fulfill({json:{...(unsupported==='unknown'?{version:99}:{}),activeProfileId:null,profiles:[]}});
+   if(pathname==='/agents/backends')return route.fulfill({json:{claude:{available:true,authenticated:true,account:{email:'legacy@example.test'}}}});
+   return route.fulfill({json:{ok:true}});
+  });
+  await page.goto('http://127.0.0.1:8080/dashboard#cli-accounts');
+  await page.locator('#claude-config-open').click();
+  await page.waitForFunction(()=>document.querySelector('#claude-config-notice').textContent.length>0);
+  assert.equal(await page.locator('#claude-profile-new').isDisabled(),true);
+  for(const mode of ['unknown','absent']){
+   unsupported=mode;const response=page.waitForResponse(response=>new URL(response.url()).pathname==='/agents/claude/config');
+   await page.locator('#claude-config-refresh').click();await response;
+   await page.waitForFunction(()=>document.querySelector('#claude-config-notice').textContent.includes('此版本'));
+   assert.equal(await page.locator('#claude-profile-new').isDisabled(),true);
+  }
+  await page.locator('[data-cli="claude"]').getByRole('button',{name:'检测账号',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('[data-cli="claude"] .cli-identity').textContent==='legacy@example.test');
+  assert.deepEqual(errors,[]);
  }finally{await browser.close();}
 });

@@ -16,6 +16,7 @@ function sourceFingerprint(root) {
   walk(path.join(crate, 'src'));
   for (const name of ['Cargo.toml', 'build.rs']) entries.push(['crate/' + name, path.join(crate, name)]);
   for (const name of ['Cargo.toml', 'Cargo.lock']) entries.push(['workspace/' + name, path.join(root, name)]);
+  entries.push(['shared/src/mcp/dashboardCli.ts', path.resolve(root, '../../src/mcp/dashboardCli.ts')]);
   const hash = crypto.createHash('sha256');
   for (const [name, file] of entries.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)) {
     const content = fs.readFileSync(file);

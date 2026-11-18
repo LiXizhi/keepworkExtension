@@ -17,6 +17,24 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
             input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         }
         const parts = url.pathname.split('/').filter(Boolean);
+        if (parts[1] === 'claude' && parts[2] === 'config') {
+            if (parts.length === 3 && req.method === 'GET') { send(200, await manager.claudeConfig('read')); return; }
+            if (parts.length === 4 && parts[3] === 'activate' && req.method === 'POST') {
+                if (!input || Array.isArray(input) || Object.keys(input).some(key => key !== 'profileId') || !Object.prototype.hasOwnProperty.call(input, 'profileId')) throw new Error('profileId required');
+                send(200, await manager.claudeConfig('activate', input)); return;
+            }
+            if (parts[3] === 'profiles') {
+                if (parts.length === 4 && req.method === 'POST') { send(200, await manager.claudeConfig('create', input)); return; }
+                if (parts.length === 5 && /^[\w-]{1,160}$/.test(parts[4])) {
+                    if (req.method === 'PATCH') {
+                        if (!input || Array.isArray(input) || Object.prototype.hasOwnProperty.call(input, 'id')) throw new Error('Invalid Claude profile fields');
+                        send(200, await manager.claudeConfig('update', { ...input, id: parts[4] })); return;
+                    }
+                    if (req.method === 'DELETE') { send(200, await manager.claudeConfig('delete', { id: parts[4] })); return; }
+                }
+            }
+            send(404, { error: 'Unknown Claude configuration operation' }); return;
+        }
         if ((parts[1] === 'approval-sessions' || ['approval-turns', 'approval-image-turns'].includes(parts[3]))
             && req.method === 'POST' && input.approvalMode === undefined) throw new Error('approvalMode required');
         if (parts.join('/') === 'agents/approval-sessions' && req.method === 'POST') {

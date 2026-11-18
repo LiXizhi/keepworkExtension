@@ -6,20 +6,38 @@ const args = process.argv.slice(2);
 const option = (name) => args.find((arg) => arg.startsWith(name + '='))?.slice(name.length + 1)
   || (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 const thread = option('--session-id') || option('--resume');
+// Profile contracts opt in explicitly. Never journal arbitrary inherited
+// credentials: only the fixed, synthetic values owned by that suite are known.
+const profileMode = process.env.KEEPWORK_CLAUDE_FIXTURE_PROFILE_MODE === '1';
+let settings;
+if (profileMode && option('--settings')) {
+  settings = JSON.parse(fs.readFileSync(option('--settings'), 'utf8'));
+  if (settings.env) Object.assign(process.env, settings.env);
+}
+const knownSecrets = new Set(['fixture-first-secret', 'fixture-second-secret', 'fixture-replacement-secret']);
+const fixtureKey = knownSecrets.has(process.env.ANTHROPIC_API_KEY) ? process.env.ANTHROPIC_API_KEY : '';
+const fixtureToken = knownSecrets.has(process.env.ANTHROPIC_AUTH_TOKEN) ? process.env.ANTHROPIC_AUTH_TOKEN : '';
+const provider = profileMode ? {
+  credentialKind: fixtureKey ? 'apiKey' : fixtureToken ? 'authToken' : 'none',
+  fixtureSecretMarker: fixtureKey || fixtureToken || null,
+  baseUrl: /^https:\/\/fixture-[a-z-]+\.example\.test(?:\/anthropic)?$/.test(process.env.ANTHROPIC_BASE_URL || '') ? process.env.ANTHROPIC_BASE_URL : null,
+  model: /^fixture-[a-z-]+$/.test(process.env.ANTHROPIC_MODEL || '') ? process.env.ANTHROPIC_MODEL : null,
+  ...(settings ? { settingsMode: fs.statSync(option('--settings')).mode & 0o777 } : {}),
+} : undefined;
 function log(value) {
   if (process.env.KEEPWORK_AGENT_FIXTURE_LOG) fs.appendFileSync(process.env.KEEPWORK_AGENT_FIXTURE_LOG, JSON.stringify({ pid: process.pid, thread, ...value }) + '\n');
 }
-log({ type: 'launch', args, cwd: process.cwd() });
+log({ type: 'launch', args, cwd: process.cwd(), ...(provider ? { provider } : {}) });
 if (args.includes('--version')) { console.log('Claude fixture 1.0'); process.exit(0); }
 if (args.includes('auth') && args.includes('status')) {
   const auth = process.env.KEEPWORK_CLAUDE_FIXTURE_AUTH || 'in';
   if (auth === 'unknown') { console.error('fixture auth status unavailable'); process.exit(2); }
-  const loggedIn = auth === 'in';
+  const loggedIn = profileMode ? !!(fixtureKey || fixtureToken) : auth === 'in';
   console.log(JSON.stringify({ loggedIn, email: loggedIn ? 'claude@example.invalid' : null,
-    authMethod: 'oauth_token', accessToken: 'SECRET_CLAUDE_AUTH_TOKEN' }));
+    authMethod: profileMode && loggedIn ? 'api_key' : 'oauth_token', accessToken: 'SECRET_CLAUDE_AUTH_TOKEN' }));
   process.exit(loggedIn ? 0 : 1);
 }
-const models = [
+const models = profileMode ? [{ value: provider.model || 'fixture-native', displayName: 'Fixture provider model', isDefault: true }] : [
   { value: 'fixture-claude', displayName: 'Claude fixture', isDefault: true, supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high'] },
   { value: 'fast', displayName: 'Fast fixture', supportsEffort: false },
 ];

@@ -151,6 +151,7 @@ impl AppState {
         caps.insert("agentModeApi".into(), serde_json::json!("v1"));
         caps.insert("agentApprovalApi".into(), serde_json::json!("codex-v1"));
         caps.insert("agentImageTurnApi".into(), serde_json::json!("v1"));
+        caps.insert("claudeConfigApi".into(), serde_json::json!("profiles-v1"));
         // Editor-model surfaces and non-Codex history stay unadvertised.
         caps
     }
@@ -436,10 +437,56 @@ fn messaging_request<'a>(
     ))
 }
 
-pub async fn dispatch(State(state): State<Arc<AppState>>, req: Request) -> Response {
+// Browsers omit Origin on same-origin GETs. Match the Node dashboard's bounded
+// recovery without granting arbitrary local pages access to owned agent/PTY data.
+fn recover_dashboard_origin(req: &mut Request, port: u16, path: &str) {
+    if req.method() != Method::GET
+        || req.headers().contains_key(header::ORIGIN)
+        || !(path.starts_with("/agents/") || path.starts_with("/terminal/"))
+        || path == "/agents/tool-proxy"
+        || req
+            .headers()
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+            != Some("same-origin")
+    {
+        return;
+    }
+    let Some(referrer) = req
+        .headers()
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| url::Url::parse(v).ok())
+    else {
+        return;
+    };
+    let origin = referrer.origin().ascii_serialization();
+    let host = &referrer[url::Position::BeforeHost..url::Position::AfterPort];
+    if [
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+    ]
+    .contains(&origin)
+        && req
+            .headers()
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            == Some(host)
+        && referrer.username().is_empty()
+        && referrer.password().is_none()
+        && ["/", "/dashboard", "/dashboard/"].contains(&referrer.path())
+    {
+        if let Ok(origin) = origin.parse() {
+            req.headers_mut().insert(header::ORIGIN, origin);
+        }
+    }
+}
+
+pub async fn dispatch(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
     let method = req.method().clone();
     let path = normalize_path(req.uri().path());
     let query = query_params(req.uri().query());
+    recover_dashboard_origin(&mut req, state.port, &path);
     let headers = req.headers().clone();
 
     match (method.as_str(), path.as_str()) {
@@ -963,6 +1010,98 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_origin_recovery_requires_exact_browser_provenance_and_never_covers_mutations() {
+        let check = |path: &str, method: Method, referrer: &str, host: &str, site: &str| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, host)
+                .header(header::REFERER, referrer)
+                .header("sec-fetch-site", site)
+                .body(Body::empty())
+                .unwrap();
+            recover_dashboard_origin(&mut req, 8089, path);
+            req.headers()
+                .get(header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            check(
+                "/agents/claude/config",
+                Method::GET,
+                "http://127.0.0.1:8089/dashboard",
+                "127.0.0.1:8089",
+                "same-origin"
+            ),
+            Some("http://127.0.0.1:8089".into())
+        );
+        assert_eq!(
+            check(
+                "/terminal/sessions/id/output",
+                Method::GET,
+                "http://localhost:8089/",
+                "localhost:8089",
+                "same-origin"
+            ),
+            Some("http://localhost:8089".into())
+        );
+        for (path, method, referrer, host, site) in [
+            (
+                "/agents/claude/config",
+                Method::GET,
+                "http://127.0.0.1:8089/other-page",
+                "127.0.0.1:8089",
+                "same-origin",
+            ),
+            (
+                "/agents/claude/config",
+                Method::GET,
+                "http://127.0.0.1:9999/dashboard",
+                "127.0.0.1:9999",
+                "same-origin",
+            ),
+            (
+                "/agents/claude/config",
+                Method::GET,
+                "http://127.0.0.1:8089/dashboard",
+                "localhost:8089",
+                "same-origin",
+            ),
+            (
+                "/agents/claude/config",
+                Method::GET,
+                "https://evil.example/dashboard",
+                "evil.example",
+                "same-origin",
+            ),
+            (
+                "/agents/claude/config",
+                Method::GET,
+                "http://127.0.0.1:8089/dashboard",
+                "127.0.0.1:8089",
+                "cross-site",
+            ),
+            (
+                "/agents/claude/config",
+                Method::POST,
+                "http://127.0.0.1:8089/dashboard",
+                "127.0.0.1:8089",
+                "same-origin",
+            ),
+            (
+                "/agents/tool-proxy",
+                Method::GET,
+                "http://127.0.0.1:8089/dashboard",
+                "127.0.0.1:8089",
+                "same-origin",
+            ),
+        ] {
+            assert_eq!(check(path, method, referrer, host, site), None);
+        }
+    }
 
     #[test]
     fn origin_allowlist_matches_node() {

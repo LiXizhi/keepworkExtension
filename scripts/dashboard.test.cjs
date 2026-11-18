@@ -44,6 +44,37 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
             const accounts = await fetch(base + '/agents/accounts', { headers: dashboardHeaders });
             assert.equal(accounts.status, 200);
             assert.deepEqual(Object.keys(await accounts.json()).sort(), [...AGENT_BACKENDS].sort());
+            const profilePath = '/agents/claude/config';
+            const profileHeaders = { ...dashboardHeaders, Origin: base, 'Content-Type': 'application/json' };
+            const profileWrite = (suffix, method, body, headers = profileHeaders) => fetch(base + profilePath + suffix, {
+                method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            });
+            assert.equal((await fetch(base + profilePath, { headers: dashboardHeaders })).status, 200);
+            for (const headers of [
+                { ...profileHeaders, Origin: 'https://evil.example' },
+                { ...dashboardHeaders, Referer: 'https://evil.example/dashboard' },
+                { ...profileHeaders, 'X-Agent-Owner': '' },
+            ]) {
+                assert.ok([400, 403].includes((await fetch(base + profilePath, { headers })).status));
+            }
+            assert.equal((await profileWrite('/profiles', 'POST', {}, { ...profileHeaders, Origin: 'https://evil.example' })).status, 403);
+            if (requireAuth) {
+                assert.equal((await fetch(base + profilePath, { headers: { ...dashboardHeaders, Authorization: '' } })).status, 401);
+                assert.equal((await profileWrite('/activate', 'POST', { profileId: null }, { ...profileHeaders, Authorization: '' })).status, 401);
+            }
+            const createdProfile = await profileWrite('/profiles', 'POST', { name: 'Fixture gateway', baseUrl: 'https://example.test/anthropic', authType: 'authToken', secret: 'fixture-dashboard-secret' });
+            assert.equal(createdProfile.status, 200);
+            const config = await createdProfile.json(), profileId = config.profiles.at(-1).id;
+            assert.equal(config.version, 1);
+            assert.equal(config.profiles.at(-1).hasSecret, true);
+            assert.ok(!JSON.stringify(config).includes('fixture-dashboard-secret'));
+            assert.equal((await profileWrite('/activate', 'POST', { profileId })).status, 200);
+            assert.equal((await profileWrite('/profiles/' + profileId, 'DELETE')).status, 400);
+            assert.equal((await profileWrite('/profiles/' + profileId, 'PATCH', { name: 'Renamed fixture' })).status, 200);
+            assert.equal((await profileWrite('/activate', 'POST', {})).status, 400);
+            assert.equal((await profileWrite('/profiles/' + profileId, 'PATCH', { id: 'different-id' })).status, 400);
+            assert.equal((await profileWrite('/activate', 'POST', { profileId: null })).status, 200);
+            assert.equal((await profileWrite('/profiles/' + profileId, 'DELETE')).status, 200);
             const terminalResponse = await fetch(base + '/terminal/sessions', { method: 'POST', headers: { ...dashboardHeaders, Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: home }) });
             assert.equal(terminalResponse.status, 201);
             const terminal = await terminalResponse.json();
@@ -59,6 +90,7 @@ test('dashboard routes, script syntax, auth and admin Origin protection', async 
             fs.writeFileSync(desktopExe, 'fixture');
             rememberDesktopClient({ version: '0.1.6', platform: 'macos', arch: 'arm64', executable: desktopExe });
             const health = await (await fetch(base + '/health')).json();
+            assert.equal(health.claudeConfigApi, 'profiles-v1');
             assert.deepEqual(health.desktopClient, { product: 'aichat-desktop', version: '0.1.6', platform: 'macos', arch: 'arm64' });
             fs.unlinkSync(desktopExe);
             assert.equal((await (await fetch(base + '/health')).json()).desktopClient, undefined);

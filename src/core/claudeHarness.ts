@@ -11,10 +11,11 @@ import { CliLaunch, resolveAgentCli, stopCli } from './agentCliProcess';
 import { cliProxyEnvironment } from './cliProxyEnvironment';
 import { unsupportedModeMethod } from './agentModes';
 import { agentAccountDisplay } from './agentAccount';
+import { ClaudeProfiles } from './claudeProfiles';
 
 type Thread = { id: string; cwd: string; roots: string[]; turns: any[]; native: boolean; planMode?: boolean; model?: string; effort?: string; mcpServers?: any[]; aichatInstructions?: string };
 type Run = { id: string; items: any[]; cancelled?: boolean; messageId?: string; timer: NodeJS.Timeout };
-type Connection = { child: ChildProcessWithoutNullStreams; ready: Promise<any>; pending: Map<string, any>; run?: Run; permissions: Map<string, any>; models: any[] };
+type Connection = { child: ChildProcessWithoutNullStreams; ready: Promise<any>; pending: Map<string, any>; run?: Run; permissions: Map<string, any>; models: any[]; profileKey: string };
 const rejected = (message: string) => Object.assign(new Error(message), { rpcRejected: true });
 const EFFORT_THINKING_TOKENS: Record<string, number> = { low: 4000, medium: 10000, high: 20000, xhigh: 31999, max: 31999 };
 function normalizeClaudeModel(m: any) {
@@ -45,7 +46,9 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
     private connections = new Map<string, Connection>();
     private modelCache: any[] = [];
     private launch?: CliLaunch;
+    private profileStore?: ClaudeProfiles;
     constructor(private directory: string, private executable?: string, private prefix: string[] = []) { super(); }
+    private get profiles() { return this.profileStore ||= new ClaudeProfiles(path.join(path.dirname(this.directory), 'claude-profiles-v1.json')); }
     cliInfo() { return this.launch && { path: this.launch.path, source: this.launch.source }; }
     refreshCapabilities() { this.modelCache = []; }
     private notify(method: string, threadId: string, params: any) { this.emit('notification', { method, params: { threadId, ...params } }); }
@@ -83,7 +86,10 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         }
         const args = [...this.prefix, '--print', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--permission-prompt-tool', 'stdio', `${thread.native ? '--resume' : '--session-id'}=${thread.id}`,
             ...thread.roots.slice(1).flatMap(root => ['--add-dir', root]), ...(thread.model ? ['--model', thread.model] : []), ...(thread.effort ? ['--effort', thread.effort] : [])];
-        const environment = { ...cliProxyEnvironment() };
+        const profileKey = this.profiles.key;
+        const provider = this.profiles.launch(cliProxyEnvironment());
+        args.push(...provider.args);
+        const environment = provider.env;
         if (thread.mcpServers?.length) {
             const servers = Object.fromEntries(thread.mcpServers.map(server => [server.name, { command: server.command, args: server.args, env: Object.fromEntries(server.env.map((entry: any) => {
                 environment[entry.name] = entry.value;
@@ -92,9 +98,14 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
             args.push('--mcp-config', JSON.stringify({ mcpServers: servers }));
         }
         if (thread.aichatInstructions) args.push('--append-system-prompt', thread.aichatInstructions);
-        const command = resolveAgentCli('claude', args, this.executable); this.launch = command;
-        const child = spawn(command.executable, command.args, { cwd: thread.cwd, env: environment, shell: false, windowsHide: true, stdio: 'pipe', detached: process.platform !== 'win32' });
-        const c: Connection = { child, ready: Promise.resolve(), pending: new Map(), permissions: new Map(), models: [] };
+        let child: ChildProcessWithoutNullStreams;
+        try {
+            const command = resolveAgentCli('claude', args, this.executable); this.launch = command;
+            child = spawn(command.executable, command.args, { cwd: thread.cwd, env: environment, shell: false, windowsHide: true, stdio: 'pipe', detached: process.platform !== 'win32' });
+        } catch (error) { provider.cleanup(); throw error; }
+        child.once('close', provider.cleanup);
+        child.once('error', provider.cleanup);
+        const c: Connection = { child, ready: Promise.resolve(), pending: new Map(), permissions: new Map(), models: [], profileKey };
         this.connections.set(thread.id, c);
         const fail = (error: Error) => {
             if (this.connections.get(thread.id) !== c) return;
@@ -118,7 +129,7 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         child.stdin.on('error', () => fail(new Error('Claude input stream disconnected')));
         c.ready = this.control(c, { subtype: 'initialize', hooks: {} }).then(result => {
             c.models = result.models || [];
-            if (Array.isArray(result.models) && result.models.length) {
+            if (profileKey === this.profiles.key && Array.isArray(result.models) && result.models.length) {
                 this.modelCache = result.models;
                 this.notify('model/updated', thread.id, {});
             }
@@ -210,7 +221,7 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         const tokens = EFFORT_THINKING_TOKENS[effort];
         if (!tokens) throw rejected(`Unsupported Claude reasoning effort: ${effort}`);
         const targetModel = model || thread.model;
-        const modelMeta = [...c.models, ...this.modelCache].find(m => (m.value || m.id) === targetModel);
+        const modelMeta = [...c.models, ...(c.profileKey === this.profiles.key ? this.modelCache : [])].find(m => (m.value || m.id) === targetModel);
         if (modelMeta) {
             if (modelMeta.supportsEffort === false) throw rejected('This Claude model does not expose reasoning effort');
             const normalized = normalizeClaudeModel(modelMeta);
@@ -223,6 +234,18 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         thread.effort = effort;
     }
     async call(method: string, p: any = {}): Promise<any> {
+        if (method.startsWith('config/')) {
+            let result;
+            if (method === 'config/read') return this.profiles.snapshot();
+            if (method === 'config/create') result = this.profiles.create(p);
+            else if (method === 'config/update') { const { id, ...input } = p; result = this.profiles.update(id, input); }
+            else if (method === 'config/delete') result = this.profiles.remove(p.id);
+            else if (method === 'config/activate') result = this.profiles.activate(p.profileId);
+            else throw rejected('Unsupported Claude configuration operation');
+            this.refreshCapabilities();
+            this.emit('capabilitiesChanged');
+            return result;
+        }
         if (method === 'thread/list') return this.nativeHistory.list(p.cursor);
         if (method === 'thread/native/read') {
             if (this.connections.has(p.threadId)) return {thread:this.thread(p.threadId)};
@@ -232,13 +255,15 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
         }
         if (method === 'account/read') {
             const command = resolveAgentCli('claude', [...this.prefix, '--version'], this.executable); this.launch = command;
-            await promisify(execFile)(command.executable, command.args, { timeout: 10000, maxBuffer: 65536, windowsHide: true });
+            try { await promisify(execFile)(command.executable, command.args, { timeout: 10000, maxBuffer: 65536, windowsHide: true }); }
+            catch { throw new Error('Claude CLI unavailable; check its installation and discovered path'); }
+            const provider = this.profiles.launch(cliProxyEnvironment());
             // Native auth status is read-only. Older CLIs may not implement it;
             // their executable discovery must remain usable and auth unknown.
             try {
-                const statusCommand = resolveAgentCli('claude', [...this.prefix, 'auth', 'status'], this.executable);
+                const statusCommand = resolveAgentCli('claude', [...this.prefix, ...provider.args, 'auth', 'status'], this.executable);
                 const output = await promisify(execFile)(statusCommand.executable, statusCommand.args, {
-                    timeout: 5000, maxBuffer: 65536, windowsHide: true,
+                    timeout: 5000, maxBuffer: 65536, windowsHide: true, env: provider.env,
                 }).catch(error => {
                     // Claude exits 1 for a valid signed-out status document.
                     if (error.code === 1 && error.stdout) return { stdout: error.stdout };
@@ -250,10 +275,11 @@ export class ClaudeHarness extends EventEmitter implements HarnessAdapter {
                     ? { type: 'apiKey' }
                     : { type: 'cli', ...agentAccountDisplay({ email: status.email }) }, probe: 'native-auth' };
             } catch { /* No credential-file fallback or raw auth output in errors. */ }
+            finally { provider.cleanup(); }
             return { account: null, authUnknown: true, probe: 'executable' };
         }
         if (method === 'model/list') {
-            const raw = [...[...this.connections.values()].flatMap(c => c.models), ...this.modelCache];
+            const raw = [...[...this.connections.values()].filter(c => c.profileKey === this.profiles.key).flatMap(c => c.models), ...this.modelCache, ...this.profiles.configuredModels()];
             const data = raw.map(normalizeClaudeModel).filter((m, i, a): m is NonNullable<typeof m> => !!m && a.findIndex(x => x?.id === m.id) === i);
             return { data };
         }
