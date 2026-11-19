@@ -32,6 +32,14 @@ pub(crate) fn is_directory(dir: &Path) -> bool {
     std::fs::metadata(dir).map(|m| m.is_dir()).unwrap_or(false)
 }
 
+fn npm_prefix() -> Option<PathBuf> {
+    ["npm_config_prefix", "NPM_CONFIG_PREFIX"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 pub(crate) fn version_prefixes() -> Vec<PathBuf> {
     let home = crate::config::os_home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let roots: [(PathBuf, &str); 3] = [
@@ -72,6 +80,13 @@ pub(crate) fn cli_search_dirs() -> Vec<PathBuf> {
     }
     for prefix in version_prefixes() {
         dirs.push(prefix.join("bin"));
+    }
+    if let Some(prefix) = npm_prefix() {
+        dirs.push(if cfg!(windows) {
+            prefix
+        } else {
+            prefix.join("bin")
+        });
     }
     if let Some(custom) = std::env::var_os("KEEPWORK_CLI_BIN") {
         dirs.insert(0, PathBuf::from(custom));
@@ -160,7 +175,36 @@ pub(crate) fn global_module_dirs() -> Vec<PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         dirs.insert(0, PathBuf::from(appdata).join("npm"));
     }
-    dirs.into_iter().filter(|dir| is_directory(dir)).collect()
+    if let Some(prefix) = npm_prefix() {
+        dirs.push(prefix.clone());
+        dirs.push(prefix.join("lib"));
+    }
+    dirs.extend(npm_module_dirs(
+        std::env::split_paths(&inherited_path()).chain(cli_search_dirs()),
+    ));
+    let mut unique = Vec::new();
+    for dir in dirs {
+        if dir.is_absolute() && is_directory(&dir) && !unique.contains(&dir) {
+            unique.push(dir);
+        }
+    }
+    unique
+}
+
+/// Windows npm stores node_modules beside PATH shims; POSIX npm stores it in
+/// ../lib relative to bin. Resolve only package native binaries, never a shell shim.
+fn npm_module_dirs(bin_dirs: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for dir in bin_dirs {
+        if !dir.is_absolute() {
+            continue;
+        }
+        dirs.push(dir.clone());
+        if let Some(parent) = dir.parent() {
+            dirs.push(parent.join("lib"));
+        }
+    }
+    dirs
 }
 
 pub(crate) fn resolve_cli(
@@ -171,7 +215,7 @@ pub(crate) fn resolve_cli(
 ) -> Result<PathBuf, DwsError> {
     if let Ok(custom) = std::env::var(env_var) {
         let path = PathBuf::from(custom);
-        if path.is_file() {
+        if path.is_absolute() && path.is_file() {
             return Ok(path);
         }
     }
@@ -188,7 +232,7 @@ pub(crate) fn resolve_cli(
         candidates.push(dir.join("node_modules").join(module_subdir).join(binary));
     }
     for path in candidates {
-        if path.is_file() {
+        if path.is_absolute() && path.is_file() {
             return Ok(path);
         }
     }
@@ -222,6 +266,43 @@ pub(crate) fn resolve_lark() -> Result<PathBuf, DwsError> {
     )
 }
 
+/// Structured DWS errors may follow lifecycle logs. Never return the CLI text.
+pub(crate) fn dws_setup_failure(diagnostics: &str) -> Option<&'static str> {
+    let json = diagnostics
+        .rfind("\n{")
+        .map_or(diagnostics, |start| &diagnostics[start + 1..]);
+    let parsed = serde_json::from_str::<Value>(json).ok();
+    let detail = parsed.as_ref().and_then(|value| value.get("error"));
+    let field = |key: &str| detail.and_then(|value| value[key].as_str());
+    let message = field("message").unwrap_or(diagnostics);
+    if field("category") == Some("permission")
+        || field("reason") == Some("permission_denied")
+        || regex_is_match(
+            r"(?i)permission.denied|forbidden|insufficient.scope|\b403\b",
+            message,
+        )
+    {
+        Some("DingTalk permission denied")
+    } else if field("category") == Some("auth")
+        || field("reason") == Some("auth_refresh_failed")
+        || regex_is_match(
+            r"(?i)invalid.?grant|token.*expired|expired.*token|unauthorized|auth login|未登录|请.*登录|load access token: organization .* not found|\b401\b",
+            message,
+        )
+    {
+        Some("DingTalk login required")
+    } else if regex_is_match(
+        r"(?i)unknown.{0,30}(event|rule)|unsupported event|not supported on windows|invalid.{0,10}event",
+        message,
+    ) {
+        Some("DWS CLI update required for message subscriptions")
+    } else if detail.is_some_and(|e| e["retryable"] == false) {
+        Some("DWS setup requires attention")
+    } else {
+        None
+    }
+}
+
 pub(crate) fn classify_cli_error(output: &str, diagnostics: &str, feishu: bool) -> DwsError {
     let error_text = format!("{output} {diagnostics}");
     if !feishu
@@ -231,6 +312,9 @@ pub(crate) fn classify_cli_error(output: &str, diagnostics: &str, feishu: bool) 
         return DwsError::uncertain("proxy connection failed; check daemon proxy settings");
     }
     if regex_is_match(r"(?i)scope|permission|9999167[29]|forbidden", &error_text) {
+        if !feishu {
+            return DwsError::rejected("DingTalk permission denied");
+        }
         return DwsError {
             uncertain: false,
             message: "Feishu permission denied; authorize personal messaging scopes: contact:user.basic_profile:readonly offline_access search:message im:chat:read im:message:readonly im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.send_as_user".to_string(),
@@ -330,6 +414,8 @@ pub(crate) async fn cli_call(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW for background channel calls.
     let mut child = command
         .spawn()
         .map_err(|_| DwsError::rejected("CLI could not start"))?;
@@ -360,6 +446,15 @@ pub(crate) async fn cli_call(
         .unwrap_or(None);
     if code.is_none() {
         return Err(DwsError::uncertain("CLI exited without a status code"));
+    }
+    let setup_read = !feishu
+        && matches!(args, [command, action, ..] if
+        (command == "event" && action == "status") || (command == "profile" && action == "list"));
+    if setup_read && code != Some(0) {
+        if let Some(reason) = dws_setup_failure(&diagnostics).or_else(|| dws_setup_failure(&output))
+        {
+            return Err(DwsError::rejected(reason));
+        }
     }
     let value: Value = serde_json::from_str(&output)
         .map_err(|_| classify_cli_error(&output, &diagnostics, feishu))?;

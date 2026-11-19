@@ -613,7 +613,7 @@ impl MessagingService {
         agent_id: &str,
         root: &str,
         prompt: &str,
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>, MessageError> {
         let shared = {
             let inner = self.lock();
             inner
@@ -625,8 +625,11 @@ impl MessagingService {
                         && run.binding.agent_id.is_some()
                 })
                 .map(|run| run.binding.id.clone())
-        }?;
-        let _ = self.bind_agent(owner, agent_id, &shared, true).ok()?;
+        };
+        let Some(shared) = shared else {
+            return Ok(None);
+        };
+        self.bind_agent(owner, agent_id, &shared, true)?;
         self.set_agent_prompt(owner, agent_id, prompt);
         if let Err(error) = self.start(&shared).await {
             let inner = self.lock();
@@ -637,11 +640,10 @@ impl MessagingService {
                 .unwrap_or(false);
             drop(inner);
             if !reconnecting {
-                let _ = error;
-                return None;
+                return Err(error);
             }
         }
-        self.view(&shared).ok()
+        self.view(&shared).map(Some)
     }
 
     pub async fn connect_agent(
@@ -658,7 +660,7 @@ impl MessagingService {
         }
         if let Some(shared) = self
             .reuse_channel("dingtalk", owner, agent_id, &root, prompt)
-            .await
+            .await?
         {
             return Ok(shared);
         }
@@ -704,7 +706,7 @@ impl MessagingService {
                 if occupied {
                     if let Some(shared) = self
                         .reuse_channel("dingtalk", owner, agent_id, &root, prompt)
-                        .await
+                        .await?
                     {
                         return Ok(shared);
                     }
@@ -760,7 +762,7 @@ impl MessagingService {
         }
         if let Some(shared) = self
             .reuse_channel("feishu", owner, agent_id, &root, prompt)
-            .await
+            .await?
         {
             return Ok(shared);
         }

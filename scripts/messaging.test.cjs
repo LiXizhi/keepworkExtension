@@ -168,6 +168,46 @@ test('DWS listener subscriptions do not subscribe all groups',()=>{
     const {listenerArgs}=load('messagingDingtalk');const c=policy.defaultMessageConfig();c.groups=['group'];assert.equal(listenerArgs(c).length,1);c.keywords=['名字'];assert.deepEqual(listenerArgs(c)[1],['event','consume','user_im_message_receive_group','--group','group','--flatten','-f','ndjson']);
 });
 
+test('DWS status and listener classify structured stderr without disclosing diagnostics', async () => {
+    const { PassThrough } = require('node:stream');
+    const { messagingNeedsLogin, messagingNeedsRepair } = load('messaging', {'./messagingExecutor': {}});
+    for (const [category, reason, expected] of [
+        ['auth', 'auth_refresh_failed', 'DingTalk login required'],
+        ['permission', 'permission_denied', 'DingTalk permission denied'],
+    ]) {
+        const diagnostic = JSON.stringify({ ok: false, error: {
+            category, reason, retryable: false, message: 'private-fixture-detail',
+        } }, null, 2);
+        const adapter = load('messagingDingtalk', {
+            'node:fs': { ...fs, existsSync: () => true, statSync: () => ({ isFile: () => true }) },
+            'node:child_process': { spawn() {
+                const child = new EventEmitter();
+                child.stdin = new PassThrough();
+                child.stdout = new PassThrough();
+                child.stderr = new PassThrough();
+                process.nextTick(() => {
+                    child.stderr.end(diagnostic + '\n');
+                    child.stdout.end();
+                    child.emit('close', 1);
+                });
+                return child;
+            } },
+        });
+        for (const invoke of [
+            () => adapter.dws(['event', 'status', '-f', 'json'], os.tmpdir()),
+            () => adapter.listenDws(os.tmpdir(), 'corp:user', policy.defaultMessageConfig(), () => {}, () => {}),
+        ]) {
+            await assert.rejects(invoke, error => {
+                assert.ok(error.message.includes(expected), error.message);
+                assert.doesNotMatch(error.message, /private-fixture-detail|Feishu/);
+                assert.equal(messagingNeedsRepair(error), true);
+                assert.equal(messagingNeedsLogin(error), category === 'auth');
+                return true;
+            });
+        }
+    }
+});
+
 test('card rejection falls back, uncertain creation does not, and send args never invoke a shell',async()=>{
     const calls=[];let payload={error:{code:'unsupported'}},code=1;
     const {DingTalkDelivery,DwsError}=load('messagingDingtalk',{

@@ -29,7 +29,7 @@ pub(crate) fn needs_login_text(text: &str) -> bool {
 
 pub(crate) fn needs_repair_text(text: &str) -> bool {
     regex_is_match(
-        r"(?i)identity does not match|DWS CLI unavailable|DWS CLI update required|Lark CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录",
+        r"(?i)identity does not match|DWS setup requires attention|DWS CLI unavailable|DWS CLI update required|Lark CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录",
         text,
     )
 }

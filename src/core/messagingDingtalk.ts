@@ -14,6 +14,19 @@ export function resolveDws(): string {
     throw new Error('DWS CLI unavailable; install dingtalk-workspace-cli or set KEEPWORK_DWS_PATH to its native executable');
 }
 export class DwsError extends Error { constructor(public uncertain: boolean, public detail?: any, reason = '') { super((uncertain ? 'DWS result unknown; not retried' : 'DWS rejected the operation') + (reason ? ` (${reason})` : '')); } }
+// DWS writes structured failures to stderr, sometimes after lifecycle messages.
+// Return fixed setup reasons only. CLI output can contain credentials and URLs.
+function dwsSetupFailure(diagnostics: string): string | undefined {
+    let detail;
+    try { detail = JSON.parse(diagnostics.slice(diagnostics.lastIndexOf('\n{') + 1)).error; } catch { /* older DWS emits text */ }
+    const reason = detail?.reason;
+    const message = String(detail?.message ?? diagnostics);
+    if (detail?.category === 'permission' || reason === 'permission_denied' || /permission.denied|forbidden|insufficient.scope|\b403\b/i.test(message)) return 'DingTalk permission denied';
+    if (detail?.category === 'auth' || reason === 'auth_refresh_failed' || /invalid.?grant|token.*expired|expired.*token|unauthorized|auth login|未登录|请.*登录|load access token: organization .* not found|\b401\b/i.test(message)) return 'DingTalk login required';
+    if (/unknown.{0,30}(event|rule)|unsupported event|not supported on windows|invalid.{0,10}event/i.test(message)) return 'DWS CLI update required for message subscriptions';
+    if (detail?.retryable === false) return 'DWS setup requires attention';
+    return undefined;
+}
 export function dws(args: string[], cwd: string, timeoutMs = 45000): Promise<any> {
     return new Promise((resolve, reject) => {
         let child: ChildProcessWithoutNullStreams;
@@ -24,7 +37,13 @@ export function dws(args: string[], cwd: string, timeoutMs = 45000): Promise<any
         child.stdout.setEncoding('utf8'); child.stdout.on('data', s => { output += s; if (output.length > 2_000_000) { child.stdin.end(); finish(new DwsError(true)); } });
         child.stderr.setEncoding('utf8'); child.stderr.on('data', s => { diagnostics = (diagnostics + s).slice(-4000); });
         child.on('error', () => finish(new DwsError(false)));
-        child.on('close', code => { try { const result = JSON.parse(output); if (code || result.error) finish(new DwsError(false, result.error)); else finish(undefined, result); } catch {
+        child.on('close', code => {
+            const setupRead = (args[0] === 'event' && args[1] === 'status') || (args[0] === 'profile' && args[1] === 'list');
+            if (setupRead && code !== 0) {
+                const reason = dwsSetupFailure(diagnostics) || dwsSetupFailure(output);
+                if (reason) return finish(new DwsError(false, undefined, reason));
+            }
+            try { const result = JSON.parse(output); if (code || result.error) finish(new DwsError(false, result.error)); else finish(undefined, result); } catch {
             // Never surface raw stderr: URLs and diagnostics can contain credentials.
             const reason = /proxy/i.test(diagnostics) && /connection|connect|dial/i.test(diagnostics)
                 ? 'proxy connection failed; check daemon proxy settings'
@@ -63,9 +82,18 @@ export async function listenDws(root: string, profile: string, config: MessageCo
                     output += chunk; if (output.length > 1_000_000) { stop(); onExit(); return; }
                     let end; while ((end = output.indexOf('\n')) >= 0) { const line = output.slice(0, end); output = output.slice(end + 1); if (ready && !stopping && line.trim()) { try { onEvent(JSON.parse(line)); } catch { /* invalid event is never executed */ } } }
                 });
-                child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-4000); if (!ready && diagnostics.includes('[event] ready')) { ready = true; clearTimeout(timer); resolve(); } });
-                child.on('error', () => { clearTimeout(timer); reject(new Error('DWS listener could not start')); if (!stopping) onExit(); });
-                child.on('close', () => { clearTimeout(timer); if (!ready && /unknown.{0,30}(event|rule)|unsupported|not supported|invalid.{0,10}event/i.test(diagnostics)) { reject(new Error('DWS CLI update required for message subscriptions')); } else if (!ready) reject(new Error(/invalid.?grant|token.*expired|unauthorized|\b401\b|auth login|未登录|请.*登录/i.test(diagnostics) ? 'DingTalk login required' : 'DWS listener exited before ready')); if (!stopping) onExit(); });
+                child.stderr.on('data', chunk => {
+                    diagnostics += chunk;
+                    if (!ready && diagnostics.includes('[event] ready')) { ready = true; clearTimeout(timer); resolve(); }
+                    diagnostics = diagnostics.slice(-8192);
+                });
+                const failed = (reason: string) => {
+                    clearTimeout(timer);
+                    if (!ready) reject(new Error(reason));
+                    else if (!stopping) { stop(); onExit(); }
+                };
+                child.on('error', () => failed('DWS listener could not start'));
+                child.on('close', () => failed(dwsSetupFailure(diagnostics) || 'DWS listener exited before ready'));
             });
         }
         return stop;

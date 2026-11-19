@@ -20,6 +20,8 @@ pub(crate) async fn login_dws(root: &str, profile: Option<&str>) -> Result<(), M
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW; authorization opens its own browser.
     let mut child = command
         .spawn()
         .map_err(|_| MessageError::bad("DingTalk authorization could not start"))?;
@@ -108,21 +110,9 @@ pub(crate) async fn wait_listener_ready(
                 if diagnostics.contains("[event] ready") {
                     return Ok(());
                 }
-                if regex_is_match(
-                    r"(?i)unknown.{0,30}(event|rule)|unsupported|not supported|invalid.{0,10}event",
-                    &diagnostics,
-                ) {
-                    return Err(DwsError::rejected(
-                        "DWS CLI update required for message subscriptions",
-                    ));
-                }
-                if regex_is_match(
-                    r"(?i)invalid.?grant|token.*expired|unauthorized|\b401\b|auth login|未登录|请.*登录",
-                    &diagnostics,
-                ) {
-                    return Err(DwsError::rejected("DingTalk login required"));
-                }
-                return Err(DwsError::rejected("DWS listener exited before ready"));
+                return Err(DwsError::rejected(
+                    dws_setup_failure(&diagnostics).unwrap_or("DWS listener exited before ready"),
+                ));
             }
             Ok(size) => {
                 diagnostics.push_str(&String::from_utf8_lossy(&buffer[..size]));
@@ -174,6 +164,8 @@ pub(crate) fn spawn_listener_child(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW for the background event listener.
     command
         .spawn()
         .map_err(|_| MessageError::bad("DWS listener could not start"))

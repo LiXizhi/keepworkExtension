@@ -2,6 +2,17 @@
 use std::{env, ffi::OsStr, io::Write, path::Path, thread, time::Duration};
 
 fn main() {
+    #[cfg(windows)]
+    if env::var_os("KEEPWORK_FIXTURE_REQUIRE_NO_CONSOLE").is_some() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        assert!(
+            unsafe { GetConsoleWindow() }.is_null(),
+            "background channel CLI must not allocate a console window"
+        );
+    }
     let executable = env::current_exe().expect("fixture executable path");
     let args: Vec<String> = env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or_default();
@@ -32,6 +43,12 @@ fn main() {
         return;
     }
 
+    if command == "event" && matches!(subcommand, "status" | "consume") {
+        if let Ok(error) = std::fs::read_to_string(format!(".dws-{subcommand}-error")) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
     let response = match (command, subcommand) {
         ("profile", "list") => {
             r#"{"currentProfile":"corp1:user1","profiles":[{"corpId":"corp1","userId":"user1","corpName":"Acme","userName":"Tester","isCurrent":true}]}"#

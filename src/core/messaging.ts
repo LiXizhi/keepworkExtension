@@ -86,7 +86,7 @@ export function messagingNeedsRepair(error: any): boolean {
     const detail = typeof error?.detail === 'object' ? JSON.stringify(error.detail) : String(error?.detail || '');
     // Occupancy can outlive a daemon restart briefly. Keep checking read-only
     // status with backoff; never stop another listener or delete its subscriptions.
-    return /identity does not match|DWS CLI unavailable|DWS CLI update required|Lark CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录/i.test(String(error?.message || error) + ' ' + detail);
+    return /identity does not match|DWS setup requires attention|DWS CLI unavailable|DWS CLI update required|Lark CLI unavailable|EACCES|EPERM|ENOENT|invalid.?grant|invalid.?token|refresh.?token.*expired|unauthenticated|unauthorized|login.required|permission.denied|forbidden|扫码|未登录/i.test(String(error?.message || error) + ' ' + detail);
 }
 export function messagingNeedsLogin(error: any): boolean {
     return /Select a current DingTalk CLI account|invalid.?grant|invalid.?token|token.*expired|unauthenticated|unauthorized|login.required|未登录/i.test(String(error?.message || error) + ' ' + JSON.stringify(error?.detail || ''));
