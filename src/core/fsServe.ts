@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import { tryRevealInVscode } from './vscodeBridge';
+import { revealInOs } from './osFileManager';
 import {
     PathEscapeError, confineLexical, confinePath, inspectDiskPath, isAbsDiskPath, relativeToRoot,
 } from './paths';
@@ -323,20 +324,6 @@ function createDirectory(rootRaw: string, relRaw: string) {
     return { rel, created };
 }
 
-function revealInOs(abs: string, folder: boolean): void {
-    if (process.platform === 'win32') {
-        const args = folder ? [abs] : [`/select,${abs}`];
-        spawn('explorer.exe', args, { detached: true, stdio: 'ignore' }).unref();
-        return;
-    }
-    if (process.platform === 'darwin') {
-        spawn('open', folder ? [abs] : ['-R', abs], { detached: true, stdio: 'ignore' }).unref();
-        return;
-    }
-    const dir = folder ? abs : path.dirname(abs);
-    spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
-}
-
 /** Open a file (or folder) with the OS default application. */
 function openInOs(abs: string): void {
     if (process.platform === 'win32') {
@@ -375,12 +362,11 @@ async function revealPath(rootRaw: string, relRaw: string, mode: 'reveal' | 'ope
     }
     if (mode === 'dir') {
         const dir = folder ? abs : path.dirname(abs);
-        const viaVscode = await tryRevealInVscode(dir);
-        if (!viaVscode) revealInOs(dir, true);
-        return { rel, via: viaVscode ? 'vscode' : 'os', mode };
+        await revealInOs(dir, true);
+        return { rel, via: 'os', mode };
     }
     const viaVscode = await tryRevealInVscode(abs);
-    if (!viaVscode) revealInOs(abs, folder);
+    if (!viaVscode) await revealInOs(abs, folder);
     return { rel, via: viaVscode ? 'vscode' : 'os', mode: 'reveal' };
 }
 

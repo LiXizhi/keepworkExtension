@@ -51,13 +51,13 @@ function renderDevices(next: Snapshot, replaceConfig: boolean) {
     deviceList = list;
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = devices.length ? "请选择遥控器…" : "暂无设备列表，请停止输入后刷新";
+    placeholder.textContent = devices.length ? "请选择遥控器…" : "暂无遥控器";
     picker.replaceChildren(placeholder);
     for (const device of devices) {
       const option = document.createElement("option");
       option.value = device.id;
-      const shortId = device.id.length > 20 ? `${device.id.slice(0, 4)}…${device.id.slice(-8)} · ` : "";
-      option.textContent = `${shortId}${device.name || "小米遥控器"} · ${device.id}${device.connected ? " · 已连接" : ""}`;
+      const suffix = devices.length > 1 && device.id.length > 20 ? device.id.slice(-8) + " · " : "";
+      option.textContent = `${suffix}${device.name || "小米遥控器"} · ${device.id}${device.connected ? " · 已连接" : ""}`;
       picker.appendChild(option);
     }
   }
@@ -67,9 +67,9 @@ function renderDevices(next: Snapshot, replaceConfig: boolean) {
   button("connect-device").disabled = !next.supported || next.running || pending || !selectedDevice;
   button("refresh-devices").disabled = !next.supported || next.running || pending;
   document.getElementById("device-selection")!.hidden = !next.supported;
-  text("device-help", choiceMissing ? "所选遥控器已不在设备列表中，请唤醒后刷新，或重新选择。"
-    : next.state === "waiting-selection" && !devices.length ? "请按键唤醒要使用的遥控器，再点“刷新设备”。"
-    : "发现多只遥控器时，请选择后连接。选择会被记住；切换设备前请先停止输入。");
+  text("device-help", choiceMissing ? "所选设备已离线，请唤醒后刷新或重新选择。"
+    : next.state === "waiting-selection" && !devices.length ? "按键唤醒遥控器，再点“刷新”。"
+    : "");
 }
 function render(next: Snapshot, replaceConfig = false) {
   snapshot = next;
@@ -93,16 +93,14 @@ function render(next: Snapshot, replaceConfig = false) {
   document.getElementById("connected-device")!.textContent = next.device ? "当前蓝牙设备：" + next.device : "";
   const keys = next.buttons;
   text("home-help", keys?.homeReady
-    ? "短按一次进入桌宠，再按一次回到原会话。关闭桌宠时切换最小化和还原。"
-    : "连接一只 RC003 并启动遥控器输入后可用。");
-  const clearKeyLabel = keys?.supported ? (keys.clearKey || "返回键") : "语音口令";
+    ? "切换桌宠和聊天窗口"
+    : "连接一只 RC003 后可用");
+  const clearKeyLabel = keys?.ready ? (keys.clearKey || "返回键") : "语音口令";
   document.getElementById("clear-key")!.textContent = clearKeyLabel;
   document.getElementById("clear-help")!.textContent = keys?.ready
-    ? "短按清空当前输入框并取消在途识别；在桌宠中逐次短按清空文字、收起输入框、临时隐藏桌宠。"
-    : "单独说“清除提示词”；识别后清空。";
-  text("key-status", keys?.error || (keys?.ready
-    ? `${clearKeyLabel}已连接 · ${keys.device}`
-    : next.running ? `${clearKeyLabel}未连接，可使用语音清除口令。` : "启动后会检测遥控器按键来源。"));
+    ? "清空输入并取消听写"
+    : "说“清除提示词”清空输入";
+  text("key-status", keys?.error || "");
 }
 async function action(command: "remote_voice_start" | "remote_voice_stop" | "remote_voice_begin_input" | "remote_voice_set_auto_start" | "remote_voice_refresh_devices") {
   if (pending || (command === "remote_voice_start" && (choiceMissing || (snapshot?.state === "waiting-selection" && !config().device)))) return;
@@ -155,3 +153,47 @@ async function refresh() {
   window.setTimeout(() => void refresh(), 300);
 }
 void refresh();
+
+interface KeyGuide { title: string; desc: string; tone?: "pairing" | "primary" }
+const keyGuides: Record<string, KeyGuide> = {
+  power: { title: "电源键", desc: "通过红外开关电视。" },
+  voice: { title: "语音键", desc: "按住说话，松手输入。双击开始或结束实时通话，朗读时短按打断。", tone: "primary" },
+  dpad: { title: "方向键 / OK", desc: "方向键移动或选择，听写完成后按 OK 发送。" },
+  back: { title: "返回键", desc: "Mac 上短按清空输入并取消识别。Windows 请用菜单键 ≡。" },
+  volume: { title: "音量键", desc: "调节电脑音量。" },
+  home: { title: "主页键", desc: "切换桌宠和聊天窗口。关闭桌宠时，切换窗口最小化和还原。" },
+  menu: { title: "菜单键 ≡", desc: "Windows 上短按清空输入或退出通话。与 TV 同时长按可配对。", tone: "pairing" },
+  tv: { title: "TV 键", desc: "与菜单键 ≡ 同时按住 3～5 秒，进入蓝牙配对模式。", tone: "pairing" },
+};
+
+function initRemoteGuide() {
+  const card = document.getElementById("remote-key-card");
+  const title = document.getElementById("remote-key-title");
+  const desc = document.getElementById("remote-key-desc");
+  if (!card || !title || !desc || typeof document.querySelectorAll !== "function") return;
+  const hotspots = Array.from(document.querySelectorAll<HTMLButtonElement>(".remote-hotspot"));
+  if (!hotspots.length) return;
+  const pairing: KeyGuide = { title: title.textContent || "", desc: desc.textContent || "", tone: "pairing" };
+  let pinned = "";
+  const apply = (key: string) => {
+    const info = keyGuides[key] || pairing;
+    card.dataset.tone = info.tone || "default";
+    title.textContent = info.title;
+    desc.textContent = info.desc;
+    for (const spot of hotspots) {
+      spot.classList.toggle("is-active", spot.dataset.key === key && key !== "pairing");
+    }
+  };
+  for (const spot of hotspots) {
+    const key = spot.dataset.key || "pairing";
+    spot.addEventListener("mouseenter", () => apply(key));
+    spot.addEventListener("focus", () => apply(key));
+    spot.addEventListener("mouseleave", () => apply(pinned || "pairing"));
+    spot.addEventListener("blur", () => apply(pinned || "pairing"));
+    spot.addEventListener("click", () => {
+      pinned = pinned === key ? "" : key;
+      apply(pinned || "pairing");
+    });
+  }
+}
+initRemoteGuide();

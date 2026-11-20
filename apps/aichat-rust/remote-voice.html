@@ -3,62 +3,112 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost tauri://localhost; frame-src 'none'; object-src 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost tauri://localhost; frame-src 'none'; object-src 'none'; base-uri 'none'">
   <title>遥控器语音输入</title>
   <link rel="stylesheet" href="/src/typography.css">
   <link rel="stylesheet" href="/src/remote-voice.css">
 </head>
 <body>
-  <main>
-    <h1>遥控器语音输入</h1>
-    <p class="intro">小米遥控器 2 / 2 Pro · Keepwork 云端识别，无需本地模型。</p>
-    <div id="status" role="status" aria-live="polite">正在读取状态…</div>
-    <p id="error" role="alert"></p>
-    <details id="voice-diagnostic" hidden>
-      <summary>蓝牙服务诊断（可复制）</summary>
-      <p class="hint">连接仍失败时，请提供电池仓内的型号和下方诊断。这里只包含设备标识与服务信息。</p>
-      <textarea id="diagnostic" readonly rows="10" aria-label="蓝牙服务诊断"></textarea>
-    </details>
-    <section id="device-selection" aria-label="选择遥控器">
-      <label for="device-picker">选择要使用的遥控器</label>
-      <select id="device-picker" aria-describedby="device-help"><option value="">请先查找或选择遥控器</option></select>
-      <p id="selected-device" class="hint"></p>
-      <div class="device-actions">
-        <button id="connect-device" type="button" disabled>连接所选遥控器</button>
-        <button id="refresh-devices" type="button">刷新设备</button>
+  <div class="voice-layout">
+    <main class="voice-controls-pane">
+      <h1>遥控器语音输入</h1>
+      <p class="intro">小米遥控器 2 / 2 Pro · Keepwork 云端听写</p>
+      <div id="status" role="status" aria-live="polite">正在读取状态…</div>
+      <div class="actions">
+        <button id="start" type="button" disabled>启动语音输入</button>
+        <button id="begin" type="button" title="返回 AIChat 输入框" hidden disabled>开始输入</button>
+        <button id="stop" type="button" disabled>停止</button>
       </div>
-      <p id="device-help" class="hint">发现多只遥控器时，请选择后连接。选择会被记住；切换设备前请先停止输入。</p>
-    </section>
-    <ol class="controls" aria-label="遥控器操作">
-      <li><kbd>语音键</kbd><strong>按住听写，双击对话</strong><span>按住时使用遥控器麦克风，松手后输入文字。在 AIChat 或桌宠中双击都会启动 AIChat 的豆包实时语音 3.0 Pro 电话。看到 ☎ 后，对着电脑麦克风说话。切换窗口时通话会继续。朗读时按语音键可打断并接着说；其他时候再按一次可退出对话。</span></li>
-      <li><kbd id="clear-key">返回键</kbd><strong>清空当前输入框</strong><span id="clear-help">正在检查清除键…</span></li>
-      <li><kbd>主页键</kbd><strong>切换桌宠和聊天窗口</strong><span id="home-help">正在检查主页键…</span></li>
-      <li><kbd>OK 键</kbd><strong>短按发送</strong><span>普通听写时，等识别完成后再按。Mac 上使用已识别遥控器的 OK 或返回键、Windows 上使用菜单键或语音键可退出连续对话。</span></li>
-    </ol>
-    <p id="key-status" class="hint" role="status" aria-live="polite"></p>
-    <div class="actions">
-      <button id="start" type="button">启动语音输入</button>
-      <button id="begin" type="button" disabled>就绪，开始输入</button>
-      <button id="stop" type="button" disabled>停止</button>
-    </div>
-    <label class="auto-option" for="auto-start"><input id="auto-start" type="checkbox" checked> 配对后自动开启</label>
-    <p class="hint auto-hint">发现已配对的小米遥控器后自动连接。关闭此选项会停止输入；点“停止”只暂停本次运行。</p>
-    <details>
-      <summary>设备与使用说明</summary>
-      <fieldset id="configuration">
-        <label for="device">蓝牙设备 ID（可选）</label>
-        <input id="device" type="text" spellcheck="false" placeholder="留空自动查找；Windows 填蓝牙地址，macOS 填设备 UUID">
-      </fieldset>
-      <p id="connected-device" class="hint"></p>
-      <p class="hint">Mac 从睡眠中唤醒后，正在使用的遥控器会自动重连。如果遥控器仍在休眠，先按键唤醒，等上方显示「已就绪」后再录音。</p>
-      <p class="hint">先在系统蓝牙设置配对遥控器，并断开电视或其他遥控软件。默认在检测到支持的已配对遥控器后开启，无需每次手动启动；没有设备时只等待。macOS 首次在前台检测到唯一遥控器时会请求一次系统蓝牙授权，允许后自动继续。辅助功能和输入监控需点击启动授权；已拒绝的权限请在系统设置中开启。</p>
-      <p class="hint">听写需要联网。按住语音键期间，客户端持续向 Keepwork 云端发送音频，预览文字会随识别结果更新。普通模式在桌面浮层显示预览，桌宠模式在聊天框里显示。松手后等待最终文字，一次输入到当前光标处。一次最多录 10 分钟。遇到异常时请查看上方状态。如果只输入了已确认的部分，请从缺失处补录。客户端不保存录音文件。</p>
-      <p class="hint">识别到单只支持的小米遥控器后，macOS 短按返回键、Windows 短按菜单键（Windows 系统驱动会丢弃返回键的 HID 0xF1 信号，仅对该遥控器设备限定接管菜单键，不影响普通键盘菜单键）会清空当前输入框并取消在途录音或识别；在桌宠中逐次短按可清空文字、收起输入框、临时隐藏桌宠。按主页键可回到原聊天。多只遥控器时可在上方选择语音设备；若仍无法确认按键来源，请单独说“清除提示词”；语音清除需等本段识别成功。清除只处理可编辑输入框。</p>
-      <p class="hint">听写完成后再按 OK。Mac 上能确认遥控器来源且当前桌面可见桌宠时，OK 发送桌宠草稿。隐藏桌宠后使用当前应用的原生回车。Windows 上 OK 使用原生回车。请在 AIChat 回复结束后发送，生成中回车会按现有规则停止回复，其他应用依自身回车规则处理。“发送提示词”和“清除提示词”整句口令只执行动作，口令文字不会填入，也不改动剪贴板。</p>
-      <p class="hint">就绪期间全局预留 F5，普通键盘的 F5 也会被拦截；停止或断连后恢复。普通口述粘贴到当前光标，会覆盖系统剪贴板，不会自动按回车。请先松开 Ctrl、Alt、Shift、Command 或 Win 修饰键。</p>
-      <p class="hint">“就绪，开始输入”返回 AIChat 并聚焦输入框。也可自行切换到其他应用输入；关闭设置窗口会继续运行，可从托盘重新打开并停止。</p>
-    </details>
-  </main>
+      <label class="auto-option"><input id="auto-start" type="checkbox" checked disabled> 配对后自动开启</label>
+
+      <section id="device-selection" aria-label="选择遥控器">
+        <label for="device-picker">遥控器</label>
+        <div class="device-actions">
+          <select id="device-picker" aria-describedby="device-help" disabled><option value="">请选择遥控器…</option></select>
+          <button id="connect-device" type="button" disabled>连接</button>
+          <button id="refresh-devices" type="button" disabled>刷新</button>
+        </div>
+        <p id="device-help" class="hint"></p>
+      </section>
+      <p id="error" role="alert"></p>
+      <details id="voice-diagnostic" hidden>
+        <summary>蓝牙诊断</summary>
+        <textarea id="diagnostic" readonly rows="6" aria-label="蓝牙服务诊断"></textarea>
+      </details>
+
+      <ul class="controls" aria-label="常用按键">
+        <li><kbd>语音键</kbd><span>按住听写，双击通话</span></li>
+        <li><kbd>OK 键</kbd><span>听写完成后按 OK 发送</span></li>
+        <li><kbd id="clear-key">清除键</kbd><span id="clear-help">检测中…</span></li>
+        <li><kbd>主页键</kbd><span id="home-help">检测中…</span></li>
+      </ul>
+      <p id="key-status" class="hint" role="status" aria-live="polite"></p>
+      <details>
+        <summary>设备与使用说明</summary>
+        <fieldset id="configuration">
+          <label for="device">手动指定设备 ID</label>
+          <input id="device" type="text" spellcheck="false" placeholder="留空自动查找，或填入蓝牙地址 / UUID">
+        </fieldset>
+        <p id="selected-device" class="hint"></p>
+        <p id="connected-device" class="hint"></p>
+        <p>先在系统蓝牙设置中配对并断开电视。切换遥控器前请先停止输入。“停止”暂停本次运行，关闭自动开启也会停止输入。点“开始输入”返回 AIChat 输入框，关闭设置后仍可从托盘管理。</p>
+        <p>macOS 首次连接需允许蓝牙访问。点“启动语音输入”可按提示授权辅助功能和输入监控。睡眠后请按键唤醒遥控器，等到就绪再说话。</p>
+        <p>按住语音键时，音频会传到 Keepwork 云端识别，每次最多 10 分钟。客户端不保存录音。普通口述会粘贴到当前光标并替换剪贴板，不会自动按回车。请先松开键盘修饰键。就绪期间 F5 由听写占用。</p>
+        <p>整句说“清除提示词”可清空输入框，说“发送提示词”可发送回车。口令文字不会填入，也不改动剪贴板。桌宠中连续短按清除键可依次清空、收起、隐藏。Mac 桌宠可见且识别到遥控器时，OK 发送桌宠草稿；其他情况按当前应用的回车规则处理。</p>
+        <p>双击语音键开始或结束实时通话，通话使用电脑麦克风。朗读时短按语音键可打断。</p>
+      </details>
+    </main>
+
+    <aside class="remote-guide-pane" aria-label="遥控器按键图">
+      <div class="guide-header">
+        <h2>按键图解</h2>
+        <p class="guide-subtitle">点选按键查看用法</p>
+      </div>
+      <section id="remote-key-card" class="key-detail-card" data-tone="pairing" aria-live="polite">
+        <strong id="remote-key-title">蓝牙配对</strong>
+        <p id="remote-key-desc">同时按住 ≡ 和 TV 3～5 秒，再到电脑蓝牙设置中配对。</p>
+      </section>
+
+      <div class="remote-stage">
+        <figure class="remote-figure">
+          <img class="remote-photo" src="/src/assets/remote-control.png" alt="蓝牙语音遥控器外观示意图" width="217" height="840">
+          <svg class="remote-overlay" viewBox="0 0 217 840" aria-hidden="true">
+            <rect x="16" y="434" width="185" height="94" rx="22" class="pairing-box"/>
+            <line x1="108.5" y1="528" x2="108.5" y2="554" class="pairing-arrow"/>
+            <rect x="14" y="554" width="189" height="60" rx="12" class="pairing-tag-bg"/>
+            <text x="108.5" y="579" class="pairing-tag-title">同时按住 3～5 秒</text>
+            <text x="108.5" y="601" class="pairing-tag-sub">进入蓝牙配对模式</text>
+          </svg>
+
+          <button type="button" class="remote-hotspot hotspot-power" data-key="power" aria-label="电源键">
+            <span class="hotspot-tip">电源键</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-voice" data-key="voice" aria-label="语音键">
+            <span class="hotspot-tip">语音键</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-dpad" data-key="dpad" aria-label="方向键与 OK 键">
+            <span class="hotspot-tip">方向键 / OK</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-back" data-key="back" aria-label="返回键">
+            <span class="hotspot-tip">返回键</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-volume" data-key="volume" aria-label="音量键">
+            <span class="hotspot-tip">音量 +/-</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-home" data-key="home" aria-label="主页键">
+            <span class="hotspot-tip">主页键</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-menu" data-key="menu" aria-label="菜单键">
+            <span class="hotspot-tip">菜单键 ≡</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-tv" data-key="tv" aria-label="TV 键">
+            <span class="hotspot-tip">TV 键</span>
+          </button>
+          <button type="button" class="remote-hotspot hotspot-pairing" data-key="pairing" aria-label="同时按住菜单键和 TV 键进入蓝牙配对模式"></button>
+        </figure>
+      </div>
+    </aside>
+  </div>
   <script type="module" src="/src/remote-voice.ts"></script>
 </body>
 </html>

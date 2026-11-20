@@ -1,4 +1,5 @@
 #[cfg(windows)]
+#[allow(dead_code)]
 #[path = "src/installer_stop.rs"]
 mod installer_stop;
 

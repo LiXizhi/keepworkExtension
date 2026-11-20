@@ -12,13 +12,17 @@ function fixture(t) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brain-native-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     const folder = path.join(dir, 'workspace'); fs.mkdirSync(folder);
-    const state = { selected: [{ scheme: 'file', fsPath: folder }], dialogs: [], commands: [] };
+    const state = { selected: [{ scheme: 'file', fsPath: folder }], dialogs: [], commands: [], reveals: [] };
     state.workspace = { isTrusted: true, workspaceFolders: [{ name: 'workspace', uri: { scheme: 'file', fsPath: folder, toString: () => 'file:///workspace' } }] };
     const vscode = { env: {}, workspace: state.workspace, window: { showOpenDialog: async options => { state.dialogs.push(options); return state.selected; } },
         Uri: { file: fsPath => ({ fsPath }) }, commands: { executeCommand: async (...args) => state.commands.push(args) } };
     const api = {};
     vm.runInNewContext(ts.transpileModule(fs.readFileSync(source, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
-        { exports: api, require: name => name === 'vscode' ? vscode : createRequire(source)(name) });
+        { exports: api, require: name => {
+            if (name === 'vscode') return vscode;
+            if (name.endsWith('/osFileManager')) return { revealInOs: async (...args) => state.reveals.push(args) };
+            return createRequire(source)(name);
+        } });
     const reopen = () => api.createBrainNative({ globalStorageUri: { fsPath: path.join(dir, 'profile') } });
     return { state, folder, reopen, call: reopen() };
 }
@@ -84,6 +88,23 @@ test('workspace listing is grant-free and selection revalidates membership and t
     await assert.rejects(call('selectWorkspaceFolder', { uri: listed[0].uri }), /no longer/);
     state.workspace.isTrusted = false;
     await assert.rejects(call('workspaceFolders'), /trusted local/);
+});
+
+test('open containing directory uses the file grant for nested files, root files and folders', async t => {
+    const { state, folder, call } = fixture(t);
+    const { id: rootId } = await call('pickFolder');
+    const nested = path.join(folder, '备课 materials');
+    fs.mkdirSync(nested);
+    fs.writeFileSync(path.join(nested, 'lesson.md'), '');
+    fs.writeFileSync(path.join(folder, 'index.md'), '');
+    const open = (rel, id = rootId) => call('file', { op: 'reveal', rootId: id, rel, mode: 'dir' });
+    for (const rel of ['备课 materials/lesson.md', 'index.md', '备课 materials', '']) await open(rel);
+    assert.deepEqual(state.reveals, [[nested, true], [folder, true], [nested, true], [folder, true]]);
+    assert.equal(state.commands.length, 0);
+    await assert.rejects(open('../escape'));
+    await assert.rejects(open('index.md', 'unknown'));
+    await assert.rejects(open('gone.md'));
+    assert.equal(state.reveals.length, 4);
 });
 
 test('cancel, closed views, remote URIs and ungranted paths never acquire grants', async t => {

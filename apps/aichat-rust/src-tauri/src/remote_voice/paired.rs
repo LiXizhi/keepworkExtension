@@ -187,7 +187,9 @@ fn select_or_wait(candidates: Vec<PairedRemote>, config_device: &str) -> Result<
 pub(super) enum Probe {
     Waiting,
     Retry(String),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     NeedsPermission(&'static str),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     NeedsBluetoothPermission,
     NeedsSelection(Vec<VoiceDevice>),
     Available(String),

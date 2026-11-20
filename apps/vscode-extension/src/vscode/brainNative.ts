@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { revealInOs } from '../../../../src/core/osFileManager';
 const { NativeFiles } = require('../../../../src/core/nativeFiles.cjs');
 
 /** Native file service; the renderer can use grants, never create them from paths. */
@@ -31,9 +33,14 @@ export function createBrainNative(context: vscode.ExtensionContext) {
         }
         if (method === 'file') {
             if (args.op === 'reveal') {
-                const uri = vscode.Uri.file(files.resolve(args.rootId, args.rel));
-                if (args.mode === 'open') await vscode.commands.executeCommand('vscode.open', uri);
-                else await vscode.commands.executeCommand('revealFileInOS', uri);
+                const target = files.resolve(args.rootId, args.rel);
+                if (args.mode === 'dir') {
+                    await revealInOs(fs.statSync(target).isDirectory() ? target : path.dirname(target), true);
+                } else {
+                    const uri = vscode.Uri.file(target);
+                    if (args.mode === 'open') await vscode.commands.executeCommand('vscode.open', uri);
+                    else await vscode.commands.executeCommand('revealFileInOS', uri);
+                }
                 return { ok: true };
             }
             const result = files.execute(args.op, args);

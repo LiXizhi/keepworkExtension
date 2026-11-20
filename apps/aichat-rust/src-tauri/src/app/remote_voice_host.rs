@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder}
 const PREPARE_COMPOSER: &str = include_str!("remote_voice_composer.js");
 
 enum ComposerOwner {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Document,
     Restored,
     Other,
@@ -401,9 +402,11 @@ pub(super) fn show_voice_setup_if_focused(app: &AppHandle) -> bool {
     build_voice_settings(app, false).is_ok()
 }
 
-fn voice_settings_inner_height(app: &AppHandle) -> f64 {
-    const TARGET_HEIGHT: f64 = 760.0;
-    const MIN_HEIGHT: f64 = 480.0;
+fn voice_settings_inner_size(app: &AppHandle) -> (f64, f64) {
+    const TARGET_WIDTH: f64 = 940.0;
+    const MIN_WIDTH: f64 = 680.0;
+    const TARGET_HEIGHT: f64 = 740.0;
+    const MIN_HEIGHT: f64 = 520.0;
     const CHROME_AND_MARGIN: f64 = 96.0;
 
     let monitor = app
@@ -411,21 +414,28 @@ fn voice_settings_inner_height(app: &AppHandle) -> f64 {
         .and_then(|window| window.current_monitor().ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten());
     let Some(monitor) = monitor else {
-        return TARGET_HEIGHT;
+        return (TARGET_WIDTH, TARGET_HEIGHT);
     };
     let scale = monitor.scale_factor();
     if !scale.is_finite() || scale <= 0.0 {
-        return TARGET_HEIGHT;
+        return (TARGET_WIDTH, TARGET_HEIGHT);
     }
-    let work_height = monitor.work_area().size.to_logical::<f64>(scale).height;
-    if !work_height.is_finite() || work_height <= 0.0 {
-        return TARGET_HEIGHT;
-    }
-    TARGET_HEIGHT.min((work_height - CHROME_AND_MARGIN).max(MIN_HEIGHT))
+    let work = monitor.work_area().size.to_logical::<f64>(scale);
+    let width = if work.width.is_finite() && work.width > 0.0 {
+        TARGET_WIDTH.min((work.width - CHROME_AND_MARGIN).max(MIN_WIDTH))
+    } else {
+        TARGET_WIDTH
+    };
+    let height = if work.height.is_finite() && work.height > 0.0 {
+        TARGET_HEIGHT.min((work.height - CHROME_AND_MARGIN).max(MIN_HEIGHT))
+    } else {
+        TARGET_HEIGHT
+    };
+    (width, height)
 }
 
 fn build_voice_settings(app: &AppHandle, focus: bool) -> tauri::Result<WebviewWindow> {
-    let height = voice_settings_inner_height(app);
+    let (width, height) = voice_settings_inner_size(app);
     let theme = app.state::<Arc<AppCore>>().theme.current();
     WebviewWindowBuilder::new(
         app,
@@ -434,8 +444,8 @@ fn build_voice_settings(app: &AppHandle, focus: bool) -> tauri::Result<WebviewWi
     )
     .focused(focus)
     .title("遥控器语音输入")
-    .inner_size(620.0, height)
-    .min_inner_size(480.0, 480.0)
+    .inner_size(width, height)
+    .min_inner_size(680.0, 520.0)
     .theme(Some(theme.native()))
     .background_color(theme.background())
     .initialization_script(&theme.document_theme_script())

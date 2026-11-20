@@ -61,6 +61,7 @@ type RecordingFocusCallback = dyn Fn() -> RecordingTarget + Send + Sync;
 type ComposerFocusCallback = dyn Fn() -> RecordingFocus + Send + Sync;
 
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum ComposerDelivery { NotApplicable, Inserted }
 pub(crate) type ComposerDeliveryRequest = Result<Option<tokio::sync::oneshot::Receiver<Result<ComposerDelivery, String>>>, String>;
 type ComposerDeliveryCallback = dyn Fn(u64, &str) -> ComposerDeliveryRequest + Send + Sync;

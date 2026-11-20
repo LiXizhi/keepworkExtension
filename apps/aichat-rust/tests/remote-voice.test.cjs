@@ -128,6 +128,9 @@ test("voice settings explain cloud processing and expose only native device cont
   assert.doesNotMatch(html, /faster.whisper|安装.*依赖|下载.*模型/);
   assert.match(html, /frame-src 'none'/);
   assert.match(html, /不会自动.*回车|不.*自动.*发送/);
+  assert.match(html, /remote-control\.png/);
+  assert.match(html, /蓝牙配对模式/);
+  assert.ok(fs.existsSync(path.join(appRoot, "src/assets/remote-control.png")));
 });
 
 test("remote-voice and updates windows follow desktop theme instead of OS dark mode", () => {
