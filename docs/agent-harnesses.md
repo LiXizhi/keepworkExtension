@@ -117,6 +117,29 @@ Snapshots carry status, thread/turn/item IDs, the last submission ID/state, boun
 requests. Disconnects remove listeners without interrupting execution. No arbitrary
 RPC forwarding or browser-supplied executable commands are accepted.
 
+Rust daemons advertising `agentAccountApi: "codex-profiles-v1"` support named
+Codex accounts scoped to the same agent owner and Origin as sessions. Each
+named account has a private `CODEX_HOME` managed by Codex and an independent
+process. Signing in uses Codex's own authorization flow. Profile metadata
+contains only an opaque ID and a display name. The `default` account uses
+the daemon's existing native CLI environment.
+
+| Endpoint | Request / result |
+| --- | --- |
+| `GET /agents/codex/accounts` | `{accounts: [{id, name}]}` including `default` |
+| `POST /agents/codex/accounts` | `{name}` creates a named account and returns `{id, name}` |
+| `POST /agents/codex/accounts/:id/login` | `{}` starts authorization for this account and returns `{url}` |
+| `GET /agents/backends?backend=codex&accountId=:id` | Native readiness and models for that account; named responses echo `accountId` |
+| `POST /agents/account-sessions` or `POST /agents/account-approval-sessions` | Existing create payload with required named `accountId`; same approval rules |
+| `/agents/account-sessions/:id` and its `turns`, `approval-turns`, `image-turns`, `approval-image-turns`, `respond`, `interrupt`, and `events` paths | Existing owned session contracts for the stored account |
+
+The stored account is immutable on a native session. Switching the visible
+chat starts a new native execution context on its next send, with conversation
+history provided as context. Other chats continue with their own accounts.
+Dedicated named paths let clients reject a downgrade before attempting a
+mutation with different account semantics. Legacy default session routes
+and the default native history browser remain available.
+
 The picker uses targeted backend queries. The unfiltered endpoint remains an
 explicit all-provider diagnostic and can wait for a slow provider's handshake.
 For ACP model discovery, targeted queries accept `cwd` and `conversationId` before

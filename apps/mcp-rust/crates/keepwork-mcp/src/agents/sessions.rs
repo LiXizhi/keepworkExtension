@@ -116,6 +116,10 @@ impl AgentManager {
         if selected.is_some_and(|id| definition(id).is_none()) {
             return Err("Unsupported agent backend".into());
         }
+        let requested = query.get("accountId").map(|id| json!(id));
+        let requested_account =
+            codex_accounts::account_id(selected.unwrap_or(""), requested.as_ref())?;
+        let executable_only = query.get("probe").map(String::as_str) == Some("executable");
         let mut result = serde_json::Map::new();
         for backend in BACKENDS
             .iter()
@@ -125,6 +129,27 @@ impl AgentManager {
             let spec = definition(backend).unwrap();
             let launch = discover(backend);
             let mut value = json!({"name":spec.name,"protocol":spec.protocol.as_str(),"protocolSupported":spec.protocol.supported(),"installUrl":spec.install_url,"available":launch.is_ok(),"authenticated":null,"authState":"unknown","probe":"executable","models":[]});
+            let scoped = if let Some(session_id) = query.get("sessionId").filter(|_| {
+                requested.is_some()
+                    || (!executable_only && launch.is_ok() && spec.protocol.supported())
+            }) {
+                let data = self.view(session_id, owner)?;
+                if data["backend"] != backend {
+                    return Err("Agent backend mismatch".into());
+                }
+                if requested.is_some() && data["accountId"].as_str() != requested_account {
+                    return Err("Agent session account mismatch".into());
+                }
+                Some(data)
+            } else {
+                None
+            };
+            let account = requested_account
+                .or_else(|| scoped.as_ref().and_then(|data| data["accountId"].as_str()));
+            let codex_home = account.map(|id| self.codex_home(owner, id)).transpose()?;
+            if let Some(account) = account {
+                value["accountId"] = json!(account);
+            }
             if backend == "trae" {
                 value["aichatContext"] = json!(false);
                 value["executionMode"] = json!("one-shot");
@@ -140,7 +165,7 @@ impl AgentManager {
                     continue;
                 }
             }
-            if query.get("probe").map(String::as_str) == Some("executable") {
+            if executable_only {
                 result.insert(backend.into(), value);
                 continue;
             }
@@ -159,15 +184,6 @@ impl AgentManager {
                 result.insert(backend.into(), value);
                 continue;
             }
-            let scoped = if let Some(session_id) = query.get("sessionId") {
-                let data = self.view(session_id, owner)?;
-                if data["backend"] != backend {
-                    return Err("Agent backend mismatch".into());
-                }
-                Some(data)
-            } else {
-                None
-            };
             if let Some(conversation) = query.get("conversationId") {
                 if !valid_id(conversation) {
                     return Err("Invalid conversation ID".into());
@@ -199,7 +215,7 @@ impl AgentManager {
                 } else {
                     None
                 };
-                let harness = self.harness_for(backend, &cwd, cursor_preview).await?;
+                let harness = self.harness_for(backend, &cwd, cursor_preview, codex_home.as_deref()).await?;
                 value["probe"] = json!("protocol");
                 value["cli"] = harness.cli_info();
                 if matches!(spec.protocol, Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae) {
@@ -363,9 +379,14 @@ impl AgentManager {
         Ok(Value::Object(result))
     }
 
-    pub(super) async fn login(self: &Arc<Self>, input: &Value) -> Result<Value, String> {
+    pub(super) async fn login(
+        self: &Arc<Self>,
+        owner: &str,
+        input: &Value,
+    ) -> Result<Value, String> {
         let backend = input["backend"].as_str().unwrap_or("codex");
         let spec = definition(backend).ok_or("Unsupported agent backend")?;
+        let account = codex_accounts::account_id(backend, input.get("accountId"))?;
         if backend == "trae" {
             return Ok(
                 json!({"command":"trae-cli --help","message":"Configure your provider API key and model in Trae Agent’s native trae_config.yaml or environment, then reconnect. Trae Agent has no account login command."}),
@@ -376,6 +397,15 @@ impl AgentManager {
                 json!({"command":spec.login,"message":"Run this command in your terminal to sign in, then reconnect."}),
             );
         }
+        self.login_codex(owner, account).await
+    }
+
+    pub(super) async fn login_codex(
+        self: &Arc<Self>,
+        owner: &str,
+        account: Option<&str>,
+    ) -> Result<Value, String> {
+        let codex_home = account.map(|id| self.codex_home(owner, id)).transpose()?;
         let cwd = self
             .file
             .parent()
@@ -383,7 +413,7 @@ impl AgentManager {
             .join("agent-workspaces/model-discovery");
         std::fs::create_dir_all(&cwd).map_err(|_| "Workspace unavailable")?;
         let result = self
-            .harness(backend, &cwd)
+            .harness_for("codex", &cwd, false, codex_home.as_deref())
             .await?
             .call(
                 "account/login/start",
@@ -411,6 +441,8 @@ impl AgentManager {
         let backend = optional_text(input, "backend", 160)?.unwrap_or_else(|| "codex".into());
         let backend = backend.as_str();
         let spec = definition(backend).ok_or("Unsupported agent backend")?;
+        let account = codex_accounts::account_id(backend, input.get("accountId"))?;
+        let codex_home = account.map(|id| self.codex_home(owner, id)).transpose()?;
         let requested_model = optional_text(input, "model", 1024)?;
         if optional_text(input, "effort", 256)?.is_some() {
             return Err(
@@ -458,6 +490,11 @@ impl AgentManager {
                     && s.data["backend"] == backend
                     && s.data["removed"] != true
             }) {
+                if s.data["accountId"].as_str() != account {
+                    return Err(
+                        "Existing session account differs; start a new execution context".into(),
+                    );
+                }
                 if contextual && s.data["aichatContext"] != true {
                     return Err("UNSUPPORTED_FEATURE: This existing session has no AIChat context; start a new conversation".into());
                 }
@@ -583,7 +620,9 @@ impl AgentManager {
                     })
             })
             .collect::<Vec<_>>();
-        let harness = self.harness(backend, Path::new(&roots[0])).await?;
+        let harness = self
+            .harness_for(backend, Path::new(&roots[0]), false, codex_home.as_deref())
+            .await?;
         self.context.set_mode(owner, conversation, &selected_mode);
         self.context
             .set_approval_mode(owner, conversation, selected_approval.as_deref());
@@ -656,6 +695,9 @@ impl AgentManager {
         }
         let session_id = id();
         let mut data = json!({"id":session_id,"owner":owner,"backend":backend,"conversationId":conversation,"threadId":thread,"title":spec.name,"roots":roots,"worktrees":roots,"rootNames":root_names,"model":input["model"],"archived":false,"removed":false,"status":"idle","mode":selected_mode,"cursor":0,"items":[],"pending":[],"submissions":{},"updatedAt":now(),"aichatContext":contextual,"nativeMetadata":native});
+        if let Some(account) = account {
+            data["accountId"] = json!(account);
+        }
         if let Some(approval) = selected_approval {
             data["approvalMode"] = json!(approval);
         }
@@ -729,8 +771,17 @@ impl AgentManager {
             .join("agent-workspaces/model-discovery");
         std::fs::create_dir_all(&cwd)
             .map_err(|_| "Legacy Codex history query workspace unavailable")?;
+        let codex_home = data["accountId"]
+            .as_str()
+            .map(|id| self.codex_home(owner, id))
+            .transpose()?;
         let harness = self
-            .harness("codex", &canonical_root(&cwd.to_string_lossy())?)
+            .harness_for(
+                "codex",
+                &canonical_root(&cwd.to_string_lossy())?,
+                false,
+                codex_home.as_deref(),
+            )
             .await
             .map_err(|error| {
                 format!(
@@ -782,6 +833,9 @@ impl AgentManager {
         owner: &str,
         input: &Value,
     ) -> Result<Value, String> {
+        if input.get("accountId").is_some() {
+            return Err("A native session cannot be moved to another account".into());
+        }
         self.view(session_id, owner)?;
         self.edit(session_id, |s| {
             if ACTIVE.contains(&s.data["status"].as_str().unwrap_or(""))
@@ -821,10 +875,16 @@ impl AgentManager {
                 return Err("Workspace root changed; reconnect the original local folder".into());
             }
         }
+        let codex_home = data["accountId"]
+            .as_str()
+            .map(|id| self.codex_home(owner, id))
+            .transpose()?;
         let harness = self
-            .harness(
+            .harness_for(
                 data["backend"].as_str().unwrap(),
                 Path::new(data["roots"][0].as_str().unwrap()),
+                false,
+                codex_home.as_deref(),
             )
             .await?;
         let contextual = data["aichatContext"] == true;

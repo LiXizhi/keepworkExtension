@@ -147,6 +147,10 @@ impl AppState {
         );
         caps.insert("agentSessionApi".into(), serde_json::json!("v1"));
         caps.insert("agentInventoryApi".into(), serde_json::json!("v1"));
+        caps.insert(
+            "agentAccountApi".into(),
+            serde_json::json!("codex-profiles-v1"),
+        );
         caps.insert("agentContextApi".into(), serde_json::json!("v1"));
         caps.insert("agentModeApi".into(), serde_json::json!("v1"));
         caps.insert("agentApprovalApi".into(), serde_json::json!("codex-v1"));

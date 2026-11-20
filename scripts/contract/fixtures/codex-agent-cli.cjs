@@ -7,6 +7,7 @@ const threads = new Map(), active = new Map(), approvals = new Map();
 const nativeCursor = 'fixture-page:2/+?';
 const nativeRoot = process.env.KEEPWORK_MCP_ROOT || process.cwd();
 const nativeState = process.env.KEEPWORK_AGENT_FIXTURE_LOG && process.env.KEEPWORK_AGENT_FIXTURE_LOG + '.native-state.json';
+const accountFixture = process.env.KEEPWORK_CODEX_ACCOUNT_FIXTURE === '1';
 function readNativeState() { return nativeState && fs.existsSync(nativeState) ? JSON.parse(fs.readFileSync(nativeState, 'utf8')) : {}; }
 function nativeThread(id) {
   const state = readNativeState();
@@ -33,6 +34,7 @@ for (const [id, fields] of [
   }] });
 }
 function log(value) {
+  if (accountFixture) Object.assign(value, { codexHome: process.env.CODEX_HOME, inheritedKey: process.env.OPENAI_API_KEY !== undefined, args: process.argv.slice(2) });
   if (process.env.KEEPWORK_AGENT_FIXTURE_LOG) fs.appendFileSync(process.env.KEEPWORK_AGENT_FIXTURE_LOG, JSON.stringify(value) + '\n');
 }
 function send(message) { process.stdout.write(JSON.stringify(message) + '\n'); }
@@ -66,6 +68,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   if (method === 'initialize') return reply(id, { userAgent: 'keepwork-codex-contract/1' });
   if (method === 'initialized') return;
   if (method === 'account/read') return reply(id, { account: { type: 'chatgpt', email: 'fixture@example.invalid' }, requiresOpenaiAuth: true });
+  if (method === 'account/login/start' && accountFixture) return reply(id, { authUrl: 'https://auth.openai.com/fixture' });
   if (method === 'model/list') return reply(id, { data: [{ id: 'fixture-codex', displayName: 'Codex fixture', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'Native fixture effort' }], defaultReasoningEffort: 'high' }] });
   if (method === 'config/read') return reply(id, { config: { sandbox_mode: 'read-only', approval_policy: 'on-request' } });
   if (method === 'collaborationMode/list') return reply(id, { data: [{ mode: 'default', model: 'fixture-codex' }, { mode: 'plan', model: 'fixture-codex' }] });

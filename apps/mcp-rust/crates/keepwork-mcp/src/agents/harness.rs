@@ -160,7 +160,7 @@ impl Harness {
         Ok(call)
     }
     pub async fn start(backend: &str, cwd: &Path) -> Result<Arc<Self>, String> {
-        Self::start_profiled(backend, cwd, None).await
+        Self::start_profiled(backend, cwd, None, None).await
     }
 
     pub(super) async fn start_with_claude_profiles(
@@ -168,13 +168,18 @@ impl Harness {
         cwd: &Path,
         profiles: Arc<super::claude_profiles::ClaudeProfiles>,
     ) -> Result<Arc<Self>, String> {
-        Self::start_profiled(backend, cwd, Some(profiles)).await
+        Self::start_profiled(backend, cwd, Some(profiles), None).await
+    }
+
+    pub(super) async fn start_with_codex_home(home: &Path) -> Result<Arc<Self>, String> {
+        Self::start_profiled("codex", home, None, Some(home)).await
     }
 
     async fn start_profiled(
         backend: &str,
         cwd: &Path,
         profiles: Option<Arc<super::claude_profiles::ClaudeProfiles>>,
+        codex_home: Option<&Path>,
     ) -> Result<Arc<Self>, String> {
         let spec = definition(backend).ok_or_else(|| "Unsupported agent backend".to_string())?;
         if !spec.protocol.supported() {
@@ -187,7 +192,7 @@ impl Harness {
             return Err("Existing absolute local folder required".to_string());
         }
         let launch = discover(backend)?;
-        Self::start_launch_profiled(backend, spec.protocol, launch, cwd, profiles).await
+        Self::start_launch_profiled(backend, spec.protocol, launch, cwd, profiles, codex_home).await
     }
 
     #[cfg(test)]
@@ -197,7 +202,7 @@ impl Harness {
         launch: CliLaunch,
         cwd: &Path,
     ) -> Result<Arc<Self>, String> {
-        Self::start_launch_profiled(backend, protocol, launch, cwd, None).await
+        Self::start_launch_profiled(backend, protocol, launch, cwd, None, None).await
     }
 
     async fn start_launch_profiled(
@@ -206,6 +211,7 @@ impl Harness {
         launch: CliLaunch,
         cwd: &Path,
         profiles: Option<Arc<super::claude_profiles::ClaudeProfiles>>,
+        codex_home: Option<&Path>,
     ) -> Result<Arc<Self>, String> {
         if matches!(
             protocol,
@@ -255,6 +261,20 @@ impl Harness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(home) = codex_home {
+            command
+                .env("CODEX_HOME", home)
+                .args(["--config", "cli_auth_credentials_store=\"file\""]);
+            for key in [
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "OPENAI_BASE_URL",
+                "CODEX_CHATGPT_BASE_URL",
+                "CODEX_ACCESS_TOKEN",
+            ] {
+                command.env_remove(key);
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;

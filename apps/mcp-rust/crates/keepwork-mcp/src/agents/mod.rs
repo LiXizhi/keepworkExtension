@@ -7,6 +7,7 @@ mod approval_tests;
 mod body;
 mod claude;
 mod claude_profiles;
+mod codex_accounts;
 pub mod context;
 pub mod discovery;
 mod events;
@@ -51,7 +52,7 @@ fn native_persistence_error(error: &str) -> String {
 fn native_observation_identity(data: &Value) -> Value {
     // A fixed-order tuple binds every identity field without duplicating private
     // values in unknown metadata that an older server might pass through.
-    let identity: Vec<_> = [
+    let mut identity: Vec<_> = [
         "id",
         "owner",
         "backend",
@@ -64,6 +65,9 @@ fn native_observation_identity(data: &Value) -> Value {
     .iter()
     .map(|key| &data[*key])
     .collect();
+    if let Some(account) = data.get("accountId") {
+        identity.push(account);
+    }
     json!(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&identity).expect("JSON identity tuple"))
@@ -86,6 +90,7 @@ struct Session {
 pub struct AgentManager {
     file: PathBuf,
     claude_profiles: Arc<claude_profiles::ClaudeProfiles>,
+    codex_accounts_lock: Mutex<()>,
     port: u16,
     sessions: Mutex<HashMap<String, Session>>,
     harnesses: AsyncMutex<HashMap<String, Arc<Harness>>>,
@@ -143,6 +148,11 @@ fn valid_record(data: &Value) -> bool {
         && data
             .get("backend")
             .is_none_or(|v| v.as_str().is_some_and(valid_id))
+        && data.get("accountId").is_none_or(|v| {
+            data["backend"] == "codex"
+                && data["native"] != true
+                && v.as_str().is_some_and(codex_accounts::valid_account_id)
+        })
         && data.get("approvalMode").is_none_or(|value| {
             value.is_null()
                 || approval::selected(
@@ -426,6 +436,7 @@ impl AgentManager {
         Arc::new(Self {
             file,
             claude_profiles,
+            codex_accounts_lock: Mutex::new(()),
             port,
             sessions: Mutex::new(sessions),
             harnesses: AsyncMutex::new(HashMap::new()),
@@ -711,7 +722,7 @@ impl AgentManager {
     }
 
     async fn harness(self: &Arc<Self>, backend: &str, cwd: &Path) -> Result<Arc<Harness>, String> {
-        self.harness_for(backend, cwd, false).await
+        self.harness_for(backend, cwd, false, None).await
     }
 
     async fn harness_for(
@@ -719,11 +730,16 @@ impl AgentManager {
         backend: &str,
         cwd: &Path,
         metadata_only: bool,
+        codex_home: Option<&Path>,
     ) -> Result<Arc<Harness>, String> {
         if self.closing.load(Ordering::Acquire) {
             return Err("Agent service is stopping".into());
         }
-        let key = if metadata_only {
+        let key = if let Some(home) = codex_home {
+            // All workspaces for a named account share a process so login and
+            // discovery see the same native state. Threads still pass their cwd.
+            format!("codex-account\0{}", home.display())
+        } else if metadata_only {
             format!("metadata\0{backend}\0{}", cwd.display())
         } else {
             format!("{backend}\0{}", cwd.display())
@@ -738,9 +754,12 @@ impl AgentManager {
                 return Err("Native CLI process limit reached".into());
             }
         }
-        let harness =
+        let harness = if let Some(home) = codex_home {
+            Harness::start_with_codex_home(home).await?
+        } else {
             Harness::start_with_claude_profiles(backend, cwd, Arc::clone(&self.claude_profiles))
-                .await?;
+                .await?
+        };
         let mut events = harness.subscribe();
         let weak = Arc::downgrade(self);
         let child = Arc::clone(&harness);
@@ -873,11 +892,18 @@ async fn handle_request(
             .await;
     }
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    if let ["agents", "account-sessions", session_id, ..] = parts.as_slice() {
+        match manager.view(session_id, &owner) {
+            Ok(session) if session["accountId"].is_string() => {}
+            Ok(_) => return error_response("Named Codex account session required"),
+            Err(error) => return error_response(&error),
+        }
+    }
     let image_turn = matches!(
         parts.as_slice(),
         [
             "agents",
-            "sessions",
+            "sessions" | "account-sessions",
             _,
             "image-turns" | "approval-image-turns"
         ]
@@ -903,6 +929,18 @@ async fn handle_request(
         json!({})
     };
     let result: Result<Value, String> = match (method, parts.as_slice()) {
+        ("GET", ["agents", "codex", "accounts"]) => manager.codex_accounts(&owner),
+        ("POST", ["agents", "codex", "accounts"]) => manager.create_codex_account(&owner, &input),
+        ("POST", ["agents", "codex", "accounts", id, "login"]) => {
+            if !input.as_object().is_some_and(|object| object.is_empty()) {
+                Err("Unexpected Codex login fields".into())
+            } else {
+                match codex_accounts::account_id("codex", Some(&json!(id))) {
+                    Ok(account) => manager.login_codex(&owner, account).await,
+                    Err(error) => Err(error),
+                }
+            }
+        }
         ("GET", ["agents", "claude", "config"]) => {
             manager.claude_profiles.call("read", None, &input)
         }
@@ -931,7 +969,7 @@ async fn handle_request(
         }
         ("GET", ["agents", "backends"]) => manager.backends(&owner, query).await,
         ("GET", ["agents", "accounts"]) => Ok(manager.accounts()),
-        ("POST", ["agents", "login"]) => manager.login(&input).await,
+        ("POST", ["agents", "login"]) => manager.login(&owner, &input).await,
         ("GET", ["agents", "native-codex"]) => manager.native_catalog(&owner, "codex", query).await,
         ("GET", ["agents", "native-codex", thread_id]) => {
             manager.native_session(&owner, "codex", thread_id).await
@@ -944,6 +982,22 @@ async fn handle_request(
         }
         ("GET", ["agents", "sessions"]) => manager.list(&owner, query),
         ("POST", ["agents", "sessions"]) => manager.create(&owner, &input).await,
+        ("POST", ["agents", "account-sessions" | "account-approval-sessions"]) => {
+            if !input["accountId"]
+                .as_str()
+                .is_some_and(codex_accounts::valid_account_id)
+            {
+                Err("Named Codex account ID required".into())
+            } else if path
+                .trim_end_matches('/')
+                .ends_with("/account-approval-sessions")
+                && input.get("approvalMode").is_none()
+            {
+                Err("approvalMode required".into())
+            } else {
+                manager.create(&owner, &input).await
+            }
+        }
         ("POST", ["agents", "approval-sessions"]) => {
             if input.get("approvalMode").is_none() {
                 Err("approvalMode required".into())
@@ -951,12 +1005,19 @@ async fn handle_request(
                 manager.create(&owner, &input).await
             }
         }
-        ("GET", ["agents", "sessions", session_id]) => manager.read_owned(session_id, &owner).await,
-        ("PATCH", ["agents", "sessions", session_id]) => manager.update(session_id, &owner, &input),
-        ("POST", ["agents", "sessions", session_id, "turns"]) => {
+        ("GET", ["agents", "sessions" | "account-sessions", session_id]) => {
+            manager.read_owned(session_id, &owner).await
+        }
+        ("PATCH", ["agents", "sessions" | "account-sessions", session_id]) => {
+            manager.update(session_id, &owner, &input)
+        }
+        ("POST", ["agents", "sessions" | "account-sessions", session_id, "turns"]) => {
             manager.turn(session_id, &owner, &input).await
         }
-        ("POST", ["agents", "sessions", session_id, "approval-turns" | "approval-image-turns"]) => {
+        (
+            "POST",
+            ["agents", "sessions" | "account-sessions", session_id, "approval-turns" | "approval-image-turns"],
+        ) => {
             if input.get("approvalMode").is_none() {
                 Err("approvalMode required".into())
             } else if image_turn && !input["images"].is_array() {
@@ -965,20 +1026,20 @@ async fn handle_request(
                 manager.turn(session_id, &owner, &input).await
             }
         }
-        ("POST", ["agents", "sessions", session_id, "image-turns"]) => {
+        ("POST", ["agents", "sessions" | "account-sessions", session_id, "image-turns"]) => {
             if !input["images"].is_array() {
                 Err("Missing images".into())
             } else {
                 manager.turn(session_id, &owner, &input).await
             }
         }
-        ("POST", ["agents", "sessions", session_id, "interrupt"]) => {
+        ("POST", ["agents", "sessions" | "account-sessions", session_id, "interrupt"]) => {
             manager.interrupt(session_id, &owner).await
         }
-        ("POST", ["agents", "sessions", session_id, "respond"]) => {
+        ("POST", ["agents", "sessions" | "account-sessions", session_id, "respond"]) => {
             manager.respond(session_id, &owner, &input).await
         }
-        ("GET", ["agents", "sessions", session_id, "events"]) => {
+        ("GET", ["agents", "sessions" | "account-sessions", session_id, "events"]) => {
             return match manager.stream(session_id, &owner) {
                 Ok(response) => response,
                 Err(error) => error_response(&error),

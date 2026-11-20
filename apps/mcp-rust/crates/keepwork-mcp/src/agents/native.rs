@@ -140,7 +140,7 @@ impl AgentManager {
                 !sessions.values().any(|s| {
                     s.data["backend"] == "codex"
                         && s.data["threadId"] == t["id"]
-                        && s.data["owner"] != owner
+                        && (s.data["owner"] != owner || s.data["accountId"].is_string())
                 })
             })
             .take(100)
