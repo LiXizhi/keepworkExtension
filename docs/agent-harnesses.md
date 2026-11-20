@@ -183,16 +183,33 @@ pending selection without cancelling native work.
 ### OpenCode custom API
 
 In the AIChat platform picker, open the OpenCode gear and choose **自定义 API**.
-Enter a provider name, an OpenAI Chat Completions base URL, the API key, and an
-upstream model ID. For OpenRouter, use `https://openrouter.ai/api/v1` and the full
-model ID including its namespace. After saving, select that model in a new
-OpenCode conversation.
+Enter a provider name, an OpenAI Chat Completions base URL and the API key, then
+fetch the provider catalog and check the models to use. For OpenRouter, use
+`https://openrouter.ai/api/v1` and the full model ID including its namespace.
+The first checked model is the default; after saving, select any saved model in
+a new OpenCode conversation. A model ID can also be added manually when the
+service exposes no catalog.
 
-Node and Rust advertise `opencodeConfigApi: "openai-compatible-v1"` in
-`/health`. The guarded `/agents/opencode/config` route supports GET, PATCH and
-DELETE. PATCH accepts `{name, baseUrl, model, apiKey?}`. Enter a new key when
-changing the Base URL. The daemon stores one local provider per OS user and
-returns only metadata. Saving does not send an inference request.
+Node and Rust advertise `opencodeConfigApi: "openai-compatible-v1"` and
+`opencodeModelCatalogApi: "openai-models-v1"` in `/health`. The guarded
+`/agents/opencode/config` route supports GET, PATCH and DELETE. PATCH accepts
+`{name, baseUrl, models, apiKey?}`; legacy clients may send a single `model`
+instead of `models`. Enter a new key when changing the Base URL. The daemon
+stores one local provider per OS user and returns only metadata. Saving does not
+send an inference request.
+
+`POST /agents/opencode/models` accepts `{baseUrl, apiKey?}` and performs the
+provider request server-side, so the key never reaches a cross-origin browser
+request. Omitting `apiKey` reuses the saved key for the same Base URL. It returns
+`{version: 1, status, models: [{id, name?}], message?}` where `status` is `ok`,
+`empty`, `auth`, `unreachable`, `timeout` or `error`; a missing key is a 400 with
+`code: "AUTH_REQUIRED"`. Nothing is saved.
+
+The selected list is persisted in `opencode-provider-v2.json`, while the legacy
+`opencode-provider-v1.json` keeps the first model as `model`. Older daemons only
+read and rewrite v1, so a downgraded daemon collapses the provider to that one
+model; the newer daemon accepts v2 only when it still describes the same
+provider as v1.
 
 New AIChat clients opt into managed model discovery with
 `includeManagedOpenCode=1` on the targeted backend query. Ordinary OpenCode

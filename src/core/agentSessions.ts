@@ -169,7 +169,9 @@ export class AgentSessions {
                 case 'gemini': return [backend, new AntigravityHarness(directory)];
                 case 'trae': return [backend, new TraeHarness(directory)];
                 case 'copilot': return [backend, new CopilotHarness(directory)];
-                case 'opencode': return [backend, new OpenCodeHarness(directory, new OpenCodeConfig(path.join(path.dirname(file), 'opencode-provider-v1.json')))];
+                case 'opencode': return [backend, new OpenCodeHarness(directory,
+                    new OpenCodeConfig(path.join(path.dirname(file), 'opencode-provider-v1.json')),
+                    threadId => ![...this.sessions.values()].some(s => s.backend === backend && s.threadId === threadId && ACTIVE.has(s.status)))];
                 default: return [backend, new AcpHarness(backend, directory)];
             }
         }));
@@ -222,6 +224,9 @@ export class AgentSessions {
     }
     async opencodeConfig(method: 'GET' | 'PATCH' | 'DELETE', input: unknown) {
         return this.adapterFor('opencode').call('config/' + method, input);
+    }
+    async opencodeModels(input: unknown) {
+        return this.adapterFor('opencode').call('config/models', input);
     }
     inventory() {
         // Installation discovery only: never start eleven native servers for a picker.
@@ -288,7 +293,8 @@ export class AgentSessions {
             try { result = AGENT_CLI[backend as Backend].protocol === 'acp' ? await adapter.call('model/list', { limit: 100, cwd, threadId: session?.threadId,
                 catalogKey: scope.owner && scope.conversationId ? scope.owner + ':' + scope.conversationId : undefined,
                 ...(backend === 'opencode' ? { routeModel: session?.model, includeManagedOpenCode: scope.includeManagedOpenCode } : {}),
-                readOnly: !!session && (session.archived || ACTIVE.has(session.status)),
+                readOnly: !!session && (session.archived || ACTIVE.has(session.status)
+                    || (backend === 'opencode' && session.aichatContext && !this.loaded.has(session.id))),
                 model: session && (session.archived || ACTIVE.has(session.status)) ? undefined : scope.model }) : await this.capability(backend, 'model/list'); }
             catch (error) { modelsError = (error as Error).message; }
             modelsError ||= result.modelsError;

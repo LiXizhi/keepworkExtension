@@ -5,7 +5,7 @@ import { HarnessAdapter } from './codexHarness';
 import { isManagedOpenCodeModel, OpenCodeConfig } from './opencodeConfig';
 
 type Launch = NonNullable<ReturnType<OpenCodeConfig['launch']>>;
-type Process = { model: string; cli: AcpHarness; threads: Set<string>; calls: number };
+type Process = { model?: string; generation?: string; cli: AcpHarness; threads: Set<string>; calls: number };
 const changed = () => Object.assign(new Error('The saved OpenCode provider changed. Select its current model in a new conversation.'), { rpcRejected: true });
 
 /** Native sessions keep their default environment. Only sessions selecting the
@@ -13,10 +13,11 @@ const changed = () => Object.assign(new Error('The saved OpenCode provider chang
 export class OpenCodeHarness extends EventEmitter implements HarnessAdapter {
     private native: AcpHarness;
     private processes = new Map<string, Process>();
+    private isolated = new Set<Process>();
     private threads = new Map<string, Process>();
     private requests = new Map<string, { cli: AcpHarness; id: string | number }>();
 
-    constructor(private directory: string, private config: OpenCodeConfig) {
+    constructor(private directory: string, private config: OpenCodeConfig, private canSuspend: (threadId: string) => boolean) {
         super();
         this.native = new AcpHarness('opencode', directory);
         this.connect(this.native);
@@ -35,6 +36,7 @@ export class OpenCodeHarness extends EventEmitter implements HarnessAdapter {
             if (entry) {
                 for (const id of entry.threads) this.threads.delete(id);
                 for (const [key, process] of this.processes) if (process === entry) this.processes.delete(key);
+                this.isolated.delete(entry);
             }
             this.emit('exit', message, scope);
         });
@@ -43,15 +45,33 @@ export class OpenCodeHarness extends EventEmitter implements HarnessAdapter {
     cliInfo() { return this.native.cliInfo(); }
 
     private process(config: Launch) {
-        let entry = this.processes.get(config.generation);
+        const entry = this.processes.get(config.generation);
         if (entry) return entry;
         this.discardPreviews(config.generation);
-        if (this.processes.size >= 32) throw new Error('OpenCode CLI process limit reached');
-        const cli = new AcpHarness('opencode', this.directory, undefined, undefined, async () => config.environment());
-        entry = { model: config.model, cli, threads: new Set(), calls: 0 };
+        const preview = this.startProcess(config);
+        this.processes.set(config.generation, preview);
+        return preview;
+    }
+
+    private startProcess(config: Launch | null, cwd?: string): Process {
+        if (this.processes.size + this.isolated.size >= 32) {
+            const idle = [...this.isolated].find(entry => !entry.calls && entry.cli.canReleaseSession()
+                && [...entry.threads].every(this.canSuspend)
+                && this.canRestore(entry));
+            if (!idle) throw new Error('OpenCode CLI process limit reached');
+            idle.cli.close();
+        }
+        const cli = new AcpHarness('opencode', this.directory, undefined, undefined,
+            config ? async () => config.environment() : undefined, undefined, cwd);
+        const entry = { model: config?.model, generation: config?.generation, cli, threads: new Set<string>(), calls: 0 };
         this.connect(cli, entry);
-        this.processes.set(config.generation, entry);
+        if (cwd) this.isolated.add(entry);
         return entry;
+    }
+
+    private canRestore(entry: Process) {
+        try { return !entry.generation || this.config.launch(entry.model)?.generation === entry.generation; }
+        catch { return false; }
     }
 
     private discardPreviews(current?: string) {
@@ -63,6 +83,7 @@ export class OpenCodeHarness extends EventEmitter implements HarnessAdapter {
     }
 
     async call(method: string, params: any = {}) {
+        if (method === 'config/models') return this.config.discoverModels(params);
         if (method.startsWith('config/')) {
             const action = method.slice(7);
             if (action !== 'GET' && action !== 'PATCH' && action !== 'DELETE') throw new Error('Unknown OpenCode configuration operation');
@@ -74,14 +95,18 @@ export class OpenCodeHarness extends EventEmitter implements HarnessAdapter {
         if (method === 'thread/read') return (bound?.cli || this.native).call(method, params);
         const preview = method === 'model/list' && !params.threadId && params.includeManagedOpenCode;
         const model = method === 'thread/start' ? params.model : params.routeModel;
-        const config = !bound && (preview || isManagedOpenCodeModel(model)) ? this.config.launch() : null;
+        const config = !bound && (preview || isManagedOpenCodeModel(model)) ? this.config.launch(isManagedOpenCodeModel(model) ? model : undefined) : null;
         if (!bound && isManagedOpenCodeModel(model) && config?.model !== model) throw changed();
-        const entry = bound || (config ? this.process(config) : undefined);
+        // OpenCode's ACP MCP registry is shared by sessions in one process.
+        // Keep each conversation's bridge capability in a dedicated process.
+        const bindsContext = (method === 'thread/start' || method === 'thread/resume') && params.mcpServers?.length;
+        const isolated = !bound && bindsContext ? this.startProcess(config, params.cwd) : undefined;
+        const entry = bound || isolated || (config ? this.process(config) : undefined);
         if (!entry) {
             if (isManagedOpenCodeModel(params.model)) throw changed();
             return this.native.call(method, params);
         }
-        if (!preview && params.model && params.model !== entry.model) throw changed();
+        if (!preview && params.model && params.model !== entry.model && (entry.model || isManagedOpenCodeModel(params.model))) throw changed();
         const options = preview ? { ...params, model: undefined, catalogKey: params.catalogKey || 'opencode-api' } : params;
         entry.calls++;
         try {
@@ -90,7 +115,11 @@ export class OpenCodeHarness extends EventEmitter implements HarnessAdapter {
                 const id = result.thread.id;
                 entry.threads.add(id); this.threads.set(id, entry);
             }
-            return preview ? { ...result, data: result.data.map((model: any) => model.id === entry.model ? { ...model, isDefault: false } : model) } : result;
+            const managedPrefix = entry.model ? entry.model.split('/')[0] + '/' : '';
+            return preview ? { ...result, data: result.data.map((model: any) => managedPrefix && isManagedOpenCodeModel(model.id) && model.id.startsWith(managedPrefix) ? { ...model, isDefault: false } : model) } : result;
+        } catch (error) {
+            if (isolated) { this.isolated.delete(isolated); isolated.cli.close(); }
+            throw error;
         } finally { entry.calls--; }
     }
 
@@ -108,6 +137,7 @@ export class OpenCodeHarness extends EventEmitter implements HarnessAdapter {
     close() {
         this.native.close();
         for (const entry of this.processes.values()) entry.cli.close();
-        this.processes.clear(); this.threads.clear(); this.requests.clear();
+        for (const entry of this.isolated) entry.cli.close();
+        this.processes.clear(); this.isolated.clear(); this.threads.clear(); this.requests.clear();
     }
 }

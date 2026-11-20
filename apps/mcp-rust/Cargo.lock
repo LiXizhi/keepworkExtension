@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "keepwork-mcp"
-version = "0.2.93"
+version = "0.2.95"
 dependencies = [
  "axum",
  "base64 0.22.1",

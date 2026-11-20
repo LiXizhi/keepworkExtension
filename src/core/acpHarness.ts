@@ -55,6 +55,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
     private authRequired = false;
     private inFlightCalls = 0;
     cliInfo() { return this.launch && { path: this.launch.path, source: this.launch.source }; }
+    canReleaseSession() { return !!this.capabilities.loadSession && !this.inFlightCalls && !this.active.size && !this.pending.size; }
     constructor(readonly backend: AcpBackend, private directory: string,
         private executable?: string,
         private args = AGENT_CLI[backend].args,
@@ -359,7 +360,13 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             this.save(thread);
             return { nativePlan: p.mode === 'plan' && !!plan };
         }
-        if (method === 'thread/resume') { if (p.mcpServers) thread.mcpServers = p.mcpServers; await this.resume(thread); return { thread }; }
+        if (method === 'thread/resume') {
+            if (p.mcpServers) {
+                if (this.backend === 'opencode' && JSON.stringify(p.mcpServers) !== JSON.stringify(thread.mcpServers)) thread.loaded = false;
+                thread.mcpServers = p.mcpServers;
+            }
+            await this.resume(thread); return { thread };
+        }
         if (method === 'turn/interrupt') {
             const run = this.active.get(thread.id); if (run) run.cancelled = true;
             this.write({ method: 'session/cancel', params: { sessionId: thread.id } }); return {};

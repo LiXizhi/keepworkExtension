@@ -160,6 +160,10 @@ impl AppState {
             "opencodeConfigApi".into(),
             serde_json::json!("openai-compatible-v1"),
         );
+        caps.insert(
+            "opencodeModelCatalogApi".into(),
+            serde_json::json!("openai-models-v1"),
+        );
         // Editor-model surfaces and non-Codex history stay unadvertised.
         caps
     }

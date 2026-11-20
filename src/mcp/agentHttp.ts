@@ -20,6 +20,11 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
         if (url.pathname === '/agents/opencode/config' && (req.method === 'GET' || req.method === 'PATCH' || req.method === 'DELETE')) {
             send(200, await manager.opencodeConfig(req.method, input)); return;
         }
+        if (url.pathname === '/agents/opencode/models' && req.method === 'POST') {
+            try { send(200, await manager.opencodeModels(input)); }
+            catch (error: any) { send(400, { error: error.message, ...(error.code ? { code: error.code } : {}) }); }
+            return;
+        }
         if (parts[1] === 'claude' && parts[2] === 'config') {
             if (parts.length === 3 && req.method === 'GET') { send(200, await manager.claudeConfig('read')); return; }
             if (parts.length === 4 && parts[3] === 'activate' && req.method === 'POST') {

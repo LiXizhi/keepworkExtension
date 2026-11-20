@@ -223,7 +223,7 @@ impl AgentManager {
                     None => {
                         let custom = scoped.as_ref().and_then(|data| data["model"].as_str()).filter(|model| backend == "opencode" && opencode_config::is_managed_model(model));
                         let provider = if include_custom || custom.is_some() { self.opencode_config.launch(custom)? } else { None };
-                        self.harness_with_provider(backend, &cwd, auth_preview, codex_home.as_deref(), provider).await?
+                        self.harness_with_provider(backend, &cwd, auth_preview, codex_home.as_deref(), provider, None).await?
                     }
                 };
                 value["probe"] = json!("protocol");
@@ -645,6 +645,7 @@ impl AgentManager {
             Some(model) => self.opencode_config.launch(Some(model))?,
             None => None,
         };
+        let session_id = id();
         let harness = self
             .harness_with_provider(
                 backend,
@@ -652,6 +653,7 @@ impl AgentManager {
                 false,
                 codex_home.as_deref(),
                 provider,
+                (backend == "opencode" && contextual).then_some(session_id.as_str()),
             )
             .await?;
         self.context.set_mode(owner, conversation, &selected_mode);
@@ -724,7 +726,6 @@ impl AgentManager {
         if contextual && self.context.marker(owner, conversation).ok() != context_marker {
             return Err("AIChat page changed while creating the native tool bridge; reconnect before sending".into());
         }
-        let session_id = id();
         let mut data = json!({"id":session_id,"owner":owner,"backend":backend,"conversationId":conversation,"threadId":thread,"title":spec.name,"roots":roots,"worktrees":roots,"rootNames":root_names,"model":input["model"],"archived":false,"removed":false,"status":"idle","mode":selected_mode,"cursor":0,"items":[],"pending":[],"submissions":{},"updatedAt":now(),"aichatContext":contextual,"nativeMetadata":native});
         if let Some(account) = account {
             data["accountId"] = json!(account);
@@ -935,6 +936,7 @@ impl AgentManager {
                     false,
                     codex_home.as_deref(),
                     provider,
+                    (backend == "opencode" && data["aichatContext"] == true).then_some(session_id),
                 )
                 .await?
             }

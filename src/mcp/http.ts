@@ -194,6 +194,7 @@ export async function startHttpServer(opts?: HttpServerOptions): Promise<HttpSer
         agentInventoryApi: 'v1',
         claudeConfigApi: 'profiles-v1',
         opencodeConfigApi: 'openai-compatible-v1',
+        opencodeModelCatalogApi: 'openai-models-v1',
         aichatPresenceApi: 'post-sse-v1',
         messagingApi: 'messaging-v1',
         personasApi: 'personas-v1',

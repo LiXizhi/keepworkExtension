@@ -740,7 +740,7 @@ impl AgentManager {
         metadata_only: bool,
         codex_home: Option<&Path>,
     ) -> Result<Arc<Harness>, String> {
-        self.harness_with_provider(backend, cwd, metadata_only, codex_home, None)
+        self.harness_with_provider(backend, cwd, metadata_only, codex_home, None, None)
             .await
     }
 
@@ -751,11 +751,17 @@ impl AgentManager {
         metadata_only: bool,
         codex_home: Option<&Path>,
         provider: Option<opencode_config::Launch>,
+        opencode_session: Option<&str>,
     ) -> Result<Arc<Harness>, String> {
         if self.closing.load(Ordering::Acquire) {
             return Err("Agent service is stopping".into());
         }
-        let key = if let Some(provider) = &provider {
+        let key = if let Some(session_id) = opencode_session {
+            // OpenCode registers ACP MCP servers process-wide within a directory.
+            // AIChat's bridge holds a different capability for each conversation.
+            let generation = provider.as_ref().map_or("", |p| p.generation.as_str());
+            format!("opencode-session\0{session_id}\0{generation}")
+        } else if let Some(provider) = &provider {
             format!(
                 "opencode-managed\0{}\0{}",
                 provider.generation,
@@ -791,7 +797,60 @@ impl AgentManager {
         if harnesses.len() >= 32 {
             harnesses.retain(|_, h| h.alive());
             if harnesses.len() >= 32 {
-                return Err("Native CLI process limit reached".into());
+                let mut sessions = self.sessions.lock().unwrap();
+                let idle = harnesses
+                    .iter()
+                    .filter_map(|(key, harness)| {
+                        let (id, generation) =
+                            key.strip_prefix("opencode-session\0")?.split_once('\0')?;
+                        let session = sessions.get(id).filter(|s| {
+                            s.harness.as_ref().is_some_and(|h| Arc::ptr_eq(h, harness))
+                        });
+                        // The map and event task hold two references. A bound
+                        // session holds one more. Leave in-flight calls alone.
+                        if Arc::strong_count(harness) > 2 + usize::from(session.is_some()) {
+                            return None;
+                        }
+                        if let Some(session) = session {
+                            let capabilities = harness.capabilities();
+                            if session.restoring
+                                || ACTIVE.contains(&session.data["status"].as_str().unwrap_or(""))
+                                || (capabilities["agentCapabilities"]["loadSession"] != true
+                                    && capabilities["loadSession"] != true)
+                                || (!generation.is_empty()
+                                    && self
+                                        .opencode_config
+                                        .launch(session.data["model"].as_str())
+                                        .ok()
+                                        .flatten()
+                                        .is_none_or(|p| p.generation != generation))
+                            {
+                                return None;
+                            }
+                        }
+                        Some((
+                            key.clone(),
+                            id.to_string(),
+                            session
+                                .and_then(|s| s.data["updatedAt"].as_u64())
+                                .unwrap_or_default(),
+                        ))
+                    })
+                    .min_by_key(|(_, _, updated)| *updated);
+                let Some((idle_key, session_id, _)) = idle else {
+                    return Err("Native CLI process limit reached".into());
+                };
+                let idle_harness = harnesses.remove(&idle_key).unwrap();
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    if session
+                        .harness
+                        .as_ref()
+                        .is_some_and(|h| Arc::ptr_eq(h, &idle_harness))
+                    {
+                        session.harness = None;
+                    }
+                }
+                idle_harness.close();
             }
         }
         let harness = if let Some(provider) = provider {
@@ -1011,6 +1070,24 @@ async fn handle_request(
         }
         ("GET" | "PATCH" | "DELETE", ["agents", "opencode", "config"]) => {
             manager.opencode_config.call(method, &input)
+        }
+        ("POST", ["agents", "opencode", "models"]) => {
+            return match manager.opencode_config.discover_models(&input).await {
+                Ok(value) => crate::http::json_response(StatusCode::OK, &value),
+                Err(error) => {
+                    // The client offers a key prompt for AUTH_REQUIRED instead of
+                    // treating a missing key as an unreachable provider.
+                    let (message, code) = match error.strip_prefix("AUTH_REQUIRED:") {
+                        Some(message) => (message, Some("AUTH_REQUIRED")),
+                        None => (error.as_str(), None),
+                    };
+                    let mut body = json!({"error":message});
+                    if let Some(code) = code {
+                        body["code"] = json!(code);
+                    }
+                    crate::http::json_response(StatusCode::BAD_REQUEST, &body)
+                }
+            };
         }
         ("GET", ["agents", "backends"]) => manager.backends(&owner, query).await,
         ("GET", ["agents", "accounts"]) => Ok(manager.accounts()),
