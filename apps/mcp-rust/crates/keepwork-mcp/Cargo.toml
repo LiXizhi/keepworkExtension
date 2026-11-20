@@ -1,6 +1,6 @@
 [package]
 name = "keepwork-mcp"
-version = "0.2.90"
+version = "0.2.93"
 description = "Keepwork local MCP daemon (Rust)"
 edition.workspace = true
 license.workspace = true
@@ -50,3 +50,4 @@ sha2 = "0.10"
 [target.'cfg(not(target_vendor = "win7"))'.dependencies]
 dirs = "6"
 portable-pty = "0.8"
+rusqlite = { version = "0.43", features = ["bundled"] }

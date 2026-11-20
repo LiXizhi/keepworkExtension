@@ -204,18 +204,28 @@ impl AgentManager {
                 canonical_root(&cwd.to_string_lossy())?
             };
             let status: Result<Value, String> = async {
-                // Cursor caches the native login state at process startup. Keep
-                // prompt-free previews separate so a rejected preview can be
-                // retired without interrupting an owned or in-flight session.
-                let cursor_preview = backend == "cursor" && scoped.is_none();
+                // These ACP providers may snapshot login at process startup.
+                // A rejected preview can be retired without interrupting a session.
+                let auth_preview = matches!(backend, "cursor" | "copilot") && scoped.is_none();
                 // Acquire the preview under the catalog lock as well: a queued
                 // probe must not retain a process retired by an earlier probe.
-                let mut preview_catalog = if cursor_preview {
+                let mut preview_catalog = if auth_preview {
                     Some(self.catalogs.lock().await)
                 } else {
                     None
                 };
-                let harness = self.harness_for(backend, &cwd, cursor_preview, codex_home.as_deref()).await?;
+                let include_custom = backend == "opencode" && scoped.is_none() && query.get("includeManagedOpenCode").is_some_and(|v| v == "1");
+                let owned_opencode = scoped.as_ref().filter(|_| backend == "opencode").and_then(|data| {
+                    self.sessions.lock().unwrap().get(data["id"].as_str()?)?.harness.as_ref().filter(|h| h.alive()).cloned()
+                });
+                let harness = match owned_opencode {
+                    Some(harness) => harness,
+                    None => {
+                        let custom = scoped.as_ref().and_then(|data| data["model"].as_str()).filter(|model| backend == "opencode" && opencode_config::is_managed_model(model));
+                        let provider = if include_custom || custom.is_some() { self.opencode_config.launch(custom)? } else { None };
+                        self.harness_with_provider(backend, &cwd, auth_preview, codex_home.as_deref(), provider).await?
+                    }
+                };
                 value["probe"] = json!("protocol");
                 value["cli"] = harness.cli_info();
                 if matches!(spec.protocol, Protocol::Codex | Protocol::Claude | Protocol::Antigravity | Protocol::Trae) {
@@ -315,7 +325,7 @@ impl AgentManager {
                                 native
                             }
                             Err(error) => {
-                                if cursor_preview
+                                if auth_preview
                                     && error == "Native RPC rejected: Authentication required"
                                 {
                                     // Do not replay this request or start browser
@@ -355,7 +365,15 @@ impl AgentManager {
                             }
                         }
                     }
-                    value["models"] = json!(harness::normalize_models(&metadata));
+                    let mut models = harness::normalize_models(&metadata);
+                    if include_custom {
+                        for model in &mut models {
+                            if model["id"].as_str().is_some_and(opencode_config::is_managed_model) {
+                                model["isDefault"] = json!(false);
+                            }
+                        }
+                    }
+                    value["models"] = json!(models);
                     if value["modelsError"]
                         .as_str()
                         .is_some_and(|e| e.to_ascii_lowercase().contains("authentication required"))
@@ -620,8 +638,21 @@ impl AgentManager {
                     })
             })
             .collect::<Vec<_>>();
+        let provider = match requested_model
+            .as_deref()
+            .filter(|model| backend == "opencode" && opencode_config::is_managed_model(model))
+        {
+            Some(model) => self.opencode_config.launch(Some(model))?,
+            None => None,
+        };
         let harness = self
-            .harness_for(backend, Path::new(&roots[0]), false, codex_home.as_deref())
+            .harness_with_provider(
+                backend,
+                Path::new(&roots[0]),
+                false,
+                codex_home.as_deref(),
+                provider,
+            )
             .await?;
         self.context.set_mode(owner, conversation, &selected_mode);
         self.context
@@ -879,14 +910,35 @@ impl AgentManager {
             .as_str()
             .map(|id| self.codex_home(owner, id))
             .transpose()?;
-        let harness = self
-            .harness_for(
-                data["backend"].as_str().unwrap(),
-                Path::new(data["roots"][0].as_str().unwrap()),
-                false,
-                codex_home.as_deref(),
-            )
-            .await?;
+        let backend = data["backend"].as_str().unwrap();
+        let owned_opencode = (backend == "opencode")
+            .then(|| {
+                self.sessions.lock().unwrap()[session_id]
+                    .harness
+                    .as_ref()
+                    .filter(|h| h.alive())
+                    .cloned()
+            })
+            .flatten();
+        let harness = match owned_opencode {
+            Some(harness) => harness,
+            None => {
+                let provider = match data["model"].as_str().filter(|model| {
+                    backend == "opencode" && opencode_config::is_managed_model(model)
+                }) {
+                    Some(model) => self.opencode_config.launch(Some(model))?,
+                    None => None,
+                };
+                self.harness_with_provider(
+                    backend,
+                    Path::new(data["roots"][0].as_str().unwrap()),
+                    false,
+                    codex_home.as_deref(),
+                    provider,
+                )
+                .await?
+            }
+        };
         let contextual = data["aichatContext"] == true;
         let conversation = data["conversationId"].as_str().unwrap();
         let current_marker = if contextual {
@@ -1168,6 +1220,12 @@ impl AgentManager {
                     return Err("UNSUPPORTED_FEATURE: This ACP agent does not advertise image input. Remove the images or switch agents.".into());
                 }
                 let mut native = { self.sessions.lock().unwrap()[session_id].native.clone() };
+                if data["backend"] == "opencode" && requested_model.as_deref().is_some_and(|next| {
+                    data["model"].as_str() != Some(next)
+                        && (opencode_config::is_managed_model(next) || data["model"].as_str().is_some_and(opencode_config::is_managed_model))
+                }) {
+                    return Err("Start a new OpenCode conversation to switch custom providers.".into());
+                }
                 if let Some(model) = requested_model
                     .as_deref()
                     .or(data["model"].as_str().filter(|s| !s.is_empty()))

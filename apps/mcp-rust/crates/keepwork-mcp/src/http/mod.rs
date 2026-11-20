@@ -156,6 +156,10 @@ impl AppState {
         caps.insert("agentApprovalApi".into(), serde_json::json!("codex-v1"));
         caps.insert("agentImageTurnApi".into(), serde_json::json!("v1"));
         caps.insert("claudeConfigApi".into(), serde_json::json!("profiles-v1"));
+        caps.insert(
+            "opencodeConfigApi".into(),
+            serde_json::json!("openai-compatible-v1"),
+        );
         // Editor-model surfaces and non-Codex history stay unadvertised.
         caps
     }

@@ -313,7 +313,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
             if (shared) this.modelFlights.set(key, task);
             try { return await task; }
             catch (error) {
-                if (this.backend === 'cursor' && !p.threadId && (error as any).rpcRejected
+                if (['cursor', 'copilot'].includes(this.backend) && !p.threadId && (error as any).rpcRejected
                     && /^Authentication required[.!]?$/i.test((error as Error).message.trim())) this.authRequired = true;
                 throw error;
             } finally { if (this.modelFlights.get(key) === task) this.modelFlights.delete(key); }
@@ -448,7 +448,7 @@ export class AcpHarness extends EventEmitter implements HarnessAdapter {
         // Only unused, prompt-free previews are discarded; owned sessions/processes stay alive.
         for (const { thread } of this.catalogs.values()) this.threads.delete(thread.id);
         this.catalogs.clear();
-        // Cursor snapshots login at process startup. An external terminal login
+        // Some ACP providers snapshot login at process startup. An external terminal login
         // cannot update a rejected preview process. Refresh only an unused one;
         // calls waiting for startup and owned sessions must retain their process.
         if (this.authRequired && !this.inFlightCalls && !this.threads.size && !this.scoped.size

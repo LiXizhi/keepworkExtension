@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, mkdirSync, readFileSync, rmSync, realpathSync, symlinkSync } = require('node:fs');
+const { mkdtempSync, mkdirSync, readFileSync, rmSync, realpathSync, symlinkSync, writeFileSync } = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const h = require('./harness.cjs');
@@ -12,7 +12,10 @@ test('named Codex accounts isolate login, discovery and persisted session execut
   mkdirSync(root);
   mkdirSync(defaultHome);
   const log = path.join(directory, 'rpc.log');
+  const appData = path.join(directory, process.platform === 'darwin' ? 'Library/Application Support' : 'app-data');
   const env = {
+    APPDATA: appData,
+    XDG_DATA_HOME: appData,
     CODEX_HOME: defaultHome,
     OPENAI_API_KEY: 'fixture-inherited-key',
     KEEPWORK_CODEX_ACCOUNT_FIXTURE: '1',
@@ -124,4 +127,40 @@ test('named Codex accounts isolate login, discovery and persisted session execut
     assert.equal((await request('account-sessions', session('retargeted-account', personal.id))).status, 400);
     assert.equal(calls().slice(count).some(row => ['account/read', 'account/login/start', 'thread/start'].includes(row.method)), false);
   }
+
+  // Match the legacy GrokX roster on disk. The Rust tests cover current SQLite/WAL discovery.
+  const grokx = path.join(appData, 'com.chenliao.grokx');
+  const grokxHome = path.join(grokx, 'cli-accounts', 'codex', 'a123');
+  mkdirSync(grokxHome, { recursive: true });
+  const roster = path.join(grokx, 'state.json');
+  const writeRoster = (accounts) => writeFileSync(roster, JSON.stringify({ settings: { agentAccounts: { codex: accounts } } }));
+  writeRoster([{ id: 'a123', label: 'Boss' }]);
+
+  const shared = (await ok('codex/accounts')).accounts.find(row => row.name === 'Boss (GrokX)');
+  assert.match(shared.id, /^grokx-[0-9a-f]{32}$/);
+  assert.equal((await request(probe('a123'))).status, 400);
+  assert.equal((await request(probe(shared.id), undefined, foreign)).status, 400);
+  assert.notEqual((await ok('codex/accounts', undefined, foreign)).accounts[1].id, shared.id);
+  const status = (await ok(probe(shared.id))).codex;
+  assert.equal(status.accountId, shared.id);
+  assert.equal(status.account.email, 'fixture@example.invalid');
+  assert.deepEqual(await ok('codex/accounts/' + shared.id + '/login', {}), { url: 'https://auth.openai.com/fixture' });
+  const sharedSession = await ok('account-sessions', session('grokx-context', shared.id));
+  assert.equal(sharedSession.accountId, shared.id);
+  for (const method of ['account/read', 'account/login/start', 'thread/start']) {
+    assert.equal(calls().findLast(row => row.method === method).codexHome, grokxHome);
+  }
+  await daemon.stop();
+  await start();
+  await ok('account-sessions/' + sharedSession.id + '/turns', { requestId: 'resume-grokx', text: 'Continue' });
+  assert.equal(calls().findLast(row => row.method === 'thread/resume' && row.params.threadId === sharedSession.threadId).codexHome, grokxHome);
+  assert.equal(calls().findLast(row => row.method === 'turn/start' && row.params.threadId === sharedSession.threadId).codexHome, grokxHome);
+
+  writeRoster([]);
+  assert.ok(!(await ok('codex/accounts')).accounts.some(row => row.id === shared.id));
+  const count = calls().length;
+  assert.equal((await request(probe(shared.id))).status, 400);
+  assert.equal((await request('codex/accounts/' + shared.id + '/login', {})).status, 400);
+  assert.equal((await request('account-sessions', session('deleted-grokx', shared.id))).status, 400);
+  assert.equal(calls().length, count);
 });

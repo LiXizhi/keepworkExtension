@@ -17,6 +17,9 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
             input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         }
         const parts = url.pathname.split('/').filter(Boolean);
+        if (url.pathname === '/agents/opencode/config' && (req.method === 'GET' || req.method === 'PATCH' || req.method === 'DELETE')) {
+            send(200, await manager.opencodeConfig(req.method, input)); return;
+        }
         if (parts[1] === 'claude' && parts[2] === 'config') {
             if (parts.length === 3 && req.method === 'GET') { send(200, await manager.claudeConfig('read')); return; }
             if (parts.length === 4 && parts[3] === 'activate' && req.method === 'POST') {
@@ -60,6 +63,7 @@ export async function handleAgentHttp(req: http.IncomingMessage, res: http.Serve
                 conversationId: url.searchParams.get('conversationId') || undefined,
                 sessionId: url.searchParams.get('sessionId') || undefined,
                 model: url.searchParams.get('model') || undefined,
+                includeManagedOpenCode: url.searchParams.get('includeManagedOpenCode') === '1',
                 refresh: url.searchParams.get('refresh') === '1',
             }) } : await manager.backends()); return;
         }

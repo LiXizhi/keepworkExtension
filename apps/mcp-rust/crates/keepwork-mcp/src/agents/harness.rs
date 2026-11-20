@@ -160,7 +160,7 @@ impl Harness {
         Ok(call)
     }
     pub async fn start(backend: &str, cwd: &Path) -> Result<Arc<Self>, String> {
-        Self::start_profiled(backend, cwd, None, None).await
+        Self::start_profiled(backend, cwd, None, None, None).await
     }
 
     pub(super) async fn start_with_claude_profiles(
@@ -168,11 +168,18 @@ impl Harness {
         cwd: &Path,
         profiles: Arc<super::claude_profiles::ClaudeProfiles>,
     ) -> Result<Arc<Self>, String> {
-        Self::start_profiled(backend, cwd, Some(profiles), None).await
+        Self::start_profiled(backend, cwd, Some(profiles), None, None).await
     }
 
     pub(super) async fn start_with_codex_home(home: &Path) -> Result<Arc<Self>, String> {
-        Self::start_profiled("codex", home, None, Some(home)).await
+        Self::start_profiled("codex", home, None, Some(home), None).await
+    }
+
+    pub(super) async fn start_with_opencode(
+        cwd: &Path,
+        provider: &super::opencode_config::Launch,
+    ) -> Result<Arc<Self>, String> {
+        Self::start_profiled("opencode", cwd, None, None, Some(provider)).await
     }
 
     async fn start_profiled(
@@ -180,6 +187,7 @@ impl Harness {
         cwd: &Path,
         profiles: Option<Arc<super::claude_profiles::ClaudeProfiles>>,
         codex_home: Option<&Path>,
+        provider: Option<&super::opencode_config::Launch>,
     ) -> Result<Arc<Self>, String> {
         let spec = definition(backend).ok_or_else(|| "Unsupported agent backend".to_string())?;
         if !spec.protocol.supported() {
@@ -192,7 +200,16 @@ impl Harness {
             return Err("Existing absolute local folder required".to_string());
         }
         let launch = discover(backend)?;
-        Self::start_launch_profiled(backend, spec.protocol, launch, cwd, profiles, codex_home).await
+        Self::start_launch_profiled(
+            backend,
+            spec.protocol,
+            launch,
+            cwd,
+            profiles,
+            codex_home,
+            provider,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -202,7 +219,7 @@ impl Harness {
         launch: CliLaunch,
         cwd: &Path,
     ) -> Result<Arc<Self>, String> {
-        Self::start_launch_profiled(backend, protocol, launch, cwd, None, None).await
+        Self::start_launch_profiled(backend, protocol, launch, cwd, None, None, None).await
     }
 
     async fn start_launch_profiled(
@@ -212,6 +229,7 @@ impl Harness {
         cwd: &Path,
         profiles: Option<Arc<super::claude_profiles::ClaudeProfiles>>,
         codex_home: Option<&Path>,
+        provider: Option<&super::opencode_config::Launch>,
     ) -> Result<Arc<Self>, String> {
         if matches!(
             protocol,
@@ -261,6 +279,9 @@ impl Harness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(provider) = provider {
+            command.envs(provider.environment()?);
+        }
         if let Some(home) = codex_home {
             command
                 .env("CODEX_HOME", home)

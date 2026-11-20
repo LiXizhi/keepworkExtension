@@ -5,12 +5,19 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_vendor = "win7"))]
+mod grokx;
+
 const MAX_ACCOUNTS: usize = 16;
 const METADATA: &str = "account.json";
 const UNAVAILABLE: &str = "Codex account profile unavailable";
+const GROKX_PREFIX: &str = "grokx-";
 
 pub(super) fn valid_account_id(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value)
+        || value.strip_prefix(GROKX_PREFIX).is_some_and(|hash| {
+            hash.len() == 32 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 pub(super) fn account_id<'a>(
@@ -110,6 +117,13 @@ impl AgentManager {
         if !valid_account_id(account) {
             return Err("Invalid Codex account ID".into());
         }
+        if account.starts_with(GROKX_PREFIX) {
+            #[cfg(not(target_vendor = "win7"))]
+            if let Some(profile) = grokx::profiles(owner).into_iter().find(|p| p.id == account) {
+                return Ok(profile.home);
+            }
+            return Err("GrokX Codex account unavailable. Check the account in GrokX.".into());
+        }
         let parent = self.codex_owner_dir(owner, false)?.ok_or(UNAVAILABLE)?;
         let directory = child_directory(&parent, account, false)?.ok_or(UNAVAILABLE)?;
         read_name(&directory)?;
@@ -123,7 +137,7 @@ impl AgentManager {
             for entry in fs::read_dir(&directory).map_err(|_| UNAVAILABLE)? {
                 let entry = entry.map_err(|_| UNAVAILABLE)?;
                 let id = entry.file_name().to_string_lossy().into_owned();
-                if !valid_account_id(&id) {
+                if id.starts_with(GROKX_PREFIX) || !valid_account_id(&id) {
                     continue;
                 }
                 let Some(profile) = child_directory(&directory, &id, false)? else {
@@ -146,6 +160,12 @@ impl AgentManager {
     pub(super) fn codex_accounts(&self, owner: &str) -> Result<Value, String> {
         let _guard = self.codex_accounts_lock.lock().map_err(|_| UNAVAILABLE)?;
         let mut accounts = self.named_codex_accounts(owner)?;
+        #[cfg(not(target_vendor = "win7"))]
+        accounts.extend(
+            grokx::profiles(owner)
+                .into_iter()
+                .map(|profile| json!({"id": profile.id, "name": profile.label + " (GrokX)"})),
+        );
         accounts.insert(0, json!({"id": "default", "name": "默认"}));
         Ok(json!({"accounts": accounts}))
     }

@@ -16,6 +16,7 @@ mod history;
 mod images;
 mod item_stream;
 mod native;
+mod opencode_config;
 mod path_identity;
 #[cfg(test)]
 mod persistence_tests;
@@ -90,6 +91,7 @@ struct Session {
 pub struct AgentManager {
     file: PathBuf,
     claude_profiles: Arc<claude_profiles::ClaudeProfiles>,
+    opencode_config: opencode_config::OpenCodeConfig,
     codex_accounts_lock: Mutex<()>,
     port: u16,
     sessions: Mutex<HashMap<String, Session>>,
@@ -433,9 +435,15 @@ impl AgentManager {
                 .unwrap_or(Path::new("."))
                 .join("claude-profiles-v1.json"),
         ));
+        let opencode_config = opencode_config::OpenCodeConfig::new(
+            file.parent()
+                .unwrap_or(Path::new("."))
+                .join("opencode-provider-v1.json"),
+        );
         Arc::new(Self {
             file,
             claude_profiles,
+            opencode_config,
             codex_accounts_lock: Mutex::new(()),
             port,
             sessions: Mutex::new(sessions),
@@ -732,10 +740,28 @@ impl AgentManager {
         metadata_only: bool,
         codex_home: Option<&Path>,
     ) -> Result<Arc<Harness>, String> {
+        self.harness_with_provider(backend, cwd, metadata_only, codex_home, None)
+            .await
+    }
+
+    async fn harness_with_provider(
+        self: &Arc<Self>,
+        backend: &str,
+        cwd: &Path,
+        metadata_only: bool,
+        codex_home: Option<&Path>,
+        provider: Option<opencode_config::Launch>,
+    ) -> Result<Arc<Harness>, String> {
         if self.closing.load(Ordering::Acquire) {
             return Err("Agent service is stopping".into());
         }
-        let key = if let Some(home) = codex_home {
+        let key = if let Some(provider) = &provider {
+            format!(
+                "opencode-managed\0{}\0{}",
+                provider.generation,
+                cwd.display()
+            )
+        } else if let Some(home) = codex_home {
             // All workspaces for a named account share a process so login and
             // discovery see the same native state. Threads still pass their cwd.
             format!("codex-account\0{}", home.display())
@@ -745,6 +771,20 @@ impl AgentManager {
             format!("{backend}\0{}", cwd.display())
         };
         let mut harnesses = self.harnesses.lock().await;
+        if let Some(provider) = &provider {
+            let current = format!("opencode-managed\0{}\0", provider.generation);
+            harnesses.retain(|key, harness| {
+                if key.starts_with("opencode-managed\0")
+                    && !key.starts_with(&current)
+                    && Arc::strong_count(harness) <= 2
+                {
+                    harness.close();
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         if let Some(harness) = harnesses.get(&key).filter(|h| h.alive()) {
             return Ok(Arc::clone(harness));
         }
@@ -754,7 +794,9 @@ impl AgentManager {
                 return Err("Native CLI process limit reached".into());
             }
         }
-        let harness = if let Some(home) = codex_home {
+        let harness = if let Some(provider) = provider {
+            Harness::start_with_opencode(cwd, &provider).await?
+        } else if let Some(home) = codex_home {
             Harness::start_with_codex_home(home).await?
         } else {
             Harness::start_with_claude_profiles(backend, cwd, Arc::clone(&self.claude_profiles))
@@ -966,6 +1008,9 @@ async fn handle_request(
                 StatusCode::NOT_FOUND,
                 &json!({"error":"Unknown Claude configuration operation"}),
             )
+        }
+        ("GET" | "PATCH" | "DELETE", ["agents", "opencode", "config"]) => {
+            manager.opencode_config.call(method, &input)
         }
         ("GET", ["agents", "backends"]) => manager.backends(&owner, query).await,
         ("GET", ["agents", "accounts"]) => Ok(manager.accounts()),

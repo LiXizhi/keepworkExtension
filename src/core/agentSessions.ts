@@ -9,6 +9,8 @@ import { AntigravityHarness } from './antigravityHarness';
 import { TraeHarness } from './traeHarness';
 import { CopilotHarness } from './copilotHarness';
 import { ClaudeHarness } from './claudeHarness';
+import { OpenCodeConfig } from './opencodeConfig';
+import { OpenCodeHarness } from './opencodeHarness';
 import { agentAccountDisplay } from './agentAccount';
 import { approvalDecision, execpolicyDecisions, canAutoApprove, toolApprovalDecision } from './agentApproval';
 import { AGENT_BACKENDS, AGENT_CLI } from './agentCliBackends';
@@ -159,7 +161,18 @@ export class AgentSessions {
             return ['read_file', 'list_dir', 'search_files', 'create_file', 'replace_string_in_file'].includes(name);
         });
         this.workspaceFiles = new AichatWorkspaceFiles(path.join(path.dirname(file), 'agent-git-drafts'));
-        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => [backend, backend === 'codex' ? adapter : backend === 'claude' ? new ClaudeHarness(file + '.claude') : backend === 'gemini' ? new AntigravityHarness(file + '.gemini') : backend === 'trae' ? new TraeHarness(file + '.trae') : backend === 'copilot' ? new CopilotHarness(file + '.copilot') : new AcpHarness(backend, file + '.' + backend)]));
+        this.adapters = adapters || Object.fromEntries(AGENT_BACKENDS.map(backend => {
+            const directory = file + '.' + backend;
+            switch (backend) {
+                case 'codex': return [backend, adapter];
+                case 'claude': return [backend, new ClaudeHarness(directory)];
+                case 'gemini': return [backend, new AntigravityHarness(directory)];
+                case 'trae': return [backend, new TraeHarness(directory)];
+                case 'copilot': return [backend, new CopilotHarness(directory)];
+                case 'opencode': return [backend, new OpenCodeHarness(directory, new OpenCodeConfig(path.join(path.dirname(file), 'opencode-provider-v1.json')))];
+                default: return [backend, new AcpHarness(backend, directory)];
+            }
+        }));
         try {
             const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
             for (const row of rows) if (row.id && row.owner && row.threadId) this.sessions.set(row.id, { ...row, backend: row.backend || 'codex', status: ACTIVE.has(row.status) ? 'interrupted' : row.status, pending: [], events: [], items: [] });
@@ -206,6 +219,9 @@ export class AgentSessions {
     }
     async claudeConfig(method: 'read' | 'create' | 'update' | 'delete' | 'activate', input: any = {}) {
         return this.adapterFor('claude').call('config/' + method, input);
+    }
+    async opencodeConfig(method: 'GET' | 'PATCH' | 'DELETE', input: unknown) {
+        return this.adapterFor('opencode').call('config/' + method, input);
     }
     inventory() {
         // Installation discovery only: never start eleven native servers for a picker.
@@ -257,7 +273,7 @@ export class AgentSessions {
         s.events = [event]; this.save();
         for (const listener of this.listeners.get(s.id) || []) listener(event);
     }
-    async status(backend: string = 'codex', scope: { owner?: string; cwd?: string; conversationId?: string; sessionId?: string; model?: string; refresh?: boolean } = {}) {
+    async status(backend: string = 'codex', scope: { owner?: string; cwd?: string; conversationId?: string; sessionId?: string; model?: string; refresh?: boolean; includeManagedOpenCode?: boolean } = {}) {
         // Resolve scope before provider I/O. Never reveal or configure another owner's session.
         let session: Session | undefined;
         if (scope.sessionId) { session = this.get(scope.sessionId, scope.owner || ''); if (session.backend !== backend) throw new Error('Agent backend mismatch'); }
@@ -271,6 +287,7 @@ export class AgentSessions {
             let result: any = {}, modelsError: string | undefined;
             try { result = AGENT_CLI[backend as Backend].protocol === 'acp' ? await adapter.call('model/list', { limit: 100, cwd, threadId: session?.threadId,
                 catalogKey: scope.owner && scope.conversationId ? scope.owner + ':' + scope.conversationId : undefined,
+                ...(backend === 'opencode' ? { routeModel: session?.model, includeManagedOpenCode: scope.includeManagedOpenCode } : {}),
                 readOnly: !!session && (session.archived || ACTIVE.has(session.status)),
                 model: session && (session.archived || ACTIVE.has(session.status)) ? undefined : scope.model }) : await this.capability(backend, 'model/list'); }
             catch (error) { modelsError = (error as Error).message; }
@@ -398,6 +415,7 @@ export class AgentSessions {
             const accessConfig = access.sandbox === 'workspace-write' ? { config: { ...(bridgeOptions as any).config,
                 sandbox_workspace_write: { writable_roots: s.roots, network_access: false } } } : {};
             const result = await this.forSession(s).call(s.archived ? 'thread/read' : 'thread/resume', { threadId: s.threadId, cwd: s.roots[0], includeTurns: true, ...bridgeOptions,
+                ...(s.backend === 'opencode' ? { routeModel: s.model } : {}),
                 ...(!s.archived ? { ...accessConfig, sandbox: access.sandbox, approvalPolicy: access.approvalPolicy } : {}) });
             if (result.sandbox) s.sandboxPolicy = result.sandbox;
             s.items = (result.thread?.turns || []).flatMap((turn: any) => turn.items || []).slice(-2000).map((item: any) => bounded(visibleItem(item)));

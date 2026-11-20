@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const readline = require('node:readline');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
+const copilot = process.argv.includes('--stdio') && process.argv.includes('--no-auto-update');
+const authenticatedAtStartup = !copilot || fs.existsSync(process.env.KEEPWORK_AGENT_FIXTURE_LOG + '.copilot-auth');
 
 function log(event, data = {}) {
   if (process.env.KEEPWORK_AGENT_FIXTURE_LOG) {
@@ -118,6 +120,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     });
   }
   if (method === 'session/new') {
+    if (!authenticatedAtStartup) return send({ id, error: { code: -32000, message: 'Authentication required' } });
     const sessionId = 'fixture-' + randomUUID();
     sessions.set(sessionId, { cwd: params.cwd, model: 'fixture-model', mode: 'default', mcpServers: params.mcpServers });
     return reply(id, metadata(sessionId));

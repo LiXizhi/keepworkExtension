@@ -118,11 +118,25 @@ requests. Disconnects remove listeners without interrupting execution. No arbitr
 RPC forwarding or browser-supplied executable commands are accepted.
 
 Rust daemons advertising `agentAccountApi: "codex-profiles-v1"` support named
-Codex accounts scoped to the same agent owner and Origin as sessions. Each
-named account has a private `CODEX_HOME` managed by Codex and an independent
-process. Signing in uses Codex's own authorization flow. Profile metadata
-contains only an opaque ID and a display name. The `default` account uses
-the daemon's existing native CLI environment.
+Codex accounts. Each named account has a `CODEX_HOME` managed by Codex and
+an independent process. Signing in uses Codex's own authorization flow.
+Profile metadata contains only an opaque ID and a display name. The `default`
+account uses the daemon's existing native CLI environment.
+
+On systems with GrokX installed, the Rust daemon also lists GrokX's registered
+Codex profiles with a `(GrokX)` suffix. It reads account IDs and labels from
+GrokX's `state.db` (or legacy `state.json`) and points Codex directly at
+`<GrokX AppData>/cli-accounts/codex/<id>`. On macOS this AppData directory is
+`~/Library/Application Support/com.chenliao.grokx`. The roster is managed in
+GrokX. Keepwork uses the same CLI sign-in for a listed GrokX profile and leaves
+existing Keepwork profiles and their session bindings in place. The legacy
+Win7 runtime does not discover GrokX profiles.
+
+Keepwork-created profiles remain private to their agent owner and Origin.
+GrokX profiles are native machine accounts, like `default`. Keepwork exposes
+owner- and Origin-scoped references to them. Sessions remain owner-scoped.
+If a GrokX profile disappears, its bound named session reports that the
+account is unavailable.
 
 | Endpoint | Request / result |
 | --- | --- |
@@ -165,6 +179,27 @@ platform selection. A busy status alone does not discard a card click. Only
 duplicate clicks on the current pending selection are coalesced; switching away
 and back gives the last selection priority, and closing the picker cancels its
 pending selection without cancelling native work.
+
+### OpenCode custom API
+
+In the AIChat platform picker, open the OpenCode gear and choose **自定义 API**.
+Enter a provider name, an OpenAI Chat Completions base URL, the API key, and an
+upstream model ID. For OpenRouter, use `https://openrouter.ai/api/v1` and the full
+model ID including its namespace. After saving, select that model in a new
+OpenCode conversation.
+
+Node and Rust advertise `opencodeConfigApi: "openai-compatible-v1"` in
+`/health`. The guarded `/agents/opencode/config` route supports GET, PATCH and
+DELETE. PATCH accepts `{name, baseUrl, model, apiKey?}`. Enter a new key when
+changing the Base URL. The daemon stores one local provider per OS user and
+returns only metadata. Saving does not send an inference request.
+
+New AIChat clients opt into managed model discovery with
+`includeManagedOpenCode=1` on the targeted backend query. Ordinary OpenCode
+requests retain native discovery and defaults. The daemon supplies the provider
+to the native CLI for the explicitly selected managed model. Live sessions
+retain their process configuration. If a removed or changed provider is
+needed after a process restart, start a new conversation with the current model.
 
 Installation discovery, protocol connection, authentication and successful turns
 are separate observations. An inventory-only response uses `probe: "executable"`

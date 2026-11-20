@@ -54,6 +54,7 @@ async function start(engine = 'rust') {
   for (const backend of ['CODEX', 'COPILOT', 'CLAUDE', 'CURSOR', 'TRAE', 'QWEN', 'GEMINI', 'ANTIGRAVITY', 'KIMI', 'OPENCODE', 'DEEPSEEK']) {
     env['KEEPWORK_' + backend + '_PATH'] = absent;
   }
+  env.KEEPWORK_COPILOT_PATH = fixture;
   const command = engine === 'node' ? process.execPath : h.rustBinary();
   const args = [...(engine === 'node' ? [path.join(h.repoRoot, 'apps/mcp-runtime/dist/cli.cjs')] : []),
     '--port', String(port), '--root', root];
@@ -141,6 +142,38 @@ test('targeted WorkBuddy status discovers ACP models without claiming account ve
   assert.equal(backend.authState, 'unknown');
   assert.equal(backend.models.some((model) => model.id === 'fixture-model'), true);
   assert.equal(backend.models.some((model) => model.id === 'fixture-other'), true);
+});
+
+test('Copilot setup rechecks native login without replacing an owned session', async () => {
+  const marker = logFile + '.copilot-auth';
+  const calls = () => logRows().filter(row => row.method === 'session/new');
+  fs.writeFileSync(marker, '');
+  const session = await create('copilot-owned', { backend: 'copilot' });
+  const ownedProcess = calls().at(-1).pid;
+  fs.rmSync(marker);
+  const probe = async () => {
+    const result = await request('/backends?backend=copilot&refresh=1&cwd=' + encodeURIComponent(root));
+    assert.equal(result.status, 200, JSON.stringify(result.json));
+    return result.json.copilot;
+  };
+  const signedOut = await probe();
+  assert.equal(signedOut.available, true);
+  assert.equal(signedOut.authenticated, false);
+  assert.equal(signedOut.authState, 'required');
+  assert.match(signedOut.modelsError, /Authentication required/);
+  const rejectedPreview = calls().at(-1).pid;
+  assert.notEqual(rejectedPreview, ownedProcess);
+  fs.writeFileSync(marker, '');
+  const connected = await probe();
+  assert.equal(connected.available, true);
+  assert.equal(connected.authenticated, null);
+  assert.equal(connected.modelsError, undefined);
+  assert.equal(connected.models[0].id, 'fixture-model');
+  assert.notEqual(calls().at(-1).pid, rejectedPreview);
+  assert.equal(prompts().length, 0, 'setup must not send any prompts');
+  assert.equal((await turn(session, 'copilot-continue', 'continue owned session')).status, 200);
+  await waitSession(session, view => view.status === 'completed');
+  assert.equal(prompts().at(-1).pid, ownedProcess);
 });
 
 test('agents enforce explicit Origin, valid owner keys, and origin-scoped session ownership', async () => {
