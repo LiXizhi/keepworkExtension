@@ -30,7 +30,13 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus, nativeMen
     const title = shadow.querySelector(".title");
     if (title) title.textContent = english() ? "KeepWork Second Brain" : "KeepWork 第二大脑";
     const translations = { ".address": ["在默认浏览器中打开", "Open in default browser"], ".refresh": ["刷新页面", "Reload page"], '[data-window-action="minimize"]': ["最小化", "Minimize"], '[data-window-action="toggle-maximize"]': ["最大化或还原", "Maximize or restore"], '[data-window-action="close"]': ["关闭", "Close"] };
-    for (const [selector, pair] of Object.entries(translations)) { const element = shadow.querySelector(selector); if (element) { element.title = pair[english() ? 1 : 0]; if (selector !== ".address") element.setAttribute("aria-label", element.title); } }
+    for (const [selector, pair] of Object.entries(translations)) {
+      const element = shadow.querySelector(selector);
+      if (!element) continue;
+      const label = pair[english() ? 1 : 0];
+      element.title = selector === ".address" ? `${label} · ${element.textContent}` : label;
+      if (selector !== ".address") element.setAttribute("aria-label", label);
+    }
   };
   const buttons = [];
   if (!Array.isArray(menus)) menus = [];
@@ -46,13 +52,14 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus, nativeMen
     .menu-heading { border-radius:3px; cursor:default; }
     .menu-heading[aria-expanded="true"] { background:var(--chrome-hover,#e2e6ef); }
     .menu-popup {
-      position:fixed; z-index:4; box-sizing:border-box; min-width:240px;
-      max-width:calc(100vw - 16px); max-height:calc(100vh - 46px);
+      position:fixed; z-index:4; box-sizing:border-box; width:max-content;
+      min-width:min(240px, calc(100vw - 16px));
+      max-width:min(440px, calc(100vw - 16px)); max-height:calc(100vh - 46px);
       overflow:auto; padding:4px; border-radius:4px;
       border:1px solid color-mix(in srgb,var(--chrome-text,#1a1a2e) 18%,transparent);
       background:var(--chrome-menu-bg,var(--chrome-bg,#f2f3f7));
       color:var(--chrome-text,#1a1a2e); box-shadow:0 5px 16px rgba(0,0,0,.18);
-      font:13px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      font:inherit;
       user-select:none; -webkit-user-select:none; -webkit-app-region:no-drag;
       cursor:default;
     }
@@ -67,8 +74,8 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus, nativeMen
     .menu-popup .menu-row[aria-disabled="true"] { opacity:.52; }
     .menu-popup .menu-row:focus-visible { outline:none; }
     .menu-mark { text-align:center; }
-    .menu-label { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .menu-shortcut { margin-left:20px; opacity:.62; white-space:nowrap; }
+    .menu-label { white-space:normal; overflow-wrap:anywhere; }
+    .menu-shortcut { margin-left:12px; opacity:.62; white-space:nowrap; }
     .menu-separator {
       height:1px; margin:4px 5px;
       background:color-mix(in srgb,var(--chrome-text,#1a1a2e) 14%,transparent);

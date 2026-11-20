@@ -83,17 +83,18 @@ function renderCard(
   section.appendChild(h2);
 
   const dl = document.createElement("dl");
-  const addRow = (dtText: string, ddText: string): void => {
+  const addRow = (dtText: string, ddText: string, suffix?: string): void => {
     const dt = document.createElement("dt");
     dt.textContent = dtText;
     const dd = document.createElement("dd");
     dd.textContent = ddText || "—";
+    if (suffix) dd.append(document.createElement("wbr"), suffix);
     dl.append(dt, dd);
   };
 
   addRow("当前安装版本", item.installedVersion || "未知");
   if (item.id === "mcp" && item.owner && item.owner !== "desktop") {
-    addRow("正在运行", `${item.runningVersion || item.installedVersion || "未知"}（${item.owner}）`);
+    addRow("正在运行", item.runningVersion || item.installedVersion || "未知", `（${item.owner}）`);
   }
   addRow("远端最新版本", item.latestVersion || "未知");
   addRow(dateLabel, item.publishedAt || "—");

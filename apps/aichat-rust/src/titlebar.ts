@@ -14,7 +14,7 @@ const TITLEBAR_CSS = `
   justify-content:space-between;
   box-sizing:border-box;
   padding:0 145px 0 10px;
-  font:12px/1 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font:14px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   color:var(--chrome-text,#1a1a2e);
   background:var(--chrome-bg,#f2f3f7);
   user-select:none;
@@ -42,6 +42,7 @@ const TITLEBAR_CSS = `
   height:100%;
 }
 .left{
+  flex:none;
   gap:2px;
 }
 .right{
@@ -53,7 +54,7 @@ const TITLEBAR_CSS = `
   left:50%;
   transform:translateX(-50%);
   gap:8px;
-  max-width:calc(100% - 360px);
+  max-width:calc(100% - 448px);
 }
 .icon{
   width:18px;
@@ -95,17 +96,25 @@ button:focus-visible{
   text-overflow:ellipsis;
 }
 @media (max-width:850px){
+  :host{column-gap:8px;}
   .title{display:none;}
+  .center{position:static;transform:none;max-width:none;margin-inline:auto;}
+  .right{display:none;}
 }
 .address{
-  padding:5px 10px;
+  display:block;
+  min-width:0;
+  padding:0 10px;
   height:24px;
   border-radius:4px;
   color:var(--chrome-address,#4a4a5a);
   background:var(--chrome-pill,#e2e6ef);
   white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
 }
 .refresh{
+  flex:none;
   width:28px;
   height:28px;
   padding:0;
@@ -144,6 +153,13 @@ button:focus-visible{
   stroke:currentColor;
   stroke-width:1.2;
   pointer-events:none;
+}
+@media (max-width:480px){
+  :host(:not([data-platform="darwin"])){padding:0 82px 0 6px;}
+  :host(:not([data-platform="darwin"])) .address{display:none;}
+  .icon{margin-left:4px;}
+  .left .menu-heading{padding-inline:5px;}
+  .window-controls button{width:26px;}
 }
 `;
 

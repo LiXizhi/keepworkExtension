@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>KeepWork 第二大脑</title>
+  <link rel="stylesheet" href="/src/typography.css">
   <style>
     :root {
       color-scheme: light;
@@ -14,7 +15,6 @@
       --launch-surface: #ffffff;
       background: transparent;
       color: var(--launch-text);
-      font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     :root[data-theme] { background: var(--launch-bg); }
     :root[data-theme="dark"] {
@@ -45,8 +45,7 @@
       gap: 10px;
       margin-bottom: 30px;
       color: var(--launch-muted);
-      font-size: 15px;
-      font-weight: 600;
+      font-weight: var(--desktop-weight-heading);
       letter-spacing: .02em;
     }
     .brand-icon {
@@ -54,12 +53,13 @@
       place-items: center;
       width: 38px;
       height: 38px;
+      flex: none;
       border-radius: 11px;
       background: #5364df;
       color: #ffffff;
       box-shadow: 0 4px 16px #5364df20;
     }
-    h1 { margin: 0 0 10px; font-size: 23px; font-weight: 600; letter-spacing: -.02em; }
+    h1 { margin: 0 0 10px; font-size: var(--desktop-text-title); font-weight: var(--desktop-weight-heading); line-height: var(--desktop-leading-heading); letter-spacing: -.02em; }
     p { margin: 0; color: var(--launch-muted); }
     .loading { width: 96px; height: 3px; margin: 28px auto 0; border-radius: 4px; background: var(--launch-border); overflow: hidden; }
     .loading::after {
@@ -88,10 +88,10 @@
     button.primary { background: #5364df; border-color: #5364df; color: #ffffff; }
     button:disabled { opacity: .6; cursor: default; }
     :is(button, summary):focus-visible { outline: 2px solid #7a86f0; outline-offset: 3px; }
-    #retry-status { margin-top: 16px; font-size: 12px; }
+    #retry-status { margin-top: 16px; font-size: var(--desktop-text-small); overflow-wrap: anywhere; }
     #retry-status:empty { display: none; }
-    details { margin-top: 18px; text-align: left; font-size: 12px; color: var(--launch-muted); }
-    details summary { cursor: pointer; text-align: center; }
+    details { margin-top: 18px; text-align: left; font-size: var(--desktop-text-small); color: var(--launch-muted); }
+    details summary { cursor: pointer; text-align: center; font-weight: var(--desktop-weight-heading); }
     #detail { margin-top: 12px; padding: 12px; border: 1px solid var(--launch-border); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
   </style>
 </head>

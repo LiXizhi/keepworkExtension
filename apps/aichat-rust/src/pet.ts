@@ -621,6 +621,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
       state.folder ? `\n${state.folder}` : ""
     }`;
     target.setAttribute("aria-description", target.dataset.hint);
+    target.title = target.dataset.hint;
     $("badge").hidden = !!callPhase() ||
       !(state.busy || state.attention || state.error || localError);
 
@@ -1037,7 +1038,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     if (!activeRemotePress || detail?.press !== activeRemotePress || typeof detail.text !== "string") return;
     preview.textContent = detail.text;
     preview.hidden = !detail.text;
-    preview.scrollLeft = preview.scrollWidth;
+    preview.scrollTop = preview.scrollHeight;
   });
   window.addEventListener("aichat:remote-voice-transcribing", (event) => {
     if (!activeRemotePress || activeRemotePress !== (event as CustomEvent<number>).detail) return;
