@@ -1,12 +1,13 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { mkdtempSync, mkdirSync, readFileSync, rmSync, realpathSync, symlinkSync, writeFileSync } = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const h = require('./harness.cjs');
 
 test('named Codex accounts isolate login, discovery and persisted session execution', async (t) => {
-  const directory = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'kp-codex-accounts-')));
+  const directory = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'kp-codex-accounts-')));
   const root = path.join(directory, 'workspace');
   const defaultHome = path.join(directory, 'default-codex-home');
   mkdirSync(root);
@@ -24,6 +25,7 @@ test('named Codex accounts isolate login, discovery and persisted session execut
     KEEPWORK_MCP_ROOT: root,
   };
   let daemon, token;
+  const owner = 'fixture-owner-'.padEnd(40, 'a');
   const start = async () => {
     daemon = await h.startRust({ env, home: directory, port: daemon?.port, requireAuth: true });
     token = readFileSync(path.join(directory, '.keepwork-mcp', 'token'), 'utf8').trim();
@@ -36,7 +38,7 @@ test('named Codex accounts isolate login, discovery and persisted session execut
     const response = await fetch(daemon.base + '/agents/' + route, {
       method: data === undefined ? 'GET' : 'POST',
       headers: {
-        origin: daemon.base, 'x-agent-owner': 'fixture-owner-'.padEnd(40, 'a'),
+        origin: daemon.base, 'x-agent-owner': owner,
         authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extra,
       },
       body: data === undefined ? undefined : JSON.stringify(data),
@@ -85,10 +87,10 @@ test('named Codex accounts isolate login, discovery and persisted session execut
   assert.ok(businessProbe.models.length);
   const businessHome = calls().find(row => row.method === 'account/login/start').codexHome;
   const personalHome = calls().filter(row => row.method === 'account/read').at(-1).codexHome;
-  assert.notEqual(businessHome, defaultHome);
+  const ownerDirectory = createHash('sha256').update(`${daemon.base}\0${owner}`).digest('hex');
   for (const [id, home] of [[business.id, businessHome], [personal.id, personalHome]]) {
-    assert.equal(path.basename(path.dirname(home)), id);
-    assert.ok(home.startsWith(directory + path.sep));
+    const relativeHome = path.relative(directory, realpathSync.native(home));
+    assert.equal(relativeHome, path.join('.keepwork-mcp', 'codex-accounts-v1', ownerDirectory, id, 'home'));
     const scoped = calls().filter(row => row.codexHome === home);
     assert.ok(scoped.every(row => !row.inheritedKey && row.args.includes('cli_auth_credentials_store="file"')));
   }
@@ -147,14 +149,16 @@ test('named Codex accounts isolate login, discovery and persisted session execut
   assert.deepEqual(await ok('codex/accounts/' + shared.id + '/login', {}), { url: 'https://auth.openai.com/fixture' });
   const sharedSession = await ok('account-sessions', session('grokx-context', shared.id));
   assert.equal(sharedSession.accountId, shared.id);
+  const expectedGrokxHome = realpathSync.native(grokxHome);
+  const assertGrokxHome = (call) => assert.equal(path.relative(expectedGrokxHome, realpathSync.native(call.codexHome)), '');
   for (const method of ['account/read', 'account/login/start', 'thread/start']) {
-    assert.equal(calls().findLast(row => row.method === method).codexHome, grokxHome);
+    assertGrokxHome(calls().findLast(row => row.method === method));
   }
   await daemon.stop();
   await start();
   await ok('account-sessions/' + sharedSession.id + '/turns', { requestId: 'resume-grokx', text: 'Continue' });
-  assert.equal(calls().findLast(row => row.method === 'thread/resume' && row.params.threadId === sharedSession.threadId).codexHome, grokxHome);
-  assert.equal(calls().findLast(row => row.method === 'turn/start' && row.params.threadId === sharedSession.threadId).codexHome, grokxHome);
+  assertGrokxHome(calls().findLast(row => row.method === 'thread/resume' && row.params.threadId === sharedSession.threadId));
+  assertGrokxHome(calls().findLast(row => row.method === 'turn/start' && row.params.threadId === sharedSession.threadId));
 
   writeRoster([]);
   assert.ok(!(await ok('codex/accounts')).accounts.some(row => row.id === shared.id));
