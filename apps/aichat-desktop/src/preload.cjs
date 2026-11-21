@@ -53,7 +53,8 @@ if (process.isMainFrame) {
       shadow.append(style, header);
       const layout = document.createElement('style');
       // #app has auto height, so the shell must use the viewport, not a percentage.
-      layout.textContent = 'body{height:calc(100vh - 34px)!important;transform:translateY(34px);position:relative;box-sizing:border-box!important}.app-shell{height:calc(100vh - 34px)!important}';
+      // A body transform would offset fixed model menus a second time.
+      layout.textContent = 'body{height:calc(100vh - 34px)!important;margin-top:34px!important;position:relative;box-sizing:border-box!important}.app-shell{height:calc(100vh - 34px)!important}';
       document.head.append(layout); document.documentElement.append(host);
       let lastTheme;
       const canvas = document.createElement('canvas');

@@ -485,7 +485,8 @@ pub fn build_main_window_init_script_with_launch_capability(
 
     const offsetStyle = document.createElement("style");
     offsetStyle.id = "keepwork-desktop-offset";
-    offsetStyle.textContent = "body {{ height: calc(100vh - 34px) !important; transform: translateY(34px); }} .app-shell {{ height: calc(100vh - 34px) !important; }}";
+    // Preserve viewport coordinates for fixed menus anchored with getBoundingClientRect().
+    offsetStyle.textContent = "body {{ height: calc(100vh - 34px) !important; margin-top: 34px !important; position: relative; }} .app-shell {{ height: calc(100vh - 34px) !important; }}";
     if (document.head && !document.getElementById("keepwork-desktop-offset")) {{
       document.head.appendChild(offsetStyle);
     }}

@@ -318,10 +318,13 @@ export function mountDesktopTitlebar(options: {
 
   const pageOffsetStyle = document.createElement("style");
   pageOffsetStyle.id = "keepwork-desktop-offset";
+  // A body transform makes fixed menus use body coordinates and applies the
+  // titlebar offset twice to menus positioned with getBoundingClientRect().
   pageOffsetStyle.textContent = `
     body {
       height: calc(100vh - 34px) !important;
-      transform: translateY(34px);
+      margin-top: 34px !important;
+      position: relative;
     }
     .app-shell {
       height: calc(100vh - 34px) !important;
