@@ -168,6 +168,8 @@ test('receipt verification rejects files added after download and symbolic links
 const version = '1.2.3';
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const credentials = { KP_QINIU_ACCESS_KEY: 'fixture-access', KP_QINIU_SECRET_KEY: 'fixture-secret' };
+const dmgName = `Keepwork_${version}_universal.dmg`;
+const signedDmg = Buffer.from('fixture local Developer ID signed, notarized and stapled DMG');
 
 function desktopFixture(t, options = {}) {
   const f = fixture(t, 'desktop', {
@@ -193,7 +195,26 @@ function desktopFixture(t, options = {}) {
     },
   });
   downloadArtifacts(f.request, f);
-  return { ...f, request: { product: 'desktop', artifacts: f.output, version, commit, tag: `v${version}` } };
+  const request = { product: 'desktop', artifacts: f.output, version, commit, tag: `v${version}` };
+  const signedDirectory = path.join(path.dirname(f.output), 'signed');
+  fs.mkdirSync(signedDirectory);
+  const dmgPath = path.join(signedDirectory, dmgName);
+  const macosReceipt = path.join(signedDirectory, 'macos-receipt.json');
+  const receipt = {
+    schemaVersion: 1, tag: request.tag, version, commit,
+    notarizationId: 'c52475f7-5162-4245-a52f-ad012cbca55e',
+    fileName: dmgName, size: signedDmg.length, sha256: digest(signedDmg),
+  };
+  fs.writeFileSync(dmgPath, signedDmg);
+  fs.writeFileSync(macosReceipt, JSON.stringify(receipt));
+  return {
+    ...f, request, signedRequest: { ...request, macosReceipt }, dmgPath, macosReceipt, receipt,
+    verifyMacDmg(file, { version: expectedVersion, commit: expectedCommit }) {
+      assert.equal(expectedVersion, version);
+      assert.equal(expectedCommit, commit);
+      assert.deepEqual(fs.readFileSync(file), signedDmg);
+    },
+  };
 }
 
 test('local desktop publication defaults to a verified plan without credentials or GitHub mutations', async t => {
@@ -207,11 +228,81 @@ test('local desktop publication defaults to a verified plan without credentials 
 test('missing local Qiniu credentials fail before creating a GitHub draft', async t => {
   const f = desktopFixture(t);
   const calls = [];
-  await assert.rejects(publishLocal({ ...f.request, publish: true }, {
-    env: {}, exec: (...args) => calls.push(args),
+  await assert.rejects(publishLocal({ ...f.signedRequest, publish: true }, {
+    env: {}, exec: (...args) => calls.push(args), verifyMacDmg: f.verifyMacDmg,
   }), /KP_QINIU/);
   assert.deepEqual(calls, []);
 });
+
+test('CI-only desktop evidence cannot authorize live publication', async t => {
+  const f = desktopFixture(t);
+  const calls = [];
+  await assert.rejects(publishLocal({ ...f.request, publish: true }, {
+    env: credentials, exec: (...args) => calls.push(args),
+  }), /DMG|macOS|macos.receipt/i);
+  assert.deepEqual(calls, []);
+});
+
+test('local signed DMG can be checked in a dry-run before any GitHub or CDN operation', async t => {
+  const f = desktopFixture(t);
+  const calls = [];
+  const result = await publishLocal(f.signedRequest, {
+    env: {}, exec: (...args) => calls.push(args),
+    verifyMacDmg(file, expected) {
+      calls.push('native verifier');
+      f.verifyMacDmg(file, expected);
+    },
+  });
+  assert.match(result.publication, /dry-run/);
+  assert.deepEqual(calls, ['native verifier']);
+  assert.ok(verifyReceipt(f.output, { product: 'desktop', commit }));
+});
+
+for (const [label, update] of [
+  ['a different tag', f => ({ ...f.receipt, tag: 'v1.2.4' })],
+  ['a different version', f => ({ ...f.receipt, version: '1.2.4' })],
+  ['a different source commit', f => ({ ...f.receipt, commit: 'b'.repeat(40) })],
+  ['an invalid notarization ID', f => ({ ...f.receipt, notarizationId: 'invalid-id' })],
+  ['a mismatched name', f => ({ ...f.receipt, fileName: '../' + dmgName })],
+  ['a mismatched size', f => ({ ...f.receipt, size: signedDmg.length - 1 })],
+  ['a mismatched checksum', f => ({ ...f.receipt, sha256: 'b'.repeat(64) })],
+]) {
+  test(`desktop publication rejects a local DMG receipt with ${label}`, async t => {
+    const f = desktopFixture(t);
+    const calls = [];
+    fs.writeFileSync(f.macosReceipt, JSON.stringify(update(f)));
+    await assert.rejects(publishLocal({ ...f.signedRequest, publish: true }, {
+      env: credentials, exec: (...args) => calls.push(args),
+      verifyMacDmg: (...args) => calls.push(args),
+    }));
+    assert.deepEqual(calls, []);
+  });
+}
+
+test('desktop publication fails before remote writes if native DMG verification fails', async t => {
+  const f = desktopFixture(t);
+  const calls = [];
+  await assert.rejects(publishLocal({ ...f.signedRequest, publish: true }, {
+    env: credentials, exec: (...args) => calls.push(args),
+    verifyMacDmg() { throw Error('fixture missing notarization ticket'); },
+  }), /missing notarization ticket/);
+  assert.deepEqual(calls, []);
+});
+
+for (const field of ['macosReceipt', 'dmgPath']) {
+  test(`desktop publication rejects a symbolic link for ${field}`, { skip: process.platform === 'win32' }, async t => {
+    const f = desktopFixture(t);
+    const calls = [];
+    const file = f[field];
+    fs.renameSync(file, file + '.original');
+    fs.symlinkSync(file + '.original', file);
+    await assert.rejects(publishLocal({ ...f.signedRequest, publish: true }, {
+      env: credentials, exec: (...args) => calls.push(args),
+      verifyMacDmg: (...args) => calls.push(args),
+    }), /regular .* file|symbolic link|symlink/i);
+    assert.deepEqual(calls, []);
+  });
+}
 
 test('a Windows manifest from another source cannot be published even with valid file checksums', async t => {
   const f = desktopFixture(t, { manifest: { commit: 'b'.repeat(40) } });
@@ -235,8 +326,9 @@ test('failed desktop CDN verification leaves the draft unpublished and never rep
     assert.deepEqual(args.slice(0, 2), ['release', 'create']);
     return '';
   };
-  await assert.rejects(publishLocal({ ...f.request, publish: true }, {
+  await assert.rejects(publishLocal({ ...f.signedRequest, publish: true }, {
     env: { ...credentials, HTTPS_PROXY: PROXY }, exec,
+    verifyMacDmg: f.verifyMacDmg,
     desktopPublisher: { ...desktopPublisher, async publishRelease() { throw Error('CDN checksum mismatch'); } },
   }), /CDN checksum mismatch/);
   assert.equal(calls.some(args => args[1] === 'create'), true);
@@ -261,8 +353,9 @@ test('successful local desktop publication verifies CDN before attachments, publ
       events.push(args[1] === 'upload' ? 'assets' : args.includes('--draft=false') ? 'public' : 'notes');
       return '';
     };
-    const result = await publishLocal({ ...f.request, publish: true }, {
+    const result = await publishLocal({ ...f.signedRequest, publish: true }, {
       exec, env: { ...credentials, HTTPS_PROXY: PROXY, http_proxy: PROXY, NO_PROXY: '*' },
+      verifyMacDmg: f.verifyMacDmg,
       desktopPublisher: {
         ...desktopPublisher,
         async publishRelease(_entries, config, { github }) {
@@ -298,6 +391,12 @@ function desktopPublication(t, options = {}) {
     if (args[0] === 'api') return commit;
     if (args[1] === 'view') return JSON.stringify({ isDraft, body });
     githubWrites.push(args);
+    if (args[1] === 'upload') {
+      const attachment = args.find(arg => path.basename(arg) === dmgName);
+      const sums = args.find(arg => path.basename(arg) === `SHA256SUMS-${version}.txt`);
+      assert.deepEqual(fs.readFileSync(attachment), signedDmg);
+      assert.ok(fs.readFileSync(sums, 'utf8').split(/\r?\n/).includes(`${digest(signedDmg)}  ${dmgName}`));
+    }
     if (args.includes('--notes-file')) body = fs.readFileSync(args[args.indexOf('--notes-file') + 1], 'utf8');
     if (args.includes('--draft=false')) isDraft = false;
     return '';
@@ -325,7 +424,7 @@ function desktopPublication(t, options = {}) {
     },
   };
   const dependencies = {
-    env: credentials, exec,
+    env: credentials, exec, verifyMacDmg: f.verifyMacDmg,
     desktopPublisher: {
       ...desktopPublisher,
       async publishRelease(entries, config, settings) {
@@ -340,13 +439,20 @@ function desktopPublication(t, options = {}) {
       },
     },
   };
-  const request = { ...f.request, publish: true };
+  const request = { ...f.signedRequest, publish: true };
   return {
     ...f, uploads, githubWrites, publish: () => publishLocal(request, dependencies),
     verifyOriginal() {
       assert.ok(verifyReceipt(f.output, { product: 'desktop', commit }));
       for (const { file, bytes } of ciFiles) assert.deepEqual(fs.readFileSync(file), bytes,
         'the original CI-generated feed bytes must remain unchanged');
+    },
+    verifyPublishedDmg() {
+      const feedUrl = 'https://cdn.keepwork.com/keepwork/aichat-rust/darwin-universal/latest-client.json';
+      const { installer } = JSON.parse(remote.get(feedUrl));
+      assert.equal(installer.size, signedDmg.length);
+      assert.equal(installer.sha256, digest(signedDmg));
+      assert.deepEqual(remote.get(installer.url), signedDmg);
     },
   };
 }
@@ -355,6 +461,7 @@ test('real desktop publication preserves downloaded evidence and permits an iden
   for (const ciFeeds of [false, true]) await t.test(ciFeeds ? 'with original CI feeds' : 'without original CI feeds', async t => {
     const f = desktopPublication(t, { ciFeeds });
     assert.match((await f.publish()).publication, /published/);
+    f.verifyPublishedDmg();
     f.verifyOriginal();
     assert.match((await f.publish()).publication, /published/);
     f.verifyOriginal();

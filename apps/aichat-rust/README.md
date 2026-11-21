@@ -262,7 +262,9 @@ xcrun swiftc -parse-as-library -module-cache-path /private/tmp/aichat-wk-module-
 
 在 `v<版本>` 标签上手动触发 [Rust 安装包发布工作流](../../.github/workflows/aichat-rust-windows-release.yml) 时，默认 `edition=all` 同时构建现代版和 Win7/Win8 x64 专版。现代 Windows x64 / ARM64 EXE 与 macOS Universal DMG、Windows 产物验证清单和 `SHA256SUMS-<版本>.txt` 汇总为 `aichat-rust-release-packages`，专版另存为 `aichat-rust-win7-win8-x64` artifact。仅现代版可显式选 `edition=modern`，仅专版选 `win7-win8`。GitHub 不再上传七牛或公开 Release；创建或推送标签也不会自动发布。
 
-产物由此设备通过 `http://127.0.0.1:7890` 下载，本地核对 run ID、完整源提交和校验和后，由此设备直连七牛上传。七牛凭据使用本机环境中的 `KP_QINIU_ACCESS_KEY`、`KP_QINIU_SECRET_KEY`，不写入命令参数或仓库。三个安装包全部通过 CDN 大小与 SHA-256 校验后，本地发布器才提升三个更新 feed、在 GitHub Release 正文顶部写入可点击的 CDN 下载地址，最后上传附件并公开 Release。新建 Release 在失败时保持草稿；重跑时保留原说明并替换同一自动下载区块。
+CI 产物由此设备通过 `http://127.0.0.1:7890` 下载并核对 run ID、完整源提交和校验和。**正式发布的 macOS Universal DMG 必须使用帕拉卡 Developer ID 签名、通过 Apple 公证并装订验证票据。** CDN、更新 feed 和 GitHub Release 附件统一使用装订后 DMG 的字节和摘要。签名、验收和发布入口要求见 [rust-release 的 macOS 流程](../../.github/skills/rust-release/SKILL.md#macos-universal-dmg-本机签名与公证)。
+
+正式产物由此设备直连七牛上传。七牛凭据使用本机环境中的 `KP_QINIU_ACCESS_KEY`、`KP_QINIU_SECRET_KEY`，不写入命令参数或仓库。三个安装包全部通过 CDN 大小与 SHA-256 校验后，本地发布器才提升三个更新 feed、在 GitHub Release 正文顶部写入可点击的 CDN 下载地址，最后上传附件并公开 Release。新建 Release 在失败时保持草稿，重跑时保留原说明并替换同一自动下载区块。
 
 历史 `aichat-rust-v<版本>` 标签、Release 与下载地址保留原样，发布脚本仅为重跑已有历史发布保留旧标签兼容；不再新建旧格式标签，也不通过重命名、移动或重建历史标签调整显示顺序。标准标签便于 GitHub 识别版本，但不保证所有历史 Release 严格按版本倒序；`Latest` 标记与列表顺序是两回事。
 
@@ -281,7 +283,7 @@ node .github/skills/rust-release/scripts/publish-local.cjs \
   --version <版本> --commit <完整源提交SHA> --tag v<版本>
 ```
 
-实际发布时给第二条命令显式添加 `--publish true`。所有 GitHub `gh` 子进程（包括 Release 附件上传）均强制使用本机代理并剔除七牛密钥；七牛发布器自身清除代理后直连七牛。代理不可用、身份不匹配或验收失败时中止，不回退到 GitHub 上传七牛。保留下载目录不变，发布日志和新增回执存到目录外，避免重试时文件清单校验失败。
+上面的命令用于 CI 产物预检。正式发布时，按 [macOS 构建流程](../../.github/skills/rust-release/SKILL.md#macos-universal-dmg-本机签名与公证) 生成并传入 `--macos-receipt`。发布器校验签名覆盖的 Git 提交、Developer ID、装订票据和最终 SHA-256。该预检通过后，用同一命令追加 `--publish true`。GitHub `gh` 子进程（包括 Release 附件上传）强制使用本机代理并剔除七牛密钥。七牛发布器自身清除代理后直连七牛。保留原始下载目录，发布日志和新增回执存到目录外。
 
 独立 MCP 四个现代目标也采用同样的本机下载和上传路径。其证据验证需要仓库根目录的 Node 依赖，尚未安装时先运行 `npm ci --ignore-scripts`，已有依赖可复用。默认 `/rust-release` / `all` 还必须通过专版发布器上传 Win7/Win8 客户端、专用 MCP 和 CEF；实际发布显式选择 `legacy-signing=production` 并保留三系统验收门禁。完整流程与验收要求见 [rust-release Skill](../../.github/skills/rust-release/SKILL.md)，`modern` 模式保留仅现代双产品发布。
 

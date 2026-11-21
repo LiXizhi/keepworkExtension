@@ -1,11 +1,8 @@
 #!/usr/bin/env node
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 const qiniu = require('../../../scripts/lib/qiniu-release.cjs');
-const { writeCdnSummary } = require('../../../scripts/lib/cdn-summary.cjs');
 const { validateDesktopManifest, validateDesktopVersionStatus } = require('../../../scripts/lib/update-manifest.cjs');
 
 const START = '<!-- keepwork-cdn-downloads:start -->';
@@ -189,25 +186,6 @@ async function publishRelease(entries, config, {
   return feeds;
 }
 
-function githubRelease(tag, repository) {
-  return {
-    async readBody() {
-      const json = execFileSync('gh', ['release', 'view', tag, '--repo', repository, '--json', 'body'], { encoding: 'utf8' });
-      return JSON.parse(json).body;
-    },
-    async writeBody(body) {
-      const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-release-notes-'));
-      try {
-        const notesFile = path.join(temporary, 'notes.md');
-        fs.writeFileSync(notesFile, body);
-        execFileSync('gh', ['release', 'edit', tag, '--repo', repository, '--notes-file', notesFile], { stdio: 'inherit' });
-      } finally {
-        fs.rmSync(temporary, { recursive: true, force: true });
-      }
-    },
-  };
-}
-
 async function main() {
   const args = qiniu.readArgs(process.argv.slice(2));
   for (const key of Object.keys(args)) {
@@ -224,22 +202,12 @@ async function main() {
   if (args.tag !== undefined && process.env.GITHUB_REF_NAME !== undefined && args.tag !== process.env.GITHUB_REF_NAME) {
     throw new Error('Release tag does not match GITHUB_REF_NAME');
   }
-  const tag = resolveReleaseTag(version, args.tag ?? process.env.GITHUB_REF_NAME);
+  resolveReleaseTag(version, args.tag ?? process.env.GITHUB_REF_NAME);
+  if (!args.dryRun) throw new Error('Use rust-release publish-local.cjs with a verified --macos-receipt for desktop publication');
   const directory = path.resolve(qiniu.required(args['release-dir'], 'release-dir'));
   const entries = collectReleaseFiles(directory, version);
-  if (args.dryRun) {
-    console.log(updateReleaseBody('', entries));
-    console.log(collectUpdateFeeds(entries, version, new Date().toISOString()).map(feed => feed.url).join('\n'));
-    return;
-  }
-  const repository = qiniu.required(process.env.GH_REPO || process.env.GITHUB_REPOSITORY, 'GH_REPO');
-  const config = {
-    accessKey: qiniu.required(process.env.KP_QINIU_ACCESS_KEY, 'KP_QINIU_ACCESS_KEY'),
-    secretKey: qiniu.required(process.env.KP_QINIU_SECRET_KEY, 'KP_QINIU_SECRET_KEY'),
-    bucket: 'haqi', uploadHost: 'https://up-z2.qiniup.com',
-  };
-  const feeds = await publishRelease(entries, config, { github: githubRelease(tag, repository) });
-  writeCdnSummary({ title: 'KeepWork 第二大脑 — CDN 下载与自动更新清单已发布', version, entries: [...entries, ...feeds] });
+  console.log(updateReleaseBody('', entries));
+  console.log(collectUpdateFeeds(entries, version, new Date().toISOString()).map(feed => feed.url).join('\n'));
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });

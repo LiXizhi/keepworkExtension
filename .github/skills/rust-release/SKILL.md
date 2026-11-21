@@ -2,7 +2,7 @@
 name: rust-release
 description: 打包或发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；默认包含现代版和 Win7/Win8 专版，也支持仅现代版、仅 MCP 或仅兼容版。用于版本打包、发布与排查。
 metadata:
-  version: "1.1.4"
+  version: "1.1.6"
 ---
 
 # Rust 全平台发布
@@ -17,6 +17,8 @@ metadata:
 | macOS Universal DMG | `Keepwork_<version>_universal.dmg` | Intel x86_64 + Apple Silicon arm64 |
 | 现代 Windows x64 EXE | `Keepwork_<version>_x64-setup.exe` | x86_64（64 位），不提供 32 位 x86 安装包 |
 | 现代 Windows ARM64 EXE | `Keepwork_<version>_arm64-setup.exe` | ARM64 |
+
+**所有正式发布的 macOS DMG 必须使用帕拉卡 Developer ID 签名、通过 Apple 公证并装订验证票据。** 此要求适用于 `all`、`modern` 和含 macOS 的仅桌面发布。按[本机签名与公证](#macos-universal-dmg-本机签名与公证)验证最终 DMG 后，再上传桌面安装包、更新 feed 或公开 Release。
 
 `all` 和 `modern` 模式中，除非用户明确限定“只发桌面”，不能省略 `Rust MCP daemon` 构建 Action 和现代独立 MCP CDN 发布。
 GitHub Actions 负责构建和保存 artifacts；**此设备经 `http://127.0.0.1:7890` 下载，再由此设备直连七牛上传**。
@@ -156,9 +158,8 @@ gh workflow run aichat-rust-windows-release.yml --ref v<desktop_version> -f edit
 实际 `all` 发布必须显式选择 `legacy-signing=production`；构建入口的 preview 默认值仅用于构建预览，缺正式 secret 时不得回退临时密钥。
 
 记录这次 dispatch 的 `desktop_run_id` 和完整 `desktop_commit`，等待 validate、Windows x64/ARM64、
-macOS Universal、`prepare-release` 全部成功。汇总 artifact 包含三个安装包、Windows manifests 和
-`SHA256SUMS-<desktop_version>.txt`。需要 Developer ID 签名与 Apple 公证的 macOS 产物时，先按[本机签名与公证](#macos-universal-dmg-本机签名与公证)处理。
-在此设备下载、预检，再执行本地发布：
+macOS Universal、`prepare-release` 全部成功。汇总 artifact 包含 Windows 安装包、CI 生成的 macOS DMG、Windows manifests 和
+`SHA256SUMS-<desktop_version>.txt`。在此设备下载并预检原始 CI 产物：
 
 ```bash
 node .github/skills/rust-release/scripts/download-artifacts.cjs \
@@ -167,13 +168,10 @@ node .github/skills/rust-release/scripts/download-artifacts.cjs \
 node .github/skills/rust-release/scripts/publish-local.cjs \
   --product desktop --artifacts .tmp/rust-release/desktop-<desktop_run_id> \
   --version <desktop_version> --commit <desktop_commit> --tag v<desktop_version>
-node .github/skills/rust-release/scripts/publish-local.cjs \
-  --product desktop --artifacts .tmp/rust-release/desktop-<desktop_run_id> \
-  --version <desktop_version> --commit <desktop_commit> --tag v<desktop_version> --publish true
 ```
 
-本地脚本核对下载回执与构建校验和，再创建或复用 draft Release，调用原桌面发布器上传三个安装包。
-三个安装包全部验证后才提升三个 `latest-client.json`，在 Release 正文的
+预检核对下载回执、构建校验和与 Windows 清单。正式发布须通过[本机签名与公证](#macos-universal-dmg-本机签名与公证)的门禁。
+发布入口预检通过后才创建或复用 draft Release 并上传三个安装包。三个安装包全部验证后才提升三个 `latest-client.json`，在 Release 正文的
 `<!-- keepwork-cdn-downloads:start -->` / `<!-- keepwork-cdn-downloads:end -->` 区块写 CDN 下载表，
 最后上传 GitHub 附件并公开 Release。失败时新建 Release 保持草稿；不得提前公开或替换附件绕过 CDN 校验。
 
@@ -183,63 +181,28 @@ node .github/skills/rust-release/scripts/publish-local.cjs \
 首次配置时，用「钥匙串访问」创建 CSR，在 Apple Developer 团队后台签发证书，再把下载的 `.cer` 导入生成 CSR 的同一台 Mac。
 `security find-identity -v -p codesigning` 应能列出该团队的有效签名身份。[Apple Developer ID 证书说明](https://developer.apple.com/help/account/certificates/create-developer-id-certificates)
 
-正式产物从目标 `v<desktop_version>` tag 对应的干净工作区构建。安装 Apple Silicon 和 Intel 的 Rust 目标 `aarch64-apple-darwin`、`x86_64-apple-darwin`，并用 `pnpm install --frozen-lockfile` 安装 `apps/aichat-rust` 的依赖。
-从仓库根目录执行。先给包内两个 `keepwork-mcp` 签名，再由 Tauri 用同一个证书签署 `Keepwork.app` 和 DMG。
+正式产物从目标 `v<desktop_version>` tag 对应的干净工作区构建。安装 Apple Silicon 和 Intel 的 Rust 目标 `aarch64-apple-darwin`、`x86_64-apple-darwin`，并用 `pnpm --prefix apps/aichat-rust install --frozen-lockfile` 安装依赖。
+正式公证复用登录钥匙串中的 `KeepworkNotary` profile。首次配置执行 `xcrun notarytool store-credentials "KeepworkNotary" --apple-id "<Apple 账号邮箱>" --team-id 5QLPT4C3EB`，在交互提示中输入 Apple 的 App 专用密码。私钥和密码留在钥匙串或受保护的凭据存储。
+
+从仓库根目录运行，输出使用已存在父目录下的全新目录。脚本把完整 Git 提交写入应用签名覆盖的 `Info.plist`，签署两个 MCP 切片后由 Tauri 签署应用和 DMG，再提交 Apple 公证。只有 `Accepted` 才装订票据并产出回执。
 
 ```bash
-set -e
-signing_identity='Developer ID Application: Shenzhen Paracraft Technology Co., Ltd. (5QLPT4C3EB)'
-security find-identity -v -p codesigning | grep -F "$signing_identity"
-node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
-
-for slice in arm64 x64; do
-  mcp="apps/aichat-rust/src-tauri/resources/mcp-runtime/$slice/bin/keepwork-mcp"
-  codesign --force --sign "$signing_identity" --timestamp --options runtime \
-    --identifier com.keepwork.aichat-desktop.mcp "$mcp"
-done
-
-(
-  cd apps/aichat-rust
-  unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
-  unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
-  APPLE_SIGNING_IDENTITY="$signing_identity" \
-    pnpm exec tauri build --ci --target universal-apple-darwin --bundles app,dmg -- --locked
-)
-
-desktop_version=$(node -p "require('./apps/aichat-rust/package.json').version")
-dmg="apps/aichat-rust/src-tauri/target/universal-apple-darwin/release/bundle/dmg/Keepwork_${desktop_version}_universal.dmg"
-hdiutil verify "$dmg"
-codesign --verify --strict --verbose=2 "$dmg"
+node .github/skills/rust-release/scripts/build-macos.cjs \
+  --tag v<desktop_version> --output .tmp/rust-release/macos-v<desktop_version>
 ```
 
-只读挂载 DMG，确认 `Keepwork.app/Contents/MacOS/Keepwork` 含 `arm64` 和 `x86_64` 两个切片。
-对镜像内的 `Keepwork.app` 和 `Contents/Resources/resources/mcp-runtime/{arm64,x64}/bin/keepwork-mcp` 分别运行 `codesign --verify --strict --all-architectures`。
-用 `codesign -dvvv` 确认 DMG、应用和两个 MCP 都带帕拉卡的证书、团队 ID 和 Apple 安全时间戳，且应用和两个 MCP 都启用了 Hardened Runtime。仅需签名样包时，到此交付并注明尚未公证。
+构建器和发布入口都验证 `hdiutil verify`、Developer ID 签名、安全时间戳、装订票据与 `spctl`。只读挂载后核对应用版本、签名保护的提交、两个原生架构，及两个同源的 MCP 二进制签名和嵌入身份。公证仍在处理时，等待同一笔提交。被拒绝时，用 `xcrun notarytool log "$submission_id" --keychain-profile "KeepworkNotary"` 查看原因。
 
-需要公证时，复用登录钥匙串中的 `KeepworkNotary` profile。首次配置执行
-`xcrun notarytool store-credentials "KeepworkNotary" --apple-id "<Apple 账号邮箱>" --team-id 5QLPT4C3EB`，
-在交互提示中输入 Apple 的 App 专用密码。私钥和密码留在钥匙串或受保护的凭据存储。
+保留正式 DMG 和同目录的 `macos-release-receipt.json`。回执记录公证提交 ID、完整源提交和装订后的大小及 SHA-256。原始 CI 下载目录单独保留。正式入口以已验下载的 Windows 安装包和装订后 DMG 生成附件校验和，并保留 CI 原始校验和。先预检正式产物，成功后用同一组参数追加 `--publish true`：
 
 ```bash
-xcrun notarytool submit "$dmg" --keychain-profile "KeepworkNotary" --wait
+node .github/skills/rust-release/scripts/publish-local.cjs \
+  --product desktop --artifacts .tmp/rust-release/desktop-<desktop_run_id> \
+  --version <desktop_version> --commit <desktop_commit> --tag v<desktop_version> \
+  --macos-receipt .tmp/rust-release/macos-v<desktop_version>/macos-release-receipt.json
 ```
 
-记录提交 ID。只有状态为 `Accepted` 才装订票据。仍在处理时，用 `xcrun notarytool wait "$submission_id" --keychain-profile "KeepworkNotary"` 等待同一笔提交。
-被拒绝时，用 `xcrun notarytool log "$submission_id" --keychain-profile "KeepworkNotary"` 查看原因。
-
-```bash
-xcrun stapler staple "$dmg"
-xcrun stapler validate "$dmg"
-codesign --verify --strict --verbose=2 "$dmg"
-spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
-shasum -a 256 "$dmg"
-wc -c < "$dmg"
-```
-
-公证提交和装订都针对最终交付的 DMG。装订会改变文件字节，发布校验和与大小以装订后的文件为准。装订后保留该文件原样用于分发。[Apple 公证工作流](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
-
-当前 CI 的 macOS DMG 使用临时签名，本地发布器按下载回执和 CI 校验和验证原始产物。上述本机签名、装订后的 DMG 存在独立路径。
-需要发布这份成品时，必须通过能验证其来源及最终摘要的发布入口。直接替换已下载的 DMG 或手改回执、校验和会破坏原有产物验证。
+装订会改变文件字节，发布校验和与大小以装订后的文件为准。装订后保留该文件原样用于分发。[Apple 公证工作流](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
 
 ### 每次桌面发布同步前台下载页（必做）
 
@@ -373,6 +336,7 @@ node .github/skills/rust-release/scripts/publish-local.cjs \
 ## 5. 核对所选渠道的 CDN，并补 GitHub Release
 
 `all` 和 `modern` 模式检查桌面 Release 非 draft、三个现代安装包可下载、三个现代 `latest-client.json` 指向预期桌面版本。
+核对 CDN 下载的 DMG、GitHub Release 附件和 macOS feed 的大小与 SHA-256 均对应同一个已签名、公证并装订的最终 DMG。
 `mcp-server` 模式跳过桌面检查及下列桌面示例命令，只检查 MCP。
 MCP：对每个已发布 target 检查固定 feed 的 `version`、完整 `commit`、`url`、`size`、`sha256`，
 然后直连 CDN 下载**实际归档**核对大小和 SHA-256。不能只看 workflow 绿灯、本地命令退出码或 HTTP HEAD 200。
@@ -437,7 +401,7 @@ git push origin main
 
 默认 `all` 发布只有在以下步骤完成后才算结束：
 
-1. 桌面 Action 生成安装包，此设备经 `127.0.0.1:7890` 下载、本地上传并完成桌面 CDN 发布。
+1. 桌面 Action 生成安装包，此设备经 `127.0.0.1:7890` 下载。macOS 正式 DMG 通过 Developer ID 签名、Apple 公证和票据装订验证后，由此设备上传安装包并完成桌面 CDN 核验。
 2. **Rust MCP daemon** 构建成功，覆盖现代桌面三个安装包对应的四个 MCP target，版本和源提交正确。
 3. 此设备经同一本机代理下载三个 MCP artifacts，本地发布命令完成四个目标的 ZIP 上传和固定 feed 提升。
 4. Win7/Win8 job 成功，其 artifact 经本机代理下载；正式签名通过，三系统验收通过或已记录当次用户授权豁免，专版客户端、MCP、CEF 的独立归档和三个签名 feed 均由本地发布器上传并核验。豁免只表示允许发布，不表示旧系统已验收。

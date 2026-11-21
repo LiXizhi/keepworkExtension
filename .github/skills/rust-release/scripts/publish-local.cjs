@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Reuse the product publishers on downloaded CI bytes; never rebuild/repack.
+// Reuse the product publishers on verified download and signed release bytes.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -9,6 +9,7 @@ const qiniu = require('../../../../scripts/lib/qiniu-release.cjs');
 const desktop = require('../../../../apps/aichat-rust/scripts/publish-release.cjs');
 const mcp = require('../../../../apps/mcp-rust/scripts/publish-runtime.cjs');
 const { writeCdnSummary } = require('../../../../scripts/lib/cdn-summary.cjs');
+const macos = require('./macos-release.cjs');
 
 function githubCommand(exec, env, args) {
   return exec('gh', args, { encoding: 'utf8', env: githubEnvironment(env), stdio: ['ignore', 'pipe', 'pipe'] });
@@ -59,8 +60,40 @@ function desktopBundle(directory, version, commit, publisher) {
   return { entries, assets: [...expected, sums].map(name => path.join(directory, name)) };
 }
 
-async function publishLocal({ product, artifacts, version, commit, tag, acceptance = 'required', publish = false }, {
-  exec = execFileSync, env = process.env, desktopPublisher = desktop, mcpPublisher = mcp,
+function useSignedDmg(plan, { directory, macosReceipt, version, commit, tag, verifyMacDmg, staging }) {
+  const outsideCi = (file, name) => {
+    if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isFile()) throw Error(`Expected a regular ${name} file`);
+    const relative = path.relative(fs.realpathSync(directory), fs.realpathSync(file));
+    if (!relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) throw Error(`${name} must be outside the CI download`);
+  };
+  const receiptPath = path.resolve(macosReceipt);
+  outsideCi(receiptPath, 'macOS release receipt');
+  const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+  const fileName = `Keepwork_${version}_universal.dmg`;
+  if (receipt.schemaVersion !== 1 || receipt.tag !== tag || receipt.version !== version || receipt.commit !== commit
+    || receipt.fileName !== fileName || !Number.isSafeInteger(receipt.size) || receipt.size <= 0
+    || !/^[a-f0-9]{64}$/.test(receipt.sha256) || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(receipt.notarizationId)) {
+    throw Error('Signed macOS release receipt does not match the release identity');
+  }
+  const source = path.join(path.dirname(receiptPath), fileName);
+  outsideCi(source, 'signed macOS DMG');
+  const filePath = path.join(staging, fileName);
+  fs.copyFileSync(source, filePath);
+  const size = fs.statSync(filePath).size;
+  const digest = sha256(filePath);
+  if (size !== receipt.size || digest !== receipt.sha256) throw Error('Signed macOS DMG size/SHA-256 mismatch');
+  verifyMacDmg(filePath, { version, commit });
+  const entries = plan.entries.map(entry => entry.name === fileName ? { ...entry, filePath, size, sha256: digest } : entry);
+  const sumsName = `SHA256SUMS-${version}.txt`;
+  const sums = path.join(staging, sumsName);
+  const assets = plan.assets.filter(file => path.basename(file) !== sumsName)
+    .map(file => path.basename(file) === fileName ? filePath : file);
+  fs.writeFileSync(sums, assets.map(file => `${sha256(file)}  ${path.basename(file)}`).join('\n') + '\n');
+  return { entries, assets: [...assets, sums] };
+}
+
+async function publishLocal({ product, artifacts, version, commit, tag, macosReceipt, acceptance = 'required', publish = false }, {
+  exec = execFileSync, env = process.env, desktopPublisher = desktop, mcpPublisher = mcp, verifyMacDmg = macos.verifyMacDmg,
 } = {}) {
   if (env.GITHUB_ACTIONS === 'true') throw Error('Run this publisher on the local device, outside GitHub Actions');
   qiniu.normalizeVersion(version);
@@ -69,13 +102,13 @@ async function publishLocal({ product, artifacts, version, commit, tag, acceptan
   if (!['required', 'deferred'].includes(acceptance)) throw Error('Use --acceptance required or deferred');
   const directory = path.resolve(artifacts);
   const receipt = verifyReceipt(directory, { product, commit });
-  const directEnv = directEnvironment(env);
   let plan;
   if (product === 'desktop') {
     tag = desktop.resolveReleaseTag(version, tag);
     plan = desktopBundle(path.join(directory, ARTIFACTS.desktop[0]), version, commit, desktopPublisher);
+    if (publish && !macosReceipt) throw Error('Desktop publication requires --macos-receipt for the signed and stapled DMG');
   } else {
-    if (tag !== undefined) throw Error('MCP publication does not use a desktop release tag');
+    if (tag !== undefined || macosReceipt !== undefined) throw Error('MCP publication does not use a desktop release tag or macOS receipt');
     const targets = ['windows-x64', 'windows-arm64', 'macos-arm64', 'macos-x64'];
     plan = [];
     // Verify every target and its original portable report before the first mutation.
@@ -89,7 +122,18 @@ async function publishLocal({ product, artifacts, version, commit, tag, acceptan
       plan.push({ release, reportFile });
     }
   }
-  if (!publish) return { product, version, commit, runId: receipt.runId, publication: 'dry-run; no upload or feed promotion' };
+  const staging = macosReceipt ? fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-signed-dmg-')) : undefined;
+  try {
+    if (staging) plan = useSignedDmg(plan, { directory, macosReceipt, version, commit, tag, verifyMacDmg, staging });
+    if (!publish) return { product, version, commit, runId: receipt.runId, publication: 'dry-run; no upload or feed promotion' };
+    return await publishPlan({ product, version, commit, tag, plan, receipt, acceptance }, { exec, env, desktopPublisher, mcpPublisher });
+  } finally {
+    if (staging) fs.rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+async function publishPlan({ product, version, commit, tag, plan, receipt, acceptance }, { exec, env, desktopPublisher, mcpPublisher }) {
+  const directEnv = directEnvironment(env);
   const config = {
     accessKey: qiniu.required(env.KP_QINIU_ACCESS_KEY, 'KP_QINIU_ACCESS_KEY'),
     secretKey: qiniu.required(env.KP_QINIU_SECRET_KEY, 'KP_QINIU_SECRET_KEY'),
@@ -145,9 +189,9 @@ async function publishLocal({ product, artifacts, version, commit, tag, acceptan
 
 if (require.main === module) {
   (async () => {
-    const args = readArgs(process.argv.slice(2), ['product', 'artifacts', 'version', 'commit', 'tag', 'acceptance', 'publish']);
+    const args = readArgs(process.argv.slice(2), ['product', 'artifacts', 'version', 'commit', 'tag', 'macos-receipt', 'acceptance', 'publish']);
     if (args.publish !== undefined && args.publish !== 'true') throw Error('Use --publish true only for actual local publication');
-    const result = await publishLocal({ ...args, publish: args.publish === 'true' });
+    const result = await publishLocal({ ...args, macosReceipt: args['macos-receipt'], publish: args.publish === 'true' });
     console.log(JSON.stringify(result, null, 2));
   })().catch(error => { console.error(error.message); process.exitCode = 1; });
 }
