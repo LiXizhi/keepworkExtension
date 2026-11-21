@@ -2,7 +2,7 @@
 name: rust-release
 description: 打包或发布 KeepWork AIChat Rust 桌面端及 MCP Rust 服务器；默认包含现代版和 Win7/Win8 专版，也支持仅现代版、仅 MCP 或仅兼容版。用于版本打包、发布与排查。
 metadata:
-  version: "1.1.3"
+  version: "1.1.4"
 ---
 
 # Rust 全平台发布
@@ -157,7 +157,8 @@ gh workflow run aichat-rust-windows-release.yml --ref v<desktop_version> -f edit
 
 记录这次 dispatch 的 `desktop_run_id` 和完整 `desktop_commit`，等待 validate、Windows x64/ARM64、
 macOS Universal、`prepare-release` 全部成功。汇总 artifact 包含三个安装包、Windows manifests 和
-`SHA256SUMS-<desktop_version>.txt`。在此设备下载、预检，再执行本地发布：
+`SHA256SUMS-<desktop_version>.txt`。需要 Developer ID 签名与 Apple 公证的 macOS 产物时，先按[本机签名与公证](#macos-universal-dmg-本机签名与公证)处理。
+在此设备下载、预检，再执行本地发布：
 
 ```bash
 node .github/skills/rust-release/scripts/download-artifacts.cjs \
@@ -175,6 +176,70 @@ node .github/skills/rust-release/scripts/publish-local.cjs \
 三个安装包全部验证后才提升三个 `latest-client.json`，在 Release 正文的
 `<!-- keepwork-cdn-downloads:start -->` / `<!-- keepwork-cdn-downloads:end -->` 区块写 CDN 下载表，
 最后上传 GitHub 附件并公开 Release。失败时新建 Release 保持草稿；不得提前公开或替换附件绕过 CDN 校验。
+
+### macOS Universal DMG 本机签名与公证
+
+使用帕拉卡团队 `5QLPT4C3EB` 的 `Developer ID Application` 证书，确认证书和对应私钥已安装在构建 Mac 的登录钥匙串。
+首次配置时，用「钥匙串访问」创建 CSR，在 Apple Developer 团队后台签发证书，再把下载的 `.cer` 导入生成 CSR 的同一台 Mac。
+`security find-identity -v -p codesigning` 应能列出该团队的有效签名身份。[Apple Developer ID 证书说明](https://developer.apple.com/help/account/certificates/create-developer-id-certificates)
+
+正式产物从目标 `v<desktop_version>` tag 对应的干净工作区构建。安装 Apple Silicon 和 Intel 的 Rust 目标 `aarch64-apple-darwin`、`x86_64-apple-darwin`，并用 `pnpm install --frozen-lockfile` 安装 `apps/aichat-rust` 的依赖。
+从仓库根目录执行。先给包内两个 `keepwork-mcp` 签名，再由 Tauri 用同一个证书签署 `Keepwork.app` 和 DMG。
+
+```bash
+set -e
+signing_identity='Developer ID Application: Shenzhen Paracraft Technology Co., Ltd. (5QLPT4C3EB)'
+security find-identity -v -p codesigning | grep -F "$signing_identity"
+node apps/aichat-rust/scripts/bundle-mcp-rust.cjs --target universal-apple-darwin
+
+for slice in arm64 x64; do
+  mcp="apps/aichat-rust/src-tauri/resources/mcp-runtime/$slice/bin/keepwork-mcp"
+  codesign --force --sign "$signing_identity" --timestamp --options runtime \
+    --identifier com.keepwork.aichat-desktop.mcp "$mcp"
+done
+
+(
+  cd apps/aichat-rust
+  unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+  unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
+  APPLE_SIGNING_IDENTITY="$signing_identity" \
+    pnpm exec tauri build --ci --target universal-apple-darwin --bundles app,dmg -- --locked
+)
+
+desktop_version=$(node -p "require('./apps/aichat-rust/package.json').version")
+dmg="apps/aichat-rust/src-tauri/target/universal-apple-darwin/release/bundle/dmg/Keepwork_${desktop_version}_universal.dmg"
+hdiutil verify "$dmg"
+codesign --verify --strict --verbose=2 "$dmg"
+```
+
+只读挂载 DMG，确认 `Keepwork.app/Contents/MacOS/Keepwork` 含 `arm64` 和 `x86_64` 两个切片。
+对镜像内的 `Keepwork.app` 和 `Contents/Resources/resources/mcp-runtime/{arm64,x64}/bin/keepwork-mcp` 分别运行 `codesign --verify --strict --all-architectures`。
+用 `codesign -dvvv` 确认 DMG、应用和两个 MCP 都带帕拉卡的证书、团队 ID 和 Apple 安全时间戳，且应用和两个 MCP 都启用了 Hardened Runtime。仅需签名样包时，到此交付并注明尚未公证。
+
+需要公证时，复用登录钥匙串中的 `KeepworkNotary` profile。首次配置执行
+`xcrun notarytool store-credentials "KeepworkNotary" --apple-id "<Apple 账号邮箱>" --team-id 5QLPT4C3EB`，
+在交互提示中输入 Apple 的 App 专用密码。私钥和密码留在钥匙串或受保护的凭据存储。
+
+```bash
+xcrun notarytool submit "$dmg" --keychain-profile "KeepworkNotary" --wait
+```
+
+记录提交 ID。只有状态为 `Accepted` 才装订票据。仍在处理时，用 `xcrun notarytool wait "$submission_id" --keychain-profile "KeepworkNotary"` 等待同一笔提交。
+被拒绝时，用 `xcrun notarytool log "$submission_id" --keychain-profile "KeepworkNotary"` 查看原因。
+
+```bash
+xcrun stapler staple "$dmg"
+xcrun stapler validate "$dmg"
+codesign --verify --strict --verbose=2 "$dmg"
+spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+shasum -a 256 "$dmg"
+wc -c < "$dmg"
+```
+
+公证提交和装订都针对最终交付的 DMG。装订会改变文件字节，发布校验和与大小以装订后的文件为准。装订后保留该文件原样用于分发。[Apple 公证工作流](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+
+当前 CI 的 macOS DMG 使用临时签名，本地发布器按下载回执和 CI 校验和验证原始产物。上述本机签名、装订后的 DMG 存在独立路径。
+需要发布这份成品时，必须通过能验证其来源及最终摘要的发布入口。直接替换已下载的 DMG 或手改回执、校验和会破坏原有产物验证。
 
 ### 每次桌面发布同步前台下载页（必做）
 
