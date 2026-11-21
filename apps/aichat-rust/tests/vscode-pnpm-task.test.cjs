@@ -28,15 +28,27 @@ function assertTaskCwd(stdout, cwd) {
 
 function runTask(home, cwd, pathPrefix, zshrc) {
   const zdot = path.join(home, "zdot");
+  const launcher = path.join(home, "vscode-pnpm-task.zsh");
+  const initialPath = pathPrefix ? `${pathPrefix}:/usr/bin:/bin` : "/usr/bin:/bin";
   fs.mkdirSync(cwd, { recursive: true });
   fs.mkdirSync(zdot, { recursive: true });
+  // macOS path_helper runs before the fixture's login profile and can add
+  // host Node and pnpm installations to the interactive PATH.
+  fs.writeFileSync(path.join(zdot, ".zprofile"), 'export PATH="$KEEPWORK_PNPM_FIXTURE_PATH"\n');
   fs.writeFileSync(path.join(zdot, ".zshrc"), zshrc);
-  return spawnSync(zsh, [script, "tauri", "dev"], {
+  // The launcher probes two system install directories independently of PATH.
+  // Point just those probes at empty fixture locations on every host.
+  const globalDirs = /^    "(?:\/opt\/homebrew\/bin|\/usr\/local\/bin)"$/gm;
+  const source = fs.readFileSync(script, "utf8");
+  assert.equal([...source.matchAll(globalDirs)].length, 2);
+  fs.writeFileSync(launcher, source.replace(globalDirs, '    "$HOME/no-system-pnpm"'));
+  return spawnSync(zsh, [launcher, "tauri", "dev"], {
     cwd,
     env: {
       HOME: home,
       ZDOTDIR: zdot,
-      PATH: pathPrefix ? `${pathPrefix}:/usr/bin:/bin` : "/usr/bin:/bin",
+      PATH: initialPath,
+      KEEPWORK_PNPM_FIXTURE_PATH: initialPath,
       TERM: "dumb",
       LANG: "C",
       DEBIAN_PREVENT_KEYBOARD_CHANGES: "1",
