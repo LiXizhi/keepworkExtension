@@ -48,6 +48,20 @@ use tauri::{
     Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
+pub(super) fn handle_new_window(
+    url: &url::Url,
+    dev_url: Option<&str>,
+    open_browser: impl FnOnce(&str) -> Result<(), String>,
+) -> NewWindowResponse<tauri::Wry> {
+    if allowed_in_app_popup(url.as_str(), dev_url) {
+        return NewWindowResponse::Allow;
+    }
+    if let Err(err) = open_browser(url.as_str()) {
+        eprintln!("open external window failed: {err}");
+    }
+    NewWindowResponse::Deny
+}
+
 fn local_source_startup_warning(error: &str, fallback_entry: &str) -> String {
     let origin = url::Url::parse(fallback_entry)
         .map(|url| url.origin().ascii_serialization())
@@ -554,17 +568,7 @@ pub fn run() {
                 }
             })
             .on_new_window(move |url, _features| {
-                let dev_url = core_for_popup.current_dev_url();
-                if allowed_in_app_popup(url.as_str(), dev_url.as_deref()) {
-                    // Login popups (Google / Feishu / DingTalk) need window.opener
-                    // and the /sso callback to complete inside the app.
-                    NewWindowResponse::Allow
-                } else {
-                    if let Err(err) = open_in_system_browser(url.as_str()) {
-                        eprintln!("open external window failed: {err}");
-                    }
-                    NewWindowResponse::Deny
-                }
+                handle_new_window(&url, core_for_popup.current_dev_url().as_deref(), open_in_system_browser)
             });
 
             #[cfg(target_os = "macos")]

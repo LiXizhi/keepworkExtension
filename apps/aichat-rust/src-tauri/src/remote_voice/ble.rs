@@ -486,6 +486,24 @@ impl Recognition {
         Self { work: Box::pin(work), audio: Some(audio), feedback, stream_started: false, received_audio: false,
             released: false, interrupted: None, result: None }
     }
+    fn live_status(&self, phase: &'static str) -> (&'static str, &str) {
+        match self.result.as_ref() {
+            Some(Err(RecognitionError::Focus(message))) => ("input-blocked", message),
+            Some(Err(RecognitionError::Cloud(message))) => ("cloud-error", message),
+            _ => (phase, ""),
+        }
+    }
+
+    fn set_result(&mut self, result: Result<String, RecognitionError>) {
+        if matches!(result, Err(RecognitionError::Focus(_) | RecognitionError::Cloud(_))) {
+            if let Some(owner) = self.feedback.take() {
+                (owner.notify)(RecordingPhase::Preview(String::new()));
+                // Dropping the feedback also ends the pet indicator for this press.
+            }
+        }
+        self.result = Some(result);
+    }
+
     // Report recording only after actual decoded PCM arrives. A stream-start
     // notification by itself is possible even when a waking mic sends no audio.
     fn enqueue(&mut self, pcm: Vec<i16>) -> bool {
@@ -739,10 +757,11 @@ async fn connection(
                 else { pending().await }
             }=>{
                 if let Some(job) = &mut recognition {
-                    if result.is_err() {
-                        if let Some(owner) = &job.feedback { (owner.notify)(RecordingPhase::Preview(String::new())); }
+                    job.set_result(result);
+                    if matches!(job.result, Some(Err(_))) {
+                        let (state, error) = job.live_status("transcribing");
+                        service.update(generation, state, error, None);
                     }
-                    job.result = Some(result);
                 }
             },
             _=heartbeat.tick()=>{
@@ -753,7 +772,17 @@ async fn connection(
                     cancel_utterance(&mut ptt,&mut recognition);
                     service.clear(generation);
                 }
-                if ptt.open_timed_out() || ptt.expired() {
+                if ptt.preparation_timed_out() {
+                    let reason = "未收到足够的遥控器音频，正在重新连接语音通道；请松开语音键后重试。";
+                    service.update(generation, "reconnecting", reason, None);
+                    if let Some(owner) = recognition.as_ref().and_then(|job| job.feedback.as_ref()) {
+                        (owner.notify)(RecordingPhase::NoAudio);
+                    }
+                    let close = ptt.abort();
+                    write(peripheral, &tx, &close, cancel).await?;
+                    return Err(Failure::temporary(reason));
+                }
+                if ptt.expired() {
                     if let Some(tail) = ptt.interrupt_capture() {
                         let Some(job) = &mut recognition else { return Err(Failure::temporary("录音状态失效，请重新按键。")); };
                         job.enqueue(tail);
@@ -761,12 +790,6 @@ async fn connection(
                         job.interrupted = Some(message.into());
                         job.audio.take();
                         service.update(generation, "recording-limit", message, None);
-                    } else {
-                        if let Some(owner) = recognition.as_ref().and_then(|job| job.feedback.as_ref()) {
-                            (owner.notify)(RecordingPhase::NoAudio);
-                        }
-                        let close=ptt.abort(); write(peripheral,&tx,&close,cancel).await?;
-                        return Err(Failure::temporary("遥控器未开始传输音频，正在重新连接语音通道；请松开语音键后重试。"));
                     }
                 }
                 health_ticks+=1;
@@ -846,7 +869,9 @@ async fn connection(
                             tokio::pin!(mic);
                             tokio::select! {
                                 result = job.work.as_mut() => {
-                                    job.result = Some(result);
+                                    job.set_result(result);
+                                    let (state, error) = job.live_status("preparing-microphone");
+                                    service.update(generation, state, error, None);
                                     mic.await?;
                                 }
                                 result = &mut mic => { result?; }
@@ -863,21 +888,26 @@ async fn connection(
                                     startup_target.take().unwrap_or_else(|| service.prepare_recording_focus(generation)),
                                     cancel.clone(), speech.clone()));
                                 job.stream_started = true;
-                                service.update(generation, "preparing-microphone", "", None);
+                                let (state, error) = job.live_status("preparing-microphone");
+                                service.update(generation, state, error, None);
                                 continue;
                             } else if state != "busy" {
+                                let (phase, error) = recognition.as_ref().map_or((state, ""), |job| job.live_status(state));
+                                service.update(generation, phase, error, None);
                                 if state == "no-audio" {
                                     if let Some(owner) = recognition.as_ref().and_then(|job| job.feedback.as_ref()) {
                                         (owner.notify)(RecordingPhase::NoAudio);
                                     }
                                 }
                                 recognition = None;
+                            } else {
+                                service.update(generation,state,"",None);
                             }
-                            service.update(generation,state,"",None);
                         }
                         Action::Recognize{samples}=>{
-                            service.update(generation,"transcribing","",None);
                             let Some(job) = &mut recognition else { return Err(Failure::temporary("录音状态失效，请重新按键。")); };
+                            let (phase, error) = job.live_status("transcribing");
+                            service.update(generation,phase,error,None);
                             job.enqueue(samples);
                             job.release();
                         }
@@ -1080,6 +1110,34 @@ mod tests {
         assert!(bluetooth_error(btleplug::Error::NotConnected).retry);
         assert!(remote_name("Xiaomi Bluetooth Remote 2 Pro"));
         assert!(!remote_name("普通键盘"));
+    }
+
+    #[tokio::test]
+    async fn early_recognition_failure_ends_pet_feedback_before_release() {
+        for (focus_allowed, expected) in [(false, "input-blocked"), (true, "cloud-error")] {
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = events.clone();
+            let (ack, focus) = tokio::sync::oneshot::channel();
+            ack.send(focus_allowed).unwrap();
+            let target = RecordingFeedback {
+                pet_delivery: None, focus: Some(focus),
+                notify: Box::new(move |phase| observed.lock().unwrap().push(phase)),
+            };
+            let mut job = Recognition::with_transcriber(Ok(Some(target)), |_, _| {
+                Box::pin(async { Err("ASR unavailable".into()) })
+            });
+            let result = job.work.as_mut().await;
+            job.set_result(result);
+            assert!(!job.released);
+            for phase in ["preparing-microphone", "transcribing", "no-audio"] {
+                let (state, reason) = job.live_status(phase);
+                assert_eq!(state, expected);
+                assert!(!reason.is_empty());
+            }
+            assert!(!job.enqueue(vec![0; CHUNK_SAMPLES]));
+            job.release();
+            assert!(matches!(&events.lock().unwrap()[..], [RecordingPhase::Preview(_), RecordingPhase::End]));
+        }
     }
 
     #[tokio::test]

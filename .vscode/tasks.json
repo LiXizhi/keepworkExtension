@@ -173,7 +173,7 @@
     },
     {
       "label": "keepwork Rust Desktop: Start",
-      "detail": "Build apps/mcp-rust, then launch the Rust/Tauri desktop with local AIChat source. On macOS, resolve pnpm from the developer shell before the same pnpm tauri dev entry. Select pnpm dev:node explicitly to use Node MCP.",
+      "detail": "Build apps/mcp-rust, then launch the Rust/Tauri desktop with local AIChat source. On macOS, locate pnpm on PATH or beside the developer shell’s Node installation. Select pnpm dev:node explicitly to use Node MCP.",
       "type": "shell",
       "command": "pnpm",
       "args": ["tauri", "dev"],

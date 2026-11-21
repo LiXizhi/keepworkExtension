@@ -141,16 +141,19 @@ pub fn allowed_in_app_popup(raw_url: &str, dev_url: Option<&str>) -> bool {
     let Ok(parsed) = Url::parse(raw_url) else {
         return false;
     };
-    if has_credentials(&parsed) {
+    if has_credentials(&parsed) || !matches!(parsed.scheme(), "http" | "https") {
         return false;
     }
-    if let Some(dev_raw) = dev_url {
-        if !dev_raw.trim().is_empty() {
-            if let Ok(dev) = Url::parse(dev_raw) {
-                if !has_credentials(&dev) && same_origin(&parsed, &dev) {
-                    return true;
-                }
-            }
+    if let Some(dev) = dev_url.and_then(|raw| Url::parse(raw).ok()) {
+        // The local source server also serves course materials. Only the entry
+        // and login routes need an opener for the local sign-in flow.
+        if !has_credentials(&dev)
+            && same_origin(&parsed, &dev)
+            && (parsed.path() == dev.path()
+                || parsed.path() == "/login.html"
+                || is_keepwork_popup_path(parsed.path()))
+        {
+            return true;
         }
     }
     if parsed.scheme() != "https" {
@@ -440,6 +443,24 @@ mod tests {
             "http://127.0.0.1:18432/login.html",
             None
         ));
+    }
+
+    #[test]
+    fn student_card_links_use_the_browser_and_preserve_the_selected_lesson() {
+        let dev = Some("http://127.0.0.1:18432/tools/AIChat/AIChat.html");
+        for card in [
+            "http://127.0.0.1:18432/tools/OfficialLearningTools/BumiLessons-H5/student.html?print=1#l01",
+            "http://127.0.0.1:18432/tools/OfficialLearningTools/BumiLessons-H5/student.html#l12",
+            "https://cdn.keepwork.com/keepwork/cdn/bumi-lessons-h5/student.html?print=1#l01",
+        ] {
+            assert!(!allowed_in_app_popup(card, dev), "in-app popup: {card}");
+            assert_eq!(external_url(card).as_deref(), Some(card));
+        }
+        assert!(allowed_in_app_popup(
+            "http://127.0.0.1:18432/tools/AIChat/AIChat.html?chat=new",
+            dev
+        ));
+        assert!(allowed_in_app_popup("http://127.0.0.1:18432/sso?code=1", dev));
     }
 
     #[test]

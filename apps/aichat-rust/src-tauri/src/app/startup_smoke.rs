@@ -30,6 +30,8 @@ use std::{
 };
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+const STUDENT_CARD: &str = "tools/OfficialLearningTools/BumiLessons-H5/student.html?print=1#l01";
+
 const PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>Isolated startup fixture</title>
 <div id="startup-progress" role="progressbar">Loading fixture packages</div>
 <div id="app"><div class="loading" aria-busy="true">Loading workspace…</div></div><script>
@@ -90,6 +92,8 @@ struct FixtureState {
     approval_presented: AtomicUsize,
     approval_returned: AtomicUsize,
     screenshot_checks: AtomicUsize,
+    external_popups: Mutex<Vec<String>>,
+    popup_callbacks: AtomicUsize,
     unexpected: AtomicUsize,
     stopped: AtomicBool,
 }
@@ -1142,6 +1146,29 @@ async fn exercise(app: AppHandle, fixture: Arc<FixtureState>, home_overlay: bool
 
     if home_overlay { return zoomed_home(&app, &fixture).await; }
 
+    let card_url = ui(&app, |app, core| {
+        let main = app.get_webview_window("main").ok_or("Missing main window")?;
+        let entry = main_window::current_entry_url(core).parse::<url::Url>().map_err(|e| e.to_string())?;
+        let card = entry.join(STUDENT_CARD).map_err(|e| e.to_string())?;
+        main.eval(format!(r#"(() => {{
+            const frame = document.createElement('iframe');
+            document.body.append(frame);
+            const card = frame.contentDocument.createElement('a');
+            card.href = {};
+            card.target = '_blank';
+            card.rel = 'noopener';
+            frame.contentDocument.body.append(card);
+            card.click();
+        }})()"#, json!(card.as_str()))).map_err(|e| e.to_string())?;
+        Ok(card.to_string())
+    }).await?;
+    wait_count(&fixture.popup_callbacks, 1, "student card popup").await?;
+    if fixture.external_popups.lock().unwrap().as_slice() != [card_url] {
+        return Err("The student card did not reach the system-browser opener exactly once with its lesson intact".into());
+    }
+    wait_view(&app, "student-card-retains-chat", Phase::Ready, true, Some(false), 2).await?;
+
+
     reload(&app, &fixture, false).await?;
     wait_view(
         &app,
@@ -1335,6 +1362,9 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                 let page_core = setup_core.clone();
                 let allowed_shell = shell.clone();
                 let allowed_entry = main_window::current_entry_url(&setup_core);
+                let popup_entry = allowed_entry.clone();
+                let popup_state = state.clone();
+                let card = url::Url::parse(&allowed_entry)?.join(STUDENT_CARD)?;
                 let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(shell.parse()?))
                     .title("Isolated native startup smoke")
                     .inner_size(640.0, 480.0)
@@ -1347,9 +1377,21 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                     )
                     .initialization_script(&script)
                     .on_navigation(move |url| {
-                        url.as_str() == allowed_shell || url.as_str() == allowed_entry
+                        url.as_str() == allowed_shell || url.as_str() == allowed_entry || *url == card || url.as_str() == "about:blank"
                     })
-                    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+                    .on_new_window(move |url, _| {
+                        use tauri::webview::NewWindowResponse;
+                        let result = super::startup::handle_new_window(&url, Some(&popup_entry), |raw| {
+                            let valid = crate::security::external_url(raw).ok_or("Invalid external URL")?;
+                            popup_state.external_popups.lock().unwrap().push(valid);
+                            Ok(())
+                        });
+                        if !matches!(result, NewWindowResponse::Deny) {
+                            popup_state.unexpected.fetch_add(1, Ordering::Relaxed);
+                        }
+                        popup_state.popup_callbacks.fetch_add(1, Ordering::Relaxed);
+                        NewWindowResponse::Deny
+                    })
                     .on_page_load(move |_, payload| {
                         main_window::handle_main_page_load(
                             payload.event(),

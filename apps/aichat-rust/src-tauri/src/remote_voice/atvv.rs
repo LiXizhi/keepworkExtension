@@ -279,8 +279,12 @@ impl Ptt {
     pub fn take_chunk(&mut self) -> Option<Vec<i16>> {
         self.capture.as_mut()?.0.take_chunk()
     }
-    pub fn open_timed_out(&self) -> bool {
-        self.open_pending.is_some_and(|started| started.elapsed() >= Duration::from_secs(5))
+    pub fn preparation_timed_out(&self) -> bool {
+        let deadline = Duration::from_secs(5);
+        self.open_pending.is_some_and(|started| started.elapsed() >= deadline)
+            || self.capture.as_ref().is_some_and(|(audio, started)| {
+                audio.total < CHUNK_SAMPLES && started.elapsed() >= deadline
+            })
     }
     pub fn interrupt_capture(&mut self) -> Option<Vec<i16>> {
         let (capture, _) = self.capture.take()?;
@@ -420,19 +424,54 @@ mod tests {
         ));
     }
     #[test]
+    fn a_started_stream_without_a_complete_audio_chunk_times_out_and_allows_a_fresh_press() {
+        // No notification, an incomplete frame, and some decoded audio below one chunk.
+        for byte_count in [0, 1, 600] {
+            let mut p = Ptt::new(caps(0x100, 120));
+            p.control(&[8]).unwrap();
+            p.control(&[4, 0, 2, 1]).unwrap();
+            p.audio(&vec![0x77; byte_count]).unwrap();
+            assert!(p.take_chunk().is_none());
+            assert!(!p.preparation_timed_out());
+            p.capture.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(5);
+            assert!(p.preparation_timed_out(), "{byte_count} initial bytes");
+            assert!(!p.expired(), "the ordinary recording limit has not elapsed");
+
+            assert_eq!(p.abort(), vec![0x0d, 1]);
+            assert!(!p.preparation_timed_out());
+            assert!(p.control(&[0]).unwrap().is_empty());
+            assert!(matches!(p.control(&[8]).unwrap()[..], [Action::OpenMic(_)]));
+            p.control(&[4, 0, 2, 2]).unwrap();
+            p.audio(&[0x77; 1200]).unwrap();
+            assert!(matches!(p.control(&[0]).unwrap()[..], [Action::Recognize { .. }]));
+        }
+    }
+
+    #[test]
+    fn a_drained_first_audio_chunk_including_silence_completes_preparation() {
+        let mut p = Ptt::new(caps(0x100, 1));
+        p.control(&[0x11, 0, 2, 1]).unwrap();
+        p.audio(&[0; CHUNK_SAMPLES / 2]).unwrap();
+        assert_eq!(p.take_chunk().unwrap().len(), CHUNK_SAMPLES);
+        p.capture.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(6);
+        assert!(!p.preparation_timed_out());
+        assert!(!p.expired());
+    }
+
+    #[test]
     fn missing_stream_start_times_out_only_the_pending_press() {
         let mut p = Ptt::new(caps(0x100, 120));
-        assert!(!p.open_timed_out());
+        assert!(!p.preparation_timed_out());
         p.control(&[0x10]).unwrap();
-        assert!(!p.open_timed_out());
+        assert!(!p.preparation_timed_out());
         p.open_pending = Some(Instant::now() - Duration::from_secs(5));
-        assert!(p.open_timed_out());
+        assert!(p.preparation_timed_out());
         p.control(&[0x11, 0, 2, 1]).unwrap();
-        assert!(!p.open_timed_out());
+        assert!(!p.preparation_timed_out());
         p.control(&[0x13]).unwrap();
         p.control(&[8]).unwrap();
         p.cancel_current();
-        assert!(!p.open_timed_out());
+        assert!(!p.preparation_timed_out());
     }
     #[test]
     fn release_reports_missing_short_or_silent_audio_and_accepts_the_next_press() {

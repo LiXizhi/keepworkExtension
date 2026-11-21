@@ -12,7 +12,7 @@ use std::{
 };
 
 pub fn open_in_system_browser(raw_url: &str) -> Result<(), String> {
-    let valid = external_url(raw_url).ok_or_else(|| format!("Invalid external URL: {raw_url}"))?;
+    let valid = external_url(raw_url).ok_or("Invalid external URL")?;
     #[cfg(target_os = "macos")]
     {
         spawn_macos_open(&valid)
@@ -38,7 +38,6 @@ pub fn open_in_system_browser(raw_url: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn spawn_macos_open(url: &str) -> Result<(), String> {
     let url = url.to_string();
-    let url_for_err = url.clone();
     std::thread::Builder::new()
         .name("open-url".into())
         .spawn(move || {
@@ -50,7 +49,7 @@ fn spawn_macos_open(url: &str) -> Result<(), String> {
             }
         })
         .map(|_| ())
-        .map_err(|e| format!("无法打开 {url_for_err}：{e}"))
+        .map_err(|e| format!("无法打开系统浏览器：{e}"))
 }
 
 #[cfg(target_os = "macos")]

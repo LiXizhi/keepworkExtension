@@ -13,11 +13,25 @@ if [[ -z "$ZSH_BIN" || ! -x "$ZSH_BIN" ]]; then
 fi
 
 executable_pnpm() {
-  hash -r
-  local found
-  found="$(whence -p pnpm 2>/dev/null || true)"
-  [[ -n "$found" && -x "$found" ]] || return 1
-  print -r -- "$found"
+  local dir node_bin candidate
+  for dir in "${path[@]}"; do
+    candidate="$dir/pnpm"
+    if [[ -f "$candidate" && -x "$candidate" ]]; then
+      print -r -- "$candidate"
+      return 0
+    fi
+    # A PATH shim may expose just Node. Its installation can also contain the
+    # Corepack pnpm shim needed by both this task and Tauri's beforeDevCommand.
+    node_bin="$dir/node"
+    if [[ -L "$node_bin" && -x "$node_bin" ]]; then
+      candidate="${node_bin:A:h}/pnpm"
+      if [[ -f "$candidate" && -x "$candidate" ]]; then
+        print -r -- "$candidate"
+        return 0
+      fi
+    fi
+  done
+  return 1
 }
 
 # First match wins. Login PATH stays ahead of default install locations, and
@@ -94,5 +108,14 @@ fi
 PATH="${pnpm_path:h}:$PATH"
 export PATH
 hash -r
+# A newly installed Xcode can be selected before its compiler is usable.
+# Prefer the selected toolchain, then try standalone Command Line Tools.
+clt_dir=/Library/Developer/CommandLineTools
+if [[ -z "${DEVELOPER_DIR:-}" && -x /usr/bin/xcrun && -d "$clt_dir" ]] &&
+    ! /usr/bin/xcrun --sdk macosx clang --version >/dev/null 2>&1 &&
+    DEVELOPER_DIR="$clt_dir" /usr/bin/xcrun --sdk macosx clang --version >/dev/null 2>&1; then
+  export DEVELOPER_DIR="$clt_dir"
+  print -u2 -- "Using standalone Command Line Tools for this desktop build."
+fi
 cd "$task_cwd"
 exec "$pnpm_path" "$@"

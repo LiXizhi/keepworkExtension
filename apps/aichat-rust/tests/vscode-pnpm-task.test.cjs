@@ -64,6 +64,29 @@ launcherTest("macOS task launcher keeps pnpm already visible to the login shell"
   }
 });
 
+launcherTest("macOS task uses pnpm beside a symlinked Node, including for nested commands", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pnpm-task-"));
+  try {
+    const cwd = path.join(home, "work dir");
+    const bin = path.join(home, "Node distribution", "bin");
+    const shims = path.join(home, "shims");
+    const fallback = path.join(home, "fallback");
+    writeExe(path.join(bin, "node"), "#!/bin/sh\nexit 0\n");
+    fs.mkdirSync(shims);
+    fs.symlinkSync(path.join(bin, "node"), path.join(shims, "node"));
+    writeExe(path.join(fallback, "pnpm"), "#!/bin/sh\nexit 42\n");
+    writeExe(path.join(bin, "pnpm"),
+      "#!/bin/sh\nif [ \"$1\" = nested ]; then pwd; exit 0; fi\n" +
+      "printf 'ARGS=%s\\n' \"$*\"\nprintf 'CWD='; exec pnpm nested\n");
+    const result = runTask(home, cwd, "", `export PATH="${shims}:${fallback}:$PATH"\n`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /ARGS=tauri dev/);
+    assertTaskCwd(result.stdout, cwd);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 launcherTest("macOS task launcher finds the official ~/Library/pnpm install", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "pnpm-task-"));
   try {
