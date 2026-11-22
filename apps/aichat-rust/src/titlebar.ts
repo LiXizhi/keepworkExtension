@@ -332,6 +332,17 @@ export function mountDesktopTitlebar(options: {
     .brain-onboarding, #chatSidePanel.chat-side-onboarding-mode {
       top: 34px !important;
     }
+    /* The wizard header is absolutely positioned inside .bo-main, so moving the
+       overlay alone still leaves its "×" under the fixed title bar. Shift the
+       header band down by the title bar height in every layout. */
+    .brain-onboarding .bo-main > header {
+      top: calc(12px + 34px) !important;
+    }
+    .brain-onboarding .bo-main > header > .bo-close,
+    .brain-onboarding .bo-main > header > .bo-btn {
+      position: relative;
+      z-index: 1;
+    }
   `;
 
   const mountDom = (): void => {

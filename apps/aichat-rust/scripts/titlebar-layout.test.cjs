@@ -169,15 +169,21 @@ for (const [name, css] of [...layouts, ['Browser without desktop chrome', '']]) 
                 });
             </script>`);
         const overlay = page.locator('#brainOnboarding');
+        const header = page.locator('.bo-main > header');
         const top = css ? 34 : 0;
         for (const { width, height } of [{ width: 1366, height: 960 }, { width: 390, height: 375 }]) {
             await page.setViewportSize({ width, height });
             assert.deepEqual(await overlay.boundingBox(), { x: 0, y: top, width, height: height - top });
             assert.equal((await page.locator('.bo-brand').boundingBox()).y, top + 20);
+            // The header is absolutely positioned inside .bo-main, so its own offset
+            // must be measured from below the title bar, not from the viewport origin.
+            const headerBox = await header.boundingBox();
+            assert.ok(headerBox.y >= top, `wizard header stays below the title bar (y=${headerBox.y})`);
             for (const action of ['finish', 'dismiss']) {
                 const button = page.locator(`[data-brain-action="${action}"]`);
                 const bounds = await button.boundingBox();
-                assert.ok(bounds.y >= top && bounds.y + bounds.height <= height);
+                assert.ok(bounds.y >= top && bounds.y + bounds.height <= height,
+                    `${action} stays clear of the title bar (y=${bounds.y}, top=${top})`);
                 await button.click({ position: { x: 8, y: 5 }, timeout: 3000 });
                 assert.equal(await page.locator('body').getAttribute('data-action'), action);
             }
