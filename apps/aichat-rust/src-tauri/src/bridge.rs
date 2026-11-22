@@ -489,7 +489,7 @@ pub fn build_main_window_init_script_with_launch_capability(
     // The wizard header is absolutely positioned inside .bo-main, so shifting the
     // overlay alone still leaves its "×" under the fixed title bar; offset the
     // header band by the title bar height as well.
-    offsetStyle.textContent = "body {{ height: calc(100vh - 34px) !important; margin-top: 34px !important; position: relative; }} .app-shell {{ height: calc(100vh - 34px) !important; }} .brain-onboarding, #chatSidePanel.chat-side-onboarding-mode {{ top: 34px !important; }} .brain-onboarding .bo-main > header {{ top: calc(12px + 34px) !important; }} .brain-onboarding .bo-main > header > .bo-close, .brain-onboarding .bo-main > header > .bo-btn {{ position: relative; z-index: 1; }}";
+    offsetStyle.textContent = "body {{ height: calc(100vh - 34px) !important; margin-top: 34px !important; position: relative; }} .app-shell {{ height: calc(100vh - 34px) !important; }} .brain-onboarding, #chatSidePanel.chat-side-onboarding-mode, .image-viewer {{ top: 34px !important; }} .image-viewer > .image-viewer-close {{ position: absolute; }} .brain-onboarding .bo-main > header {{ top: calc(12px + 34px) !important; }} .brain-onboarding .bo-main > header > .bo-close, .brain-onboarding .bo-main > header > .bo-btn {{ position: relative; z-index: 1; }}";
     if (document.head && !document.getElementById("keepwork-desktop-offset")) {{
       document.head.appendChild(offsetStyle);
     }}

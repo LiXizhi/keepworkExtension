@@ -203,3 +203,47 @@ for (const [name, css] of [...layouts, ['Browser without desktop chrome', '']]) 
         assert.deepEqual(await panel.boundingBox(), { x: 1046, y: top, width: 320, height: 960 - top });
     } finally { await page.close(); }
 });
+
+for (const [name, css] of [...layouts, ['Browser without desktop chrome', '']]) test(`${name}: image viewer starts below the title bar and can be closed from the top edge`, async () => {
+    const page = await browser.newPage({ viewport: { width: 1288, height: 871 } });
+    try {
+        await page.setContent(`<!doctype html><style>${css}</style><style>
+            #keepwork-desktop-titlebar{position:fixed;inset:0 0 auto;height:34px;background:#eee;z-index:2147483647}
+            .image-viewer{position:fixed;inset:0;z-index:99999;background:#222}
+            .image-viewer-stage{position:absolute;inset:0;overflow:hidden}
+            .image-viewer-close{position:fixed;top:calc(14px + env(safe-area-inset-top,0px));right:16px;width:38px;height:38px}
+            .image-viewer-toolbar{position:fixed;bottom:26px;left:50%}
+            </style>
+            ${css ? '<div id="keepwork-desktop-titlebar"></div>' : ''}
+            <button id="open">Open image</button>
+            <template id="viewer">
+                <div class="image-viewer" role="dialog">
+                    <div class="image-viewer-stage"></div>
+                    <button class="image-viewer-close" aria-label="Close">×</button>
+                    <div class="image-viewer-toolbar">100%</div>
+                </div>
+            </template>
+            <script>
+                document.querySelector('#open').onclick = () => {
+                    const viewer = document.querySelector('#viewer').content.firstElementChild.cloneNode(true);
+                    viewer.querySelector('.image-viewer-close').onclick = () => viewer.remove();
+                    document.body.append(viewer);
+                };
+            </script>`);
+        const viewer = page.locator('.image-viewer');
+        for (const { width, height } of [{ width: 1288, height: 871 }, { width: 390, height: 375 }]) {
+            await page.setViewportSize({ width, height });
+            await page.locator('#open').click();
+            const top = css ? 34 : 0;
+            const expectedBounds = { x: 0, y: top, width, height: height - top };
+            assert.deepEqual(await viewer.boundingBox(), expectedBounds);
+            assert.deepEqual(await viewer.locator('.image-viewer-stage').boundingBox(), expectedBounds);
+            const toolbar = await viewer.locator('.image-viewer-toolbar').boundingBox();
+            assert.ok(toolbar.y >= top && toolbar.y + toolbar.height <= height);
+            const close = viewer.getByRole('button', { name: 'Close' });
+            assert.deepEqual(await close.boundingBox(), { x: width - 54, y: top + 14, width: 38, height: 38 });
+            await close.click({ position: { x: 19, y: 2 }, timeout: 3000 });
+            assert.equal(await viewer.count(), 0);
+        }
+    } finally { await page.close(); }
+});

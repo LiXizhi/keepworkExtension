@@ -329,8 +329,12 @@ export function mountDesktopTitlebar(options: {
     .app-shell {
       height: calc(100vh - 34px) !important;
     }
-    .brain-onboarding, #chatSidePanel.chat-side-onboarding-mode {
+    .brain-onboarding, #chatSidePanel.chat-side-onboarding-mode, .image-viewer {
       top: 34px !important;
+    }
+    /* Resolve the close button's existing safe-area inset inside the viewer. */
+    .image-viewer > .image-viewer-close {
+      position: absolute;
     }
     /* The wizard header is absolutely positioned inside .bo-main, so moving the
        overlay alone still leaves its "×" under the fixed title bar. Shift the
