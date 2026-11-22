@@ -135,3 +135,65 @@ for (const [name, css] of layouts) test(`${name}: titlebar offset preserves view
         assert.deepEqual(errors, []);
     } finally { await page.close(); }
 });
+
+for (const [name, css] of [...layouts, ['Browser without desktop chrome', '']]) test(`${name}: onboarding controls are fully visible and clickable`, async () => {
+    const page = await browser.newPage({ viewport: { width: 1366, height: 960 } });
+    try {
+        await page.setContent(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>${css}</style>
+            <style>
+                *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}
+                #keepwork-desktop-titlebar{position:fixed;inset:0 0 auto;height:34px;background:#eee;z-index:2147483647}
+                .brain-onboarding{position:fixed;inset:0;z-index:12000;display:grid;grid-template-columns:280px minmax(0,1fr)}
+                .bo-sidebar{padding:20px 18px;overflow:auto}
+                .bo-main{position:relative;display:flex;flex-direction:column;min-height:0}
+                .bo-main>header{position:absolute;top:12px;right:16px;z-index:10;display:flex;gap:12px}
+                .bo-main>header>button{height:44px}
+                .bo-content{flex:1;overflow:auto;padding:64px 24px 24px}
+                .brain-onboarding-side-open .brain-onboarding{right:320px}
+                #chatSidePanel.chat-side-onboarding-mode{position:fixed;top:0;right:0;bottom:0;width:320px;z-index:12005}
+                @media(max-width:760px){.brain-onboarding{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}}
+            </style>
+            ${css ? '<div id="keepwork-desktop-titlebar"></div>' : ''}
+            <div id="brainOnboarding" class="brain-onboarding">
+                <aside class="bo-sidebar"><div class="bo-brand">KeepWork 第二大脑</div></aside>
+                <section class="bo-main"><header>
+                    <button data-brain-action="finish">完成，开始使用</button>
+                    <button data-brain-action="dismiss" aria-label="关闭指引">×</button>
+                </header><div class="bo-content"><div style="height:1100px">配置大脑</div></div></section>
+            </div>
+            <section id="chatSidePanel" hidden>大脑助手</section>
+            <script>
+                document.querySelector('header').addEventListener('click', event => {
+                    document.body.dataset.action = event.target.dataset.brainAction;
+                });
+            </script>`);
+        const overlay = page.locator('#brainOnboarding');
+        const top = css ? 34 : 0;
+        for (const { width, height } of [{ width: 1366, height: 960 }, { width: 390, height: 375 }]) {
+            await page.setViewportSize({ width, height });
+            assert.deepEqual(await overlay.boundingBox(), { x: 0, y: top, width, height: height - top });
+            assert.equal((await page.locator('.bo-brand').boundingBox()).y, top + 20);
+            for (const action of ['finish', 'dismiss']) {
+                const button = page.locator(`[data-brain-action="${action}"]`);
+                const bounds = await button.boundingBox();
+                assert.ok(bounds.y >= top && bounds.y + bounds.height <= height);
+                await button.click({ position: { x: 8, y: 5 }, timeout: 3000 });
+                assert.equal(await page.locator('body').getAttribute('data-action'), action);
+            }
+            assert.ok(await page.locator('.bo-content').evaluate(el => {
+                el.scrollTop = el.scrollHeight;
+                return el.scrollTop > 0;
+            }), 'onboarding content scrolls inside the available height');
+        }
+        await page.setViewportSize({ width: 1366, height: 960 });
+        const panel = page.locator('#chatSidePanel');
+        await panel.evaluate(el => {
+            el.hidden = false;
+            el.classList.add('chat-side-onboarding-mode');
+            document.body.classList.add('brain-onboarding-side-open');
+        });
+        assert.deepEqual(await overlay.boundingBox(), { x: 0, y: top, width: 1046, height: 960 - top });
+        assert.deepEqual(await panel.boundingBox(), { x: 1046, y: top, width: 320, height: 960 - top });
+    } finally { await page.close(); }
+});

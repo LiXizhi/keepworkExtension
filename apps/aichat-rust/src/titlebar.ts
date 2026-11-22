@@ -329,6 +329,9 @@ export function mountDesktopTitlebar(options: {
     .app-shell {
       height: calc(100vh - 34px) !important;
     }
+    .brain-onboarding, #chatSidePanel.chat-side-onboarding-mode {
+      top: 34px !important;
+    }
   `;
 
   const mountDom = (): void => {
