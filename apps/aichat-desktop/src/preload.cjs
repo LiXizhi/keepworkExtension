@@ -54,7 +54,19 @@ if (process.isMainFrame) {
       const layout = document.createElement('style');
       // #app has auto height, so the shell must use the viewport, not a percentage.
       // A body transform would offset fixed model menus a second time.
-      layout.textContent = 'body{height:calc(100vh - 34px)!important;margin-top:34px!important;position:relative;box-sizing:border-box!important}.app-shell{height:calc(100vh - 34px)!important}.brain-onboarding,#chatSidePanel.chat-side-onboarding-mode,.image-viewer{top:34px!important}.image-viewer>.image-viewer-close{position:absolute}.brain-onboarding .bo-main>header{top:calc(12px + 34px)!important}.brain-onboarding .bo-main>header>.bo-close,.brain-onboarding .bo-main>header>.bo-btn{position:relative;z-index:1}';
+      layout.textContent = `body{height:calc(100vh - 34px)!important;margin-top:34px!important;position:relative;box-sizing:border-box!important}
+        .app-shell{height:calc(100vh - 34px)!important}
+        .brain-onboarding,#chatSidePanel.chat-side-onboarding-mode,.image-viewer,.workspace-git-overlay,
+        #aichatGlobalSettingsModal{top:34px!important}
+        #aichatGlobalSettingsModal>.gs-box{display:flex;flex-direction:column;max-height:calc(100% - 24px)!important}
+        #aichatGlobalSettingsModal>.gs-box>:not(.gs-body){flex-shrink:0}
+        #aichatGlobalSettingsModal>.gs-box>.gs-body{min-height:0}
+        .image-viewer>.image-viewer-close{position:absolute}
+        .brain-onboarding .bo-main>header{top:calc(12px + 34px)!important}
+        .brain-onboarding .bo-main>header>.bo-close,.brain-onboarding .bo-main>header>.bo-btn{position:relative;z-index:1}
+        /* Center the native dialog in the area below the title bar, preserving both gutters. */
+        .chat-changes-dialog{top:34px!important;max-height:calc(100% - 34px - 2 * var(--chat-changes-inset, 0px))!important}
+        .chat-changes-dialog::backdrop{top:34px!important}`;
       document.head.append(layout); document.documentElement.append(host);
       let lastTheme;
       const canvas = document.createElement('canvas');

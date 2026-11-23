@@ -10,11 +10,11 @@ const repository = path.resolve(__dirname, '../../..');
 const read = relative => fs.readFileSync(path.join(repository, relative), 'utf8');
 const layouts = [
     ['Rust initialization', read('apps/aichat-rust/src-tauri/src/bridge.rs')
-        .match(/offsetStyle\.textContent = "([^"]+)";/)[1].replaceAll('{{', '{').replaceAll('}}', '}')],
+        .match(/offsetStyle\.textContent = (["`])([\s\S]*?)\1;/)[2].replaceAll('{{', '{').replaceAll('}}', '}')],
     ['TypeScript titlebar', read('apps/aichat-rust/src/titlebar.ts')
         .match(/pageOffsetStyle\.textContent = `([\s\S]*?)`;/)[1]],
     ['Electron preload', read('apps/aichat-desktop/src/preload.cjs')
-        .match(/layout\.textContent = '([^']+)';/)[1]],
+        .match(/layout\.textContent = (['`])([\s\S]*?)\1;/)[2]],
 ];
 
 let browser;
@@ -244,6 +244,213 @@ for (const [name, css] of [...layouts, ['Browser without desktop chrome', '']]) 
             assert.deepEqual(await close.boundingBox(), { x: width - 54, y: top + 14, width: 38, height: 38 });
             await close.click({ position: { x: 19, y: 2 }, timeout: 3000 });
             assert.equal(await viewer.count(), 0);
+        }
+    } finally { await page.close(); }
+});
+
+for (const [name, css] of [...layouts, ['Browser without desktop chrome', '']]) test(`${name}: Git and conversation changes stay within the client area`, async () => {
+    const desktop = { width: 1360, height: 900 };
+    const narrow = { width: 390, height: 375 };
+    const top = css ? 34 : 0;
+    const page = await browser.newPage({ viewport: desktop });
+    try {
+        await page.setContent(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>${css}</style><style>
+                *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}
+                #keepwork-desktop-titlebar{position:fixed;inset:0 0 auto;height:34px;background:#eee;z-index:2147483647}
+                .workspace-git-overlay{position:fixed;inset:0;z-index:10000;padding:18px;background:#0006;display:flex}
+                .workspace-git-overlay[hidden]{display:none}
+                .workspace-git{display:flex;flex-direction:column;width:100%;overflow:hidden;background:white;border:1px solid}
+                .workspace-git>header,.chat-changes-dialog>header{display:flex;align-items:center;justify-content:space-between;padding:8px 14px}
+                .git-diff,.chat-changes-records{flex:1;min-height:0;overflow:auto}
+                @media(max-width:650px){.workspace-git-overlay{padding:0}}
+                .chat-changes-dialog{
+                    --chat-changes-inset:clamp(8px,1.4vw,20px);
+                    width:min(1600px,calc(100% - 2 * var(--chat-changes-inset)));
+                    height:calc(100dvh - 2 * var(--chat-changes-inset));max-width:none;max-height:none;
+                    padding:0;margin:auto;border:1px solid;
+                }
+                .chat-changes-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
+                .chat-changes-dialog::backdrop{background:#0006}
+                .chat-changes-close{width:44px;height:44px}
+            </style>
+            ${css ? '<div id="keepwork-desktop-titlebar"></div>' : ''}
+            <button id="open-git">Git changes</button><button id="open-chat">Conversation changes</button>
+            <div class="workspace-git-overlay" hidden><section class="workspace-git" role="dialog" aria-modal="true">
+                <header><strong>Git changes</strong><button data-action="close" aria-label="Close Git changes">×</button></header>
+                <div class="git-diff"><div style="height:1500px">Git diff</div></div>
+            </section></div>
+            <dialog class="chat-changes-dialog">
+                <header><strong>Conversation changes</strong><button class="chat-changes-close" autofocus aria-label="Close conversation changes">×</button></header>
+                <div class="chat-changes-records"><div style="height:1500px">Conversation diff</div></div>
+            </dialog>
+            <script>
+                const git = document.querySelector('.workspace-git-overlay');
+                const dialog = document.querySelector('.chat-changes-dialog');
+                document.querySelector('#open-git').onclick = () => { git.hidden = false; };
+                document.querySelector('[data-action="close"]').onclick = () => { git.hidden = true; };
+                document.querySelector('#open-chat').onclick = () => dialog.showModal();
+                document.querySelector('.chat-changes-close').onclick = () => dialog.close();
+            </script>`);
+
+        const overlay = page.locator('.workspace-git-overlay');
+        const git = page.locator('.workspace-git');
+        const dialog = page.locator('.chat-changes-dialog');
+        const scrolls = locator => locator.evaluate(el => {
+            el.scrollTop = el.scrollHeight;
+            return el.scrollTop > 0;
+        });
+
+        await page.locator('#open-git').click();
+        for (const { width, height } of [desktop, narrow]) {
+            await page.setViewportSize({ width, height });
+            const inset = width <= 650 ? 0 : 18;
+            assert.deepEqual(await overlay.boundingBox(), { x: 0, y: top, width, height: height - top });
+            assert.deepEqual(await git.boundingBox(), {
+                x: inset, y: top + inset, width: width - 2 * inset, height: height - top - 2 * inset,
+            });
+            assert.ok(await scrolls(git.locator('.git-diff')));
+        }
+        await git.getByRole('button', { name: 'Close Git changes' }).click({ position: { x: 6, y: 2 }, timeout: 3000 });
+        assert.equal(await overlay.isVisible(), false);
+
+        await page.setViewportSize(desktop);
+        await page.locator('#open-chat').click();
+        assert.equal(await dialog.evaluate(el => el.matches(':modal')), true);
+        for (const { width, height } of [desktop, narrow]) {
+            await page.setViewportSize({ width, height });
+            const inset = Math.max(8, Math.min(width * 0.014, 20));
+            const box = await dialog.boundingBox();
+            assert.ok(Math.abs(box.y - top - inset) < 0.1, `dialog top at ${box.y}, expected ${top + inset}`);
+            assert.ok(Math.abs(box.y + box.height - (height - inset)) < 0.1, `dialog bottom at ${box.y + box.height}`);
+            assert.ok(await scrolls(dialog.locator('.chat-changes-records')));
+        }
+        assert.equal(await dialog.evaluate(el => getComputedStyle(el, '::backdrop').top), `${top}px`);
+        await dialog.getByRole('button', { name: 'Close conversation changes' }).click({ position: { x: 6, y: 2 }, timeout: 3000 });
+        assert.equal(await dialog.isVisible(), false);
+        await page.locator('#open-chat').click();
+        await page.keyboard.press('Escape');
+        await dialog.waitFor({ state: 'hidden' });
+        assert.equal(await page.locator('#open-chat').evaluate(el => el === document.activeElement), true);
+    } finally { await page.close(); }
+});
+
+for (const [name, css] of [...layouts, ['Browser without desktop chrome', '']]) test(`${name}: Global Settings fits below the title bar`, async () => {
+    const desktop = { width: 1360, height: 900 };
+    const narrow = { width: 390, height: 375 };
+    const top = css ? 34 : 0;
+    const page = await browser.newPage({ viewport: desktop });
+    try {
+        await page.setContent(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>${css}</style><style>
+                *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}
+                #keepwork-desktop-titlebar{position:fixed;inset:0 0 auto;height:34px;background:#eee;z-index:2147483647}
+                .gs-overlay{position:fixed;inset:0;z-index:9998;background:#0008;display:flex;align-items:center;justify-content:center}
+                .gs-box{display:flex;flex-direction:column;width:960px;max-width:95vw;max-height:calc(100dvh - 24px);
+                    border:1px solid;border-radius:12px;background:white;font:15px/1.5 system-ui}
+                .gs-head,.gs-tabs,.gs-foot{flex-shrink:0;display:flex}
+                .gs-head{align-items:center;padding:14px 18px;border-bottom:1px solid}
+                .gs-title{margin:0;font-size:17px;flex:1}
+                .gs-close{font-size:22px;line-height:1;padding:0 4px;border:0}
+                .gs-tabs{gap:4px;padding:10px 18px 0;border-bottom:1px solid}
+                .gs-tab{font:inherit;border:0;border-bottom:2px solid transparent;padding:8px 12px;margin-bottom:-1px}
+                .gs-body{height:min(75dvh,720px);max-height:min(75dvh,720px);min-height:0;overflow-y:auto;padding:16px 18px}
+                .gs-box.is-packages .gs-body{overflow:hidden}
+                .gs-panel[hidden]{display:none}
+                #gsPanelPackages{height:100%;overflow:auto}
+                .gs-foot{justify-content:flex-end;padding:12px 18px;border-top:1px solid}
+                .gs-btn{font:inherit;border:0;padding:8px 16px}
+            </style>
+            ${css ? '<div id="keepwork-desktop-titlebar"></div>' : ''}
+            <button id="open-settings">Open Global Settings</button>
+            <template id="settings">
+                <div id="aichatGlobalSettingsModal" class="gs-overlay">
+                    <div class="gs-box" role="dialog" aria-label="全局设置">
+                        <div class="gs-head"><h3 class="gs-title">全局设置</h3><button class="gs-close" data-gs-close>×</button></div>
+                        <div class="gs-tabs" role="tablist">
+                            <button class="gs-tab" data-gs-tab="packages" role="tab" aria-selected="false">扩展包与配置</button>
+                            <button class="gs-tab" data-gs-tab="common" role="tab" aria-selected="true">常用</button>
+                            <button class="gs-tab" data-gs-tab="advanced" role="tab" aria-selected="false">高级</button>
+                        </div>
+                        <div class="gs-body">
+                            <div id="gsPanelPackages" class="gs-panel" role="tabpanel" data-gs-panel="packages" hidden><div style="height:1500px">扩展包</div></div>
+                            <div class="gs-panel" role="tabpanel" data-gs-panel="common"><div style="height:1500px">界面与体验</div></div>
+                            <div class="gs-panel" role="tabpanel" data-gs-panel="advanced" hidden><div style="height:1500px">高级设置</div></div>
+                        </div>
+                        <div class="gs-foot"><button class="gs-btn" data-gs-close>关闭</button></div>
+                    </div>
+                </div>
+            </template>
+            <script>
+                document.querySelector('#open-settings').onclick = () => {
+                    const overlay = document.querySelector('#settings').content.firstElementChild.cloneNode(true);
+                    overlay.querySelectorAll('[data-gs-close]').forEach(button => { button.onclick = () => overlay.remove(); });
+                    overlay.querySelectorAll('[data-gs-tab]').forEach(tab => {
+                        tab.onclick = () => {
+                            const selected = tab.dataset.gsTab;
+                            overlay.querySelector('.gs-box').classList.toggle('is-packages', selected === 'packages');
+                            overlay.querySelectorAll('[data-gs-tab]').forEach(button => button.setAttribute('aria-selected', button === tab));
+                            overlay.querySelectorAll('[data-gs-panel]').forEach(panel => { panel.hidden = panel.dataset.gsPanel !== selected; });
+                        };
+                    });
+                    document.body.append(overlay);
+                };
+            </script>`);
+
+        const open = page.locator('#open-settings');
+        const overlay = page.locator('#aichatGlobalSettingsModal');
+        const dialog = overlay.getByRole('dialog', { name: '全局设置' });
+        const scrolls = locator => locator.evaluate(el => {
+            el.scrollTop = el.scrollHeight;
+            return el.scrollTop > 0;
+        });
+
+        async function checkSettings({ width, height }, legacy = false) {
+            await page.setViewportSize({ width, height });
+            const box = await dialog.boundingBox();
+            assert.ok(box.y >= top + 12, `settings top ${box.y} must clear the title bar and gutter (${top + 12})`);
+            assert.ok(box.y + box.height <= height - 12, 'settings footer stays above the bottom gutter');
+            assert.ok(Math.abs(2 * box.y + box.height - (height + top)) < 0.1, 'settings stays centered in the client area');
+            assert.deepEqual(await overlay.boundingBox(), { x: 0, y: top, width, height: height - top });
+            if (width === narrow.width) assert.equal(box.height, height - top - 24, 'settings shrinks on a short window');
+            const footer = await dialog.locator('.gs-foot').boundingBox();
+            assert.ok(footer.y + footer.height <= box.y + box.height, 'footer fits inside the settings dialog');
+
+            for (const [tabName, panel, scrollContainer] of [
+                ['常用', 'common', '.gs-body'],
+                ['扩展包与配置', 'packages', '#gsPanelPackages'],
+                ['高级', 'advanced', '.gs-body'],
+            ]) {
+                const tab = dialog.getByRole('tab', { name: tabName });
+                await tab.click({ position: { x: 8, y: 3 }, timeout: 3000 });
+                assert.equal(await tab.getAttribute('aria-selected'), 'true');
+                assert.equal(await dialog.locator(`[data-gs-panel="${panel}"]`).isVisible(), true);
+                assert.ok(await scrolls(dialog.locator(legacy ? '.gs-body' : scrollContainer)), `${tabName} content scrolls inside settings`);
+            }
+        }
+
+        await open.click();
+        await checkSettings(desktop);
+        await checkSettings(narrow);
+        await dialog.locator('.gs-head [data-gs-close]').click({ position: { x: 6, y: 2 }, timeout: 3000 });
+        assert.equal(await overlay.count(), 0);
+        await open.click();
+        await dialog.locator('.gs-foot [data-gs-close]').click({ position: { x: 6, y: 2 }, timeout: 3000 });
+        assert.equal(await overlay.count(), 0);
+
+        if (css) {
+            // Older AIChat pages use the same modal ID with a block layout and one scroll container.
+            await page.addStyleTag({ content: `
+                .gs-box{display:block;width:480px;max-height:none}
+                .gs-head,.gs-tabs,.gs-foot{flex-shrink:1}
+                .gs-body{height:auto;max-height:min(70vh,520px);min-height:auto}
+                .gs-box.is-packages .gs-body{overflow-y:auto}
+                #gsPanelPackages{height:auto;overflow:visible}
+            ` });
+            await open.click();
+            await checkSettings(narrow, true);
+            await dialog.locator('.gs-foot [data-gs-close]').click({ position: { x: 6, y: 2 }, timeout: 3000 });
+            assert.equal(await overlay.count(), 0);
         }
     } finally { await page.close(); }
 });

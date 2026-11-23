@@ -22,6 +22,8 @@ extension is active (loopback bridge in `~/.keepwork-mcp/terminal-bridge.json`).
 The MCP HTTP server stays in the daemon. Closing a window must **not** kill the
 daemon; it may drop the terminal bridge (next command falls back to spawn).
 
+For `/rust-release`, first read [the release skill](.github/skills/rust-release/SKILL.md). A bare command selects `all`, including Win7/Win8. If the selected source is already tagged or online, finish the read-only verification of every selected channel before deciding whether anything needs publishing. A fully verified release with no pending changes needs no new version or scope confirmation.
+
 ## Agent Roles & Collaboration (`产品 Agent` / `程序员 Agent` / `测试 Agent`)
 
 Agents in this repository operate in a **parallel collaboration mode**: each role owns its distinct domain, artifacts, and verification scope, and agents invoke or hand off to one another on demand when tasks cross boundaries.
