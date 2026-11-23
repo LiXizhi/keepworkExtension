@@ -10,11 +10,12 @@ function fixture(env = {}) {
   const nodeRoot = path.resolve('fixture-node-runtime'), rustRoot = path.resolve('fixture-rust-runtime');
   const options = {
     env, appRoot: path.resolve(__dirname, '..'),
+    prepareDesktopDependencies: () => 'fixture-tauri.cjs',
     prepareNodeRuntime: () => { calls.push({ action: 'prepare-node' }); return nodeRoot; },
     prepareRustRuntime: () => { calls.push({ action: 'prepare-rust' }); return rustRoot; },
     validateNodeRuntime: () => { calls.push({ action: 'validate-node' }); },
     validateRustRuntime: () => { calls.push({ action: 'validate-rust' }); },
-    runTauri: async (args, launchEnv) => { calls.push({ action: 'tauri', args, env: launchEnv }); return 0; },
+    runTauri: async (_entry, args, launchEnv) => { calls.push({ action: 'tauri', args, env: launchEnv }); return 0; },
   };
   return { calls, options, nodeRoot, rustRoot };
 }
@@ -156,10 +157,9 @@ test('a Rust executable symlink cannot escape a caller-selected runtime', async 
 
 test('Tauri exit status and literal argument boundaries reach the caller unchanged', async () => {
   const f = fixture(); const args = ['dev', '--config', 'config with spaces/$(not-a-shell).json'];
-  f.options.runTauri = async (received) => { assert.deepEqual(received, args); return 17; };
+  f.options.runTauri = async (_entry, received) => { assert.deepEqual(received, args); return 17; };
   assert.equal(await launch(args, f.options), 17);
 });
-
 
 for (const args of [['--verbose', 'dev'], ['-vv', 'dev'], ['dev', '--', '--help']]) {
   test(`Rust development startup remains selected with ${args.join(' ')}`, async () => {
@@ -170,3 +170,87 @@ for (const args of [['--verbose', 'dev'], ['-vv', 'dev'], ['dev', '--', '--help'
     assert.equal(f.calls.at(-1).env.AICHAT_MCP_BUNDLED_DIR, f.rustRoot);
   });
 }
+
+function dependencyFixture(t, installStatus = '0') {
+  const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aichat desktop deps '));
+  t.after(() => fs.rmSync(appRoot, { recursive: true, force: true }));
+  const bin = path.join(appRoot, 'bin');
+  fs.mkdirSync(bin);
+  const installer = path.join(bin, 'install.cjs');
+  const installLog = path.join(appRoot, 'install.jsonl');
+  fs.writeFileSync(installer, `
+    const fs = require('node:fs');
+    fs.appendFileSync(process.env.KEEPWORK_TEST_INSTALL_LOG, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }) + '\\n');
+    if (process.env.KEEPWORK_TEST_INSTALL_STATUS !== '0') process.exit(Number(process.env.KEEPWORK_TEST_INSTALL_STATUS));
+    fs.mkdirSync('node_modules/@tauri-apps/cli', { recursive: true });
+    fs.writeFileSync('node_modules/@tauri-apps/cli/package.json', '{"bin":{"tauri":"tauri.cjs"}}');
+    fs.writeFileSync('node_modules/@tauri-apps/cli/tauri.cjs', '');
+    fs.mkdirSync('node_modules/vite', { recursive: true });
+    fs.writeFileSync('node_modules/vite/package.json', '{}');
+  `);
+  const windows = process.platform === 'win32';
+  fs.writeFileSync(path.join(bin, windows ? 'pnpm.cmd' : 'pnpm'), windows
+    ? '@echo off\r\n"%KEEPWORK_TEST_NODE%" "%KEEPWORK_TEST_INSTALLER%" %*\r\n'
+    : '#!/bin/sh\nexec "$KEEPWORK_TEST_NODE" "$KEEPWORK_TEST_INSTALLER" "$@"\n', { mode: 0o755 });
+  const pathKey = Object.keys(process.env).find(key => key.toUpperCase() === 'PATH') || 'PATH';
+  const f = fixture({
+    ...process.env,
+    [pathKey]: bin + path.delimiter + (process.env[pathKey] || ''),
+    KEEPWORK_TEST_NODE: process.execPath,
+    KEEPWORK_TEST_INSTALLER: installer,
+    KEEPWORK_TEST_INSTALL_LOG: installLog,
+    KEEPWORK_TEST_INSTALL_STATUS: installStatus,
+  });
+  f.options.appRoot = appRoot;
+  delete f.options.env.AICHAT_MCP_BUNDLED_DIR;
+  delete f.options.env.AICHAT_MCP_RUNTIME_DIR;
+  delete f.options.env.AICHAT_MCP_ENGINE;
+  delete f.options.prepareDesktopDependencies;
+  const entry = path.join(appRoot, 'node_modules', '@tauri-apps', 'cli', 'tauri.cjs');
+  const vite = path.join(appRoot, 'node_modules', 'vite', 'package.json');
+  return { ...f, appRoot, entry, vite, installLog };
+}
+
+test('development installs missing app dependencies before preparing Rust and reuses them on restart', async t => {
+  const f = dependencyFixture(t);
+  const args = ['dev', '--no-watch'];
+  const expectedInstall = { cwd: fs.realpathSync(f.appRoot), args: ['install', '--frozen-lockfile', '--prod=false'] };
+  const readInstalls = () => fs.readFileSync(f.installLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  f.options.prepareRustRuntime = () => {
+    assert.ok(fs.existsSync(f.entry) && fs.existsSync(f.vite));
+    f.calls.push('rust');
+    return f.rustRoot;
+  };
+  f.options.runTauri = (entry, received, env, cwd) => {
+    assert.equal(entry, f.entry);
+    assert.deepEqual(received, args);
+    assert.equal(env.AICHAT_MCP_ENGINE, 'rust');
+    assert.equal(cwd, f.appRoot);
+    f.calls.push('tauri');
+    return 0;
+  };
+
+  assert.equal(await launch(args, f.options), 0);
+  assert.deepEqual(readInstalls(), [expectedInstall]);
+  assert.equal(await launch(args, f.options), 0);
+  assert.deepEqual(readInstalls(), [expectedInstall]);
+
+  fs.unlinkSync(f.vite);
+  assert.equal(await launch(args, f.options), 0);
+  assert.deepEqual(readInstalls(), [expectedInstall, expectedInstall]);
+  assert.deepEqual(f.calls, ['rust', 'tauri', 'rust', 'tauri', 'rust', 'tauri']);
+});
+
+test('a dependency install failure reports the remedy before preparing the runtime', async t => {
+  const f = dependencyFixture(t, '19');
+  await assert.rejects(launch(['dev'], f.options), /Desktop dependency installation failed:.*pnpm install --frozen-lockfile --prod=false/);
+  assert.ok(fs.existsSync(f.installLog));
+  assert.deepEqual(f.calls, []);
+});
+
+test('informational Tauri commands report missing dependencies without installing them', async t => {
+  const f = dependencyFixture(t);
+  await assert.rejects(launch(['dev', '--help'], f.options), /Missing the desktop Tauri CLI/);
+  assert.equal(fs.existsSync(f.installLog), false);
+  assert.deepEqual(f.calls, []);
+});

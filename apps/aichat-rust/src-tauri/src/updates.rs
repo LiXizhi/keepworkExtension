@@ -48,6 +48,8 @@ pub struct UpdateComponentStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     pub latest_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_version: Option<String>,
     pub published_at: String,
     pub state: String,
     pub progress: Option<u8>,
@@ -272,7 +274,7 @@ impl UpdateManager {
 
     pub fn build_mcp_component(mcp: &RuntimeStatusSnapshot) -> UpdateComponentStatus {
         let foreign_owner = !mcp.owner.is_empty() && mcp.owner != "desktop";
-        let has_staged = !mcp.pending_version.is_empty() || mcp.update_state == "staged";
+        let has_staged = !mcp.pending_version.is_empty();
         let state = if mcp.update_state == "checking" {
             "checking"
         } else if mcp.update_state == "downloading" {
@@ -309,15 +311,13 @@ impl UpdateManager {
             } else {
                 None
             },
-            latest_version: if !mcp.pending_version.is_empty() {
-                mcp.pending_version.clone()
-            } else {
-                mcp.latest_version.clone()
-            },
+            latest_version: mcp.latest_version.clone(),
+            pending_version: (has_staged && mcp.pending_version != mcp.latest_version)
+                .then(|| mcp.pending_version.clone()),
             published_at: mcp.latest_built_at.clone(),
             state: state.to_string(),
             progress: mcp.update_progress,
-            can_apply: has_staged && !foreign_owner && mcp.update_state != "downloading",
+            can_apply: state == "ready" && !foreign_owner,
             stale: !mcp.update_error.is_empty() && !mcp.latest_version.is_empty(),
             error,
             checked_at: None,
@@ -349,6 +349,7 @@ impl UpdateManager {
             running_version: None,
             owner: None,
             latest_version: ds.meta.latest_version.clone(),
+            pending_version: None,
             published_at: ds.meta.published_at.clone(),
             state: ds.state.clone(),
             progress: ds.progress,

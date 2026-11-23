@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "bumi-control",
+  "description": "Bumi Bluetooth controls in the local desktop window.",
+  "local": true,
+  "windows": ["bumi-control"],
+  "permissions": ["allow-bumi-control"]
+}

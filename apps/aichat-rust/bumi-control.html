@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost tauri://localhost; frame-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>Bumi 机器人</title>
+  <link rel="stylesheet" href="/src/typography.css">
+  <link rel="stylesheet" href="/src/bumi-control.css">
+</head>
+<body>
+  <main class="bumi-layout">
+    <header class="bumi-header">
+      <div class="bumi-mark" aria-hidden="true">B</div>
+      <div class="bumi-heading">
+        <h1>Bumi 机器人</h1>
+        <p>通过蓝牙直接控制你的机器人</p>
+      </div>
+      <span id="connection-state" class="connection-state" data-state="offline">未连接</span>
+    </header>
+
+    <section class="panel connection-panel" aria-labelledby="connection-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="connection-title">连接</h2>
+          <p>打开机器人并退出手机 App 中的连接，然后扫描名称含“Bumi”或以“NTXB”开头的设备。</p>
+        </div>
+        <button id="scan" class="secondary" type="button">扫描设备</button>
+      </div>
+      <label for="device-picker">附近的 Bumi</label>
+      <select id="device-picker" disabled>
+        <option value="">尚未扫描</option>
+      </select>
+      <p id="device-id" class="hint"></p>
+      <div class="connection-actions">
+        <button id="connect" class="primary" type="button" disabled>连接机器人</button>
+        <button id="disconnect" class="secondary" type="button" hidden>断开连接</button>
+      </div>
+      <p id="operation" class="operation" role="status" aria-live="polite">点击“扫描设备”开始。</p>
+      <p id="error" class="error" role="alert"></p>
+    </section>
+
+    <section class="telemetry" aria-label="机器人状态">
+      <div class="metric">
+        <span>电量</span>
+        <strong id="battery">—</strong>
+        <button type="button" class="text-button" data-query="battery" disabled>查询电量</button>
+      </div>
+      <div class="metric">
+        <span>运行状态</span>
+        <strong id="robot-status">—</strong>
+        <button type="button" class="text-button" data-query="status" disabled>查询状态</button>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="movement-title">
+      <div class="section-heading compact">
+        <div>
+          <h2 id="movement-title">低速移动</h2>
+          <p>按住方向键移动，松开、窗口失焦或点“停止”即发送零速度指令。请在平坦且无障碍物的区域使用。</p>
+        </div>
+      </div>
+      <div class="mode-row">
+        <button id="walk-mode" class="primary" type="button" disabled>进入行走模式</button>
+        <span>官方要求先进入行走或跑步模式；这里固定使用低速行走模式。</span>
+      </div>
+      <div class="movement-layout">
+        <div class="direction-pad" aria-label="方向控制">
+          <button type="button" class="direction-forward" data-move="forward" aria-label="按住前进" aria-pressed="false" disabled>前进</button>
+          <button type="button" class="direction-left" data-move="left" aria-label="按住左转" aria-pressed="false" disabled>左转</button>
+          <button type="button" id="stop-move" class="stop-move" disabled>停止</button>
+          <button type="button" class="direction-right" data-move="right" aria-label="按住右转" aria-pressed="false" disabled>右转</button>
+          <button type="button" class="direction-backward" data-move="backward" aria-label="按住后退" aria-pressed="false" disabled>后退</button>
+        </div>
+        <p class="movement-note">左右按钮为原地转向，不是左右平移。移动期间会暂时禁用其他动作，切换动作前也会先停止。</p>
+      </div>
+    </section>
+
+    <section class="panel standup-panel" aria-labelledby="standup-title">
+      <div class="section-heading compact">
+        <div>
+          <h2 id="standup-title">一键起身</h2>
+          <p>仅限正面朝上平躺、四肢自然摆放且双腿伸直时使用。地面须平坦不打滑，周围 3m × 3m 内不得有杂物或行人。</p>
+        </div>
+      </div>
+      <button type="button" class="standup-button" data-command="standUp" disabled><strong>确认环境并执行起身</strong><span>点击后还需再次确认前置姿态与安全空间</span></button>
+    </section>
+
+    <section class="panel standup-panel" aria-labelledby="storage-title">
+      <div class="section-heading compact">
+        <div>
+          <h2 id="storage-title">一键收纳</h2>
+          <p>从站立姿态执行官方收纳动作。地面须平坦不打滑，周围不得有杂物或行人；完成后请将机器人扶稳并坐于地面。</p>
+        </div>
+      </div>
+      <button type="button" class="standup-button" data-command="standToFall" disabled><strong>确认环境并执行一键收纳</strong><span>点击后还需再次确认安全空间和后续扶稳方式</span></button>
+    </section>
+
+    <section class="panel" aria-labelledby="actions-title">
+      <div class="section-heading compact">
+        <div>
+          <h2 id="actions-title">动作</h2>
+          <p>请确保机器人周围有足够空间。</p>
+        </div>
+      </div>
+      <div class="action-grid">
+        <button type="button" data-command="dance" disabled><strong>跳舞</strong><span>播放内置舞蹈动作</span></button>
+        <button type="button" data-command="wave" disabled><strong>挥手</strong><span>向周围的人打招呼</span></button>
+        <button type="button" data-command="handshake" disabled><strong>握手</strong><span>执行握手动作</span></button>
+        <button type="button" data-command="cheer" disabled><strong>欢呼</strong><span>执行欢呼动作</span></button>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="speech-title">
+      <div class="section-heading compact">
+        <div>
+          <h2 id="speech-title">让 Bumi 说话</h2>
+          <p>输入文字后，由机器人通过扬声器播放。内容按 UTF-8 编码，最长 120 字节。</p>
+        </div>
+      </div>
+      <div class="speech-controls">
+        <input id="speech-text" type="text" maxlength="120" placeholder="例如：大家好，我是 Bumi" aria-label="让机器人说的内容" disabled>
+        <button id="speak" class="primary" type="button" disabled>说话</button>
+      </div>
+    </section>
+
+    <section class="panel volume-panel" aria-labelledby="volume-title">
+      <div class="volume-heading">
+        <h2 id="volume-title">音量</h2>
+        <output id="volume-value" for="volume">50%</output>
+      </div>
+      <div class="volume-controls">
+        <input id="volume" type="range" min="0" max="100" step="1" value="50" aria-label="机器人音量" disabled>
+        <button id="set-volume" class="secondary" type="button" disabled>设置音量</button>
+      </div>
+    </section>
+
+    <details class="protocol-details">
+      <summary>连接说明与协议信息</summary>
+      <p>所有指令都在本机通过 BLE 发送，不经过云端。关闭此窗口会断开连接。当前界面不包含 Wi-Fi 配网、连续语音对话或自定义指令。</p>
+      <dl>
+        <div><dt>GATT 服务</dt><dd>061e8f00-8a56-11f0-a62c-00155dff3a7e</dd></div>
+        <div><dt>数据帧</dt><dd>55 AA · 长度 · 指令 · 长度校验</dd></div>
+      </dl>
+    </details>
+  </main>
+  <script type="module" src="/src/bumi-control.ts"></script>
+</body>
+</html>

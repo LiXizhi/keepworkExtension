@@ -56,6 +56,12 @@ CEF 首版以云端聊天与登录窗口为范围，尚未移植桌面 Bridge、
   - `src-tauri/src/brain_folder.rs`：管理 `<Documents>/MyBrain` 默认第二大脑文件夹预览与初始化授权。
   - `src-tauri/src/terminal.rs`：基于原生 PTY（Unix `libc::openpty` / Windows Shell）提供 `desktop:<id>` 会话、游标增量输出、窗口尺寸同步与中断控制。
 
+### Bumi 机器人蓝牙控制
+
+实现架构、完整指令表与安全约束见 [Bumi 机器人 BLE 控制实现](../../docs/bumi-ble-control.md)。
+
+macOS / Windows 桌面端在「视图 → Bumi 机器人…」和系统托盘提供独立控制窗口。窗口扫描名称含 `Bumi` 或以 `NTXB` 开头的 BLE 设备，由用户选择并连接后，可查询电量与运行状态、设置音量、输入 UTF-8 文本让机器人说话，以及发送一键起身、一键收纳、跳舞、挥手、握手和欢呼指令。方向键提供低速前进、后退和原地左右转向；须先显式进入官方要求的行走模式，按住移动，松开、窗口失焦、切换动作或断开前发送零速度指令。起身指令每次都需要确认官方要求的平躺前置姿态与 3m × 3m 安全空间；收纳指令需要确认站立姿态和安全空间，并提示完成后扶稳坐好。控制使用 Noetix 3.2.2 的本地 GATT 服务与数据帧，不经过云端，也不自动连接或控制设备；关闭窗口会断开连接。当前不包含 Wi-Fi 配网、连续语音对话或自定义指令。
+
 ### 小米遥控器语音输入
 
 正常的 Tauri 客户端在「编辑 → 遥控器语音输入…」和系统托盘提供独立设置窗口，适配小米蓝牙语音遥控器 2 / 2 Pro（RC001 / RC003）。蓝牙连接、ATVV 音频解码与输入控制内置于 Rust 客户端，语音由 **Keepwork 云端 ASR** 转为文字，识别完成时直接输入到当前前台应用的输入焦点。无需安装 Python、下载本地语音模型或准备额外运行环境。此入口独立于 AIChat 网页和 MCP 版本；语音识别需要网络。`0.2.153` 起，Windows 10 1703（15063）及以上 / Windows 11 的 CEF 兼容宿主也通过随包原生语音进程复用该能力；Windows 7/8/8.1 显示明确的系统能力限制，麦克风语音输入和普通聊天仍可使用。兼容宿主的范围见 [Windows CEF 兼容说明](docs/windows-cef.md)，真实蓝牙与跨应用输入的验收状态见 [VALIDATION.md](VALIDATION.md)。
@@ -166,11 +172,11 @@ ATVV 只在按住语音键时采集录音。请等识别完成后再录下一段
 
 在 `apps/aichat-rust` 目录执行 `pnpm tauri dev` 启动桌面；默认构建并使用 **`apps/mcp-rust`**。VS Code 任务 `keepwork Rust Desktop: Start` 使用同一入口。macOS 上 VS Code 用登录 shell 启动该任务，因此会先采用开发者 shell 中的 pnpm PATH（官方安装脚本、nvm、fnm 通常写在 `~/.zshrc`），再执行同一条 `pnpm tauri dev`。`pnpm dev:rust` 保留为显式 Rust 别名。`pnpm dev` 只启动桌面页面的 Vite 服务，不启动桌面或 MCP。
 
-默认入口需要 Rust/Cargo 工具链及桌面开发依赖；准备 Rust MCP 失败会停止启动并保留错误。Node.js 仍用于桌面开发工具和可选外部 CLI，并不表示 MCP 服务端使用 Node。`pnpm build` 只构建桌面前端，不会准备或覆盖 MCP 资源；运行时由开发启动器或 `make:*` / `bundle:mcp*` 命令准备。
+开发启动会检查桌面应用的 Tauri CLI 和 Vite。缺少依赖时，先在 `apps/aichat-rust` 执行 `pnpm install --frozen-lockfile --prod=false`，安装成功后再准备 MCP。默认入口需要 Rust/Cargo 工具链。依赖安装或 Rust MCP 准备失败会停止启动并保留错误。Node.js 仍用于桌面开发工具和可选外部 CLI，并不表示 MCP 服务端使用 Node。`pnpm build` 只构建桌面前端，不会准备或覆盖 MCP 资源；运行时由开发启动器或 `make:*` / `bundle:mcp*` 命令准备。
 
 Rust 开发启动与 Node 一样，每次在 `src-tauri/target/dev-mcp-runtime/rust-*` 独立目录准备运行时；不覆盖仍可能被存活 daemon 使用的资源目录或先前开发运行时。
 
-需要 Node MCP 兼容能力时显式执行 `pnpm dev:node`，或设置 `AICHAT_MCP_ENGINE=node`。该路线要求 Node.js 22 或更新版本，以及仓库、`apps/mcp-runtime` 与桌面的已安装依赖；从当前源码生成独立的 Node 开发运行时，不依赖之前的 staging，也不自动安装或下载依赖。
+需要 Node MCP 兼容能力时显式执行 `pnpm dev:node`，或设置 `AICHAT_MCP_ENGINE=node`。该路线要求 Node.js 22 或更新版本，以及事先安装仓库和 `apps/mcp-runtime` 的依赖。Node MCP 开发运行时从当前源码独立生成，无需之前的 staging。
 
 如显式设置 `AICHAT_MCP_BUNDLED_DIR`（优先）或 `AICHAT_MCP_RUNTIME_DIR`，启动器会校验指定运行时与所选引擎一致；默认 Rust 入口不能借此静默加载 Node。目录设置只在下一次启动读取，不会动态切换运行中的 MCP。
 

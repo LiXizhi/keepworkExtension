@@ -336,7 +336,7 @@ pub(super) fn desktop_titlebar_action(
 
 pub(super) fn sync_secondary_windows_theme(app: &AppHandle, theme: DesktopTheme) {
     let script = theme.document_theme_script();
-    for label in ["remote-voice", "updates"] {
+    for label in ["remote-voice", "updates", "bumi-control"] {
         if let Some(window) = app.get_webview_window(label) {
             let _ = window.set_theme(Some(theme.native()));
             let _ = window.set_background_color(Some(theme.background()));

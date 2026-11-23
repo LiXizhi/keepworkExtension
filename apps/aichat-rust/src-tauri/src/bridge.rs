@@ -157,6 +157,7 @@ pub fn build_main_window_init_script_with_launch_capability(
   const allowedHostCommands = new Set(bootstrap.hostCommands || []);
   const capabilities = Object.freeze({{
     files: true,
+    markdownExportVersion: 1,
     terminal: true,
     defaultBrainFolder: true,
     gitSetup: true,
@@ -222,6 +223,7 @@ pub fn build_main_window_init_script_with_launch_capability(
       installGit: () => invoke("desktop_install_git"),
       roots: () => invoke("desktop_roots"),
       pickFolder: () => invoke("desktop_pick_folder"),
+      saveMarkdownExport: (fileName, data) => invoke("desktop_save_markdown_export", {{ fileName, data }}),
       defaultBrainFolder: (prepare = false) => invoke("desktop_default_brain_folder", {{ prepare: !!prepare }}),
       revokeFolder: (rootId) => invoke("desktop_revoke_folder", {{ rootId: String(rootId || "") }}),
       file: (op, args = {{}}) => invoke("desktop_file", {{ op: String(op || ""), args: args || {{}} }}),
@@ -564,6 +566,8 @@ mod tests {
         assert!(script.contains("Object.freeze"));
         assert!(script.contains("reportStartupSignIn"));
         assert!(script.contains("defaultBrainFolder"));
+        assert!(script.contains("markdownExportVersion: 1"));
+        assert!(script.contains("saveMarkdownExport: (fileName, data) => invoke(\"desktop_save_markdown_export\", { fileName, data })"));
         assert!(script.contains("checkUpdates"));
         assert!(script.contains("installUpdate"));
     }

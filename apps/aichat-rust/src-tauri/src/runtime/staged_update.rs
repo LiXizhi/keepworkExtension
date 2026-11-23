@@ -50,6 +50,25 @@ impl RuntimeSupervisor {
     }
 
     async fn stage_update(&self) -> Result<bool, String> {
+        {
+            let _commit = self.lifecycle.lock().await;
+            let mut record = Self::load_active_record(&self.config.store_dir);
+            if record
+                .pending
+                .as_deref()
+                .and_then(|hash| self.cached_runtime(hash).ok())
+                .is_some_and(|pending| self.installed_runtime_is_newer_than(&pending.version))
+            {
+                // Only retire the pointer. Keep the verified archive and any
+                // current or rollback entries in the store.
+                record.pending = None;
+                self.save_active_record(&record)?;
+                if let Ok(mut status) = self.status.lock() {
+                    status.pending_version.clear();
+                    status.update_progress = None;
+                }
+            }
+        }
         validate_update_url(&self.config.feed_url)?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -143,7 +162,7 @@ impl RuntimeSupervisor {
             }
             if !newer {
                 if let Ok(mut status) = self.status.lock() {
-                    status.update_state = if record.pending.is_some() {
+                    status.update_state = if !status.pending_version.is_empty() {
                         "staged"
                     } else {
                         "idle"

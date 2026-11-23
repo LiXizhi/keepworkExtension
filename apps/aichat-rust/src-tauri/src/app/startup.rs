@@ -382,6 +382,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::clone(&core))
         .manage(super::screenshot::ScreenshotAccess::default())
+        .manage(Arc::new(super::bumi::Control::default()))
         .setup(move |app| {
             let app_handle = app.handle().clone();
 
@@ -728,6 +729,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            super::bumi::bumi_control,
             super::browser_surface::desktop_browser_surface,
             super::screenshot::desktop_capture_screenshot,
             super::screenshot::desktop_get_screenshot_permission,
@@ -749,6 +751,7 @@ pub fn run() {
             commands::desktop_install_git,
             commands::desktop_roots,
             commands::desktop_pick_folder,
+            super::markdown_export::desktop_save_markdown_export,
             commands::desktop_default_brain_folder,
             commands::desktop_revoke_folder,
             commands::desktop_file,

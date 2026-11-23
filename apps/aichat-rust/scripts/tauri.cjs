@@ -3,10 +3,11 @@
 // only through an explicit engine selection. Release commands pass through.
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { execFileSync, execSync, spawnSync } = require('node:child_process');
 const { validateRuntime } = require('./bundle-mcp-runtime.cjs');
 
 const APP_ROOT = path.resolve(__dirname, '..');
+const INSTALL_DESKTOP_DEPS = 'pnpm install --frozen-lockfile --prod=false';
 
 function parseInvocation(argv, env = process.env) {
   const args = [...argv];
@@ -140,9 +141,34 @@ function prepareRustRuntime({ appRoot = APP_ROOT, env = process.env } = {}) {
   }
 }
 
-function runTauri(args, env, appRoot = APP_ROOT) {
-  const pkgFile = require.resolve('@tauri-apps/cli/package.json', { paths: [appRoot] });
+function findTauriEntry(appRoot) {
+  const pkgFile = path.join(appRoot, 'node_modules', '@tauri-apps', 'cli', 'package.json');
+  if (!fs.existsSync(pkgFile)) return undefined;
   const entry = path.resolve(path.dirname(pkgFile), JSON.parse(fs.readFileSync(pkgFile, 'utf8')).bin.tauri);
+  return fs.existsSync(entry) ? entry : undefined;
+}
+
+function prepareDesktopDependencies(appRoot, env, development) {
+  const viteManifest = path.join(appRoot, 'node_modules', 'vite', 'package.json');
+  const installHint = `Run \`${INSTALL_DESKTOP_DEPS}\` in ${appRoot} and retry.`;
+  let entry = findTauriEntry(appRoot);
+  if (development && (!entry || !fs.existsSync(viteManifest))) {
+    process.stdout.write('[tauri-dev] Installing desktop dependencies from pnpm-lock.yaml...\n');
+    try {
+      execSync(INSTALL_DESKTOP_DEPS, { cwd: appRoot, env, stdio: 'inherit' });
+    } catch (error) {
+      throw new Error(`Desktop dependency installation failed: ${error.message}. ${installHint}`, { cause: error });
+    }
+    entry = findTauriEntry(appRoot);
+    if (!entry || !fs.existsSync(viteManifest)) {
+      throw new Error(`Desktop dependency installation did not provide the Tauri CLI and Vite. ${installHint}`);
+    }
+  }
+  if (!entry) throw new Error(`Missing the desktop Tauri CLI. ${installHint}`);
+  return entry;
+}
+
+function runTauri(entry, args, env, appRoot) {
   // Launch the JS entry rather than a .cmd shim; no shell interpolation on Windows.
   const result = spawnSync(process.execPath, [entry, ...args], { cwd: appRoot, env, stdio: 'inherit' });
   if (result.error) throw result.error;
@@ -153,10 +179,11 @@ async function launch(argv, options = {}) {
   const appRoot = options.appRoot || APP_ROOT;
   const env = { ...(options.env || process.env) };
   const invocation = parseInvocation(argv, env);
+  if (invocation.development && !['rust', 'node'].includes(invocation.engine)) {
+    throw new Error(`Unsupported MCP engine: ${invocation.engine}; select rust or node.`);
+  }
+  const entry = (options.prepareDesktopDependencies || prepareDesktopDependencies)(appRoot, env, invocation.development);
   if (invocation.development) {
-    if (!['rust', 'node'].includes(invocation.engine)) {
-      throw new Error(`Unsupported MCP engine: ${invocation.engine}; select rust or node.`);
-    }
     const custom = env.AICHAT_MCP_BUNDLED_DIR || env.AICHAT_MCP_RUNTIME_DIR;
     if (custom) {
       const directory = path.resolve(appRoot, custom);
@@ -169,7 +196,7 @@ async function launch(argv, options = {}) {
     }
     env.AICHAT_MCP_ENGINE = invocation.engine;
   }
-  return (options.runTauri || runTauri)(invocation.args, env, appRoot);
+  return (options.runTauri || runTauri)(entry, invocation.args, env, appRoot);
 }
 
 if (require.main === module) {
