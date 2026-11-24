@@ -23,7 +23,7 @@ function assertCloudAsrContract(source) {
   assert.doesNotMatch(production, /std::fs|tokio::fs|File::create|access_token|Authorization|asr_start/);
 }
 
-test("remote pages retain their existing ACL while only local settings can start and stop voice input", () => {
+test("only local settings can manage voice input and diagram demo mode", () => {
   const main = JSON.parse(read("src-tauri/capabilities/default.json"));
   const settings = JSON.parse(read("src-tauri/capabilities/remote-voice.json"));
   assert.deepEqual(main.windows, ["main", "pet", "updates"]);
@@ -31,12 +31,12 @@ test("remote pages retain their existing ACL while only local settings can start
   assert.deepEqual(settings.windows, ["remote-voice"]);
   assert.equal(settings.local, true);
   assert.equal(Object.hasOwn(settings, "remote"), false);
-  assert.deepEqual(settings.permissions, ["allow-remote-voice-settings"]);
+  assert.deepEqual(settings.permissions, ["allow-remote-voice-settings", "core:event:allow-listen", "core:event:allow-unlisten"]);
 
   const permissions = read("src-tauri/permissions/desktop-commands.toml").split("[[permission]]");
   const legacy = permissions.find(part => part.includes('identifier = "allow-desktop-commands"'));
   const isolated = permissions.find(part => part.includes('identifier = "allow-remote-voice-settings"'));
-  const expected = ["remote_voice_status", "remote_voice_start", "remote_voice_stop"];
+  const expected = ["remote_voice_status", "remote_voice_start", "remote_voice_stop", "remote_voice_set_demo_mode", "remote_voice_enter_demo"];
   assert.ok(legacy && isolated);
   const host = read("src-tauri/src/app/remote_voice_host.rs");
   const startup = read("src-tauri/src/app/startup.rs");
@@ -130,7 +130,37 @@ test("voice settings explain cloud processing and expose only native device cont
   assert.match(html, /不会自动.*回车|不.*自动.*发送/);
   assert.match(html, /remote-control\.png/);
   assert.match(html, /蓝牙配对模式/);
+  assert.match(html, /同时长按主页键（小房子图标）\+ 菜单键（三条横线图标）3～5 秒/);
+  assert.doesNotMatch(html, /≡ 和 TV|菜单键和 TV 键/);
   assert.ok(fs.existsSync(path.join(appRoot, "src/assets/remote-control.png")));
+});
+
+test("remote pairing guide highlights Home + Menu consistently across SVG, hotspots and copy", () => {
+  const html = read("remote-voice.html");
+  const script = read("src/remote-voice.ts");
+  const css = read("src/remote-voice.css");
+
+  const boxMatch = /<rect\s+x="(\d+(?:\.\d+)?)"\s+y="(\d+(?:\.\d+)?)"\s+width="(\d+(?:\.\d+)?)"\s+height="(\d+(?:\.\d+)?)"[^>]*class="pairing-box"/.exec(html);
+  assert.ok(boxMatch, "pairing-box rect must exist in remote-voice.html");
+  const [, x, y, width, height] = boxMatch.map(Number);
+  assert.ok(height > width, "pairing-box must frame the vertical Home + Menu column");
+  assert.ok(x < 30 && x + width > 98 && x + width < 118, "pairing-box must enclose only the left Home + Menu column");
+  assert.ok(y < 367 && y + height > 515, "pairing-box must enclose both Home (y=367..435) and Menu (y=447..515)");
+
+  const arrowMatch = /<line\s+x1="(\d+(?:\.\d+)?)"\s+y1="(\d+(?:\.\d+)?)"\s+x2="(\d+(?:\.\d+)?)"\s+y2="(\d+(?:\.\d+)?)"[^>]*class="pairing-arrow"/.exec(html);
+  assert.ok(arrowMatch, "pairing-arrow line must exist in remote-voice.html");
+  const [, x1, y1, x2] = arrowMatch.map(Number);
+  assert.equal(x1, x + width / 2, "pairing-arrow must originate from the horizontal center of pairing-box");
+  assert.equal(x2, x1, "pairing-arrow must connect vertically into the pairing callout badge");
+  assert.equal(y1, y + height, "pairing-arrow must start from the bottom edge of pairing-box");
+
+  assert.match(script, /home:\s*\{[^}]*菜单键（三条横线图标）[^}]*tone:\s*"pairing"/);
+  assert.match(script, /menu:\s*\{[^}]*主页键（小房子图标）[^}]*tone:\s*"pairing"/);
+  assert.doesNotMatch(script, /tv:\s*\{[^}]*(?:配对|tone:\s*"pairing")/);
+  assert.doesNotMatch(script, /与 TV 同时长按/);
+
+  assert.match(css, /\.hotspot-home:hover[\s\S]*\.hotspot-menu:hover[\s\S]*border-color:\s*var\(--alert\)/);
+  assert.doesNotMatch(css, /\.hotspot-tv:(?:hover|focus-visible)|\.hotspot-tv\.is-active/);
 });
 
 test("remote-voice and updates windows follow desktop theme instead of OS dark mode", () => {

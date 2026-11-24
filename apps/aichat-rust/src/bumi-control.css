@@ -51,17 +51,12 @@ button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-v
 .primary:hover:not(:disabled) { background: var(--primary-hover); }
 .secondary { background: var(--surface-muted); }
 .bumi-layout { max-width: 720px; margin: 0 auto; padding: 22px; }
-.bumi-header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
-.bumi-mark {
-  display: grid;
-  place-items: center;
-  flex: 0 0 42px;
-  height: 42px;
-  border-radius: 12px;
-  background: var(--primary);
-  color: #fff;
-  font-size: 24px;
-  font-weight: 750;
+.bumi-header { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.bumi-portrait {
+  height: 156px;
+  width: auto;
+  flex: none;
+  filter: drop-shadow(0 8px 12px rgba(20, 32, 48, 0.16));
 }
 .bumi-heading { min-width: 0; flex: 1; }
 h1, h2, p { margin: 0; }
@@ -96,6 +91,10 @@ select {
 .hint { color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; margin-top: 5px; min-height: 0; }
 .hint:empty, .error:empty { display: none; }
 .connection-actions { display: flex; gap: 8px; margin-top: 12px; }
+.connection-actions .primary { flex: 1; }
+.monitor-panel > summary { cursor: pointer; font-weight: 650; }
+.monitor-panel > p { color: var(--text-muted); font-size: var(--desktop-text-small); margin-top: 8px; }
+.monitor-panel .monitor-actions { margin-top: 12px; }
 .operation { color: var(--text-muted); font-size: 12px; margin-top: 10px; }
 .error { color: var(--error); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; margin-top: 8px; }
 .telemetry { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
@@ -145,6 +144,18 @@ select {
 #volume-value { color: var(--primary); font-weight: 650; font-variant-numeric: tabular-nums; }
 .volume-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; margin-top: 12px; }
 input[type="range"] { width: 100%; accent-color: var(--primary); }
+.remote-shield {
+  width: min(420px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: inherit;
+  padding: 18px;
+}
+.remote-shield::backdrop { background: rgba(20, 32, 48, 0.45); }
+.remote-shield h2 { margin-bottom: 8px; }
+.remote-shield > p { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+.remote-shield .mode-row { margin: 14px 0 0; }
 .protocol-details { margin: 14px 2px 0; color: var(--text-muted); font-size: 12px; line-height: 1.65; }
 .protocol-details summary { cursor: pointer; font-weight: 600; }
 .protocol-details p { margin-top: 8px; }
@@ -154,6 +165,7 @@ input[type="range"] { width: 100%; accent-color: var(--primary); }
 .protocol-details dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
 @media (max-width: 560px) {
   .bumi-layout { padding: 16px; }
+  .bumi-portrait { height: 120px; }
   .action-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .section-heading { flex-wrap: wrap; }
   .movement-layout { grid-template-columns: 1fr; justify-items: center; }

@@ -32,8 +32,8 @@ extern uint64_t IOHIDEventGetSenderID(CFTypeRef) __attribute__((weak_import));
 extern bool keepwork_remote_home_sender(uint64_t sender);
 extern bool keepwork_remote_dialogue_ok_edge(bool down) __attribute__((weak_import));
 
-static bool remoteHomeEvent(CGEventRef event) {
-    if (!CGEventCopyIOHIDEvent || !IOHIDEventGetSenderID) return false;
+bool keepwork_remote_event_from_selected_remote(CGEventRef event) {
+    if (!event || !CGEventCopyIOHIDEvent || !IOHIDEventGetSenderID) return false;
     CFTypeRef hid = CGEventCopyIOHIDEvent(event);
     if (!hid) return false;
     uint64_t sender = IOHIDEventGetSenderID(hid);
@@ -45,7 +45,7 @@ static bool remoteHomeEvent(CGEventRef event) {
 // The local monitor handles only an identified remote Return in the chat window.
 static bool consumeMainNarrationOK(CGEventRef source, bool down, bool repeat, bool chatKeyWindow,
     bool modified, bool *held, bool (*pause)(void)) {
-    if (!source || !remoteHomeEvent(source)) return false;
+    if (!source || !keepwork_remote_event_from_selected_remote(source)) return false;
     if (!down) {
         bool consumed = *held;
         *held = false;
@@ -78,8 +78,8 @@ static CGEventRef voiceKey(CGEventTapProxy proxy, CGEventType type, CGEventRef e
     // this user-enabled ATVV session is ready. No device distinction is claimed.
     if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
         int64_t key = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
-        if (key == 96 || (key == 115 && remoteHomeEvent(event))) return NULL;
-        if ((key == 36 || key == 76) && keepwork_remote_dialogue_ok_edge && remoteHomeEvent(event)
+        if (key == 96 || (key == 115 && keepwork_remote_event_from_selected_remote(event))) return NULL;
+        if ((key == 36 || key == 76) && keepwork_remote_dialogue_ok_edge && keepwork_remote_event_from_selected_remote(event)
             && keepwork_remote_dialogue_ok_edge(type == kCGEventKeyDown)) return NULL;
     }
     return event;

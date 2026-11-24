@@ -7,6 +7,49 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execute = promisify(execFile);
 
+test('macOS live HID media keys produce diagram edges and leave system volume and mute untouched during demo', {
+  skip: process.platform !== 'darwin' || process.env.AICHAT_TEST_MACOS_REMOTE_DEMO_MEDIA !== '1',
+  timeout: 65000,
+}, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-demo-media-'));
+  const executable = path.join(directory, 'media');
+  try {
+    await execute('clang', ['-fobjc-arc', '-Wall', '-Werror', '-framework', 'Cocoa', '-framework', 'Carbon',
+      '-framework', 'ApplicationServices', '-framework', 'CoreAudio',
+      path.join(__dirname, 'fixtures/remote_voice_demo_media_macos.m'), '-o', executable], { timeout: 15000 });
+    const { stdout } = await execute(executable, ['snapshot'], { timeout: 5000 });
+    const state = stdout.trim().split(/\s+/);
+    assert.equal(state.length, 3, 'device ID, original volume and mute are required');
+    try {
+      const result = await execute(executable, ['test', state[0]], { timeout: 30000 });
+      t.diagnostic(result.stdout.trim());
+      assert.match(result.stdout, /Live system volume, mute, diagram edges and HID interception passed/);
+    } finally {
+      // Restore from the parent even if the foreground fixture crashes or times out.
+      await execute(executable, ['restore', ...state], { timeout: 5000 });
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('AppKit blocks remote-demo menu shortcuts and session input only during focused capture', {
+  skip: process.platform !== 'darwin' || process.env.AICHAT_TEST_MACOS_REMOTE_DEMO !== '1',
+  timeout: 30000,
+}, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-remote-demo-'));
+  try {
+    const executable = path.join(directory, 'demo');
+    await execute('clang', ['-fobjc-arc', '-Wall', '-Werror', '-framework', 'Cocoa',
+      '-framework', 'ApplicationServices', path.join(__dirname, 'fixtures/remote_voice_demo_macos.m'),
+      '-o', executable], { timeout: 15000 });
+    const result = await execute(executable, [], { timeout: 7000 });
+    assert.match(result.stdout, /AppKit demo shortcut fixture passed/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('macOS voice input pastes at current focus and explicitly submits once using isolated OS boundaries', {
   skip: process.platform !== 'darwin', timeout: 30000,
 }, async () => {

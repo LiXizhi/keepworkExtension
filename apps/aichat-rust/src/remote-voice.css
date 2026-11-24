@@ -99,10 +99,10 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
 }
 .guide-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 4px 8px;
   margin-bottom: 10px;
 }
 .guide-header h2 {
@@ -111,13 +111,16 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
   line-height: 1.3;
 }
 .guide-subtitle {
+  flex-basis: 100%;
   margin: 0;
   font-size: 11.5px;
   color: var(--text-muted);
 }
+#remote-demo-toggle { padding: 3px 8px; font-size: var(--desktop-text-small); }
+.remote-guide-pane[data-demo] #remote-demo-toggle { border-color: var(--primary); }
 
 .key-detail-card {
-  height: 90px;
+  height: 108px;
   overflow-y: auto;
   overflow-anchor: none;
   border-radius: 10px;
@@ -156,7 +159,7 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
 .remote-figure {
   position: relative;
   margin: 0;
-  width: clamp(86px, calc(25.8vh - 49px), 132px);
+  width: clamp(76px, calc(24.6vh - 54px), 120px);
   user-select: none;
 }
 .remote-photo {
@@ -176,6 +179,11 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
   fill: rgba(217, 56, 41, 0.12);
   stroke: var(--alert);
   stroke-width: 5;
+  transition: fill 140ms ease;
+}
+.remote-guide-pane:not([data-demo]) .remote-figure:has(.hotspot-pairing:is(:hover, :focus-visible)) .pairing-box,
+.remote-figure:has(.hotspot-pairing.is-pressed) .pairing-box {
+  fill: rgba(217, 56, 41, 0.22);
 }
 .pairing-arrow {
   stroke: var(--alert);
@@ -202,11 +210,10 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
   background: transparent;
   border-radius: 50%;
   cursor: pointer;
-  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+  transition: none;
 }
-.remote-hotspot:hover,
-.remote-hotspot:focus-visible,
-.remote-hotspot.is-active {
+.remote-guide-pane:not([data-demo]) .remote-hotspot:is(:hover, :focus-visible, .is-active),
+.remote-hotspot.is-pressed {
   border-color: var(--primary);
   background: rgba(40, 99, 212, 0.16);
   box-shadow: 0 0 0 3px rgba(40, 99, 212, 0.22);
@@ -215,18 +222,20 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
 .hotspot-voice {
   border-color: rgba(40, 99, 212, 0.45);
 }
-.hotspot-menu:hover,
-.hotspot-menu:focus-visible,
-.hotspot-menu.is-active,
-.hotspot-tv:hover,
-.hotspot-tv:focus-visible,
-.hotspot-tv.is-active,
-.hotspot-pairing:hover,
-.hotspot-pairing:focus-visible,
-.hotspot-pairing.is-active {
+.remote-guide-pane:not([data-demo]) .hotspot-home:hover,
+.remote-guide-pane:not([data-demo]) .hotspot-menu:hover,
+.remote-guide-pane:not([data-demo]) :is(.hotspot-home, .hotspot-menu, .hotspot-pairing):is(:focus-visible, .is-active),
+.remote-guide-pane:not([data-demo]) .hotspot-pairing:hover,
+.hotspot-home.is-pressed,
+.hotspot-menu.is-pressed,
+.hotspot-pairing.is-pressed {
   border-color: var(--alert);
   background: rgba(217, 56, 41, 0.16);
   box-shadow: 0 0 0 3px rgba(217, 56, 41, 0.22);
+}
+.remote-guide-pane[data-demo] .remote-hotspot:focus-visible:not(.is-pressed) {
+  outline: 1px dashed var(--primary);
+  outline-offset: 3px;
 }
 
 .hotspot-tip {
@@ -256,7 +265,43 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
 /* Exact hotspot positions mapped to remote-control.png (217x840) */
 .hotspot-power   { left: 13%; top: 3.9%;  width: 24%; height: 6.4%; }
 .hotspot-voice   { left: 63%; top: 3.9%;  width: 24%; height: 6.4%; }
-.hotspot-dpad    { left: 10%; top: 12.2%; width: 80%; height: 21.0%; }
+#remote-dpad {
+  position: absolute;
+  left: 9.68%;
+  top: 12.38%;
+  width: 80.65%;
+  height: 20.83%;
+  border-radius: 50%;
+}
+#remote-dpad.legacy-pressed { outline: 2px solid var(--primary); }
+/* Rotate the same annular quadrant around the physical center of the pad. */
+.dpad-direction {
+  left: 0;
+  top: 0;
+  width: 50%;
+  height: 50%;
+  border: 0;
+  border-radius: 0;
+  clip-path: url("#dpad-quarter");
+  transform-origin: bottom right;
+}
+.dpad-direction[data-key="up"]    { transform: rotate(45deg); }
+.dpad-direction[data-key="right"] { transform: rotate(135deg); }
+.dpad-direction[data-key="down"]  { transform: rotate(225deg); }
+.dpad-direction[data-key="left"]  { transform: rotate(-45deg); }
+.dpad-direction.is-pressed { background-color: var(--primary); }
+.dpad-direction:is(.is-pressed, :focus-visible)::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 20%;
+  height: 20%;
+  transform: translate(-50%, -50%);
+  border: solid white;
+  border-width: 2px 0 0 2px;
+}
+.hotspot-ok { inset: 23.45%; }
 .hotspot-back    { left: 13%; top: 33.8%; width: 33%; height: 8.8%; }
 .hotspot-volume  { left: 54%; top: 33.8%; width: 33%; height: 18.4%; border-radius: 999px; }
 .hotspot-home    { left: 13%; top: 43.3%; width: 33%; height: 8.8%; }
@@ -265,7 +310,6 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
 .hotspot-pairing { left: 6%;  top: 65.5%; width: 88%; height: 7.6%; border-radius: 8px; }
 
 .hotspot-power .hotspot-tip,
-.hotspot-dpad .hotspot-tip,
 .hotspot-back .hotspot-tip,
 .hotspot-home .hotspot-tip,
 .hotspot-menu .hotspot-tip {
@@ -285,6 +329,8 @@ summary { font-weight: var(--desktop-weight-heading); cursor: pointer; color: va
   .controls { padding: 6px 0; gap: 3px; }
   .remote-guide-pane { padding: 10px; top: 10px; }
   .guide-header { margin-bottom: 6px; }
+  .key-detail-card { height: 106px; padding: 8px 10px; }
+  .key-detail-card p { font-size: 11.5px; line-height: 1.4; }
 }
 
 @media (max-width: 620px) {

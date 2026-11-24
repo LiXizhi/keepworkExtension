@@ -2,10 +2,10 @@ use super::protocol::{self, Reading, NOTIFY, SERVICE, WRITE};
 use super::{Command, Device, LocomotionMode, Request, Snapshot};
 use btleplug::api::{
     Central, CentralEvent, CentralState, CharPropFlags, Characteristic, Manager as _,
-    Peripheral as _, ScanFilter, WriteType,
+    Peripheral as _, ScanFilter, ValueNotification, WriteType,
 };
-use btleplug::platform::{Adapter, Manager, Peripheral};
-use futures_util::{future::Shared, FutureExt, StreamExt};
+use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
+use futures_util::{future::Shared, FutureExt, Stream, StreamExt};
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::{
@@ -28,7 +28,7 @@ const SCAN_WINDOW_SECONDS: u64 = 20;
 pub(super) struct Bluetooth {
     adapters: Option<Adapters>,
     owner: Option<watch::Receiver<()>>,
-    devices: Vec<(Device, Peripheral)>,
+    devices: Vec<(Device, Peripheral, Adapter)>,
     connection: Option<Connection>,
     listener: Option<Listener>,
 }
@@ -40,6 +40,10 @@ struct Listener {
 
 struct Connection {
     device: Device,
+    id: String,
+    attempt_id: Option<String>,
+    link_lost: Arc<AtomicBool>,
+    cancel_link_monitor: watch::Sender<()>,
     peripheral: Peripheral,
     tx: Characteristic,
     write_type: WriteType,
@@ -47,7 +51,9 @@ struct Connection {
     battery: Option<u8>,
     status: Option<i8>,
     moving: bool,
+    motion_owner: Option<u64>,
     locomotion_mode: Option<LocomotionMode>,
+    gait_confirmed: bool,
 }
 
 impl Bluetooth {
@@ -55,63 +61,98 @@ impl Bluetooth {
         &mut self,
         app: &AppHandle,
         request: Request,
+        owner: watch::Receiver<()>,
         mut lifetime: watch::Receiver<()>,
+        verify_remote: impl Fn() -> Result<(), String>,
     ) -> Result<Snapshot, String> {
-        if lifetime.has_changed().is_err() {
+        if owner.has_changed().is_err() || lifetime.has_changed().is_err() {
             return Err(CLOSED.into());
         }
-        if !self.owned_by(&lifetime) {
+        if !self.owned_by(&owner) {
             self.reset().await;
-            self.owner = Some(lifetime.clone());
+            self.owner = Some(owner);
         }
         if let Some(connection) = &self.connection {
-            let connected = during(
-                &mut lifetime,
-                2,
-                connection.peripheral.is_connected().map(map_error),
-            )
-            .await?;
-            if !connected {
-                self.disconnect().await;
+            // A stop must not wait for a separate peripheral status query. The
+            // GATT write reports its own failure if the link was just lost.
+            let stopping = matches!(&request, Request::Disconnect | Request::CancelConnection { .. })
+                || matches!(&request, Request::Send { command, .. } if command.motion_active() == Some(false));
+            let lost = connection.link_lost.load(Ordering::Acquire)
+                || (!stopping
+                    && !during(
+                        &mut lifetime,
+                        2,
+                        connection.peripheral.is_connected().map(map_error),
+                    )
+                    .await?);
+            if lost || connection.link_lost.load(Ordering::Acquire) {
+                report_link_loss(
+                    app,
+                    &connection.device.id,
+                    &connection.id,
+                    &connection.link_lost,
+                );
+                self.stop_listening();
+                self.connection = None;
             }
         }
 
         match request {
             Request::Status => {}
-            Request::Scan if self.connection.is_none() => {
+            Request::Scan { .. } if self.connection.is_none() => {
                 self.devices.clear();
                 self.devices = scan(self.adapter(&mut lifetime).await?, &mut lifetime).await?;
             }
-            Request::Connect { id } if self.connection.is_none() => {
-                let (device, peripheral) = self
+            Request::Connect { id, attempt_id } if self.connection.is_none() => {
+                let (device, peripheral, adapter) = self
                     .devices
                     .iter()
-                    .find(|(device, _)| device.id == id)
+                    .find(|(device, _, _)| device.id == id)
                     .cloned()
                     .ok_or("请从最近一次扫描结果中选择机器人。")?;
-                self.connection = Some(connect(device, peripheral, &mut lifetime).await?);
+                self.connection =
+                    Some(connect(app, device, peripheral, adapter, attempt_id, &mut lifetime).await?);
             }
-            Request::Scan | Request::Connect { .. } => return Err("请先断开当前机器人。".into()),
+            Request::Scan { .. } | Request::Connect { .. } => return Err("请先断开当前机器人。".into()),
+            Request::CancelConnection { attempt_id } => {
+                // Setup may already have completed while its IPC reply was in flight.
+                if self.connection.as_ref().and_then(|c| c.attempt_id.as_ref()) == Some(&attempt_id) {
+                    self.disconnect().await;
+                }
+            }
             Request::Disconnect => self.disconnect().await,
             Request::Listen { enabled } => self.set_listening(app, enabled, &mut lifetime).await?,
-            Request::Send { command } => {
+            Request::Send {
+                command,
+                remote_capture_id,
+            } => {
                 let monitor = self
                     .listener
                     .as_ref()
                     .filter(|listener| listener.active.load(Ordering::Relaxed))
                     .map(|_| app);
                 let connection = self.connection.as_mut().ok_or(DISCONNECTED)?;
-                connection.send(command, &mut lifetime, monitor).await?;
+                if command.motion_active() == Some(true) {
+                    if remote_capture_id.is_some() && !connection.gait_confirmed {
+                        return Err("请查询并确认机器人已进入所选步态。".into());
+                    }
+                    verify_remote()?;
+                }
+                connection
+                    .send(command, &mut lifetime, monitor, remote_capture_id)
+                    .await?;
             }
         }
 
         let locomotion_mode = self.connection.as_ref().and_then(|c| c.locomotion_mode);
         Ok(Snapshot {
             available: true,
+            remote_motion_version: Some(2),
+            connection_id: self.connection.as_ref().map(|c| c.id.clone()),
             devices: self
                 .devices
                 .iter()
-                .map(|(device, _)| device.clone())
+                .map(|(device, _, _)| device.clone())
                 .collect(),
             connected: self
                 .connection
@@ -249,6 +290,28 @@ impl Bluetooth {
         }
     }
 
+    pub(super) async fn stop_remote_if_moving(
+        &mut self,
+        lifetime: &watch::Receiver<()>,
+        capture_id: u64,
+    ) -> Result<(), String> {
+        if self.owned_by(lifetime) {
+            if let Some(connection) = self
+                .connection
+                .as_mut()
+                .filter(|c| c.motion_owner == Some(capture_id))
+            {
+                if connection.link_lost.load(Ordering::Acquire) {
+                    return Err("机器人蓝牙已断开，停止状态未知。".into());
+                }
+                connection
+                    .send(Command::STOP, &mut lifetime.clone(), None, None)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn reset(&mut self) {
         self.stop_listening();
         self.devices.clear();
@@ -258,10 +321,14 @@ impl Bluetooth {
     async fn disconnect(&mut self) {
         self.stop_listening();
         if let Some(mut connection) = self.connection.take() {
+            let _ = connection.cancel_link_monitor.send(());
+            if connection.link_lost.load(Ordering::Acquire) {
+                return;
+            }
             if connection.moving {
                 let (_sender, mut lifetime) = watch::channel(());
                 if let Err(error) = connection
-                    .send(Command::Move { vx: 0, vyaw: 0 }, &mut lifetime, None)
+                    .send(Command::STOP, &mut lifetime, None, None)
                     .await
                 {
                     eprintln!("Bumi: failed to stop movement before disconnect: {error}");
@@ -307,7 +374,7 @@ fn supported_name(name: &str) -> bool {
 async fn scan(
     adapter: Adapter,
     lifetime: &mut watch::Receiver<()>,
-) -> Result<Vec<(Device, Peripheral)>, String> {
+) -> Result<Vec<(Device, Peripheral, Adapter)>, String> {
     let mut events = during(lifetime, 3, adapter.events().map(map_error)).await?;
     let discovered = during(lifetime, SCAN_WINDOW_SECONDS + 10, async {
         adapter
@@ -370,10 +437,11 @@ async fn scan(
                         rssi: properties.rssi,
                     },
                     peripheral,
+                    adapter.clone(),
                 ));
             }
         }
-        devices.sort_by(|(left, _), (right, _)| {
+        devices.sort_by(|(left, _, _), (right, _, _)| {
             right
                 .rssi
                 .cmp(&left.rssi)
@@ -386,10 +454,14 @@ async fn scan(
 }
 
 async fn connect(
+    app: &AppHandle,
     device: Device,
     peripheral: Peripheral,
+    adapter: Adapter,
+    attempt_id: Option<String>,
     lifetime: &mut watch::Receiver<()>,
 ) -> Result<Connection, String> {
+    let events = during(lifetime, 2, adapter.events().map(map_error)).await?;
     let setup = during(lifetime, 18, async {
         peripheral.connect().await.map_err(ble_error)?;
         peripheral.discover_services().await.map_err(ble_error)?;
@@ -425,21 +497,71 @@ async fn connect(
     })
     .await;
     match setup {
-        Ok((tx, write_type)) => Ok(Connection {
-            device,
-            peripheral,
-            tx,
-            write_type,
-            last_motion_write: None,
-            battery: None,
-            status: None,
-            moving: false,
-            locomotion_mode: None,
-        }),
+        Ok((tx, write_type)) => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let link_lost = Arc::new(AtomicBool::new(false));
+            let (cancel_link_monitor, cancelled) = watch::channel(());
+            let app = app.clone();
+            let peripheral_id = peripheral.id();
+            let device_id = device.id.clone();
+            let connection_id = id.clone();
+            let lost = link_lost.clone();
+            tauri::async_runtime::spawn(async move {
+                if wait_for_link_loss(events, cancelled, peripheral_id).await {
+                    report_link_loss(&app, &device_id, &connection_id, &lost);
+                }
+            });
+            Ok(Connection {
+                device,
+                id,
+                attempt_id,
+                link_lost,
+                cancel_link_monitor,
+                peripheral,
+                tx,
+                write_type,
+                last_motion_write: None,
+                battery: None,
+                status: None,
+                moving: false,
+                motion_owner: None,
+                locomotion_mode: None,
+                gait_confirmed: false,
+            })
+        }
         Err(error) => {
             disconnect(&peripheral).await;
             Err(error)
         }
+    }
+}
+
+async fn wait_for_link_loss(
+    mut events: impl Stream<Item = CentralEvent> + Unpin,
+    mut cancelled: watch::Receiver<()>,
+    device_id: PeripheralId,
+) -> bool {
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = cancelled.changed() => return false,
+            event = events.next() => event,
+        };
+        match event {
+            Some(CentralEvent::DeviceDisconnected(id)) if id == device_id => return true,
+            Some(CentralEvent::StateUpdate(CentralState::PoweredOff)) | None => return true,
+            _ => {}
+        }
+    }
+}
+
+fn report_link_loss(app: &AppHandle, id: &str, connection_id: &str, lost: &AtomicBool) {
+    if !lost.swap(true, Ordering::AcqRel) {
+        let _ = app.emit_to(
+            super::LABEL,
+            "bumi:disconnected",
+            serde_json::json!({ "id": id, "connectionId": connection_id }),
+        );
     }
 }
 
@@ -458,7 +580,7 @@ fn prepare_locomotion_mode(
         | Command::Cheer
         | Command::StandUp
         | Command::StandToFall => None,
-        Command::Move { vx, vyaw } if current.is_none() && (*vx != 0 || *vyaw != 0) => {
+        _ if current.is_none() && command.motion_active() == Some(true) => {
             return Err("请先进入行走模式或全身行走模式，再控制移动。");
         }
         _ => return Ok(*current),
@@ -473,17 +595,22 @@ impl Connection {
         command: Command,
         lifetime: &mut watch::Receiver<()>,
         monitor: Option<&AppHandle>,
+        remote_capture_id: Option<u64>,
     ) -> Result<(), String> {
-        if self.moving && !matches!(&command, Command::Move { .. }) {
-            self.write_frame(
-                &protocol::frame(Command::Move { vx: 0, vyaw: 0 })?,
-                lifetime,
-                monitor,
-            )
-            .await?;
+        let motion_active = command.motion_active();
+        if self.moving && motion_active.is_none() {
+            self.write_frame(&protocol::frame(Command::STOP)?, lifetime, monitor)
+                .await?;
             self.moving = false;
+            self.motion_owner = None;
         }
         let selected = prepare_locomotion_mode(&mut self.locomotion_mode, &command)?;
+        // Keep the last reported status visible in the UI. A new gait write
+        // (even the same gait) or an inconclusive status query needs fresh
+        // confirmation before the remote may move again.
+        if self.locomotion_mode.is_none() || matches!(command, Command::Status) {
+            self.gait_confirmed = false;
+        }
         let frame = protocol::frame(command.clone())?;
         let is_query = matches!(command, Command::Battery | Command::Status);
         let mut notifications = if is_query {
@@ -493,38 +620,26 @@ impl Connection {
         };
         // A cancelled write may already have reached the robot. Keep disconnect's
         // stop armed until a zero-speed write actually completes.
-        if matches!(&command, Command::Move { vx, vyaw } if *vx != 0 || *vyaw != 0) {
+        if motion_active == Some(true) {
             self.moving = true;
+            self.motion_owner = remote_capture_id;
         }
         self.write_frame(&frame, lifetime, monitor).await?;
         self.locomotion_mode = selected;
-        if matches!(&command, Command::Move { vx: 0, vyaw: 0 }) {
+        if motion_active == Some(false) {
             self.moving = false;
+            self.motion_owner = None;
         }
 
         if let Some(notifications) = &mut notifications {
-            let response = during(lifetime, 4, async {
-                while let Some(value) = notifications.next().await {
-                    if value.uuid == NOTIFY {
-                        if let Some(reading) = protocol::reading(&value.value)
-                            .filter(|reading| reading.matches(&command))
-                        {
-                            return Ok(reading);
-                        }
-                    }
-                }
-                Err("Bumi 蓝牙连接已中断。".into())
-            })
-            .await;
-            match response {
-                Ok(Reading::Battery(percent)) => self.battery = Some(percent),
-                Ok(Reading::Status(status)) => self.status = Some(status),
-                Err(error) => {
-                    return Err(if error == TIMED_OUT {
-                        "已发送查询，但 Bumi 未返回数据。".into()
-                    } else {
-                        error
-                    })
+            match query_reading(notifications, &command, lifetime).await? {
+                Reading::Battery(percent) => self.battery = Some(percent),
+                Reading::Status(status) => {
+                    self.status = Some(status);
+                    self.gait_confirmed = matches!(
+                        (self.locomotion_mode, status),
+                        (Some(LocomotionMode::Walk), 2) | (Some(LocomotionMode::Run), 3)
+                    );
                 }
             }
         }
@@ -538,6 +653,9 @@ impl Connection {
         monitor: Option<&AppHandle>,
     ) -> Result<(), String> {
         for chunk in frame.chunks(20) {
+            if self.link_lost.load(Ordering::Acquire) {
+                return Err("Bumi 蓝牙连接已中断，请重新连接。".into());
+            }
             during(
                 lifetime,
                 3,
@@ -549,6 +667,9 @@ impl Connection {
             if frame.len() > 20 && matches!(self.write_type, WriteType::WithoutResponse) {
                 sleep(Duration::from_millis(15)).await;
             }
+        }
+        if self.link_lost.load(Ordering::Acquire) {
+            return Err("Bumi 蓝牙连接已中断，指令执行结果未知。".into());
         }
         if let Some(app) = monitor {
             let mut description = protocol::describe_write(frame);
@@ -578,6 +699,46 @@ async fn disconnect(peripheral: &Peripheral) {
 }
 
 const TIMED_OUT: &str = "蓝牙操作超时，请检查机器人和系统蓝牙状态。";
+
+async fn query_reading(
+    mut notifications: impl Stream<Item = ValueNotification> + Unpin,
+    command: &Command,
+    lifetime: &mut watch::Receiver<()>,
+) -> Result<Reading, String> {
+    let mut received_notification = false;
+    let mut invalid_battery = None;
+    let result = during(lifetime, 4, async {
+        while let Some(value) = notifications.next().await {
+            if value.uuid != NOTIFY {
+                continue;
+            }
+            received_notification = true;
+            if let Some(reading) = protocol::reading(&value.value).filter(|r| r.matches(command)) {
+                return Ok(reading);
+            }
+            if matches!(command, Command::Battery)
+                && matches!(value.value.as_slice(), [0x55, 0xaa, _, 0x26, ..])
+            {
+                invalid_battery = Some(protocol::describe(&value.value).summary);
+            }
+        }
+        Err("Bumi 蓝牙连接已中断。".into())
+    })
+    .await;
+    match result {
+        Err(error) if error == TIMED_OUT => {
+            let query = if matches!(command, Command::Battery) { "电量" } else { "状态" };
+            Err(if let Some(reason) = invalid_battery {
+                format!("电量查询未取得有效读数：{reason}。")
+            } else if received_notification {
+                format!("已收到蓝牙通知，但 4 秒内未识别到有效的{query}回包。可开启监听后再查，查看收到的原始帧。")
+            } else {
+                format!("已发送{query}查询，4 秒内未收到 Bumi 的蓝牙通知。")
+            })
+        }
+        other => other,
+    }
+}
 
 async fn during<T>(
     lifetime: &mut watch::Receiver<()>,
@@ -620,12 +781,103 @@ fn permission_denied() -> bool {
 mod tests {
     use super::{prepare_locomotion_mode, supported_name, Command, LocomotionMode};
 
+    #[tokio::test(start_paused = true)]
+    async fn battery_query_distinguishes_silence_other_notifications_and_invalid_readings() {
+        use super::{query_reading, Reading, ValueNotification, NOTIFY, SERVICE};
+        use futures_util::{stream, StreamExt};
+
+        let status = vec![0x55, 0xaa, 6, 0x51, 2, 6];
+        let invalid = vec![0x55, 0xaa, 6, 0x26, 255, 6];
+        let extended = vec![0x55, 0xaa, 7, 0x26, 83, 42, 7];
+        let (_owner, mut lifetime) = tokio::sync::watch::channel(());
+        for (frames, expected) in [
+            (vec![], Err("未收到 Bumi 的蓝牙通知")),
+            (vec![status.clone()], Err("已收到蓝牙通知")),
+            (vec![invalid.clone(), status.clone()], Err("255 超出")),
+            (vec![status, invalid, extended], Ok(Reading::Battery(83))),
+        ] {
+            let notifications = stream::iter(frames.into_iter().map(|value| ValueNotification {
+                uuid: NOTIFY,
+                service_uuid: SERVICE,
+                value,
+            })).chain(stream::pending());
+            let result = query_reading(notifications, &Command::Battery, &mut lifetime).await;
+            match expected {
+                Ok(reading) => assert_eq!(result, Ok(reading)),
+                Err(message) => assert!(result.unwrap_err().contains(message)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_interrupts_a_pending_bluetooth_operation() {
+        use super::super::ConnectionAttempts;
+        use futures_util::FutureExt;
+
+        let mut attempts = ConnectionAttempts::default();
+        let mut lifetime = attempts.start("scanning").unwrap();
+        let work = super::during(&mut lifetime, 20, std::future::pending::<Result<(), String>>());
+        tokio::pin!(work);
+        assert!(work.as_mut().now_or_never().is_none());
+        attempts.cancel("scanning");
+        assert!(work.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnect_latches_for_the_selected_robot_even_if_it_reconnects() {
+        use super::{wait_for_link_loss, CentralEvent, PeripheralId};
+        use futures_util::{stream, FutureExt, StreamExt};
+        #[cfg(target_os = "macos")]
+        fn id(value: u8) -> PeripheralId {
+            uuid::Uuid::from_bytes([value; 16]).into()
+        }
+        #[cfg(windows)]
+        fn id(value: u8) -> PeripheralId {
+            btleplug::api::BDAddr::from([value; 6]).into()
+        }
+        let selected = id(1);
+        let (cancel, rx) = tokio::sync::watch::channel(());
+        let other =
+            stream::iter([CentralEvent::DeviceDisconnected(id(2))]).chain(stream::pending());
+        assert!(wait_for_link_loss(other, rx.clone(), selected.clone())
+            .now_or_never()
+            .is_none());
+        let reconnected = [
+            CentralEvent::DeviceDisconnected(selected.clone()),
+            CentralEvent::DeviceConnected(selected.clone()),
+        ];
+        let same_robot = stream::iter(reconnected).chain(stream::pending());
+        assert_eq!(
+            wait_for_link_loss(same_robot, rx.clone(), selected.clone()).now_or_never(),
+            Some(true)
+        );
+        assert!(wait_for_link_loss(stream::empty(), rx.clone(), selected.clone()).await);
+        drop(cancel);
+        assert!(!wait_for_link_loss(stream::empty(), rx, selected).await);
+    }
+
     #[test]
     fn movement_requires_a_successfully_written_gait_and_stop_is_always_available() {
         let mut mode = None;
-        let forward = Command::Move { vx: 40, vyaw: 0 };
-        let stop = Command::Move { vx: 0, vyaw: 0 };
+        let forward = Command::Move {
+            vx: 40,
+            vyaw: 0,
+            vy: 0,
+        };
+        let left = Command::Move {
+            vx: 0,
+            vyaw: 0,
+            vy: 40,
+        };
+        let right = Command::Move {
+            vx: 0,
+            vyaw: 0,
+            vy: -40,
+        };
+        let stop = Command::STOP;
         assert!(prepare_locomotion_mode(&mut mode, &forward).is_err());
+        assert!(prepare_locomotion_mode(&mut mode, &left).is_err());
+        assert!(prepare_locomotion_mode(&mut mode, &right).is_err());
         assert_eq!(prepare_locomotion_mode(&mut mode, &stop), Ok(None));
 
         for (command, gait) in [
@@ -638,7 +890,7 @@ mod tests {
             assert!(prepare_locomotion_mode(&mut mode, &forward).is_err());
             mode = selected;
             assert_eq!(mode, Some(gait));
-            for command in [&forward, &stop, &Command::Status] {
+            for command in [&forward, &left, &right, &stop, &Command::Status] {
                 assert_eq!(prepare_locomotion_mode(&mut mode, command), Ok(Some(gait)));
                 assert_eq!(mode, Some(gait));
             }

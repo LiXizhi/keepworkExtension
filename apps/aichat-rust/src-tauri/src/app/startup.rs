@@ -45,7 +45,7 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::{
     webview::{NewWindowResponse, PageLoadEvent},
-    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
 pub(super) fn handle_new_window(
@@ -344,6 +344,7 @@ pub fn run() {
         pet_approval_return: Mutex::new(None),
         pet_audio: Arc::new(pet_audio::PetAudioRelay::default()),
         remote_voice: Arc::new(crate::remote_voice::RemoteVoice::new(&profile_dir)),
+        remote_demo: Default::default(),
         pet_menu: pet_menu::Session::default(),
         dev_server: Mutex::new(initial_dev_srv),
         entry_url: Mutex::new(initial_entry),
@@ -426,6 +427,14 @@ pub fn run() {
             core_for_setup.remote_voice.set_recording_focus(move || {
                 super::pet_host::focus_pet_for_remote_voice(&pet_app)
             });
+            let key_activity_app = app_handle.clone();
+            core_for_setup.remote_voice.set_key_activity_callback(move |activity| {
+                let _ = key_activity_app.emit_to(
+                    "remote-voice",
+                    "aichat-desktop:remote-voice-keys",
+                    activity,
+                );
+            });
             #[cfg(windows)]
             crate::remote_voice::home_windows::install();
             let back_app = app_handle.clone();
@@ -438,7 +447,7 @@ pub fn run() {
                 // expired or disconnected input without clearing another app.
                 main_window::run_on_window_thread(&back_app, move || {
                     let active = pressed.elapsed() < Duration::from_secs(1)
-                        && handle.state::<Arc<AppCore>>().remote_voice.current(generation);
+                        && handle.state::<Arc<AppCore>>().remote_voice.input_allowed(generation, pressed);
                     let routed = if active { super::pet_host::route_remote_back(&handle) } else { Ok(true) };
                     let _ = done.send(routed);
                 }).map_err(|e| e.to_string())?;
@@ -447,7 +456,7 @@ pub fn run() {
                 #[cfg(any(target_os = "macos", windows))]
                 {
                     let voice = back_app.state::<Arc<AppCore>>().remote_voice.clone();
-                    if super::remote_voice_host::clear_main_composer(&back_app, pressed, move || voice.current(generation))? {
+                    if super::remote_voice_host::clear_main_composer(&back_app, pressed, move || voice.input_allowed(generation, pressed))? {
                         return Ok(BackRoute::MainComposer);
                     }
                 }
@@ -459,7 +468,7 @@ pub fn run() {
                 let pressed = std::time::Instant::now();
                 let _ = main_window::run_on_window_thread(&home_app, move || {
                     if pressed.elapsed() < Duration::from_secs(1)
-                        && handle.state::<Arc<AppCore>>().remote_voice.current(generation)
+                        && handle.state::<Arc<AppCore>>().remote_voice.input_allowed(generation, pressed)
                     {
                         main_window::toggle_remote_home(&handle);
                     }
@@ -730,6 +739,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             super::bumi::bumi_control,
+            super::bumi::remote_input::bumi_remote_input,
             super::browser_surface::desktop_browser_surface,
             super::screenshot::desktop_capture_screenshot,
             super::screenshot::desktop_get_screenshot_permission,
@@ -770,6 +780,8 @@ pub fn run() {
             updates_window::updates_window_apply_mcp,
             updates_window::updates_window_apply_desktop,
             super::remote_voice_host::remote_voice_status,
+            super::remote_voice_host::remote_voice_set_demo_mode,
+            super::remote_voice_host::remote_voice_enter_demo,
             super::remote_dialogue::remote_voice_dialogue_closed,
             super::remote_voice_host::remote_voice_start,
             super::remote_voice_host::remote_voice_stop,
@@ -820,6 +832,7 @@ pub fn run() {
                     }
                 }
                 if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+                    core_for_events.remote_demo.stop(&voice);
                     voice.shutdown();
                 }
             });

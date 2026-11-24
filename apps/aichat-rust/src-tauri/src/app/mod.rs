@@ -15,6 +15,7 @@ mod pet_host;
 #[cfg(target_os = "macos")]
 mod pet_home_overlay;
 mod platform;
+mod remote_demo;
 mod remote_voice_host;
 mod remote_dialogue;
 mod remote_phone_view;

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 interface Device { id: string; name: string; rssi: number | null }
@@ -8,11 +8,13 @@ interface Snapshot {
   available: boolean;
   devices: Device[];
   connected: Device | null;
+  connectionId?: string | null;
   battery: number | null;
   status: number | null;
   moving: boolean;
   walkMode: boolean;
   locomotionMode?: LocomotionMode | null;
+  remoteMotionVersion?: number;
   listening: boolean;
 }
 interface BluetoothMessage {
@@ -28,14 +30,13 @@ interface BluetoothMessage {
 type Command =
   | { action: "battery" | "status" | PostureAction }
   | { action: "volume"; percent: number }
-  | { action: "move"; vx: number; vyaw: number }
+  | ({ action: "move" } & Motion)
   | { action: "speak"; text: string };
 type Request =
-  | { operation: "status" | "scan" | "disconnect" }
-  | { operation: "connect"; id: string }
+  | { operation: "status" | "disconnect" }
   | { operation: "listen"; enabled: boolean }
-  | { operation: "send"; command: Command };
-interface Motion { vx: number; vyaw: number }
+  | { operation: "send"; command: Command; remoteCaptureId?: number };
+interface Motion { vx: number; vyaw: number; vy?: number }
 
 const picker = document.getElementById("device-picker") as HTMLSelectElement;
 const volume = document.getElementById("volume") as HTMLInputElement;
@@ -45,6 +46,7 @@ const queryButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[d
 const moveButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-move]"));
 const pad = document.getElementById("direction-pad")!;
 const stick = document.getElementById("motion-stick") as HTMLButtonElement;
+const stickHorizontal = document.getElementById("stick-horizontal") as HTMLSelectElement;
 const commandLabels: Record<string, string> = {
   battery: "电量已更新", status: "状态已更新", dance: "跳舞指令已发送",
   wave: "挥手指令已发送", handshake: "握手指令已发送", cheer: "欢呼指令已发送",
@@ -53,10 +55,11 @@ const commandLabels: Record<string, string> = {
   run: "全身行走模式指令已发送。",
   volume: "音量指令已发送", speak: "说话指令已发送",
 };
-// The controls use the SDK's longitudinal and turning axes.
+// The remote and jog buttons use a fixed step. The virtual stick scales to ±127.
+const DIGITAL_AXIS = 80;
 const moveVectors: Record<string, Motion> = {
-  forward: { vx: 40, vyaw: 0 }, backward: { vx: -40, vyaw: 0 },
-  left: { vx: 0, vyaw: 40 }, right: { vx: 0, vyaw: -40 },
+  forward: { vx: DIGITAL_AXIS, vyaw: 0 }, backward: { vx: -DIGITAL_AXIS, vyaw: 0 },
+  left: { vx: 0, vyaw: DIGITAL_AXIS }, right: { vx: 0, vyaw: -DIGITAL_AXIS },
 };
 const zeroMotion = (): Motion => ({ vx: 0, vyaw: 0 });
 const MOTION_REFRESH_MS = 100;
@@ -66,6 +69,12 @@ const bleStatusLabels: Record<number, string> = {
 };
 let snapshot: Snapshot = { available: true, devices: [], connected: null, battery: null, status: null, moving: false, walkMode: false, listening: false };
 let pending = false;
+const CONNECT_RETRY_MS = 20_000;
+const MAX_CONNECT_RETRIES = 3;
+const connectionPageId = Math.random().toString(36).slice(2);
+let nextAttempt = 0;
+interface ConnectionAttempt { id: string; retryTimer?: number }
+let connectionAttempt: ConnectionAttempt | null = null;
 let motionBusy = false;
 let motionFailed = false;
 let disconnecting = false;
@@ -75,7 +84,8 @@ let grip: { pointerId: number; x: number; y: number; radius: number } | null = n
 let stickKey: string | null = null;
 let desiredMotion = zeroMotion();
 let sentMotion = zeroMotion();
-let operation = "点击“扫描设备”开始。";
+const connectionHint = "查找设备约需 20 秒，未连接时最多自动重试 3 次。";
+let operation = connectionHint;
 let error = "";
 let deviceList = "";
 let messages: BluetoothMessage[] = [];
@@ -83,13 +93,40 @@ let sentFrames = 0;
 let receivedFrames = 0;
 let eventsRegistered = false;
 
+type Direction = "up" | "down" | "left" | "right";
+interface RemoteSample { keys: Direction[]; sampledAt: number; error?: string }
+interface RemoteSession {
+  id: number;
+  drive: boolean;
+  ready: boolean;
+  lastSample: number;
+  held: string | null;
+  blocked: boolean;
+  watchdog?: number;
+}
+const remoteDirections: Record<Direction, string> = { up: "上", down: "下", left: "左", right: "右" };
+const REMOTE_TIMEOUT_MS = 500;
+let remote: RemoteSession | null = null;
+let nextCapture = Date.now();
+let remoteNote = "可先检查按键，诊断期间不会发送运动指令。";
+let lostConnectionId: string | null = null;
+let disconnectMonitor: Promise<void> | undefined;
+
+function acceptSnapshot(next: Snapshot) {
+  // A completed GATT request can arrive after its disconnect notification.
+  if (next.connectionId && next.connectionId === lostConnectionId) return;
+  snapshot = next;
+}
+
 function button(id: string) { return document.getElementById(id) as HTMLButtonElement; }
 function text(id: string, value: string) {
   const element = document.getElementById(id)!;
   if (element.textContent !== value) element.textContent = value;
 }
-function sameMotion(left: Motion, right: Motion) { return left.vx === right.vx && left.vyaw === right.vyaw; }
-function isZero(motion: Motion) { return motion.vx === 0 && motion.vyaw === 0; }
+function sameMotion(left: Motion, right: Motion) {
+  return left.vx === right.vx && left.vyaw === right.vyaw && (left.vy ?? 0) === (right.vy ?? 0);
+}
+function isZero(motion: Motion) { return motion.vx === 0 && motion.vyaw === 0 && !motion.vy; }
 function moving() { return snapshot.moving || !isZero(desiredMotion) || !!grip || !!stickKey; }
 function requestedMode(): LocomotionMode | null {
   if (snapshot.locomotionMode === undefined) return snapshot.walkMode ? "walk" : null;
@@ -181,11 +218,15 @@ function render() {
   const connectionState = document.getElementById("connection-state")!;
   connectionState.dataset.state = connected ? "connected" : pending ? "working" : "offline";
   text("connection-state", connected ? isMoving ? "移动控制中" : "已连接" : pending ? "处理中" : "未连接");
-  picker.disabled = pending || connected || unavailable || !snapshot.devices.length;
-  button("scan").disabled = pending || connected || unavailable;
-  text("scan", pending && !connected ? "请稍候…" : "扫描设备");
-  button("connect").disabled = pending || connected || unavailable || !picker.value;
+  const showChoice = !connected && !pending && snapshot.devices.length > 1;
+  document.getElementById("device-choice")!.hidden = !showChoice;
+  picker.disabled = !showChoice || unavailable;
+  button("connect").disabled = pending || unavailable || (showChoice && !picker.value);
   button("connect").hidden = connected;
+  button("cancel-connect").hidden = !connectionAttempt;
+  text("connect", pending && !connected ? "请稍候…" : showChoice ? "连接所选机器人" : "连接机器人");
+  button("rescan").hidden = !showChoice;
+  button("rescan").disabled = pending || unavailable;
   button("disconnect").hidden = !connected;
   button("disconnect").disabled = !connected || disconnecting;
   const controlsBusy = pending || !connected || disconnecting || isMoving;
@@ -199,11 +240,22 @@ function render() {
   button("run-mode").disabled = legacyHost || modeDisabled;
   text("walk-mode", mode === "walk" ? "重发行走模式指令" : "进入行走模式");
   text("run-mode", mode === "run" ? "重发全身行走模式指令" : "进入全身行走模式");
-  const motionDisabled = !connected || unavailable || !mode || disconnecting || motionFailed || (pending && !motionBusy);
+  const motionDisabled = !!remote || !connected || unavailable || !mode || disconnecting || motionFailed || (pending && !motionBusy);
   stick.disabled = motionDisabled || (isMoving && !grip && !stickKey);
+  const supportsLateral = snapshot.remoteMotionVersion === 1 || snapshot.remoteMotionVersion === 2;
+  if (!supportsLateral || !connected) stickHorizontal.value = "yaw";
+  stickHorizontal.disabled = !supportsLateral || motionDisabled || isMoving || motionBusy || stopQueued;
   for (const control of moveButtons) {
     control.disabled = motionDisabled || !!grip || !!stickKey;
-    const active = !isZero(desiredMotion) && sameMotion(desiredMotion, moveVectors[control.dataset.move!]);
+    const direction = control.dataset.move!;
+    if (direction === "left" || direction === "right") {
+      const label = (direction === "left" ? "左" : "右") + (stickHorizontal.value === "lateral" ? "移" : "转");
+      if (control.textContent !== label) {
+        control.textContent = label;
+        control.setAttribute("aria-label", `按住${label}`);
+      }
+    }
+    const active = !isZero(desiredMotion) && sameMotion(desiredMotion, padStep(direction));
     control.setAttribute("aria-pressed", String(active));
   }
   button("stop-move").disabled = !connected || unavailable;
@@ -214,16 +266,29 @@ function render() {
   text("battery", snapshot.battery === null ? "—" : `${snapshot.battery}%`);
   const status = snapshot.status;
   text("robot-status", status === null ? "—" : `${bleStatusLabels[status] ?? "状态码"}（${status}）`);
+  button("remote-toggle").disabled = remote ? !remote.drive :
+    snapshot.remoteMotionVersion !== 2 || !mode || controlsBusy || motionFailed;
+  button("remote-diagnose").disabled = remote ? remote.drive : unavailable || pending || disconnecting || isMoving;
+  text("remote-toggle", remote?.drive ? "关闭方向键遥控" : "开启方向键遥控");
+  text("remote-diagnose", remote && !remote.drive ? "结束检查" : "检查按键");
+  text("remote-status", !remote && connected && snapshot.remoteMotionVersion !== 2
+    ? "当前桌面接口不支持遥控器左右转向。可继续使用屏幕摇杆。" : remoteNote);
   button("listen-toggle").disabled = pending || !connected || isMoving || disconnecting;
   text("listen-toggle", snapshot.listening && eventsRegistered ? "停止监听" : "开始监听");
   renderLogStatus();
   text("operation", operation);
   text("error", error || (unavailable ? "Bumi 蓝牙控制目前支持 macOS 和 Windows 桌面版。" : ""));
+  syncRemoteShield();
 }
 
 async function pumpMotion(refresh = false) {
   if (pending || motionFailed || !snapshot.connected) return;
+  if (remote?.drive && !isZero(desiredMotion) && Date.now() - remote.lastSample > REMOTE_TIMEOUT_MS) {
+    endRemote("遥控器输入超时，请重新开启。");
+    return;
+  }
   const next = stopQueued ? zeroMotion() : { ...desiredMotion };
+  const source = remote?.drive && !isZero(next) ? remote : null;
   if (!stopQueued && sameMotion(next, sentMotion) && !(refresh && !isZero(next))) return;
   stopQueued = false;
   motionBusy = true;
@@ -232,12 +297,21 @@ async function pumpMotion(refresh = false) {
   if (!refresh) operation = isZero(next) ? "正在停止移动…" : "正在发送移动指令…";
   render();
   try {
-    snapshot = await invoke<Snapshot>("bumi_control", {
-      request: { operation: "send", command: { action: "move", ...next } } satisfies Request,
-    });
+    acceptSnapshot(await invoke<Snapshot>("bumi_control", {
+      request: { operation: "send", command: { action: "move", ...next },
+        remoteCaptureId: source?.id } satisfies Request,
+    }));
+    if (!snapshot.connected) return;
     sentMotion = next;
     operation = isZero(next) ? "停止指令已发送。" : "正在发送移动指令，松开即发送停止指令。";
   } catch (cause) {
+    // The native check runs immediately before the GATT write. A quick tap
+    // can be released while the request is waiting for that check.
+    if (source && remote === source && String(cause) === "遥控方向键已释放或遥控会话已结束。") {
+      if (!stopQueued) setMotion(zeroMotion(), true);
+      return;
+    }
+    if (remote?.drive) endRemote("机器人通信异常，遥控已关闭。请确认机器人已停稳。");
     error = String(cause);
     resetStick();
     window.clearInterval(refreshTimer);
@@ -247,9 +321,9 @@ async function pumpMotion(refresh = false) {
     operation = isZero(next) ? "停止指令未确认，请立即断开连接。" : "移动指令异常，请检查连接。";
     if (!isZero(next)) {
       try {
-        snapshot = await invoke<Snapshot>("bumi_control", {
+        acceptSnapshot(await invoke<Snapshot>("bumi_control", {
           request: { operation: "send", command: { action: "move", vx: 0, vyaw: 0 } } satisfies Request,
-        });
+        }));
         sentMotion = zeroMotion();
         motionFailed = false;
         operation = "移动指令异常，已尝试停止。";
@@ -293,33 +367,176 @@ function stopInput(force = false) {
   render();
 }
 
-async function request(request: Request, success = "") {
+function endRemote(note: string) {
+  const session = remote;
+  if (!session) return;
+  remote = null;
+  window.clearInterval(session.watchdog);
+  remoteNote = note;
+  if (session.drive && !isZero(desiredMotion)) stopInput();
+  void invoke("bumi_remote_input", { enabled: false, captureId: session.id }).catch(() => {});
+  render();
+}
+
+function remoteSample(session: RemoteSession, sample: RemoteSample) {
+  if (session !== remote) return;
+  if (sample.error) { endRemote(sample.error); return; }
+  const age = Date.now() - sample.sampledAt;
+  if (!Number.isFinite(age) || age < -REMOTE_TIMEOUT_MS || age > REMOTE_TIMEOUT_MS ||
+      !Array.isArray(sample.keys) || sample.keys.some(key => !Object.prototype.hasOwnProperty.call(remoteDirections, key))) {
+    endRemote("遥控器按键状态已失效，请重新开启。");
+    return;
+  }
+  session.lastSample = sample.sampledAt;
+  const held = sample.keys.join("+");
+  if (held === session.held) return;
+  const previous = session.held;
+  session.held = held;
+  if (!session.drive) {
+    const names = sample.keys.map(key => remoteDirections[key]).join(" + ");
+    remoteNote = names ? `检测到方向键：${names}` : "四个方向键均已释放。";
+  } else if (!held) {
+    session.blocked = false;
+    if (!isZero(desiredMotion)) stopInput();
+    if (session.ready) remoteNote = "四个方向键均已释放。";
+  } else if (!session.ready || previous !== "" || sample.keys.length !== 1 || (pending && !motionBusy)) {
+    session.blocked = true;
+    if (!isZero(desiredMotion)) stopInput();
+    remoteNote = "请松开全部方向键，再按一个方向。";
+  } else if (!session.blocked) {
+    const key = sample.keys[0];
+    const direction = key === "up" ? "forward" : key === "down" ? "backward" : key;
+    remoteNote = `方向键：${remoteDirections[key]} · 松开即停`;
+    setMotion(moveVectors[direction]);
+  }
+  render();
+}
+
+function watchRobotDisconnect() {
+  // Keep watching the BLE connection even if a failed write closes remote
+  // input before the corresponding native disconnect event reaches the page.
+  disconnectMonitor ??= listen<{ id: string; connectionId: string }>("bumi:disconnected", ({ payload }) => {
+    if (!payload.connectionId || snapshot.connectionId !== payload.connectionId ||
+        snapshot.connected?.id !== payload.id) return;
+    lostConnectionId = payload.connectionId;
+    snapshot = { ...snapshot, connected: null, connectionId: null, moving: false, walkMode: false,
+      locomotionMode: null, status: null, battery: null, listening: false };
+    window.clearInterval(refreshTimer);
+    desiredMotion = sentMotion = zeroMotion();
+    stopQueued = false;
+    resetStick();
+    operation = "机器人蓝牙连接已断开，停止状态未知。请现场确认机器人已停稳。";
+    if (remote?.drive) endRemote(operation);
+    render();
+  }, { target: "bumi-control" }).then(() => {}).catch(cause => {
+    disconnectMonitor = undefined;
+    throw cause;
+  });
+  return disconnectMonitor;
+}
+
+async function startRemote(drive: boolean) {
+  if (remote) { endRemote("遥控器方向键已关闭。"); return; }
+  if (pending || disconnecting || moving()) return;
+  if (drive && (!snapshot.connected || !requestedMode() || snapshot.remoteMotionVersion !== 2)) return;
+  const session: RemoteSession = {
+    id: ++nextCapture, drive, ready: false, lastSample: Date.now(), held: null,
+    blocked: true,
+  };
+  remote = session;
+  remoteNote = drive ? "正在确认机器人当前步态…" : "正在识别已配对的小米遥控器…";
+  render();
+  try {
+    if (drive) {
+      await watchRobotDisconnect();
+      if (remote !== session) return;
+      await request({ operation: "send", command: { action: "status" } });
+      if (remote !== session) return;
+      const mode = requestedMode();
+      if (error || !snapshot.connected || !mode || snapshot.status !== (mode === "walk" ? 2 : 3)) {
+        endRemote("机器人尚未确认所选步态。请让它站稳并进入行走模式后重试。");
+        return;
+      }
+    }
+    const events = new Channel<RemoteSample>();
+    events.onmessage = sample => remoteSample(session, sample);
+    const device = await invoke<string>("bumi_remote_input", { enabled: true, captureId: session.id, events, drive });
+    if (remote !== session) {
+      await invoke("bumi_remote_input", { enabled: false, captureId: session.id });
+      return;
+    }
+    session.ready = true;
+    if (session.held === null) session.lastSample = Date.now();
+    remoteNote = drive ? `${device} · 上、下键控制前后，左、右键控制转向。` : `${device} · 请依次按下并松开四个方向键。`;
+    session.watchdog = window.setInterval(() => {
+      if (remote === session && Date.now() - session.lastSample > REMOTE_TIMEOUT_MS) {
+        endRemote("遥控器输入超时，请重新开启。");
+      }
+    }, MOTION_REFRESH_MS);
+    render();
+  } catch (cause) {
+    if (remote === session) endRemote(`无法开启遥控器方向键：${String(cause)}`);
+  }
+}
+
+const remoteShield = document.getElementById("remote-shield") as HTMLDialogElement;
+let shieldSyncing = false;
+function syncRemoteShield() {
+  const driving = remote?.drive === true;
+  shieldSyncing = true;
+  try {
+    if (driving && !remoteShield.open) {
+      remoteShield.showModal();
+      remoteShield.focus();
+    } else if (!driving && remoteShield.open) {
+      remoteShield.close();
+    }
+  } finally {
+    shieldSyncing = false;
+  }
+  text("remote-shield-status", remoteNote);
+}
+function swallowRemoteKeys(event: KeyboardEvent) {
+  if (!remoteShield.open) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+for (const type of ["keydown", "keyup", "keypress"] as const) {
+  window.addEventListener(type, swallowRemoteKeys, true);
+}
+remoteShield.addEventListener("cancel", event => event.preventDefault());
+remoteShield.addEventListener("close", () => {
+  if (!shieldSyncing && remote?.drive) endRemote("遥控器方向键已关闭。");
+});
+button("remote-shield-close").addEventListener("click", () => {
+  if (remote?.drive) endRemote("遥控器方向键已关闭。");
+});
+button("remote-diagnose").addEventListener("click", () => void startRemote(false));
+button("remote-toggle").addEventListener("click", () => void startRemote(true));
+
+async function request(request: Request, success = "", activity = "") {
   if (pending || (disconnecting && request.operation !== "disconnect")) return;
   pending = true;
   error = "";
-  operation = request.operation === "scan" ? "正在扫描附近的 Bumi，稀疏广播可能需要约 20 秒…"
-    : request.operation === "connect" ? "正在连接并读取蓝牙服务…"
-      : request.operation === "disconnect" ? "正在断开连接…" : "正在与 Bumi 通信…";
+  operation = activity || (request.operation === "disconnect" ? "正在断开连接…" : "正在与 Bumi 通信…");
   render();
   try {
     if (request.operation === "listen" && request.enabled) await registerMonitorEvents();
-    snapshot = await invoke<Snapshot>("bumi_control", { request });
-    if (request.operation === "status" && snapshot.listening) await registerMonitorEvents();
-    operation = success || (request.operation === "scan"
-      ? snapshot.devices.length ? `发现 ${snapshot.devices.length} 台设备，请选择并连接。` : "未发现 Bumi。请确认机器人已开机，且未连接手机 App。"
-      : request.operation === "connect" ? `已连接 ${snapshot.connected?.name || "Bumi"}。`
-        : request.operation === "disconnect" ? "已断开连接。" : "状态已更新。");
-    if (request.operation === "connect") clearMessages();
-    if (request.operation === "connect" || request.operation === "disconnect") {
-      resetStick();
-      desiredMotion = zeroMotion();
-      sentMotion = zeroMotion();
-      motionFailed = false;
-      stopQueued = false;
+    acceptSnapshot(await invoke<Snapshot>("bumi_control", { request }));
+    if (remote?.drive && remote.ready && (!snapshot.connected ||
+        snapshot.status !== (requestedMode() === "walk" ? 2 : 3) || !requestedMode())) {
+      endRemote("连接或步态已改变。请确认机器人状态后重新开启遥控。");
     }
+    if (request.operation === "status" && snapshot.listening) await registerMonitorEvents();
+    operation = success || (request.operation === "disconnect" ? "已断开连接。" : "状态已更新。");
+    if (request.operation === "disconnect") resetConnectionMotion();
   } catch (cause) {
     error = String(cause);
-    operation = "操作未完成，请检查机器人与蓝牙状态后重试。";
+    if (request.operation === "send" && request.command.action === "battery") {
+      operation = "本次电量查询未完成。";
+    } else {
+      operation = "操作未完成，请检查机器人与蓝牙状态后重试。";
+    }
   } finally {
     pending = false;
     render();
@@ -330,17 +547,289 @@ async function request(request: Request, success = "") {
 function sendPostureCommand(action: PostureAction) {
   if (pending || disconnecting || moving() || motionFailed || !snapshot.connected) return;
   if (action === "run" && snapshot.locomotionMode === undefined) return;
+  if (remote) endRemote("步态或姿态已切换，请重新开启遥控。");
   // A failed write can leave the robot's gait unknown. Require a fresh selection.
   snapshot.walkMode = false;
   if (snapshot.locomotionMode !== undefined) snapshot.locomotionMode = null;
   void request({ operation: "send", command: { action } }, commandLabels[action]);
 }
 
-picker.addEventListener("change", () => { error = ""; render(); });
-button("scan").addEventListener("click", () => void request({ operation: "scan" }));
-button("connect").addEventListener("click", () => {
-  if (picker.value) void request({ operation: "connect", id: picker.value });
+function normalizeVoice(raw: string) {
+  return raw.trim().replace(/[。！？!?,，.\s]/g, "");
+}
+function voiceNote(message: string) { text("voice-status", message); }
+function pressControl(control: HTMLButtonElement | undefined, unavailable: string) {
+  if (!control || control.disabled || control.hidden) {
+    voiceNote(unavailable);
+    return false;
+  }
+  control.click();
+  return true;
+}
+function resetConnectionMotion() {
+  resetStick();
+  desiredMotion = zeroMotion();
+  sentMotion = zeroMotion();
+  motionFailed = false;
+  stopQueued = false;
+}
+
+async function readConnectedRobot() {
+  if (!snapshot.connected || disconnecting) return;
+  const name = snapshot.connected.name || "Bumi";
+  await request(
+    { operation: "send", command: { action: "battery" } },
+    `已连接 ${name}。电量已更新。`,
+    `已连接 ${name}。正在查询电量和状态…`,
+  );
+  const batteryError = error;
+  if (!snapshot.connected || disconnecting) return;
+  await request(
+    { operation: "send", command: { action: "status" } },
+    batteryError ? `已连接 ${name}。状态已更新。` : `已连接 ${name}。电量和状态已更新。`,
+    `已连接 ${name}。正在查询状态…`,
+  );
+  if (!batteryError || !snapshot.connected || disconnecting) return;
+  if (error) {
+    error = `${batteryError} ${error}`;
+    render();
+    return;
+  }
+  error = batteryError;
+  operation = `已连接 ${name}。状态已更新，电量查询未完成。`;
+  render();
+}
+async function tryConnection(selectedId: string, retry = 0) {
+  const attempt: ConnectionAttempt = { id: `${connectionPageId}-${++nextAttempt}` };
+  const started = Date.now();
+  const prefix = retry ? `第 ${retry}/${MAX_CONNECT_RETRIES} 次重试。` : "";
+  connectionAttempt = attempt;
+  pending = true;
+  error = "";
+  let id = selectedId;
+  try {
+    if (!id) {
+      operation = prefix + "正在查找附近的 Bumi，请等待约 20 秒。";
+      render();
+      const found = await invoke<Snapshot>("bumi_control", { request: { operation: "scan", attemptId: attempt.id } });
+      if (connectionAttempt !== attempt) return;
+      acceptSnapshot(found);
+      if (snapshot.devices.length > 1) {
+        operation = `发现 ${snapshot.devices.length} 台设备，请选择要连接的一台。`;
+        return;
+      }
+      id = snapshot.devices[0]?.id;
+      if (!id) throw "未发现 Bumi。请确认机器人已开机，且未连接手机 App。";
+    }
+    operation = prefix + "正在连接并读取蓝牙服务…";
+    render();
+    const result = await invoke<Snapshot>("bumi_control", { request: { operation: "connect", id, attemptId: attempt.id } });
+    if (connectionAttempt !== attempt) return;
+    acceptSnapshot(result);
+    if (!snapshot.connected) throw "未能连接 Bumi。";
+    resetConnectionMotion();
+    clearMessages();
+  } catch (cause) {
+    if (connectionAttempt !== attempt) return;
+    error = String(cause);
+    if (retry === MAX_CONNECT_RETRIES) {
+      operation = `已重试 ${MAX_CONNECT_RETRIES} 次，仍未连接。请检查机器人和系统蓝牙后重新连接。`;
+      return;
+    }
+    // Native discovery needs its full scan window. Wait only the remainder
+    // after a fast failure, and never overlap two Bluetooth operations.
+    const remaining = Math.max(0, CONNECT_RETRY_MS - (Date.now() - started));
+    operation = remaining
+      ? `将在 ${Math.ceil(remaining / 1000)} 秒后进行第 ${retry + 1}/${MAX_CONNECT_RETRIES} 次重试。`
+      : `即将进行第 ${retry + 1}/${MAX_CONNECT_RETRIES} 次重试。`;
+    attempt.retryTimer = window.setTimeout(() => {
+      if (connectionAttempt === attempt) void tryConnection(selectedId, retry + 1);
+    }, remaining);
+    render();
+    return;
+  } finally {
+    if (connectionAttempt === attempt && attempt.retryTimer === undefined) {
+      connectionAttempt = null;
+      pending = false;
+      render();
+    }
+  }
+  await readConnectedRobot();
+}
+
+async function cancelConnection() {
+  const attempt = connectionAttempt;
+  if (!attempt) return;
+  connectionAttempt = null;
+  operation = "正在取消连接…";
+  error = "";
+  render();
+  try {
+    if (attempt.retryTimer !== undefined) {
+      window.clearTimeout(attempt.retryTimer);
+    } else {
+      acceptSnapshot(await invoke<Snapshot>("bumi_control", {
+        request: { operation: "cancelConnection", attemptId: attempt.id },
+      }));
+    }
+    operation = "已取消连接。";
+  } catch (cause) {
+    error = String(cause);
+    operation = "已停止重试，未能确认蓝牙连接状态。";
+  } finally {
+    pending = false;
+    render();
+  }
+}
+
+function connectRobot() {
+  if (pending || disconnecting || snapshot.connected || !snapshot.available) return;
+  if (snapshot.devices.length > 1) {
+    if (picker.value) void tryConnection(picker.value);
+    return;
+  }
+  void tryConnection("");
+}
+function rescanRobots() {
+  if (pending || disconnecting || snapshot.connected || !snapshot.available) return;
+  picker.value = "";
+  void tryConnection("");
+}
+function jog(direction: string) {
+  if (remote) { voiceNote("请先关闭小米遥控器方向键。"); return; }
+  if (!snapshot.connected || disconnecting) {
+    voiceNote("请先连接机器人。");
+    return;
+  }
+  if (!requestedMode()) {
+    voiceNote("请先说“行走”或“全身行走”，并确认机器人已经站稳。");
+    return;
+  }
+  if (grip || stickKey || moving()) {
+    voiceNote("机器人正在移动。先说“停止”。");
+    return;
+  }
+  const motion = moveVectors[direction];
+  setMotion(motion);
+  voiceNote("正在短距离点动，松手一样会停止。");
+  window.setTimeout(() => {
+    if (!grip && stickKey === null && sameMotion(desiredMotion, motion)) stopInput();
+  }, 800);
+}
+function runVoiceCommand(raw: string) {
+  const phrase = normalizeVoice(raw);
+  const field = document.getElementById("voice-command") as HTMLInputElement;
+  if (!phrase) {
+    voiceNote("请说一个指令，例如：连接、行走、前进、停止、跳舞。");
+    return;
+  }
+  field.value = "";
+  if (phrase === "连接" || phrase === "连接机器人") {
+    if (snapshot.connected) {
+      voiceNote("已经连上了。");
+      return;
+    }
+    if (snapshot.devices.length > 1 && !picker.value) {
+      voiceNote("发现多台设备，请先在列表里选择一台。");
+      return;
+    }
+    voiceNote(snapshot.devices.length > 1 ? "正在连接所选机器人…" : "正在查找机器人，请等待约 20 秒。");
+    void connectRobot();
+    return;
+  }
+  if (phrase === "重新查找") {
+    voiceNote("正在重新查找，请等待约 20 秒。");
+    void rescanRobots();
+    return;
+  }
+  const spoken = phrase.match(/^(说话|说)(.+)$/);
+  if (spoken) {
+    speech.value = spoken[2].slice(0, 120);
+    render();
+    if (pressControl(button("speak"), "现在不能让机器人说话。请先连接，并等它停稳。")) voiceNote("已提交说话指令。");
+    return;
+  }
+  const volumeRequest = phrase.match(/^音量(\d{1,3})$/);
+  if (volumeRequest) {
+    const percent = Math.min(100, Number(volumeRequest[1]));
+    volume.value = String(percent);
+    text("volume-value", `${percent}%`);
+    if (pressControl(button("set-volume"), "现在不能设置音量。")) voiceNote(`已提交音量 ${percent}%。`);
+    return;
+  }
+  if (!snapshot.connected) {
+    voiceNote("请先说“连接”，或点“连接机器人”。");
+    return;
+  }
+  const posture = ({ 跳舞: "dance", 挥手: "wave", 握手: "handshake", 欢呼: "cheer", 起身: "standUp", 一键起身: "standUp", 收纳: "standToFall", 一键收纳: "standToFall" } as Record<string, string>)[phrase];
+  if (posture) {
+    const control = actionButtons.find(item => item.dataset.command === posture);
+    if (pressControl(control, "现在不能执行这个动作。请先连接，并等机器人停稳。")) voiceNote("已提交动作。起身和收纳仍会要求确认。");
+    return;
+  }
+  const query = ({ 电量: "battery", 查询电量: "battery", 状态: "status", 查询状态: "status" } as Record<string, string>)[phrase];
+  if (query) {
+    const control = queryButtons.find(item => item.dataset.query === query);
+    if (pressControl(control, "现在不能查询。")) voiceNote("已提交查询。");
+    return;
+  }
+  if (phrase === "行走" || phrase === "行走模式" || phrase === "进入行走模式") {
+    if (pressControl(button("walk-mode"), "现在不能切换步态。")) voiceNote("已提交行走模式。");
+    return;
+  }
+  if (phrase === "全身行走" || phrase === "全身行走模式" || phrase === "进入全身行走模式") {
+    if (pressControl(button("run-mode"), "当前不能切换全身行走。")) voiceNote("已提交全身行走模式。");
+    return;
+  }
+  if (phrase === "停止" || phrase === "停下") {
+    stopAllInput(true);
+    voiceNote("已发送停止。");
+    return;
+  }
+  if (phrase === "断开" || phrase === "断开连接") {
+    if (pressControl(button("disconnect"), "现在不能断开。")) voiceNote("正在断开连接…");
+    return;
+  }
+  if (phrase === "开始监听" || phrase === "停止监听") {
+    const active = snapshot.listening && eventsRegistered;
+    const enable = phrase === "开始监听";
+    if (active === enable) {
+      voiceNote(enable ? "已经在监听。" : "监听未开启。");
+      return;
+    }
+    if (pressControl(button("listen-toggle"), "现在不能切换监听。")) voiceNote(enable ? "已开启监听。" : "已停止监听。");
+    return;
+  }
+  if (phrase === "清空" || phrase === "清空记录") {
+    if (pressControl(button("clear-messages"), "没有可清空的记录。")) voiceNote("已清空监听记录。");
+    return;
+  }
+  const direction = ({ 前进: "forward", 后退: "backward", 左转: "left", 右转: "right" } as Record<string, string>)[phrase];
+  if (direction) {
+    jog(direction);
+    return;
+  }
+  voiceNote("不认识这个指令。可以说：连接、行走、前进、停止、跳舞、音量50、说你好。");
+}
+picker.addEventListener("change", () => {
+  error = "";
+  if (!snapshot.connected && !pending && snapshot.devices.length > 1 && picker.value) {
+    connectRobot();
+    return;
+  }
+  render();
 });
+button("connect").addEventListener("click", () => { void connectRobot(); });
+button("cancel-connect").addEventListener("click", () => { void cancelConnection(); });
+button("rescan").addEventListener("click", () => { void rescanRobots(); });
+const voiceCommand = document.getElementById("voice-command") as HTMLInputElement;
+voiceCommand.addEventListener("keydown", event => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    runVoiceCommand(voiceCommand.value);
+  }
+});
+button("voice-run").addEventListener("click", () => runVoiceCommand(voiceCommand.value));
 button("listen-toggle").addEventListener("click", () => {
   const enabled = !(snapshot.listening && eventsRegistered);
   void request({ operation: "listen", enabled }, enabled ? "蓝牙消息监听已开启。" : "蓝牙消息监听已停止。");
@@ -351,7 +840,7 @@ button("run-mode").addEventListener("click", () => sendPostureCommand("run"));
 button("disconnect").addEventListener("click", () => {
   if (disconnecting) return;
   disconnecting = true;
-  stopInput();
+  stopAllInput();
   operation = "正在停止移动并断开连接…";
   render();
   const disconnect = async () => {
@@ -393,9 +882,16 @@ stick.addEventListener("pointermove", event => {
   const x = dx / scale;
   const y = dy / scale;
   stick.style.transform = `translate(${x * grip.radius}px, ${y * grip.radius}px)`;
-  // NOETIX Run's portrait stick drives longitudinal speed and yaw together.
-  setMotion({ vx: signedAxis(-y), vyaw: signedAxis(-x) });
+  setMotion(stickVector(signedAxis(-y), signedAxis(-x)));
 });
+function stickVector(vx: number, horizontal: number): Motion {
+  return stickHorizontal.value === "lateral" ? { vx, vyaw: 0, vy: horizontal } : { vx, vyaw: horizontal };
+}
+function padStep(direction: string): Motion {
+  const { vx, vyaw } = moveVectors[direction];
+  return stickVector(vx, vyaw);
+}
+stickHorizontal.addEventListener("change", render);
 function signedAxis(value: number) {
   const magnitude = Math.round(Math.abs(value) * 127);
   return value < 0 && magnitude > 0 ? -magnitude : magnitude;
@@ -414,7 +910,7 @@ stick.addEventListener("keydown", event => {
   event.preventDefault();
   if (stick.disabled || grip || stickKey || event.repeat) return;
   stickKey = event.key;
-  setMotion(moveVectors[direction]);
+  setMotion(padStep(direction));
 });
 stick.addEventListener("keyup", event => {
   if (event.key === stickKey) stopInput();
@@ -424,9 +920,9 @@ stick.addEventListener("contextmenu", event => event.preventDefault());
 
 for (const control of moveButtons) {
   const start = () => {
-    if (!control.disabled) setMotion(moveVectors[control.dataset.move!]);
+    if (!control.disabled) setMotion(padStep(control.dataset.move!));
   };
-  const stop = () => setMotion(zeroMotion());
+  const stop = () => { if (!remote) setMotion(zeroMotion()); };
   control.addEventListener("pointerdown", event => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -446,10 +942,18 @@ for (const control of moveButtons) {
   control.addEventListener("blur", stop);
   control.addEventListener("contextmenu", event => event.preventDefault());
 }
-button("stop-move").addEventListener("click", () => stopInput(true));
-window.addEventListener("blur", () => stopInput());
-document.addEventListener("visibilitychange", () => { if (document.hidden) stopInput(); });
-window.addEventListener("pagehide", () => stopInput());
+function stopAllInput(force = false) {
+  if (remote) {
+    const wasMoving = !isZero(desiredMotion);
+    endRemote("遥控已关闭。再次使用时请手动开启。");
+    if (wasMoving) return;
+  }
+  stopInput(force);
+}
+button("stop-move").addEventListener("click", () => stopAllInput(true));
+window.addEventListener("blur", () => stopAllInput());
+document.addEventListener("visibilitychange", () => { if (document.hidden) stopAllInput(); });
+window.addEventListener("pagehide", () => { void cancelConnection(); stopAllInput(); });
 volume.addEventListener("input", () => { text("volume-value", `${volume.value}%`); });
 button("set-volume").addEventListener("click", () => {
   void request({ operation: "send", command: { action: "volume", percent: Number(volume.value) } }, commandLabels.volume);
@@ -477,4 +981,4 @@ async function registerMonitorEvents() {
   }
 }
 render();
-void request({ operation: "status" }, "点击“扫描设备”开始。");
+void request({ operation: "status" }, connectionHint);

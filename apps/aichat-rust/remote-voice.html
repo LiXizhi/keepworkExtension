@@ -10,7 +10,7 @@
 </head>
 <body>
   <div class="voice-layout">
-    <main class="voice-controls-pane">
+    <main id="voice-controls" class="voice-controls-pane">
       <h1>遥控器语音输入</h1>
       <p class="intro">小米遥控器 2 / 2 Pro · Keepwork 云端听写</p>
       <div id="status" role="status" aria-live="polite">正在读取状态…</div>
@@ -59,24 +59,31 @@
       </details>
     </main>
 
-    <aside class="remote-guide-pane" aria-label="遥控器按键图">
+    <aside id="remote-guide" class="remote-guide-pane" aria-label="遥控器按键图" tabindex="-1">
       <div class="guide-header">
         <h2>按键图解</h2>
-        <p class="guide-subtitle">点选按键查看用法</p>
+        <button id="remote-demo-toggle" type="button" aria-describedby="remote-demo-help">进入演示</button>
+        <p id="remote-demo-help" class="guide-subtitle" role="status">点选按键查看用法</p>
       </div>
       <section id="remote-key-card" class="key-detail-card" data-tone="pairing" aria-live="polite">
         <strong id="remote-key-title">蓝牙配对</strong>
-        <p id="remote-key-desc">同时按住 ≡ 和 TV 3～5 秒，再到电脑蓝牙设置中配对。</p>
+        <p id="remote-key-desc">同时长按主页键（小房子图标）+ 菜单键（三条横线图标）3～5 秒，再到电脑蓝牙设置中配对。</p>
       </section>
 
       <div class="remote-stage">
         <figure class="remote-figure">
           <img class="remote-photo" src="/src/assets/remote-control.png" alt="蓝牙语音遥控器外观示意图" width="217" height="840">
           <svg class="remote-overlay" viewBox="0 0 217 840" aria-hidden="true">
-            <rect x="16" y="434" width="185" height="94" rx="22" class="pairing-box"/>
-            <line x1="108.5" y1="528" x2="108.5" y2="554" class="pairing-arrow"/>
+            <defs>
+              <!-- One quarter of the ring. Its inner radius matches the center OK button. -->
+              <clipPath id="dpad-quarter" clipPathUnits="objectBoundingBox">
+                <path d="M0 1 A1 1 0 0 1 1 0 V.469 A.531 .531 0 0 0 .469 1 Z"/>
+              </clipPath>
+            </defs>
+            <rect x="22" y="360" width="84" height="162" rx="22" class="pairing-box"/>
+            <line x1="64" y1="522" x2="64" y2="554" class="pairing-arrow"/>
             <rect x="14" y="554" width="189" height="60" rx="12" class="pairing-tag-bg"/>
-            <text x="108.5" y="579" class="pairing-tag-title">同时按住 3～5 秒</text>
+            <text x="108.5" y="579" class="pairing-tag-title">同时长按 3～5 秒</text>
             <text x="108.5" y="601" class="pairing-tag-sub">进入蓝牙配对模式</text>
           </svg>
 
@@ -86,25 +93,29 @@
           <button type="button" class="remote-hotspot hotspot-voice" data-key="voice" aria-label="语音键">
             <span class="hotspot-tip">语音键</span>
           </button>
-          <button type="button" class="remote-hotspot hotspot-dpad" data-key="dpad" aria-label="方向键与 OK 键">
-            <span class="hotspot-tip">方向键 / OK</span>
-          </button>
+          <div id="remote-dpad" role="group" aria-label="方向键与 OK 键">
+            <button type="button" class="remote-hotspot dpad-direction" data-key="up" aria-label="上方向键"></button>
+            <button type="button" class="remote-hotspot dpad-direction" data-key="left" aria-label="左方向键"></button>
+            <button type="button" class="remote-hotspot hotspot-ok" data-key="ok" aria-label="OK 键"></button>
+            <button type="button" class="remote-hotspot dpad-direction" data-key="right" aria-label="右方向键"></button>
+            <button type="button" class="remote-hotspot dpad-direction" data-key="down" aria-label="下方向键"></button>
+          </div>
           <button type="button" class="remote-hotspot hotspot-back" data-key="back" aria-label="返回键">
             <span class="hotspot-tip">返回键</span>
           </button>
           <button type="button" class="remote-hotspot hotspot-volume" data-key="volume" aria-label="音量键">
             <span class="hotspot-tip">音量 +/-</span>
           </button>
-          <button type="button" class="remote-hotspot hotspot-home" data-key="home" aria-label="主页键">
+          <button type="button" class="remote-hotspot hotspot-home" data-key="home" aria-label="主页键（小房子图标）">
             <span class="hotspot-tip">主页键</span>
           </button>
-          <button type="button" class="remote-hotspot hotspot-menu" data-key="menu" aria-label="菜单键">
+          <button type="button" class="remote-hotspot hotspot-menu" data-key="menu" aria-label="菜单键（三条横线图标）">
             <span class="hotspot-tip">菜单键 ≡</span>
           </button>
           <button type="button" class="remote-hotspot hotspot-tv" data-key="tv" aria-label="TV 键">
             <span class="hotspot-tip">TV 键</span>
           </button>
-          <button type="button" class="remote-hotspot hotspot-pairing" data-key="pairing" aria-label="同时按住菜单键和 TV 键进入蓝牙配对模式"></button>
+          <button type="button" class="remote-hotspot hotspot-pairing" data-key="pairing" aria-label="同时长按主页键（小房子图标）+ 菜单键（三条横线图标）3～5 秒进入蓝牙配对模式"></button>
         </figure>
       </div>
     </aside>

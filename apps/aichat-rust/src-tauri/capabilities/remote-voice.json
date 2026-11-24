@@ -4,5 +4,5 @@
   "description": "Local voice settings only; no remote origins, filesystem or arbitrary input commands.",
   "local": true,
   "windows": ["remote-voice"],
-  "permissions": ["allow-remote-voice-settings"]
+  "permissions": ["allow-remote-voice-settings", "core:event:allow-listen", "core:event:allow-unlisten"]
 }
