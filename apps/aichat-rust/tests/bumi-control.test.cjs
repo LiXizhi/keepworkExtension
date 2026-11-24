@@ -11,7 +11,9 @@ test("Bumi IPC is limited to its bundled local control window", () => {
   assert.deepEqual(capability.windows, ["bumi-control"]);
   assert.equal(capability.local, true);
   assert.equal(Object.hasOwn(capability, "remote"), false);
-  assert.deepEqual(capability.permissions, ["allow-bumi-control"]);
+  assert.deepEqual(capability.permissions.toSorted(), [
+    "allow-bumi-control", "core:event:allow-listen", "core:event:allow-unlisten",
+  ]);
 
   const permissions = read("src-tauri/permissions/desktop-commands.toml").split("[[permission]]");
   const own = permissions.find(part => part.includes('identifier = "allow-bumi-control"'));
@@ -63,9 +65,19 @@ test("Bumi control is available from every desktop menu and packaged as a local 
   }
   assert.ok(html.includes('id="stop-move"'));
   assert.ok(html.includes('id="walk-mode"'));
-  assert.match(renderer, /!snapshot\.walkMode/);
-  assert.match(read("src-tauri/src/app/bumi/bluetooth.rs"), /请先进入行走模式/);
+  assert.ok(html.includes('id="run-mode"'));
+  assert.ok(html.includes('id="motion-stick"'));
+  assert.ok(html.includes('id="direction-pad"'));
   assert.ok(html.includes('id="speech-text"'));
+  assert.match(html, /<section\b[^>]*aria-labelledby="speech-title"[^>]*\bhidden\b/);
+  assert.ok(html.includes('id="listen-toggle"'));
+  assert.ok(html.includes('id="message-log"'));
+  assert.ok(html.includes('id="clear-messages"'));
+  assert.match(renderer, /messages\.length > 200/);
+  assert.doesNotMatch(renderer, /localStorage|writeFile|innerHTML/);
+  assert.match(bluetooth, /Request::Listen \{ enabled \}/);
+  assert.match(bluetooth, /app\.emit_to\(super::LABEL, "bumi:message"/);
+  assert.match(bluetooth, /size\.min\(1024\)/);
   assert.match(renderer, /"pointerup", "pointercancel", "lostpointercapture"/);
   assert.match(renderer, /window\.addEventListener\("blur"/);
   assert.match(renderer, /window\.addEventListener\("pagehide"/);

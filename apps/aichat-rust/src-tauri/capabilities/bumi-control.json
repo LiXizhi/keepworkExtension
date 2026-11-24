@@ -4,5 +4,5 @@
   "description": "Bumi Bluetooth controls in the local desktop window.",
   "local": true,
   "windows": ["bumi-control"],
-  "permissions": ["allow-bumi-control"]
+  "permissions": ["allow-bumi-control", "core:event:allow-listen", "core:event:allow-unlisten"]
 }

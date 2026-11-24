@@ -30,6 +30,7 @@ pub(super) enum Request {
     Scan,
     Connect { id: String },
     Disconnect,
+    Listen { enabled: bool },
     Send { command: Command },
 }
 
@@ -45,9 +46,17 @@ pub(super) enum Command {
     StandUp,
     StandToFall,
     Walk,
+    Run,
     Move { vx: i8, vyaw: i8 },
     Speak { text: String },
     Volume { percent: u8 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum LocomotionMode {
+    Walk,
+    Run,
 }
 
 #[derive(Clone, Serialize)]
@@ -67,6 +76,8 @@ pub(super) struct Snapshot {
     status: Option<i8>,
     moving: bool,
     walk_mode: bool,
+    locomotion_mode: Option<LocomotionMode>,
+    listening: bool,
 }
 
 fn trusted_page(label: &str, url: &Url) -> bool {
@@ -180,7 +191,9 @@ pub(super) async fn bumi_control(
             .bluetooth
             .try_lock()
             .map_err(|_| "蓝牙操作正在进行，请稍后重试。")?;
-        bluetooth.request(request, lifetime).await
+        bluetooth
+            .request(window.app_handle(), request, lifetime)
+            .await
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -194,6 +207,8 @@ pub(super) async fn bumi_control(
                 status: None,
                 moving: false,
                 walk_mode: false,
+                locomotion_mode: None,
+                listening: false,
             });
         }
         Err(UNSUPPORTED.into())
