@@ -162,7 +162,11 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
     for (let iteration = 0; iteration < limit; iteration++) {
         throwIfAborted(signal);
         const announced = new Map();
-        const finalSummary = options.reserveFinalResponse && iteration === limit - 1;
+        // The last round always runs without tools so the model can summarize
+        // verified progress instead of failing the whole turn. Callers may opt
+        // out explicitly with reserveFinalResponse:false (e.g. loops that own
+        // their own continuation budget).
+        const finalSummary = options.reserveFinalResponse !== false && iteration === limit - 1;
         const response = await abortable(request({ ...options, ...(finalSummary ? { tools: [] } : {}), messages, onToolCall: call => {
                 // Keep the mutable SDK snapshot until the response has completed.
                 const key = call?.id || `index:${call?.index ?? announced.size}`;
@@ -193,8 +197,20 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
         await emit({ type: 'message', content, iteration, message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) } });
         if (!calls.length)
             return response;
-        if (finalSummary)
-            throw Error('Observer final response requested an unavailable tool');
+        // A final summary must not execute tools. Some models still emit a call;
+        // keep the streamed text as the answer instead of failing the turn.
+        if (finalSummary) {
+            const summary = content || String(responseText(response) || '');
+            if (summary.trim()) {
+                await emit({ type: 'message', content: summary, iteration, message: { role: 'assistant', content: summary } });
+                return summary;
+            }
+            const limitError = Error('Maximum model/tool iterations reached');
+            limitError.code = 'E_TOOL_ITERATION_LIMIT';
+            limitError.recoverable = true;
+            limitError.iterations = limit;
+            throw limitError;
+        }
         messages.push({ role: 'assistant', content, tool_calls: calls });
         // Complete the entire section before appending tool results (browser steering boundary).
         const results = [];
@@ -239,5 +255,11 @@ async function runCompletion(options, { request, execute, emit = () => { } }) {
         if (options._session?._restartSignal)
             return content;
     }
-    throw Error('Maximum model/tool iterations reached');
+    const error = Error('Maximum model/tool iterations reached');
+    // Recoverable marker: callers keep the recorded tool results and continue
+    // in a follow-up turn instead of surfacing a dead-end error to the user.
+    error.code = 'E_TOOL_ITERATION_LIMIT';
+    error.recoverable = true;
+    error.iterations = limit;
+    throw error;
 }

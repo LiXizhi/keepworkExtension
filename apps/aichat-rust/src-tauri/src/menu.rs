@@ -40,6 +40,7 @@ pub fn mac_menu_text<'a>(language: &str, text: &'a str) -> &'a str {
         "版本" => "Version",
         "桌面版本" => "Desktop version",
         "遥控器语音输入…" => "Remote voice input…",
+        "Bumi 机器人…" => "Bumi Robot…",
         _ => text,
     }
 }
@@ -85,6 +86,7 @@ pub const HOST_COMMANDS: &[&str] = &[
     "toggle-pet",
     "open-keepwork",
     "remote-voice",
+    "bumi-control",
 ];
 
 /// 历史 id → 规范化 id。原生菜单/托盘与旧页面仍可能投递旧 id，
@@ -242,6 +244,7 @@ fn view_menu() -> Value {
         key_item("F11", "全屏", "fullscreen"),
         { "type": "separator" },
         { "id": "open-settings", "label": "设置" },
+        { "id": "bumi-control", "label": "Bumi 机器人…" },
     ])
 }
 

@@ -6,6 +6,7 @@ export function mountDesktopMenus({ host, shadow, left, invoke, menus, nativeMen
     return /^en(?:[-_]|$)/i.test(lang || "");
   };
   const labels = { file: "File", edit: "Edit", view: "View", help: "Help",
+    "bumi-control": "Bumi Robot…",
     "new-chat": "New chat", "open-folder": "Open folder…", reload: "Reload", "check-updates": "Check for updates…", "toggle-login": "Launch at login", quit: "Quit",
     undo: "Undo", redo: "Redo", cut: "Cut", copy: "Copy", paste: "Paste", "select-all": "Select all", "remote-voice": "Remote voice input…",
     "experience-simple": "Simple mode", "experience-professional": "Professional mode", "theme-light": "Light appearance", "theme-dark": "Dark appearance", "toggle-sidebar": "Chat history", "toggle-files": "Files", "zoom-in": "Zoom in", "zoom-out": "Zoom out", "zoom-reset": "Actual size", fullscreen: "Full screen", "open-settings": "Settings", "mcp-status": "View status…", "mcp-dashboard": "Open Dashboard", "mcp-restart": "Restart Keepwork MCP", "open-browser": "Open in browser", "local-source": "Use local source server…", "published-site": "Use online server" };

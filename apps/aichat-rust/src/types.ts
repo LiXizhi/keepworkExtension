@@ -1,4 +1,5 @@
 export interface DesktopCapabilities {
+  markdownExportVersion?: 1;
   readonly browserSurfaceVersion?: 1;
   readonly browserSurfaceViewportVersion?: 1;
   readonly browserSurfaceScaleVersion?: 1;
@@ -83,6 +84,7 @@ export interface UpdateComponentStatus {
   runningVersion?: string;
   owner?: string;
   latestVersion: string;
+  pendingVersion?: string;
   publishedAt: string;
   state: "idle" | "checking" | "downloading" | "ready" | "up-to-date" | "error";
   progress: number | null;
@@ -145,6 +147,7 @@ export interface AIChatDesktopBridge {
   installGit(): Promise<GitInstallResult>;
   roots(): Promise<RootGrant[]>;
   pickFolder(): Promise<RootGrant | null>;
+  saveMarkdownExport?(fileName: string, base64url: string): Promise<boolean>;
   defaultBrainFolder(prepare?: boolean): Promise<BrainFolderResult>;
   revokeFolder(rootId: string): Promise<boolean>;
   file(op: string, args?: Record<string, unknown>): Promise<unknown>;

@@ -27,6 +27,7 @@ const ALLOWED_HOST_COMMANDS = new Set([
   "copy",
   "paste",
   "remote-voice",
+  "bumi-control",
   "select-all",
   "zoom-in",
   "zoom-out",
@@ -75,6 +76,7 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
 
   const capabilities: DesktopCapabilities = Object.freeze({
     files: true,
+    markdownExportVersion: 1,
     terminal: true,
     defaultBrainFolder: true,
     gitSetup: true,
@@ -210,6 +212,9 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     },
     pickFolder(): Promise<RootGrant | null> {
       return invoke<RootGrant | null>("desktop_pick_folder");
+    },
+    saveMarkdownExport(fileName: string, data: string): Promise<boolean> {
+      return invoke("desktop_save_markdown_export", { fileName, data });
     },
     defaultBrainFolder(prepare = false): Promise<BrainFolderResult> {
       return invoke<BrainFolderResult>("desktop_default_brain_folder", {

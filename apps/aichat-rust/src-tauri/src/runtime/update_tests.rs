@@ -257,6 +257,144 @@ async fn missing_feed_preserves_only_the_same_source_release_cache() {
 }
 
 #[tokio::test]
+async fn superseded_pending_cannot_mask_feed_version_or_offer_an_update() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for online_version in [Some("0.2.102"), Some("0.2.101"), None] {
+        let root = root();
+        let mut pending = fixture_manifest("0.2.101");
+        pending.built_at = "2026-11-22T09:39:19Z".into();
+        let store = root.join("store");
+        let pending_dir = store.join(&pending.sha256);
+        write_bundle(&pending_dir, &pending);
+        write_bundle(&store.join("current"), &fixture_manifest("0.2.58"));
+        write_bundle(&root.join("bundle"), &fixture_manifest("0.2.102"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut remote = if online_version == Some("0.2.101") {
+            pending.clone()
+        } else {
+            let mut remote = fixture_manifest("0.2.102");
+            remote.sha256 = "d".repeat(64);
+            remote.built_at = "2026-11-23T03:30:34Z".into();
+            remote
+        };
+        let feed_url = format!(
+            "http://127.0.0.1:{}/feed",
+            listener.local_addr().unwrap().port()
+        );
+        remote.url = feed_url.clone();
+        let built_at = remote.built_at.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let length = socket.read(&mut request).await.unwrap();
+            assert!(request[..length].starts_with(b"GET /feed "));
+            let (status, body) = if online_version.is_some() {
+                ("200 OK", serde_json::to_vec(&remote).unwrap())
+            } else {
+                ("503 Service Unavailable", Vec::new())
+            };
+            let header = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+        let config = RuntimeConfig {
+            id: "mcp".into(),
+            products: vec![RUST_MCP_PRODUCT.into()],
+            port: 0,
+            health_path: "/health".into(),
+            updates_enabled: true,
+            bundled_dir: root.join("bundle"),
+            store_dir: store.clone(),
+            feed_url,
+        };
+        let record = ActiveRuntimeRecord {
+            current: Some("current".into()),
+            previous: Some("rollback".into()),
+            pending: Some(pending.sha256.clone()),
+            latest_version: Some("0.2.102".into()),
+            latest_built_at: Some("2026-11-23T03:30:34Z".into()),
+            latest_source: Some(config.update_source()),
+            ..Default::default()
+        };
+        atomic_json_write(&store.join("active.json"), &record).unwrap();
+        let supervisor = RuntimeSupervisor::new(config);
+        assert!(supervisor.snapshot().pending_version.is_empty());
+        supervisor.status.lock().unwrap().version = "0.2.102".into();
+        let (status, newly_staged) = supervisor.check_for_update().await;
+        server.await.unwrap();
+        let card = crate::updates::UpdateManager::build_mcp_component(&status);
+        assert_eq!(card.installed_version, "0.2.102");
+        assert_eq!(card.latest_version, online_version.unwrap_or("0.2.102"));
+        assert_eq!(card.published_at, built_at);
+        assert_eq!(card.stale, online_version.is_none());
+        assert_eq!(
+            card.state,
+            if online_version.is_some() { "up-to-date" } else { "error" }
+        );
+        assert!(!card.can_apply);
+        assert!(!newly_staged);
+        assert!(supervisor.child.lock().unwrap().is_none());
+        let saved = RuntimeSupervisor::load_active_record(&store);
+        assert!(saved.pending.is_none());
+        assert_eq!(saved.current, record.current);
+        assert_eq!(saved.previous, record.previous);
+        assert!(pending_dir.join("runtime.json").is_file());
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn eligible_pending_is_shown_separately_and_survives_a_newer_external_peer() {
+    let root = root();
+    let config = RuntimeConfig {
+        id: "mcp".into(),
+        products: vec![RUST_MCP_PRODUCT.into()],
+        port: 0,
+        health_path: "/health".into(),
+        updates_enabled: true,
+        bundled_dir: root.join("bundle"),
+        store_dir: root.join("store"),
+        feed_url: default_mcp_feed_url(true),
+    };
+    write_bundle(&config.bundled_dir, &fixture_manifest("0.2.100"));
+    write_bundle(&config.store_dir.join("pending"), &fixture_manifest("0.2.102"));
+    let record = ActiveRuntimeRecord {
+        pending: Some("pending".into()),
+        latest_version: Some("0.2.103".into()),
+        latest_source: Some(config.update_source()),
+        ..Default::default()
+    };
+    atomic_json_write(&config.store_dir.join("active.json"), &record).unwrap();
+    let supervisor = RuntimeSupervisor::new(config);
+    let peer = |engine: &str, owner: &str, version: &str| HealthProbeResult {
+        compatible: true,
+        pid: 100,
+        runtime_version: version.into(),
+        runtime_commit: "c".repeat(40),
+        runtime_built_at: String::new(),
+        runtime_engine: engine.into(),
+        host_kind: owner.into(),
+    };
+    let card = crate::updates::UpdateManager::build_mcp_component(
+        &supervisor.observe_peer(peer("rust", "desktop", "0.2.102")),
+    );
+    assert_eq!(card.latest_version, "0.2.103");
+    assert_eq!(card.pending_version.as_deref(), Some("0.2.102"));
+    assert!(card.can_apply, "same-version repacks can still be applied");
+
+    for engine in ["rust", "node", ""] {
+        let status = supervisor.observe_peer(peer(engine, "vscode-extension", "0.2.104"));
+        let card = crate::updates::UpdateManager::build_mcp_component(&status);
+        assert_eq!(card.pending_version.as_deref(), Some("0.2.102"));
+        assert!(!card.can_apply);
+    }
+    assert_eq!(RuntimeSupervisor::load_active_record(&root.join("store")), record);
+    drop(supervisor);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn unavailable_feed_keeps_diagnostic_causes_and_cached_release_identity() {
     let root = root();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -23,6 +23,7 @@ commands.allow = [
   "desktop_install_git",
   "desktop_roots",
   "desktop_pick_folder",
+  "desktop_save_markdown_export",
   "desktop_default_brain_folder",
   "desktop_revoke_folder",
   "desktop_file",
@@ -54,3 +55,8 @@ commands.allow = [
   "remote_voice_set_auto_start",
   "remote_voice_refresh_devices",
 ]
+
+[[permission]]
+identifier = "allow-bumi-control"
+description = "Allows the bundled Bumi window to discover and operate a selected robot."
+commands.allow = ["bumi_control"]

@@ -98,6 +98,7 @@ function renderCard(
   }
   addRow("远端最新版本", item.latestVersion || "未知");
   addRow(dateLabel, item.publishedAt || "—");
+  if (item.pendingVersion) addRow("待安装版本", item.pendingVersion);
   section.appendChild(dl);
 
   if (item.state === "downloading") {

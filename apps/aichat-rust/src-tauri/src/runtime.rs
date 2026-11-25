@@ -168,7 +168,10 @@ impl RuntimeSupervisor {
         if let Some(hash) = record.pending.as_deref() {
             let mut status = supervisor.status.lock().unwrap();
             match supervisor.cached_runtime(hash) {
-                Ok(manifest) if record.failed.as_deref() != Some(hash) => {
+                Ok(manifest)
+                    if record.failed.as_deref() != Some(hash)
+                        && !supervisor.installed_runtime_is_newer_than(&manifest.version) =>
+                {
                     status.pending_version = manifest.version;
                     status.update_state = "staged".into();
                 }
@@ -366,6 +369,11 @@ impl RuntimeSupervisor {
     pub fn newest_local_version(&self) -> Option<String> {
         self.select_local_runtime(PendingPolicy::UpgradeOnly)
             .map(|(_, manifest, _)| manifest.version)
+    }
+
+    fn installed_runtime_is_newer_than(&self, version: &str) -> bool {
+        self.select_local_runtime(PendingPolicy::Ignore)
+            .is_some_and(|(_, installed, _)| is_version_newer(&installed.version, version))
     }
 
     pub async fn probe_health(&self) -> Option<HealthProbeResult> {

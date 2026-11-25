@@ -161,6 +161,7 @@ pub async fn execute_host_command(
         "close-window" => dismiss_main_window(app, core, DismissAction::Close),
         "reload" => reload_main_window(app, core),
         "remote-voice" => super::remote_voice_host::open_remote_voice_window(app),
+        "bumi-control" => super::bumi::open(app).await?,
         "fullscreen" => {
             core.pet_approval_return.lock().unwrap().take();
             if let Some(win) = app.get_webview_window("main") {
@@ -299,6 +300,7 @@ pub(super) fn setup_native_menu_and_tray(
         MenuItem::with_id(app, "help:check-updates", "检查更新…", true, None::<&str>)?;
     let remote_voice =
         MenuItem::with_id(app, "remote-voice", "遥控器语音输入…", true, None::<&str>)?;
+    let bumi = MenuItem::with_id(app, "bumi-control", "Bumi 机器人…", true, None::<&str>)?;
     let tray_version = MenuItem::with_id(
         app,
         "tray:version",
@@ -319,6 +321,7 @@ pub(super) fn setup_native_menu_and_tray(
             &new_chat,
             &open_settings,
             &remote_voice,
+            &bumi,
             &sep4,
             &open_folder,
             &toggle_pet,
@@ -585,6 +588,13 @@ pub(super) fn setup_mac_native_menu(
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                "bumi-control",
+                mac_menu_text(language, "Bumi 机器人…"),
+                true,
+                None::<&str>,
+            )?,
             &mac_toggle_pet,
             &mac_toggle_startup,
         ],
