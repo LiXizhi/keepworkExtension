@@ -159,6 +159,12 @@ HTTP compatibility errors preserve the legacy `error` string and add `code: "UNS
 
 ### Autonomous CRM sales
 
+CRM sales credentials are protected per OS account. Windows uses DPAPI. macOS uses Keychain and Linux uses Secret Service to protect the key that encrypts the local credential. Keep the service under the same OS account with its credential store accessible after restart.
+
+On upgrade the service migrates an existing plaintext CRM binding to protected storage. If the OS store is unavailable or the saved credential cannot be decrypted, the affected persona stops working on sales and preserves its recoverable state. Unlock the original credential store and restart the service, or explicitly bind the same CRM address, remote persona, role and campaign again to retain progress. Other personas remain available. A legacy runtime sees a protected binding as paused. Upgrade again to resume it. Rebinding with a legacy runtime writes the credential in that version’s format.
+
+When a persona advertises `salesDisconnectVersion:1`, its owner can send `{"action":"disconnect"}` to `POST /agents/personas/:id/sales` while it is idle. This clears the local sales binding and progress. Pause preserves the binding for resume. To revoke the remote grant, use the CRM credential management endpoint.
+
 Campaign-only starts use the campaign-scoped sales tools when the credential has the campaign, task and report grants. A role-based start uses CRM Agent Jobs and verifies the grants and role with the server. On restart or resume, stored campaign personas keep polling their bound campaign, and stored job personas keep their assigned role.
 
 `POST /agents/personas/:id/sales` supports start, pause, resume and decide for this owner. Persona views advertise `salesRuntimeVersion:1` and redact the CRM bearer. A sales cycle uses the Keepwork runtime, the named skills bound by the owner, a campaign-scoped CRM toolset, and same-owner peer consultation. No general filesystem or terminal tools are exposed. With the service running, polling continues when the page closes; empty scans and pending decisions do not start inference. Credentials, availability, limits, receipts, lessons and decisions survive service restarts. An interrupted run is not replayed and may require a new owner login. The host sends a decision ID and accept/decline from a human-controlled card; decisions do not authorize capabilities outside the campaign.

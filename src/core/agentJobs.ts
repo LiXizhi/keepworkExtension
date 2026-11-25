@@ -3,6 +3,7 @@ import {SalesCycle, SalesState, nextCampaignCycle, campaignGrants, salesConfigur
 export {salesSkillContext as agentJobSkillContext} from './personaSales';
 import {AGENT_JOB_PROTOCOL,validAgentJobRole} from './agentJobProtocol';
 import type {AgentJobCapabilities,AgentJobRecord} from './agentJobProtocol';
+import {credentialUnavailable,validCrmToken} from './personaCredentials';
 
 export type AgentJobState = {
     url:string; token:string; crmPersonaId:string; credentialId:string; expiresAt:string;
@@ -17,11 +18,12 @@ export type AgentJobState = {
 };
 
 // Campaign records saved before Agent Jobs have no role; job records always carry one.
-export type CrmRuntimeState = (SalesState | AgentJobState) & {consecutiveErrors?:number};
+export type CrmRuntimeState = (SalesState | AgentJobState) & {consecutiveErrors?:number;credentialRevoked?:true};
 
 export function agentJobView(s?:CrmRuntimeState) {
     if (!s) return null;
     const {token,...view}=s;
+    if(!token && !s.credentialRevoked)return {...view,enabled:false,status:'需重新连接 CRM',lastError:credentialUnavailable};
     return view;
 }
 
@@ -30,7 +32,7 @@ export function agentJobConfiguration(input:any, previous?:AgentJobState):AgentJ
     if ((url.protocol!=='https:' && !(url.protocol==='http:' && ['localhost','127.0.0.1','[::1]'].includes(url.hostname))) ||
         url.username || url.password || url.search || url.hash || !/^[\w/-]*$/.test(url.pathname))
         throw Error('需要 HTTPS CRM 地址或本机测试地址');
-    if (!/^kwcrm_[a-f0-9]{64}$/.test(input.token||'')) throw Error('CRM 授权无效');
+    if (!validCrmToken(input.token)) throw Error('CRM 授权无效');
     for (const key of ['crmPersonaId','credentialId'])
         if (typeof input[key]!=='string' || !/^[\w-]{1,160}$/.test(input[key])) throw Error('CRM 记录标识无效');
     const role=String(input.role||previous?.role||'SDR');
@@ -272,6 +274,13 @@ export class AgentJobsRuntime {
     private runs=new Map<AgentJobHostPersona,AgentJobCycle | SalesCycle>();
     constructor(private readonly host:AgentJobRuntimeHost) {}
 
+    private markRevoked(persona:AgentJobHostPersona,state:CrmRuntimeState) {
+        if(!this.host.current(persona)||persona.sales!==state)return;
+        const message='CRM 授权已失效，请重新绑定 CRM';
+        persona.sales={...state,token:'',enabled:false,credentialRevoked:true,status:message,lastError:message};
+        this.host.save(persona);
+    }
+
     hasRun(persona:AgentJobHostPersona) { return this.runs.has(persona); }
     cycleFor(persona:AgentJobHostPersona,jobId?:string) {
         const cycle=this.runs.get(persona);
@@ -285,9 +294,15 @@ export class AgentJobsRuntime {
     async sales(owner:string,id:string,input:any) {
         const persona=this.host.get(owner,id),state=persona.sales;
         if (id==='default-persona') throw Error('请使用自定义销售分身');
+        if (input.action==='disconnect') {
+            if (this.host.active(persona)||this.runs.has(persona)||this.checks.has(persona)) throw Error('请等待当前工作结束');
+            delete persona.sales;
+            try { this.host.save(persona); } catch(error) { persona.sales=state;throw error; }
+            return null;
+        }
         if (input.action==='start') {
             if (this.host.active(persona)||this.runs.has(persona)||this.checks.has(persona)) throw Error('请等待当前工作结束');
-            if (state?.pending) throw Error('请先处理已有请示');
+            if (state?.pending && state.token) throw Error('请先处理已有请示');
             const previousJob = state && 'role' in state ? state : undefined;
             const nextJob = agentJobConfiguration(input,previousJob);
             const grants = await salesPermissions(nextJob);
@@ -301,17 +316,36 @@ export class AgentJobsRuntime {
             } else {
                 await verifyAgentJobConnection(nextJob,grants);
             }
-            if (!this.host.current(persona)||persona.sales!==state||this.host.active(persona)||this.checks.has(persona)||this.runs.has(persona)||state?.pending) throw Error('分身状态已改变');
+            if (!this.host.current(persona)||persona.sales!==state||this.host.active(persona)||this.checks.has(persona)||this.runs.has(persona)||(state?.pending && state.token)) throw Error('分身状态已改变');
+            if (state && !state.token) {
+                const same = state.url===next.url && state.crmPersonaId===next.crmPersonaId &&
+                    ('role' in state ? 'role' in next && state.role===next.role : !('role' in next)) && state.campaignId===next.campaignId;
+                if (!same) throw Error('请先断开原 CRM 绑定再连接其他分身');
+                next={...state,token:next.token,credentialId:next.credentialId,expiresAt:next.expiresAt};
+                if(next.credentialRevoked){
+                    delete next.credentialRevoked;
+                    delete next.lastError;
+                    next.enabled=true;next.status=next.pending?'等你决定':'待巡查';next.next=Date.now();
+                }
+            }
             persona.sales=next;
+            try { this.host.save(persona); } catch(error) { persona.sales=state;throw error; }
+            return agentJobView(next);
         } else {
             if (!state) throw Error('尚未开启自主销售');
+            if (!state.token) throw Error(state.credentialRevoked?state.status:credentialUnavailable);
             if (input.action==='pause') {
                 state.enabled=false;state.status='已暂停';
                 if (this.runs.has(persona)) this.host.abort(owner,id);
             } else if (input.action==='resume') {
                 if (state.pending||this.host.active(persona)) throw Error('请先完成请示或当前工作');
-                if ('role' in state) await verifyAgentJobConnection(state);
-                else await verifySalesConnection(state);
+                try {
+                    if ('role' in state) await verifyAgentJobConnection(state);
+                    else await verifySalesConnection(state);
+                } catch(error){
+                    if((error as {status?:number})?.status===401)this.markRevoked(persona,state);
+                    throw error;
+                }
                 if (!this.host.current(persona)||persona.sales!==state||this.host.active(persona)||state.pending) throw Error('分身状态已改变');
                 state.enabled=true;state.next=Date.now();state.status='待巡查';delete state.lastError;
             } else if (input.action==='decide') {
@@ -332,7 +366,7 @@ export class AgentJobsRuntime {
 
     async poll(persona:AgentJobHostPersona,now:number) {
         const state=persona.sales;
-        if (!state?.enabled||state.pending||state.next>now||this.host.active(persona)||this.host.busy(persona.owner,persona.id)||this.checks.has(persona)||this.runs.has(persona)) return;
+        if (!state?.enabled||!state.token||state.pending||state.next>now||this.host.active(persona)||this.host.busy(persona.owner,persona.id)||this.checks.has(persona)||this.runs.has(persona)) return;
         const valid=()=>!this.host.closed()&&this.host.current(persona)&&persona.sales===state&&state.enabled&&!state.pending&&!this.host.active(persona);
         this.checks.add(persona);
         try {
@@ -358,6 +392,7 @@ export class AgentJobsRuntime {
         } catch (error) {
             if (valid()) {
                 this.runs.delete(persona);
+                if((error as {status?:number})?.status===401){this.markRevoked(persona,state);return;}
                 state.lastError=(error as Error).message;
                 const failures=Number(state.consecutiveErrors||0)+1;
                 if (isTransientPollError(error) && failures<=BACKOFF_MINUTES.length) {

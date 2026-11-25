@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {validCrmToken} from './personaCredentials';
 
 export type SalesState = {
     url:string; token:string; crmPersonaId:string; credentialId:string; expiresAt:string;
@@ -24,7 +25,7 @@ export function salesConfiguration(input:any, previous?:SalesState):SalesState {
     if ((url.protocol!=='https:' && !(url.protocol==='http:' && ['localhost','127.0.0.1','[::1]'].includes(url.hostname))) ||
         url.username || url.password || url.search || url.hash || !/^[\w/-]*$/.test(url.pathname))
         throw Error('需要 HTTPS CRM 地址或本机测试地址');
-    if (!/^kwcrm_[a-f0-9]{64}$/.test(input.token||'')) throw Error('CRM 授权无效');
+    if (!validCrmToken(input.token)) throw Error('CRM 授权无效');
     for (const key of ['crmPersonaId','credentialId','campaignId'])
         if (typeof input[key]!=='string' || !/^[\w-]{1,160}$/.test(input[key])) throw Error('CRM 记录标识无效');
     const objective=typeof input.objective==='string'?input.objective.trim():'';
@@ -56,14 +57,14 @@ export async function salesRequest(s:SalesState,args:any,signal?:AbortSignal) {
     const content=await response.text();
     if (content.length>150000) throw Error('CRM 回执过大，请缩小查询范围');
     let receipt:any;
-    try {receipt=JSON.parse(content);} catch {throw Error('CRM 未返回有效回执');}
+    try {receipt=JSON.parse(content);} catch {throw Object.assign(Error('CRM 未返回有效回执'),{status:response.status});}
     if (!response.ok || receipt.ok!==true) throw Object.assign(Error('CRM 请求未成功（HTTP '+response.status+'），请核对记录与授权'),{status:response.status});
     return receipt.result;
 }
 
 export async function salesPermissions(s:Pick<SalesState, 'url' | 'token' | 'crmPersonaId'>):Promise<string[]> {
     const response=await fetch(s.url+'/api/v1/me',{headers:{Authorization:'Bearer '+s.token},redirect:'error',signal:AbortSignal.timeout(15000)});
-    if (!response.ok) throw Error('CRM 授权验证失败');
+    if (!response.ok) throw Object.assign(Error('CRM 授权验证失败'),{status:response.status});
     const me=await response.json() as any;
     if (me.user?.agent?.id!==s.crmPersonaId) throw Error('CRM 分身身份不匹配');
     if (!Array.isArray(me.user.agent.permissions)) throw Error('CRM 授权列表无效');

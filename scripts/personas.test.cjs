@@ -4,8 +4,24 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const Module=require('node:module');
+const {createHash, randomUUID}=require('node:crypto');
 const ts=require('typescript');
-function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./personaSales','./agentJobs','./agentJobProtocol'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function moduleFor(mocks){const file=path.resolve(__dirname,'../src/core/personas.ts'),m=new Module(file,module);m.filename=file;m.paths=module.paths;m.require=id=>{if(Object.hasOwn(mocks,id))return mocks[id];if(['./personaWechat','./personaMessaging','./agentRolePolicy','./personaSales','./agentJobs','./agentJobProtocol','./personaCredentials'].includes(id)){const f=path.resolve(__dirname,'../src/core',id.slice(2)+'.ts'),c=new Module(f,module);c.filename=f;c.paths=module.paths;c.require=m.require;c._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);return c.exports;}return require(id);};m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);return m.exports;}
+function isolatedVault() {
+    const credentials = new Map();
+    return {
+        seal(scope, token) {
+            const sealed = randomUUID();
+            credentials.set(sealed, {scope, token});
+            return sealed;
+        },
+        open(scope, sealed) {
+            const credential = credentials.get(sealed);
+            if (!credential || credential.scope !== scope) throw Error('Cannot open test credential');
+            return credential.token;
+        },
+    };
+}
 function fixture(t,backend='keepwork'){
     const home=fs.mkdtempSync(path.join(os.tmpdir(),'personas-test-')),pending=[],calls=[];
     let client={defaultExecutor:{backend,model:'preferred'},token:'owner-login'};
@@ -19,9 +35,11 @@ function fixture(t,backend='keepwork'){
     const callbacks=new Map();const sessions={async create(owner,input){calls.push({owner,input});return {id:'native'};},subscribe(id,owner,fn){callbacks.set(id,fn);return()=>callbacks.delete(id);},async turn(id,owner,input){calls.push({owner,input});callbacks.get(id)?.({session:{status:'running',pending:[]}});},async interrupt(){callbacks.get('native')?.({session:{status:'interrupted'}});},respond(id,owner,input){calls.push({owner,input});}};
     const messaging={setAgentRootResolver:resolve=>{messaging.resolveRoot=resolve;},watch:()=>()=>{},setAgentPrompt:()=>{},agentBindings:()=>[],detachAgent:()=>{},assertAgentBinding:()=>{},inboxView:()=>({conversations:[]}),workers:{answer(input,signal,login,executeTool){if(!login)return Promise.reject(Error('需要登录 AIChat'));return new Promise((resolve,reject)=>{pending.push({input,resolve,reject,executeTool});signal.addEventListener('abort',()=>reject(Error('cancelled')),{once:true});});}}};
     const factory=(login,executeTool)=>({close(){},answer(input,signal){return messaging.workers.answer(input,signal,login,(name,args)=>executeTool(name,args,signal));}});
-    const service=new Personas(home,sessions,messaging,factory);t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
+    const vault = isolatedVault();
+    const startService = (run = factory) => new Personas(home, sessions, messaging, run, vault);
+    const service=startService();t.after(async()=>{service.close();await new Promise(r=>setImmediate(r));fs.rmSync(home,{recursive:true,force:true});});
     service.upsert('owner',{id:'first',name:'我的分身',root:home,executor:'auto'});
-    return {service,home,pending,peerRequests,calls,callbacks,nextPersonaRun,Personas,sessions,messaging,factory,setClient:value=>{client=value;}};
+    return {service,home,pending,peerRequests,calls,callbacks,nextPersonaRun,startService,vault,sessions,messaging,factory,setClient:value=>{client=value;}};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
 test('personas discover same-owner peers, exchange actual replies and retain only pair context', async t=>{
@@ -188,7 +206,7 @@ test('daily scheduling honors timezone and does not replay missed or overlapping
 });
 test('restart retains transcript, marks interrupted work unknown and never resubmits',async t=>{
     const f=fixture(t);f.service.submit('owner','first',{requestId:'restart',text:'pending'});
-    const second=new f.Personas(f.home,f.sessions,f.messaging);t.after(()=>second.close());assert.equal(second.read('owner','first').job.state,'unknown');
+    const second=f.startService();t.after(()=>second.close());assert.equal(second.read('owner','first').job.state,'unknown');
     second.submit('owner','first',{requestId:'restart',text:'pending'});assert.equal(f.pending.length,1);
 });
 test('history pagination, read state, bounded context and deletion during execution',async t=>{
@@ -210,7 +228,7 @@ test('clear context is owner scoped, persistent, preserves schedules and dedup, 
     f.service.clear('owner','first');
     const cleared=f.service.read('owner','first');assert.deepEqual(cleared.messages,[]);assert.equal(cleared.before,null);assert.equal(cleared.job,undefined);assert.equal(cleared.schedules.length,1);assert.equal(cleared.name,'我的分身');assert.equal(cleared.unread,0);
     const persisted=JSON.parse(fs.readFileSync(path.join(f.home,fs.readdirSync(f.home).find(x=>x.endsWith('.json'))),'utf8'));assert.equal(persisted.summary,'');assert.deepEqual(persisted.messages,[]);
-    const restarted=new f.Personas(f.home,f.sessions,f.messaging);t.after(()=>restarted.close());assert.deepEqual(restarted.read('owner','first').messages,[]);
+    const restarted=f.startService();t.after(()=>restarted.close());assert.deepEqual(restarted.read('owner','first').messages,[]);
     f.service.submit('owner','first',{requestId:'old-0',text:'old context 0'});assert.equal(f.pending.length,10);
     f.service.submit('owner','first',{requestId:'fresh',text:'fresh'});assert.deepEqual(f.pending.at(-1).input.history,[]);assert.doesNotMatch(f.pending.at(-1).input.prompt,/old context|old answer/);
     assert.throws(()=>f.service.clear('owner','first'),/等待或取消/);assert.equal(f.service.read('owner','first').messages.length,1);
@@ -277,7 +295,7 @@ test('custom persona fork persists role and portable routing without copying own
     assert.deepEqual(created.messaging,{version:1,enabled:true,groups});
     assert.throws(()=>f.service.upsert('owner',{id:'duplicate',name:'ＬＩＬＹ',prompt:'other',messaging:{version:1,enabled:true,groups}}),/唯一/);
     assert.throws(()=>f.service.upsert('owner',{id:'empty',name:'Empty',prompt:'role',messaging:{version:1,enabled:true,groups:[]}}),/主要群聊/);
-    const restored=new f.Personas(f.home,f.sessions,f.messaging);t.after(()=>restored.close());
+    const restored=f.startService();t.after(()=>restored.close());
     assert.deepEqual(restored.read('owner','fork').messaging,created.messaging);
     f.service.submit('owner','fork',{requestId:'fork-task',text:'Research'});
     assert.match(f.pending[1].input.prompt,/Research using \$research/);assert.doesNotMatch(JSON.stringify(f.pending[1].input),/Private owner conversation|Private answer/);
@@ -364,7 +382,7 @@ test('sales: only one worker starts and an interrupted round never replays after
     assert.equal(scans,1);assert.equal(f.pending.length,1);
     assert.ok(!JSON.stringify(f.service.read('owner','first')).includes(token));
     f.service.close();await tick();
-    const restarted=new f.Personas(f.home,f.sessions,f.messaging,()=>{throw Error('interrupted sales must not replay');});
+    const restarted=f.startService(()=>{throw Error('interrupted sales must not replay');});
     try{const saved=restarted.read('owner','first');assert.equal(saved.job.state,'unknown');assert.equal(saved.sales.enabled,false);
         restarted.tick(now+3600000);await tick();assert.equal(scans,1);assert.equal(saved.sales.cycles,1);
     }finally{restarted.close();}
@@ -504,7 +522,7 @@ test('legacy campaign credentials start, resume and finish sales work across an 
         day: '', cycles: 0, status: '待巡查', learning: [], ownerDecisions: [{id: 'prior', question: '继续吗', answer: '采纳'}],
     };
     fs.writeFileSync(filename, JSON.stringify(stored));
-    const service = new f.Personas(f.home, f.sessions, f.messaging, f.factory);
+    const service = f.startService();
     t.after(() => service.close());
     service.tick();
     await tick();
@@ -593,4 +611,301 @@ test('campaign-only start stays bound to its campaign when the credential also g
     assert.deepEqual(campaignFilters, [{campaign_id: 'autumn'}]);
     assert.ok(commands.every(command => command === 'crm_request'));
     assert.equal(f.service.read('owner', 'first').sales.enabled, true);
+});
+
+function crmGrant(hexDigit) {
+    return {
+        action: 'start', url: 'https://crm.test', token: 'kwcrm_' + hexDigit.repeat(64),
+        credentialId: 'credential-' + hexDigit, crmPersonaId: 'crm', role: 'SDR',
+        objective: 'Follow up', expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    };
+}
+
+function mockCrm(t) {
+    const received = [];
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+        assert.equal(new URL(url).origin, 'https://crm.test');
+        received.push(options.headers.Authorization);
+        if (url.endsWith('/me')) {
+            return Response.json({user: {agent: {id: 'crm', permissions: ['agent-jobs:read', 'agent-jobs:write']}}});
+        }
+        assert.equal(JSON.parse(options.body).command, 'agent_job_capabilities');
+        return Response.json({ok: true, result: {roles: [{id: 'SDR'}]}});
+    });
+    return received;
+}
+
+function personaFile(f, owner = 'owner', id = 'first') {
+    const key = createHash('sha256').update(owner + '\0' + id).digest('hex');
+    return path.join(f.home, key + '.json');
+}
+
+function savedPersona(file) {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+function assertProtected(file, view, ...tokens) {
+    const raw = fs.readFileSync(file, 'utf8');
+    const {sales} = JSON.parse(raw);
+    assert.equal(typeof sales.protectedToken, 'string');
+    assert.ok(sales.protectedToken.length > 0);
+    assert.equal(Object.hasOwn(sales, 'token'), false);
+    for (const token of tokens) {
+        assert.equal(raw.includes(token), false, 'record contains a plaintext token');
+        assert.equal(JSON.stringify(view).includes(token), false, 'public view contains a plaintext token');
+    }
+    assert.equal(JSON.stringify(view).includes(sales.protectedToken), false, 'public view contains the sealed token');
+    return sales.protectedToken;
+}
+
+function seedLegacyCredential(f, grant) {
+    f.service.close();
+    const file = personaFile(f);
+    const stored = savedPersona(file);
+    const {action, ...sales} = grant;
+    stored.sales = {...sales, enabled: true, intervalMinutes: 30, next: Date.now() + 3600000,
+        maxDailyCycles: 24, status: '待巡查', learning: [], ownerDecisions: [], day: '', cycles: 0};
+    stored.messages.push({id: 'history', role: 'user', text: 'Preserve this conversation', time: 1});
+    fs.writeFileSync(file, JSON.stringify(stored));
+    return file;
+}
+
+test('CRM credentials survive restart and rotation and are removed by disconnect and persona deletion', async t => {
+    const f = fixture(t);
+    const requests = mockCrm(t);
+    const first = crmGrant('a'), second = crmGrant('b'), other = crmGrant('c');
+    const file = personaFile(f), otherFile = personaFile(f, 'other');
+    f.service.upsert('other', {id: 'first', name: 'Other account', root: f.home});
+    const start = await f.service.sales('owner', 'first', first);
+    const original = assertProtected(file, [start, f.service.list('owner')], first.token);
+    assert.equal(start.enabled, true);
+    assert.equal(Object.hasOwn(start, 'protectedEnabled'), false);
+    assert.equal(savedPersona(file).sales.enabled, false, 'an older daemon must not run an unreadable grant');
+    assert.equal(savedPersona(file).sales.protectedEnabled, true);
+    await f.service.sales('other', 'first', other);
+    const otherCiphertext = assertProtected(otherFile, f.service.read('other', 'first'), other.token);
+    await f.service.sales('owner', 'first', {action: 'pause'});
+    assert.equal(savedPersona(file).sales.protectedEnabled, false);
+    f.service.close();
+    const restarted = f.startService();
+    t.after(() => restarted.close());
+    assert.equal(restarted.read('owner', 'first').sales.enabled, false);
+    assert.equal(restarted.read('other', 'first').sales.enabled, true);
+    await restarted.sales('owner', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + first.token);
+    const rotated = await restarted.sales('owner', 'first', second);
+    const replacement = assertProtected(file, rotated, first.token, second.token);
+    assert.notEqual(original, replacement);
+    assert.equal(fs.readFileSync(file, 'utf8').includes(original), false);
+    assert.equal(savedPersona(otherFile).sales.protectedToken, otherCiphertext);
+
+    restarted.close();
+    const restored = f.startService();
+    t.after(() => restored.close());
+    await restored.sales('owner', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + second.token);
+    await restored.sales('owner', 'first', {action: 'disconnect'});
+    assert.equal(restored.read('owner', 'first').sales, null);
+    assert.equal(fs.readFileSync(file, 'utf8').includes(replacement), false);
+    await restored.sales('other', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + other.token);
+    await restored.sales('owner', 'first', first);
+    await restored.remove('owner', 'first');
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(savedPersona(otherFile).sales.protectedToken, otherCiphertext);
+});
+
+test('migration removes the legacy plaintext once and retains history and usable authorization', async t => {
+    const f = fixture(t), grant = crmGrant('a');
+    const requests = mockCrm(t);
+    const file = seedLegacyCredential(f, grant);
+    fs.copyFileSync(file, file + '.tmp');
+    const seal = t.mock.method(f.vault, 'seal');
+    for (let restart = 0; restart < 2; restart++) {
+        const service = f.startService();
+        try {
+            const view = service.read('owner', 'first');
+            assertProtected(file, view, grant.token);
+            assert.equal(fs.existsSync(file + '.tmp'), false, 'legacy temporary file contains a plaintext token');
+            assert.equal(view.messages[0].text, 'Preserve this conversation');
+            assert.equal(view.sales.credentialId, grant.credentialId);
+            await service.sales('owner', 'first', {action: 'resume'});
+            assert.ok(requests.at(-1) === 'Bearer ' + grant.token);
+        } finally {
+            service.close();
+        }
+    }
+    assert.equal(seal.mock.callCount(), 1, 'restarts and metadata updates must reuse the migrated credential');
+});
+
+test('failed legacy migration preserves the recoverable original and pauses only the affected persona', async t => {
+    const f = fixture(t), grant = crmGrant('a');
+    const requests = mockCrm(t);
+    f.service.upsert('owner', {id: 'other', name: 'Other', root: f.home});
+    const file = seedLegacyCredential(f, grant), original = fs.readFileSync(file, 'utf8');
+    const broken = t.mock.method(f.vault, 'seal', () => {throw Error('Vault unavailable');});
+    const service = f.startService();
+    try {
+        const view = service.read('owner', 'first');
+        assert.equal(view.sales.enabled, false);
+        assert.equal(JSON.stringify(view).includes(grant.token), false);
+        assert.equal(view.messages.at(-1).text, 'Preserve this conversation');
+        assert.equal(service.list('owner').length, 2);
+        service.tick(Date.now() + 86400000);
+        await tick();
+        assert.equal(requests.length, 0);
+        service.upsert('owner', {id: 'other', name: 'Updated', root: f.home});
+        assert.equal(fs.readFileSync(file, 'utf8') === original, true);
+    } finally {
+        service.close();
+        broken.mock.restore();
+    }
+    const recovered = f.startService();
+    t.after(() => recovered.close());
+    assertProtected(file, recovered.read('owner', 'first'), grant.token);
+    assert.equal(recovered.read('owner', 'other').name, 'Updated');
+    await recovered.sales('owner', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + grant.token);
+});
+
+test('vault write failure rolls back failed first binding and rotation', async t => {
+    const f = fixture(t), first = crmGrant('a'), replacement = crmGrant('b');
+    const requests = mockCrm(t);
+    const file = personaFile(f);
+    const fail = () => {throw Error('Vault unavailable');};
+    const firstFailure = t.mock.method(f.vault, 'seal', fail);
+    await assert.rejects(f.service.sales('owner', 'first', first));
+    assert.equal(f.service.read('owner', 'first').sales, null);
+    assert.equal(fs.readFileSync(file, 'utf8').includes(first.token), false);
+    firstFailure.mock.restore();
+    await f.service.sales('owner', 'first', first);
+    const before = fs.readFileSync(file, 'utf8');
+    const nextFailure = t.mock.method(f.vault, 'seal', fail);
+    await assert.rejects(f.service.sales('owner', 'first', replacement));
+    assert.equal(fs.readFileSync(file, 'utf8') === before, true);
+    assert.equal(f.service.read('owner', 'first').sales.credentialId, first.credentialId);
+    nextFailure.mock.restore();
+    await f.service.sales('owner', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + first.token);
+});
+
+test('a disconnected observer cannot roll back a committed credential rotation', async t => {
+    const f = fixture(t), first = crmGrant('a'), replacement = crmGrant('b');
+    const requests = mockCrm(t);
+    await f.service.sales('owner', 'first', first);
+    const stopBroken = f.service.watch('owner', () => {throw Error('Disconnected observer');}, () => {});
+    let updates = 0;
+    const stopHealthy = f.service.watch('owner', () => {updates++;}, () => {});
+    try {
+        const view = await f.service.sales('owner', 'first', replacement);
+        assert.equal(view.credentialId, replacement.credentialId);
+        assert.equal(updates, 1);
+        assertProtected(personaFile(f), view, first.token, replacement.token);
+        assert.equal(f.service.read('owner', 'first').sales.credentialId, replacement.credentialId);
+    } finally {
+        stopBroken();
+        stopHealthy();
+    }
+    f.service.close();
+    const service = f.startService();
+    t.after(() => service.close());
+    await service.sales('owner', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + replacement.token);
+});
+
+for (const operation of ['resume', 'poll']) {
+    test(operation + ' discards only a revoked CRM credential and retains persona history', async t => {
+        const f = fixture(t), grant = crmGrant('c');
+        const file = seedLegacyCredential(f, grant);
+        const requests = mockCrm(t);
+        const service = f.startService();
+        t.after(() => service.close());
+        const old = savedPersona(file).sales.protectedToken;
+        assert.ok(old);
+        const original = globalThis.fetch;
+        let fault;
+        const attempts = [];
+        t.mock.method(globalThis, 'fetch', async (url, options) => {
+            if (!fault) return original(url, options);
+            attempts.push(fault);
+            if (fault === 'network') throw TypeError('fetch failed');
+            return Response.json({ok: false}, {status: fault});
+        });
+        for (const status of [403, 'network', 401]) {
+            fault = status;
+            if (operation === 'poll') {
+                service.tick(Date.now() + 7200000);
+                await tick();
+            } else {
+                await assert.rejects(service.sales('owner', 'first', {action: 'resume'}));
+            }
+            assert.equal(attempts.at(-1), status);
+            if (status !== 401) {
+                assert.equal(savedPersona(file).sales.protectedToken, old);
+                fault = undefined;
+                await service.sales('owner', 'first', {action: 'resume'});
+                assert.ok(requests.at(-1) === 'Bearer ' + grant.token);
+            }
+        }
+        assert.equal(fs.readFileSync(file, 'utf8').includes(old), false);
+        assert.equal(service.read('owner', 'first').sales.enabled, false);
+        service.close();
+        const restarted = f.startService();
+        t.after(() => restarted.close());
+        const view = restarted.read('owner', 'first');
+        assert.equal(view.sales.objective, grant.objective);
+        assert.ok(view.messages.some(message => message.text === 'Preserve this conversation'));
+        const before = attempts.length;
+        await assert.rejects(restarted.sales('owner', 'first', {action: 'resume'}));
+        assert.equal(attempts.length, before);
+    });
+}
+
+test('a late revocation response cannot discard the active replacement credential', async t => {
+    const f = fixture(t), first = crmGrant('c'), replacement = crmGrant('d');
+    const requests = mockCrm(t);
+    await f.service.sales('owner', 'first', first);
+    const original = globalThis.fetch;
+    let release;
+    t.mock.method(globalThis, 'fetch', (url, options) => {
+        if (url.endsWith('/me') && options.headers.Authorization === 'Bearer ' + first.token) {
+            return new Promise(resolve => {release = () => resolve(Response.json({}, {status: 401}));});
+        }
+        return original(url, options);
+    });
+    const oldResume = assert.rejects(f.service.sales('owner', 'first', {action: 'resume'}));
+    assert.equal(typeof release, 'function');
+    await f.service.sales('owner', 'first', replacement);
+    release();
+    await oldResume;
+    assertProtected(personaFile(f), f.service.read('owner', 'first'), first.token, replacement.token);
+    await f.service.sales('owner', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + replacement.token);
+});
+
+test('a sealed credential copied across accounts never authorizes a request and can be rebound', async t => {
+    const f = fixture(t), first = crmGrant('a'), replacement = crmGrant('b');
+    const requests = mockCrm(t);
+    f.service.upsert('other', {id: 'first', name: 'Other account', root: f.home});
+    await f.service.sales('owner', 'first', first);
+    await f.service.sales('other', 'first', first);
+    f.service.close();
+    const file = personaFile(f), otherFile = personaFile(f, 'other');
+    const record = savedPersona(file);
+    record.sales.protectedToken = savedPersona(otherFile).sales.protectedToken;
+    fs.writeFileSync(file, JSON.stringify(record));
+    const service = f.startService();
+    t.after(() => service.close());
+    const before = requests.length;
+    const view = service.read('owner', 'first');
+    assert.equal(view.sales.enabled, false);
+    assertProtected(file, view, first.token);
+    await assert.rejects(service.sales('owner', 'first', {action: 'resume'}));
+    assert.equal(requests.length, before);
+    await service.sales('other', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + first.token);
+    await service.sales('owner', 'first', replacement);
+    await service.sales('owner', 'first', {action: 'resume'});
+    assert.ok(requests.at(-1) === 'Bearer ' + replacement.token);
+    assertProtected(file, service.read('owner', 'first'), first.token, replacement.token);
 });

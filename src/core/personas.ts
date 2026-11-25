@@ -12,6 +12,7 @@ import { GroupWorkRequest } from './messagingAgentWork';
 import { AGENT_ROLE_WRITE_POLICY, roleApprovalProperties, roleNeedsApproval, roleToolTarget, executeRoleTool } from './agentRolePolicy';
 import { runTerminal } from './terminal';
 import {CrmRuntimeState,agentJobSkillContext,agentJobView,AgentJobsRuntime} from './agentJobs';
+import {createPersonaCredentialVault, credentialUnavailable, PersonaCredentialVault, validCrmToken} from './personaCredentials';
 
 type Message = { id: string; role: string; text: string; time: number; peerId?: string; peerRoute?: {fromId:string; from:string; to:string}; state?: string; execution?: {source:'keepwork-runtime'; requested:number; returned:number} };
 /** Preserve daemon evidence when replaying prose-only transcripts to a model. */
@@ -47,6 +48,9 @@ export function personaModelHistoryText(message: Message, limit: number) {
 type Schedule = { id: string; title: string; prompt: string; time: string; timezone: string; enabled: boolean; next: number; last?: string; lastDate?: string; target?: { binding: string; conversation: string } };
 type Persona = { sales?:CrmRuntimeState; messaging?: AgentMessaging; cliApprovalGrant?: {root:string;backend:string}; id: string; owner: string; name: string; avatar: string; prompt: string; root: string; executor: string; model: string; preference?: {backend: string; model: string}; pinned: boolean; order: number; readAt: number; messages: Message[]; summary: string; requests: Record<string,string>; schedules: Schedule[]; job?: { id: string; state: string; output?: {text:string}; contextMode?: string; worker?: boolean; runtime?: any; session?: string; error?: string; pending?: any[] }; };
 const ID = /^[\w-]{1,160}$/;
+function credentialScope(p: Persona, sales: CrmRuntimeState) {
+    return JSON.stringify(['keepwork-persona-crm-v1', p.owner, p.id, sales.url, sales.crmPersonaId, sales.credentialId]);
+}
 const active = (p: Persona) => !!p.job && ['queued','running','waiting'].includes(p.job.state);
 const roleAgent = (p:Persona) => p.id!=='default-persona'&&!!p.prompt.trim();
 const ownerTools = [
@@ -74,6 +78,9 @@ export function nextPersonaRun(time: string, timezone: string, after = Date.now(
 export class Personas {
     readonly wechat: PersonaWechat;
     private readonly agentJobs: AgentJobsRuntime;
+    private readonly protectedSales = new WeakMap<CrmRuntimeState, {scope:string; token:string; sealed:string}>();
+    private readonly locked = new Set<string>();
+    private readonly legacyStaging = new Set<string>();
     private closed = false;
     private note(p:Persona,text:string,id:string){
         for(const target of new Set([p,this.rows.get(this.key(p.owner,'default-persona'))])){
@@ -82,7 +89,10 @@ export class Personas {
             this.save(target);
         }
     }
-    async sales(owner:string,id:string,a:any){return this.agentJobs.sales(owner,id,a);}
+    async sales(owner:string,id:string,a:any){
+        this.get(owner,id,a.action==='start'||a.action==='disconnect');
+        return this.agentJobs.sales(owner,id,a);
+    }
     private rows = new Map<string,Persona>();
     private aborts = new Map<string,AbortController>();
     private sessionGrants = new Map<string,string>();
@@ -91,13 +101,14 @@ export class Personas {
     private stopMessagingWatch: () => void;
     private deliveries = new Set<NodeJS.Timeout>();
     private watchers = new Set<{owner:string; update:()=>void; close:()=>void}>();
-    constructor(private home: string, private sessions: AgentSessions, private messaging: MessagingService, private runtimeFactory = createMcpAgentRuntime) {
+    constructor(private home: string, private sessions: AgentSessions, private messaging: MessagingService, private runtimeFactory = createMcpAgentRuntime,
+        private readonly credentialVault: PersonaCredentialVault = createPersonaCredentialVault()) {
         this.agentJobs=new AgentJobsRuntime({
             closed:()=>this.closed,
             active:persona=>active(persona as Persona),
             current:persona=>this.rows.get(this.key(persona.owner,persona.id))===persona,
             busy:(owner,id)=>this.messaging.isAgentBusy?.(owner,id)||false,
-            get:(owner,id)=>this.get(owner,id),
+            get:(owner,id)=>this.get(owner,id,true),
             save:persona=>this.save(persona as Persona),
             note:(persona,text,id)=>this.note(persona as Persona,text,id),
             submit:(owner,id,input)=>this.submit(owner,id,input),
@@ -105,12 +116,40 @@ export class Personas {
         });
         fs.mkdirSync(home,{recursive:true});
         this.wechat=new PersonaWechat(home,owner=>{for(const w of this.watchers)if(w.owner===owner)w.update();});
-        for(const file of fs.readdirSync(home).filter(f=>/^[a-f0-9]{64}\.json$/.test(f))) {
+        const files=fs.readdirSync(home);
+        for(const file of files)if(/^[a-f0-9]{64}\.json\.tmp$/.test(file))this.legacyStaging.add(file.slice(0,64));
+        for(const file of files.filter(f=>/^[a-f0-9]{64}\.json$/.test(f))) {
             try { const p:Persona=JSON.parse(fs.readFileSync(path.join(home,file),'utf8'));
+                const key=this.key(p.owner,p.id);
+                if(file!==key+'.json') continue;
                 if(p.messaging!==undefined)p.messaging=agentMessaging(p.messaging);
+                if(p.sales) {
+                    const sales=p.sales as CrmRuntimeState & {protectedToken?:string;protectedEnabled?:boolean};
+                    const sealed=sales.protectedToken;
+                    if(sealed!==undefined && typeof sales.protectedEnabled==='boolean')sales.enabled=sales.protectedEnabled;
+                    delete sales.protectedToken;
+                    delete sales.protectedEnabled;
+                    try {
+                        if(sealed!==undefined) {
+                            const scope=credentialScope(p,sales);
+                            sales.token=this.credentialVault.open(scope,sealed);
+                            if(!validCrmToken(sales.token))throw Error(credentialUnavailable);
+                            this.protectedSales.set(sales,{scope,token:sales.token,sealed});
+                        } else if(sales.credentialRevoked===true){sales.token='';sales.enabled=false;}
+                        else if(!validCrmToken(sales.token))throw Error(credentialUnavailable);
+                    } catch { this.locked.add(key);sales.token=''; }
+                }
                 if(active(p)) { this.agentJobs.restore(p);p.job!.state='unknown';p.job!.error='服务已重启，任务未重放';p.job!.pending=[];for(const run of Object.values(p.job!.runtime?.runs||{}) as any[])if(['running','waiting'].includes(run.state))run.state='unknown'; }
                 for(const s of p.schedules) if(s.enabled)s.next=nextPersonaRun(s.time,s.timezone);
-                this.rows.set(this.key(p.owner,p.id),p);this.save(p);
+                this.rows.set(key,p);
+                if(!this.locked.has(key)){
+                    try { this.save(p); }
+                    catch(error){
+                        if(!p.sales)throw error;
+                        this.protectedSales.delete(p.sales);
+                        this.locked.add(key);p.sales.token='';
+                    }
+                }
             } catch { /* Invalid records are not executed. */ }
         }
         this.messaging.setAgentRootResolver((owner,id)=>this.closed?'':this.rows.get(this.key(owner,id))?.root||'');
@@ -121,16 +160,54 @@ export class Personas {
         this.timer=setInterval(()=>this.tick(),15000);this.timer.unref();
     }
     private key(owner:string,id:string){return createHash('sha256').update(owner+'\0'+id).digest('hex');}
-    private save(p:Persona){if(this.closed||this.rows.get(this.key(p.owner,p.id))!==p)return;const file=path.join(this.home,this.key(p.owner,p.id)+'.json');fs.writeFileSync(file+'.tmp',JSON.stringify(p),{mode:0o600});fs.renameSync(file+'.tmp',file);for(const w of this.watchers)if(w.owner===p.owner)w.update();}
+    private save(p:Persona){
+        const key=this.key(p.owner,p.id);
+        if(this.closed||this.rows.get(key)!==p)return;
+        const {sales,...meta}=p;
+        let data: object=meta;
+        if(sales?.credentialRevoked){
+            const {token,...revoked}=sales;
+            data={...meta,sales:{...revoked,enabled:false}};
+        } else if(sales){
+            const {token,...rest}=sales;
+            if(!validCrmToken(token))throw Error(credentialUnavailable);
+            const scope=credentialScope(p,sales);
+            let cached=this.protectedSales.get(sales);
+            if(!cached || cached.scope!==scope || cached.token!==token){
+                try {
+                    cached={scope,token,sealed:this.credentialVault.seal(scope,token)};
+                    this.protectedSales.set(sales,cached);
+                } catch { throw Error(credentialUnavailable); }
+            }
+            // Older daemons don't understand protectedToken. Leave their scheduler paused.
+            data={...meta,sales:{...rest,enabled:false,protectedEnabled:sales.enabled,protectedToken:cached.sealed}};
+        }
+        const file=path.join(this.home,key+'.json'),temp=file+'.'+randomUUID()+'.tmp';
+        const fd=fs.openSync(temp,'wx',0o600);
+        try {
+            try { fs.writeFileSync(fd,JSON.stringify(data)); } finally { fs.closeSync(fd); }
+            // Older writers could leave an uncommitted plaintext staging file.
+            if(this.legacyStaging.has(key)){
+                fs.rmSync(file+'.tmp',{force:true});
+                this.legacyStaging.delete(key);
+            }
+            fs.renameSync(temp,file);
+        } catch(error) { fs.rmSync(temp,{force:true});throw error; }
+        this.locked.delete(key);
+        for(const w of this.watchers)if(w.owner===p.owner){
+            // A disconnected observer cannot roll back an already committed persona.
+            try { w.update(); } catch { this.watchers.delete(w); }
+        }
+    }
     watch(owner:string,update:()=>void,close:()=>void){const w={owner,update,close};this.watchers.add(w);return()=>this.watchers.delete(w);}
-    private get(owner:string,id:string){const p=this.rows.get(this.key(owner,id));if(!p)throw Error('分身不存在');return p;}
+    private get(owner:string,id:string,allowLocked=false){const key=this.key(owner,id),p=this.rows.get(key);if(!p)throw Error('分身不存在');if(!allowLocked && this.locked.has(key))throw Error(credentialUnavailable);return p;}
     private approvalBinding(p:Persona){return {root:p.root,backend:p.executor==='auto'?(p.preference?.backend||'keepwork'):p.executor};}
     private approvalScope(p:Persona){
         const binding=JSON.stringify(this.approvalBinding(p));
         if(p.cliApprovalGrant&&JSON.stringify(p.cliApprovalGrant)===binding)return 'always';
         return this.sessionGrants.get(this.key(p.owner,p.id))===binding?'session':'ask';
     }
-    private view(p:Persona){const {owner,messages,requests,summary,cliApprovalGrant,sales,...rest}=p;return {...rest,wechatVersion:1,wechatStatus:this.wechat.view(p.owner,p.id).status,salesRuntimeVersion:1,sales:agentJobView(sales),taskContextVersion:1,peerMessagingVersion:1,groupWorkActive:this.messaging.isAgentBusy?.(p.owner,p.id)||false,messagingVersion:1,roleWriteVersion:1,writePolicy:roleAgent(p)?'role-prompt':'owner-approval',nicknameSync:this.messaging.nicknameStatus?.(p.owner)||{pending:false,warnings:[]},
+    private view(p:Persona){const {owner,messages,requests,summary,cliApprovalGrant,sales,...rest}=p;return {...rest,wechatVersion:1,wechatStatus:this.wechat.view(p.owner,p.id).status,salesRuntimeVersion:1,salesDisconnectVersion:1,sales:agentJobView(sales),taskContextVersion:1,peerMessagingVersion:1,groupWorkActive:this.messaging.isAgentBusy?.(p.owner,p.id)||false,messagingVersion:1,roleWriteVersion:1,writePolicy:roleAgent(p)?'role-prompt':'owner-approval',nicknameSync:this.messaging.nicknameStatus?.(p.owner)||{pending:false,warnings:[]},
         cliApproval:{scope:this.approvalScope(p)},
         ...(p.job?{job:{...p.job,execution:messages.find(m=>m.id===p.job!.id+'-answer')?.execution,pending:(p.job.pending||[]).map(request=>({...request,personaApprovalScopes:request.decisionCapabilities?.autoApproval===true?['session','always']:[]}))}}:{}),
         unread:messages.filter(m=>m.role==='assistant'&&m.time>p.readAt).length,channels:this.messaging.agentBindings(p.owner,p.id)};}
@@ -186,6 +263,7 @@ export class Personas {
     upsert(owner:string,input:any){
         if(!ID.test(input.id||''))throw Error('Invalid Agent ID');
         const old=this.rows.get(this.key(owner,input.id));
+        if(old)this.get(owner,input.id);
         if(old&&active(old))throw Error('请先等待或取消当前任务再修改分身');
         const name=String(input.name||'').trim().slice(0,80);if(!name)throw Error('请输入分身名称');
         const root=String(input.root === undefined ? (old ? old.root : (this.rows.get(this.key(owner,'default-persona'))?.root ?? latestAichatBrainRoot(owner))) : (input.root || ''));if(root&&(!path.isAbsolute(root)||!fs.statSync(root).isDirectory()))throw Error('请选择现有本机第二大脑目录');
@@ -201,7 +279,7 @@ export class Personas {
         if(old&&old.root!==p.root)this.sessions.workspaceFiles?.revoke(this.key(owner,p.id));
         this.rows.set(this.key(owner,p.id),p);this.messaging.setAgentPrompt(owner,p.id,p.prompt);this.save(p);return this.view(p);
     }
-    read(owner:string,id:string,before=Infinity){const p=this.get(owner,id);const rows=p.messages.filter(m=>m.time<before).slice(-50);return {...this.view(p),peerCount:this.peers(p).length,messages:rows,before:rows.length===50?rows[0].time:null};}
+    read(owner:string,id:string,before=Infinity){const p=this.get(owner,id,true);const rows=p.messages.filter(m=>m.time<before).slice(-50);return {...this.view(p),peerCount:this.peers(p).length,messages:rows,before:rows.length===50?rows[0].time:null};}
     markRead(owner:string,id:string){const p=this.get(owner,id);p.readAt=Math.max(Date.now(),p.messages.at(-1)?.time||0);this.save(p);return this.view(p);}
     clear(owner:string,id:string){
         const p=this.get(owner,id);
@@ -519,12 +597,19 @@ export class Personas {
     tick(now=Date.now()){
         this.wechat.tick(now);
         for(const p of this.rows.values())if(p.sales)void this.agentJobs.poll(p,now);
-        for(const p of this.rows.values())for(const s of p.schedules){if(!s.enabled||s.next>now)continue;const due=s.next;s.next=nextPersonaRun(s.time,s.timezone,now);const date=new Intl.DateTimeFormat('en-CA',{timeZone:s.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(now);if(s.lastDate===date){this.save(p);continue;}s.lastDate=date;
+        for(const p of this.rows.values())for(const s of p.schedules){if(!s.enabled||s.next>now||this.locked.has(this.key(p.owner,p.id)))continue;const due=s.next;s.next=nextPersonaRun(s.time,s.timezone,now);const date=new Intl.DateTimeFormat('en-CA',{timeZone:s.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(now);if(s.lastDate===date){this.save(p);continue;}s.lastDate=date;
             if(now-due>60000||active(p)){s.last='已跳过：离线或分身忙碌';this.save(p);continue;}
             const id='schedule-'+s.id+'-'+due;s.last=id;this.save(p);this.submit(p.owner,p.id,{requestId:id,text:s.prompt});
             if(s.target){const target={...s.target};const poll=setInterval(()=>{const result=p.requests[id];if(['queued','accepted','running'].includes(result))return;clearInterval(poll);this.deliveries.delete(poll);if(result==='done'){const answer=p.messages.find(m=>m.id===id+'-answer');if(answer)void this.messaging.manualReply(p.owner,p.id,target.binding,target.conversation,id,answer.text,false).catch(()=>{s.last='执行完成；发送失败或结果未知';this.save(p);});}},1000);this.deliveries.add(poll);poll.unref();}
         }
     }
-    async remove(owner:string,id:string){const p=this.get(owner,id);await this.cancel(owner,id);p.schedules=[];this.wechat.remove(owner,id);this.messaging.detachAgent(owner,id);this.sessions.workspaceFiles?.revoke(this.key(owner,id));this.rows.delete(this.key(owner,id));this.sessionGrants.delete(this.key(owner,id));fs.rmSync(path.join(this.home,this.key(owner,id)+'.json'),{force:true});}
+    async remove(owner:string,id:string){
+        const p=this.get(owner,id,true),key=this.key(owner,id);
+        if(!this.locked.has(key))await this.cancel(owner,id);
+        p.schedules=[];this.wechat.remove(owner,id);this.messaging.detachAgent(owner,id);this.sessions.workspaceFiles?.revoke(key);
+        const file=path.join(this.home,key+'.json');
+        fs.rmSync(file+'.tmp',{force:true});fs.rmSync(file,{force:true});
+        this.rows.delete(key);this.locked.delete(key);this.legacyStaging.delete(key);this.sessionGrants.delete(key);
+    }
     close(){if(this.closed)return;this.stopMessagingWatch();clearInterval(this.timer);for(const timer of this.deliveries)clearInterval(timer);this.deliveries.clear();for(const p of this.rows.values())if(active(p)){this.agentJobs.close(p);p.job!.state='unknown';p.job!.pending=[];this.save(p);}this.closed=true;for(const w of this.watchers)w.close();this.watchers.clear();for(const controller of this.aborts.values())controller.abort();}
 }
