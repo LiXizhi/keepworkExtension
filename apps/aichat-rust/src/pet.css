@@ -20,12 +20,13 @@ button:disabled { opacity: .5; cursor: default; }
   background: #f7fbf8f7;
   border: 1px solid #bed5c7;
   box-shadow: 0 3px 8px #0002;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 #panel > * { flex: none; }
 #panel > :is(#status, #error, #options, #draft) { flex: 0 1 auto; }
 #panel > :is(#status, #error, #options) { min-height: 1.6em; }
-header { display: flex; align-items: center; justify-content: flex-end; margin-right: -12px; }
+header { display: flex; align-items: center; justify-content: flex-end; }
 #messages { flex: 1; min-height: 40px; overflow: auto; white-space: pre-wrap; }
 .message { margin: 4px 0; padding: 6px 8px; border-radius: 8px; background: #ebf2ed; }
 .message.user { background: #d9eddf; margin-left: 20px; }
@@ -67,7 +68,7 @@ body.dragging #art{filter:none}
   flex: none;
   width: 32px;
   height: 28px;
-  margin-right: 8px;
+  margin-right: 4px;
   border-radius: 9px;
 }
 #remote-voice-indicator svg { width: 21px; height: 21px; }
@@ -86,7 +87,8 @@ body.dragging #art{filter:none}
 #target[data-kind="persona"] .session { display: none; }
 #remote-voice-label,
 #panel.remote-voice-station .target-text,
-#panel .action-label {
+#panel .action-label:not(#call-label),
+#panel.remote-voice-station #call-label {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -110,6 +112,16 @@ body.dragging #art{filter:none}
 }
 #panel .actions button:hover:enabled { border-color: #2563a8; color: #1d4f87; }
 #panel .actions button:focus-visible { outline-color: #2563a8; }
+#panel:not(.remote-voice-station) #call {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: auto;
+  padding: 0 10px;
+  border-radius: 17px;
+  white-space: nowrap;
+}
 #panel #send { border: 0; border-radius: 10px; background: #2563a8; color: white; }
 #panel #send:hover:enabled { opacity: .85; }
 #panel #send.alternate-action, #panel #call.alternate-action { background: #ef4444; color: white; }
@@ -164,24 +176,22 @@ body.dragging #art{filter:none}
 #exit-status { font-size: var(--desktop-text-small); color: #637268; }
 
 #target { flex: 1; min-width: 0; text-align: left; background: transparent; padding: 4px 6px; }
+.target-text { display: block; }
 #target-title, #target-detail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #target-title { font-weight: var(--desktop-weight-heading); line-height: var(--desktop-leading-heading); }
 #target-detail { font-size: var(--desktop-text-small); color: #637268; margin-top: 3px; }
 .window-control {
-  align-self: flex-start;
   flex: none;
   display: grid;
   place-items: center;
-  width: 36px;
+  width: 28px;
   height: 28px;
-  margin-top: -12px;
   padding: 0;
-  border-radius: 0;
+  border-radius: 6px;
   background: transparent;
   font-size: 16px;
   line-height: 1;
 }
-#collapse { border-top-right-radius: 17px; }
 .window-control:hover { background: #d5e9dc; }
 .window-control:focus-visible { outline-offset: -2px; }
 

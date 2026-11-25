@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 151 260" width="151" height="260">
+  <title>Bumi 机器人</title>
+  <style>
+    @keyframes nod {
+      0%, 48%, 100% { transform: rotate(0deg); }
+      18%, 31% { transform: rotate(7deg); }
+    }
+    @keyframes lift {
+      0%, 49%, 100% { transform: rotate(0deg); }
+      16%, 33% { transform: rotate(-27deg); }
+    }
+    @keyframes wave {
+      0%, 46%, 100% { transform: rotate(0deg); }
+      15%, 27% { transform: rotate(-113deg); }
+      21%, 33% { transform: rotate(-88deg); }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .head { transform-origin: 101px 47px; animation: nod 5.6s ease-in-out infinite; }
+      .upper-arm { transform-origin: 131px 59px; animation: lift 5.6s ease-in-out infinite; }
+      .forearm { transform-origin: 135px 94px; animation: wave 5.6s ease-in-out infinite; }
+    }
+    #still:target .head, #still:target .upper-arm, #still:target .forearm { animation: none; }
+  </style>
+  <defs>
+    <linearGradient id="ceramic" x1="0" y1=".2" x2="1" y2=".6" gradientUnits="objectBoundingBox">
+      <stop stop-color="#cbd2d8"/>
+      <stop offset=".19" stop-color="#fafbfc"/>
+      <stop offset=".45" stop-color="#fff"/>
+      <stop offset=".76" stop-color="#e1e5e8"/>
+      <stop offset="1" stop-color="#a7b0b8"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" x2=".65" y1="0" y2="1">
+      <stop stop-color="#f6f8fa"/>
+      <stop offset=".52" stop-color="#d4d9de"/>
+      <stop offset="1" stop-color="#8a959e"/>
+    </linearGradient>
+    <linearGradient id="metal">
+      <stop stop-color="#353d44"/>
+      <stop offset=".28" stop-color="#adb6bd"/>
+      <stop offset=".51" stop-color="#505a63"/>
+      <stop offset="1" stop-color="#252c32"/>
+    </linearGradient>
+    <linearGradient id="glass" x1=".2" y1="0" x2=".8" y2="1">
+      <stop stop-color="#67717a"/>
+      <stop offset=".35" stop-color="#353c43"/>
+      <stop offset=".49" stop-color="#171c21"/>
+      <stop offset="1" stop-color="#070a0d"/>
+    </linearGradient>
+    <radialGradient id="cap" cx=".35" cy=".28" r=".8">
+      <stop stop-color="white"/>
+      <stop offset=".6" stop-color="#e9ecef"/>
+      <stop offset="1" stop-color="#acb5bc"/>
+    </radialGradient>
+
+    <!-- Both legs share the same hip bearing, knee cover and exposed ankle linkage. -->
+    <g id="leg">
+      <path fill="url(#metal)" d="M112 129q7-5 14 0l-1 23-11 1z"/>
+      <path fill="url(#ceramic)" d="M111 141q6-6 13-2 7 6 7 16l-5 22q-6 6-15 0l-3-23q-1-9 3-13z"/>
+      <ellipse cx="124.5" cy="142" rx="6.6" ry="8.6" fill="url(#rim)"/>
+      <ellipse cx="125.5" cy="142" rx="3.8" ry="5.3" fill="#707a83"/>
+      <ellipse cx="125" cy="141.5" rx="2" ry="3.1" fill="#c7cdd2"/>
+      <path fill="url(#metal)" d="m112 171 14 1-1 18h-13z"/>
+      <path fill="url(#ceramic)" d="M111 168q8 2 16-1l-1 12q-2 6-8 6-6 0-8-4z"/>
+      <path fill="url(#metal)" d="m111 219 15 1-1 19-4 4-10-3z"/>
+      <path fill="#d0d5da" d="m114 220 3 1-1 16-2-1z"/>
+      <path fill="url(#ceramic)" d="M109 182q8 3 17-1 5 4 3 15l-3 24q0 6-4 8l-12-2q-1-12-3-23-3-15 2-21z"/>
+      <path fill="none" stroke="#b7c0c7" stroke-width=".8" d="M127 186q-6 3-6 12"/>
+      <circle cx="124.3" cy="199.2" r="1" fill="#909ba4"/>
+      <path fill="#89939c" d="M104 243q12-2 27 0l-.4 5q-7 4-16 4l-13-2q-4-3 2-7z"/>
+      <path fill="url(#ceramic)" d="M111 235q5 3 11 1l4-4q5 2 5 11-2 5-14 6l-14-2q-4-1-3-4 1-3 7-5z"/>
+    </g>
+    <g id="upper-shell">
+      <path fill="url(#metal)" d="m129 62 9 1 1 32h-9z"/>
+      <path fill="url(#ceramic)" d="M125 60q3-6 10-4 6 2 6 11l.3 16q-5 4-12 1l-3-13z"/>
+      <ellipse cx="131" cy="59" rx="9" ry="9.7" fill="url(#cap)"/>
+      <path fill="url(#rim)" d="M129 84q6 2 12-1l.6 4q-6 4-12 1z"/>
+    </g>
+    <g id="lower-shell">
+      <circle cx="135" cy="94" r="7.6" fill="url(#cap)"/>
+      <path fill="url(#ceramic)" d="M129 99q5 3 12-1l-3 22q-.5 5-4 8l-4-2-1-16z"/>
+      <path fill="url(#metal)" d="m131 126 6-1-1 7h-6z"/>
+      <path fill="url(#rim)" d="M129 129q4-3 8 0 4 3 2 8l-3 5-4 1-3-2-2-6z"/>
+      <path fill="none" stroke="#68737c" stroke-width="1.5" stroke-linecap="round" d="m130 135 2 3 3-1 1-3"/>
+    </g>
+  </defs>
+
+  <g id="still" transform="translate(-50 0)">
+    <use href="#leg" transform="translate(-30 4) scale(.94 .965) rotate(3 120 139)"/>
+    <g transform="translate(209 -2) scale(-1 .985) rotate(-5 131 59)">
+      <use href="#upper-shell"/>
+      <use href="#lower-shell"/>
+    </g>
+    <!-- Pelvis and the narrower waist show between the chest and hip shells. -->
+    <path fill="url(#metal)" d="M86 117q14-8 34 0l4 17-8 8-11-5-13-3-11 3z"/>
+    <path fill="url(#ceramic)" d="M92 94q10 4 22 0l2 29q-1 11-9 15l-10-1q-7-5-7-14z"/>
+    <path fill="url(#cap)" d="M85 117q6-2 9 4l-1 15q-3 5-8 3-6-3-5-10 0-8 5-12z"/>
+    <use href="#leg"/>
+    <path fill="url(#ceramic)" d="M113 117q6-4 11 2 6 5 6 15-2 6-7 6l-7-5-7-3q-2-10 4-15z"/>
+    <path fill="url(#metal)" d="M96 39h11l3 14-17 1z"/>
+    <path fill="url(#rim)" d="m94 44 13-1 1 6-15 2z"/>
+    <!-- The broad, tapered breastplate sits in front of the shoulder yoke. -->
+    <path fill="url(#rim)" d="M75 52q5-5 15-4l22-1q14-1 22 7l-4 13-12-3-31 1-10 3z"/>
+    <path fill="url(#ceramic)" d="M85 50q12-3 24-2 10 0 15 6 4 7 1 17l-6 23q-1 6-9 8l-18-1q-6-1-7-8l-5-24q-2-12 5-19z"/>
+    <path fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" d="M84 66q-1-9 4-12 8-3 17-3"/>
+    <path fill="none" stroke="#bbc3c9" stroke-width=".9" stroke-linecap="round" d="M113 97q3-1 4-6l3-11"/>
+    <g fill="#9ca6af">
+      <circle cx="120" cy="75" r=".8"/><circle cx="119.4" cy="78" r=".8"/>
+    </g>
+    <g class="head">
+      <path fill="url(#rim)" d="M94 9q9-3 17 1 7 4 7 13l-3 14q-2 7-9 10l-8-2-8-9z"/>
+      <path fill="url(#ceramic)" d="M95 9q10-3 16 3 4 4 3 13l-3 12q-2 7-10 9l-6-3z"/>
+      <path fill="#242a30" d="M93 10q8-3 13 1 4 3 3 10l-2 12q-2 9-7 11-5 2-9-3-6-7-6-16 0-11 8-15z"/>
+      <path fill="url(#glass)" d="M94 12q7-3 11 1 2 3 1 9l-2 12q-2 6-5 8-4 0-7-4-5-6-5-13 0-9 7-13z"/>
+      <path fill="#879199" opacity=".66" d="M91 15q6-5 13-2-1 2-3 2-6-1-11 5z"/>
+      <path fill="#0a0e12" d="m86 24 21-2-.5 4-20 1z"/>
+      <path fill="#99a5ad" opacity=".7" d="m87 24 18-1.7-.2 1.2L87 25z"/>
+    </g>
+    <g class="upper-arm">
+      <use href="#upper-shell"/>
+      <g class="forearm"><use href="#lower-shell"/></g>
+    </g>
+  </g>
+</svg>

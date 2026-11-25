@@ -72,8 +72,11 @@ test("Bumi control is available from every desktop menu and packaged as a local 
   assert.ok(html.includes('id="direction-pad"'));
   assert.match(html, /id="device-choice"[^>]*\bhidden\b/);
   assert.match(html, /id="connect"/);
-  assert.match(html, /src="\/src\/assets\/bumi-robot\.png"/);
-  assert.ok(fs.existsSync(path.join(root, "src/assets/bumi-robot.png")));
+  assert.match(html, /src="\/src\/assets\/bumi-robot\.svg"/);
+  assert.match(html, /<source media="\(prefers-reduced-motion: reduce\)" srcset="\/src\/assets\/bumi-robot\.svg#still">/);
+  const portrait = read("src/assets/bumi-robot.svg");
+  assert.match(portrait, /@media\s*\(prefers-reduced-motion:\s*no-preference\)/);
+  assert.match(portrait, /id="still"/);
   assert.match(html, /id="voice-command"/);
   assert.match(html, /mi-remote-voice/);
   assert.match(html, /20 秒/);

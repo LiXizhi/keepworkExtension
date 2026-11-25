@@ -51,6 +51,7 @@ pub struct AppCore {
     pub local_model_supervisor: Arc<RuntimeSupervisor>,
     pub updates: Arc<UpdateManager>,
     pub pet: Arc<PetController>,
+    pub(super) pet_camera_view: Mutex<Option<(String, uuid::Uuid)>>,
     pub(super) pet_approval_return: Mutex<Option<super::pet_approval::ReturnTicket>>,
     pub pet_audio: Arc<pet_audio::PetAudioRelay>,
     pub remote_voice: Arc<crate::remote_voice::RemoteVoice>,

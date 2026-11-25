@@ -98,6 +98,7 @@ impl Bluetooth {
         }
 
         match request {
+            Request::Guide { .. } => return Err("导航步进需先验证当前遥控会话。".into()),
             Request::Status => {}
             Request::Scan { .. } if self.connection.is_none() => {
                 self.devices.clear();
@@ -125,6 +126,7 @@ impl Bluetooth {
             Request::Send {
                 command,
                 remote_capture_id,
+                voice_id,
             } => {
                 let monitor = self
                     .listener
@@ -132,22 +134,31 @@ impl Bluetooth {
                     .filter(|listener| listener.active.load(Ordering::Relaxed))
                     .map(|_| app);
                 let connection = self.connection.as_mut().ok_or(DISCONNECTED)?;
+                if voice_id.is_some() && (connection.moving || !connection.gait_confirmed) {
+                    return Err("请先停止移动，确认 Bumi 的行走步态后再跳舞。".into());
+                }
                 if command.motion_active() == Some(true) {
                     if remote_capture_id.is_some() && !connection.gait_confirmed {
                         return Err("请查询并确认机器人已进入所选步态。".into());
                     }
-                    verify_remote()?;
                 }
+                if command.motion_active() == Some(true) || voice_id.is_some() { verify_remote()?; }
                 connection
                     .send(command, &mut lifetime, monitor, remote_capture_id)
                     .await?;
             }
         }
 
+        Ok(self.snapshot())
+    }
+
+    pub(super) fn snapshot(&self) -> Snapshot {
         let locomotion_mode = self.connection.as_ref().and_then(|c| c.locomotion_mode);
-        Ok(Snapshot {
+        Snapshot {
             available: true,
+            guided_motion_version: Some(1),
             remote_motion_version: Some(2),
+            remote_voice_command_version: Some(1),
             connection_id: self.connection.as_ref().map(|c| c.id.clone()),
             devices: self
                 .devices
@@ -176,7 +187,7 @@ impl Bluetooth {
                 .listener
                 .as_ref()
                 .is_some_and(|listener| listener.active.load(Ordering::Relaxed)),
-        })
+        }
     }
 
     async fn set_listening(

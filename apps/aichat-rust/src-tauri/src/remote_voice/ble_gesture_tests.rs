@@ -8,6 +8,7 @@ struct Remote {
     gesture: RecordGesture,
     ptt: Ptt,
     recognition: Option<Recognition>,
+    bumi: bool,
 }
 
 impl Remote {
@@ -16,6 +17,7 @@ impl Remote {
             bytes,
             self.now + Duration::from_millis(time),
             &self.dialogue,
+            self.bumi,
             &mut self.gesture,
             &mut self.ptt,
             &mut self.recognition,
@@ -52,6 +54,7 @@ async fn remote_dialogue_atvv_taps_discard_ready_cloud_results_and_mode_controls
             frame_size: 120,
         }),
         recognition: None,
+        bumi: false,
     };
 
     assert!(matches!(
@@ -116,6 +119,17 @@ async fn remote_dialogue_atvv_taps_discard_ready_cloud_results_and_mode_controls
     assert!(remote.ptt.take_chunk().is_none());
     assert!(remote.packet(429, &[0]).is_empty());
     assert_eq!(&*routed.lock().unwrap(), &["interrupt", "enter", "record"]);
+    remote.bumi = true;
+    for (at, stream) in [(450, 4), (570, 5)] {
+        assert!(matches!(remote.packet(at, &[8]).as_slice(), [Action::OpenMic(_)]));
+        assert!(matches!(remote.packet(at + 10, &[4, 0, 2, stream]).as_slice(), [Action::State("recording")]));
+        remote.ptt.audio(&[0x77; 1200]).unwrap();
+        assert!(matches!(remote.packet(at + 60, &[0]).as_slice(), [Action::Recognize { .. }]));
+        assert!(!remote.gesture.defer_result(remote.now + Duration::from_millis(at + 61)));
+        remote.ptt.busy = false; // Simulate completion before the next physical press.
+    }
+    assert_eq!(&*routed.lock().unwrap(), &["interrupt", "enter", "record"]);
+    remote.bumi = false;
     assert!(remote.dialogue.exit("back"));
     assert!(matches!(
         remote.packet(650, &[8]).as_slice(),

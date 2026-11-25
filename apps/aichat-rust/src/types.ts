@@ -8,6 +8,7 @@ export interface DesktopCapabilities {
   readonly defaultBrainFolder: true;
   readonly gitSetup: true;
   readonly floatingPet: true;
+  readonly petCameraPresentationVersion?: 1;
   readonly petApprovalReturnVersion?: 1;
   readonly desktopScreenshotVersion?: 1;
   readonly petApprovalRevealVersion?: 1;
@@ -137,6 +138,7 @@ export interface AIChatDesktopBridge {
   getScreenshotPermission?(): Promise<ScreenshotPermission>;
   setScreenshotPermission?(enabled: boolean): Promise<ScreenshotPermission>;
   revealPetApproval?(options?: { returnToPet?: boolean }): Promise<boolean>;
+  presentPetCamera?(active: boolean): Promise<boolean>;
   returnToPetAfterApproval?(): Promise<boolean>;
   publishPetState(state: Record<string, unknown>): Promise<boolean>;
   petResult(result: Record<string, unknown>): Promise<boolean>;

@@ -191,6 +191,14 @@ enum SourceChoice {
     Ambiguous,
 }
 
+impl SourceChoice {
+    fn matches_voice_source(&self, source: &str) -> bool {
+        let Self::Unique { physical, .. } = self else { return false; };
+        let Some(expected) = super::paired::canonical_mac(source) else { return false; };
+        physical.rsplit('_').next().and_then(super::paired::canonical_mac).as_ref() == Some(&expected)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RemoteCandidate {
     handle: usize,
@@ -831,6 +839,10 @@ impl HomeListener {
         })
     }
 
+    pub(super) fn matches_voice_source(&self, source: &str) -> bool {
+        MONITOR.lock().is_ok_and(|monitor| monitor.presses.choice.matches_voice_source(source))
+    }
+
     pub(super) fn status(&self) -> ButtonStatus {
         MONITOR
             .lock()
@@ -998,6 +1010,10 @@ mod tests {
                 label: "HID · Xiaomi RC003".into(),
             },
         ]);
+        assert!(same_device.matches_voice_source("E8:55:40:E1:3E:8A"));
+        assert!(!same_device.matches_voice_source("AA:BB:CC:DD:EE:FF"));
+        assert!(!same_device.matches_voice_source(""));
+        assert!(!SourceChoice::Ambiguous.matches_voice_source("E8:55:40:E1:3E:8A"));
         assert!(matches!(
             same_device,
             SourceChoice::Unique { ref handles, .. } if handles == &[1, 2]

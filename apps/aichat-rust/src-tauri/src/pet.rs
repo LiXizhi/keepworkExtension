@@ -528,6 +528,7 @@ pub fn sanitize_pet_state(
         "dictating": raw.get("dictating").and_then(|v| v.as_bool()).unwrap_or(false),
         "richDraft": raw.get("richDraft").and_then(|v| v.as_bool()).unwrap_or(false),
         "canCall": raw.get("canCall").and_then(|v| v.as_bool()).unwrap_or(false),
+        "callUnavailableReason": raw["callUnavailableReason"].as_str().map(|s| truncate_str(s, 240)),
         "compactVoice": raw.get("compactVoice").and_then(|v| v.as_bool()).unwrap_or(false),
         "petReplyPresentationVersion": presentation_version,
         "petStreamingSpeechVersion": supports_streaming_speech(raw).then_some(1),
@@ -1393,6 +1394,15 @@ mod tests {
         assert_eq!(legacy["reply"]["text"], "legacy answer");
         assert!(legacy["reply"].get("requestId").is_none());
         assert!(legacy["reply"].get("speechText").is_none());
+    }
+
+    #[test]
+    fn call_unavailable_reason_is_optional_and_bounded() {
+        let pet = command_controller();
+        assert!(pet.snapshot()["callUnavailableReason"].is_null());
+        let reason = "语".repeat(250);
+        let state = pet.update_raw_state(json!({ "callUnavailableReason": reason }));
+        assert_eq!(state["callUnavailableReason"], "语".repeat(240));
     }
 
     #[test]

@@ -8,6 +8,8 @@ use url::Url;
 
 #[cfg(any(target_os = "macos", windows))]
 mod bluetooth;
+#[cfg(any(target_os = "macos", windows))]
+mod guided;
 pub(super) mod remote_input;
 #[cfg(any(target_os = "macos", windows, test))]
 mod protocol;
@@ -26,12 +28,23 @@ pub(super) struct Control {
     attempts: Mutex<ConnectionAttempts>,
     #[cfg(any(target_os = "macos", windows))]
     remote: Mutex<remote_input::Sessions>,
+    #[cfg(any(target_os = "macos", windows))]
+    guide: Mutex<guided::Lease>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "camelCase")]
 pub(super) enum Request {
     Status,
+    Guide {
+        #[serde(rename = "captureId")]
+        capture_id: u64,
+        #[serde(rename = "pressId")]
+        press_id: u64,
+        direction: Option<GuidedDirection>,
+        #[serde(rename = "voiceId", default)]
+        voice_id: Option<u64>,
+    },
     Scan {
         #[serde(rename = "attemptId", default)]
         attempt_id: Option<String>,
@@ -51,7 +64,17 @@ pub(super) enum Request {
         command: Command,
         #[serde(rename = "remoteCaptureId", default)]
         remote_capture_id: Option<u64>,
+        #[serde(rename = "voiceId", default)]
+        voice_id: Option<u64>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum GuidedDirection {
+    Forward,
+    Left,
+    Right,
 }
 
 // The BLE mutex serializes work. Cancellation has a separate lock so it can
@@ -155,7 +178,11 @@ struct Device {
 pub(super) struct Snapshot {
     available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    guided_motion_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     remote_motion_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_voice_command_version: Option<u8>,
     connection_id: Option<String>,
     devices: Vec<Device>,
     connected: Option<Device>,
@@ -302,6 +329,9 @@ pub(super) async fn bumi_control(
             }
             lifetime
         };
+        if let Request::Guide { capture_id, press_id, direction, voice_id } = request {
+            return guided::request(&window, control.inner(), lifetime, capture_id, press_id, direction, voice_id).await;
+        }
         let mut bluetooth = match &request {
             Request::CancelConnection { .. } => control.bluetooth.lock().await,
             Request::Send { command, .. } if command.motion_active() == Some(false) => {
@@ -319,17 +349,22 @@ pub(super) async fn bumi_control(
             }
             _ => lifetime.clone(),
         };
+        let dance = match &request {
+            Request::Send { command: Command::Dance, remote_capture_id: Some(id), voice_id: Some(voice_id) } => Some((*id, *voice_id)),
+            Request::Send { voice_id: Some(_), .. } => return Err("Bumi 语音指令与遥控会话不匹配。".into()),
+            _ => None,
+        };
         let direction = match &request {
-            Request::Send { command, remote_capture_id: Some(id) } => {
+            Request::Send { command, remote_capture_id: Some(id), .. } if dance.is_none() => {
                 command.remote_direction()?.map(|key| (*id, key))
             }
             _ => None,
         };
-        let verify = || match direction {
-            Some((id, key)) => remote_input::verify_direction(&window, &control, id, key),
-            None => Ok(()),
+        let verify = || match (direction, dance) {
+            (Some((id, key)), _) => remote_input::verify_direction(&window, &control, id, key),
+            (_, Some((id, voice_id))) => remote_input::verify_guided_voice(&window, &control, id, voice_id, true),
+            _ => Ok(()),
         };
-        verify()?;
         bluetooth
             .request(window.app_handle(), request, lifetime, operation_lifetime, verify)
             .await
@@ -340,7 +375,9 @@ pub(super) async fn bumi_control(
         if matches!(request, Request::Status) {
             return Ok(Snapshot {
                 available: false,
+                guided_motion_version: None,
                 remote_motion_version: None,
+                remote_voice_command_version: None,
                 connection_id: None,
                 devices: Vec::new(),
                 connected: None,

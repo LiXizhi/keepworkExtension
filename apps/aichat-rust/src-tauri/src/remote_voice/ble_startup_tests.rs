@@ -194,7 +194,7 @@ async fn first_press_is_signalled_during_setup_and_both_orders_of_caps_and_write
             packet(AUDIO, &[0x77; 134]),
             packet(CONTROL, &[0x00]),
         ];
-        let run = startup::negotiate(&mut inbox, setup, || signal.send(()).unwrap());
+        let run = startup::negotiate(&mut inbox, setup, |_| signal.send(()).unwrap());
         let peripheral = async {
             let caps = packet(CONTROL, &[0x0b, 0, 4, 0, 2, 0, 0]);
             if caps_before_write_ack {

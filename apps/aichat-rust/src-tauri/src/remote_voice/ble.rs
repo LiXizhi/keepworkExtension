@@ -451,6 +451,7 @@ const MAX_PENDING_CHUNKS: usize = 16_000 * 60 / CHUNK_SAMPLES;
 
 struct Recognition {
     work: RecognitionWork,
+    bumi: Option<super::BumiDelivery>,
     audio: Option<tokio::sync::mpsc::Sender<Vec<i16>>>,
     feedback: Option<std::sync::Arc<RecordingFeedback>>,
     stream_started: bool,
@@ -461,10 +462,18 @@ struct Recognition {
 }
 
 impl Recognition {
-    fn start(target: RecordingTarget, cancel: watch::Receiver<bool>, speech: std::sync::Arc<asr::SpeechConnection>) -> Self {
-        Self::with_transcriber(target, move |pcm, preview| {
+    fn start(
+        bumi: Option<super::BumiDelivery>,
+        editor_target: impl FnOnce() -> RecordingTarget,
+        cancel: watch::Receiver<bool>,
+        speech: std::sync::Arc<asr::SpeechConnection>,
+    ) -> Self {
+        let target = if bumi.is_some() { Ok(None) } else { editor_target() };
+        let mut job = Self::with_transcriber(target, move |pcm, preview| {
             Box::pin(async move { speech.transcribe(pcm, cancel, preview).await })
-        })
+        });
+        job.bumi = bumi;
+        job
     }
     fn with_transcriber(
         target: RecordingTarget,
@@ -485,7 +494,7 @@ impl Recognition {
             });
             recognize_for_focus(focus, stream, move |pcm| transcribe(pcm, preview)).await
         };
-        Self { work: Box::pin(work), audio: Some(audio), feedback, stream_started: false, received_audio: false,
+        Self { work: Box::pin(work), bumi: None, audio: Some(audio), feedback, stream_started: false, received_audio: false,
             released: false, interrupted: None, result: None }
     }
     fn live_status(&self, phase: &'static str) -> (&'static str, &str) {
@@ -569,15 +578,65 @@ async fn confirm_composer(focus: RecordingFocus) -> Result<(), RecognitionError>
     }
     Ok(())
 }
+
+fn deliver_bumi_result(
+    deliver: &super::BumiDelivery,
+    result: Result<String, RecognitionError>,
+) -> (&'static str, String) {
+    let (status, message) = match result {
+        Ok(text) if text.trim().is_empty() => return ("ready", String::new()),
+        Ok(text) if text.encode_utf16().take(121).count() > 120 || text.contains('\0') => {
+            ("input-blocked", "请重新说一句简短的 Bumi 指令。".to_owned())
+        }
+        Ok(text) => return match deliver(Ok(text.trim())) {
+            Ok(()) => ("ready", String::new()),
+            Err(error) => ("input-blocked", error),
+        },
+        Err(RecognitionError::Partial(_, _) | RecognitionError::Cloud(_)) => {
+            ("cloud-error", "未能完整识别 Bumi 指令，请重新按住语音键说一次。".into())
+        }
+        Err(RecognitionError::Focus(error)) => ("input-blocked", error),
+    };
+    let _ = deliver(Err(&message));
+    (status, message)
+}
+
+#[cfg(target_os = "macos")]
+async fn only_connected_bumi_voice_source(adapter: &Adapter, source: &PeripheralId) -> bool {
+    // HID reports hardware identity, CoreBluetooth reports UUIDs. There is
+    // no public MAC-to-UUID mapping. The connected RC003 exposes ATVV, so
+    // only accept a unique system-wide ATVV result matching the actual press.
+    let options = RetrievePeripheralsOptions { identifiers: None, services: Some(vec![SERVICE]) };
+    let Ok(Ok(connected)) = timeout(Duration::from_secs(2), adapter.retrieve_peripherals(options)).await else {
+        return false;
+    };
+    same_voice_source_only(source, connected.iter().map(|device| device.id()))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn same_voice_source_only<T: PartialEq>(source: &T, connected: impl IntoIterator<Item = T>) -> bool {
+    let mut found = false;
+    for candidate in connected {
+        if candidate != *source { return false; }
+        found = true;
+    }
+    found
+}
 fn cancel_utterance(ptt: &mut Ptt, recognition: &mut Option<Recognition>) {
     // Drop the owned socket lease and upload future before clearing the current input.
     *recognition = None;
     ptt.cancel_current();
 }
 fn handle_record_control(
-    data: &[u8], now: Instant, dialogue: &std::sync::Arc<super::dialogue::Dialogue>,
+    data: &[u8], now: Instant, dialogue: &std::sync::Arc<super::dialogue::Dialogue>, bumi: bool,
     gesture: &mut RecordGesture, ptt: &mut Ptt, recognition: &mut Option<Recognition>,
 ) -> Result<Vec<Action>, String> {
+    if bumi {
+        // Keep the remote microphone for Bumi even if a desktop call is open.
+        // Two short robot commands must never become a phone double-tap.
+        *gesture = RecordGesture::default();
+        return ptt.control(data);
+    }
     // Firmware can report a press twice (request + stream start),
     // or release before the first audio frame arrives.
     match gesture.control(data, now, dialogue.active()) {
@@ -684,6 +743,7 @@ async fn connection(
     // the last successfully negotiated device across reconnects and service restarts.
     static LAST_VALIDATED: std::sync::Mutex<Option<PeripheralId>> = std::sync::Mutex::new(None);
     let device_id = peripheral.id();
+    let voice_source = device_id.to_string();
     let chars = peripheral.characteristics();
     service.set_diagnostic(generation, gatt::report(&device_id.to_string(), &peripheral.services(), &chars));
     let gatt::Channels { tx, control, audio } = gatt::channels(&chars).ok_or_else(|| {
@@ -703,14 +763,18 @@ async fn connection(
     };
     let setup_mode = *service.demo_mode.borrow();
     let mut startup_target = None;
+    let mut bumi_press = None;
+    let mut startup_press_bound = false;
     let mut stop = cancel.clone();
     let negotiation = tokio::select! {
         biased;
         _ = cancelled(&mut stop) => return Ok(()),
-        result = with_idle_buttons(service, generation, startup::negotiate(&mut notifications, setup, || {
+        result = with_idle_buttons(service, generation, startup::negotiate(&mut notifications, setup, |at| {
             if setup_mode.active || *service.demo_mode.borrow() != setup_mode { return; }
             service.update(generation, "preparing-microphone", "", None);
-            if !service.dialogue.active() {
+            startup_press_bound = true;
+            bumi_press = service.bumi_target_at(at, &voice_source);
+            if bumi_press.is_none() && !service.dialogue.active() {
                 startup_target = Some(service.prepare_recording_focus(generation));
             }
         })) => result,
@@ -832,6 +896,11 @@ async fn connection(
                         _ => None,
                     };
                     if let Some(pressed) = edge {
+                        if pressed && !voice_pressed {
+                            if !std::mem::take(&mut startup_press_bound) {
+                                bumi_press = if discard_demo { None } else { service.bumi_target_at(at, &voice_source) };
+                            }
+                        }
                         voice_pressed = pressed;
                         demo_press = pressed && discard_demo;
                         service.update_key_activity(generation, Some(pressed));
@@ -842,7 +911,8 @@ async fn connection(
                     if discard_demo || cleared_at.is_some_and(|cutoff| at <= cutoff) {
                         ptt.discard_buffered_control(&notification.value)
                     } else {
-                        handle_record_control(&notification.value, at, &service.dialogue, &mut gesture, &mut ptt, &mut recognition)
+                        handle_record_control(&notification.value, at, &service.dialogue, bumi_press.is_some(),
+                            &mut gesture, &mut ptt, &mut recognition)
                     }
                 } else if notification.uuid==AUDIO { ptt.audio(&notification.value).map(|_|vec![]) } else { Ok(vec![]) };
                 let actions=match actions {
@@ -894,8 +964,10 @@ async fn connection(
                             // MIC_OPEN is the earliest accepted key-down indication. Signal the pet
                             // before waiting for its GATT response or the first audio packet.
                             service.update(generation, "preparing-microphone", "", None);
-                            let target = startup_target.take().unwrap_or_else(|| service.prepare_recording_focus(generation));
-                            let mut job = Recognition::start(target, cancel.clone(), speech.clone());
+                            let mut job = Recognition::start(
+                                bumi_press.clone(),
+                                || startup_target.take().unwrap_or_else(|| service.prepare_recording_focus(generation)),
+                                cancel.clone(), speech.clone());
                             notifications.drain_available(&mut backlog)?;
                             if backlog.mic_open_obsolete() {
                                 recognition = Some(job);
@@ -923,7 +995,8 @@ async fn connection(
                                     recognition = None;
                                 }
                                 let job = recognition.get_or_insert_with(|| Recognition::start(
-                                    startup_target.take().unwrap_or_else(|| service.prepare_recording_focus(generation)),
+                                    bumi_press.clone(),
+                                    || startup_target.take().unwrap_or_else(|| service.prepare_recording_focus(generation)),
                                     cancel.clone(), speech.clone()));
                                 job.stream_started = true;
                                 let (state, error) = job.live_status("preparing-microphone");
@@ -971,7 +1044,7 @@ async fn connection(
                 _ => false,
             };
             let owner = job.feedback.as_deref();
-            if pending_text && !owner.is_some_and(|target| target.pet_delivery.is_some()) {
+            if job.bumi.is_none() && pending_text && !owner.is_some_and(|target| target.pet_delivery.is_some()) {
                 let ready = tokio::select! {
                     biased;
                     _=cancelled(&mut stop)=>return Ok(()),
@@ -989,6 +1062,18 @@ async fn connection(
             }
             if !service.input_allowed(generation, started) {
                 service.update(generation, "ready", "", None);
+                continue;
+            }
+            if let Some(deliver) = &job.bumi {
+                #[cfg(target_os = "macos")]
+                if matches!(&result, Ok(text) if !text.trim().is_empty()) {
+                    if !only_connected_bumi_voice_source(adapter, &peripheral.id()).await {
+                        result = Err(RecognitionError::Focus("无法确认语音来自方向键所用的遥控器。请只连接一只 RC003 并重试。".into()));
+                    }
+                    if !service.input_allowed(generation, started) { continue; }
+                }
+                let (state, error) = deliver_bumi_result(deliver, result);
+                service.update(generation, state, &error, None);
                 continue;
             }
             match result {
@@ -1017,6 +1102,38 @@ mod gesture_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bumi_rejects_another_connected_atvv_even_if_a_voice_device_was_explicitly_selected() {
+        assert!(!same_voice_source_only(&"RC001-uuid", []));
+        assert!(!same_voice_source_only(&"RC001-uuid", ["RC003-uuid"]));
+        assert!(!same_voice_source_only(&"RC001-uuid", ["RC001-uuid", "RC003-uuid"]));
+        assert!(same_voice_source_only(&"RC003-uuid", ["RC003-uuid", "RC003-uuid"]));
+    }
+
+    #[test]
+    fn bumi_press_never_focuses_an_editor_or_turns_partial_audio_into_a_command() {
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received = delivered.clone();
+        let target: super::super::BumiDelivery = std::sync::Arc::new(move |outcome| {
+            if let Ok(text) = outcome { received.lock().unwrap().push(text.to_owned()); }
+            Ok(())
+        });
+        let (_cancel, receiver) = watch::channel(false);
+        let job = Recognition::start(Some(target),
+            || panic!("a Bumi recording must not prepare chat, pet, or system input"),
+            receiver, std::sync::Arc::new(asr::SpeechConnection::default()));
+        let bound = job.bumi.as_ref().unwrap();
+        for partial in ["跳舞", "走到讲台", "停止"] {
+            let result = Err(RecognitionError::Partial(partial.into(), "断线".into()));
+            assert_eq!(deliver_bumi_result(bound, result).0, "cloud-error");
+        }
+        assert_eq!(deliver_bumi_result(bound, Ok("跳舞".repeat(161))).0, "input-blocked");
+        assert_eq!(deliver_bumi_result(bound, Ok("跳舞\0停止".into())).0, "input-blocked");
+        assert_eq!(deliver_bumi_result(bound, Ok(" 跳舞。 ".into())).0, "ready");
+        assert_eq!(deliver_bumi_result(bound, Ok("走到讲台".into())).0, "ready");
+        assert_eq!(&delivered.lock().unwrap()[..], &["跳舞。", "走到讲台"]);
+    }
     use std::sync::Arc;
     fn released_job(target: RecordingTarget, work: impl Future<Output = Result<String, String>> + Send + 'static) -> Recognition {
         let mut job = Recognition::with_transcriber(target, move |_, _| Box::pin(work));

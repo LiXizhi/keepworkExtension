@@ -9,7 +9,7 @@ const { promisify } = require('node:util');
 
 const run = promisify(execFile);
 
-test('macOS main phone acquires mock audio in pet mode without navigating or showing its desktop window', {
+test('macOS hidden main WebView can use its mock microphone and take one mock camera photo from the pet', {
   skip: process.platform !== 'darwin',
   timeout: 90000,
 }, async t => {
@@ -23,13 +23,42 @@ test('macOS main phone acquires mock audio in pet mode without navigating or sho
     }
     requests.set(page, (requests.get(page) || 0) + 1);
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
-      'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'" });
+      'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src blob:" });
     response.end(page === '/pet'
       ? `<!doctype html><title>pet</title><button style="position:fixed;inset:0" onclick="window.petClicks++">Pet</button>
          <script>window.petClicks = 0</script>`
       : `<!doctype html><title>main</title><script>
         window.sessionMarker = crypto.randomUUID();
         window.phoneStarts = 0;
+        window.photoStarts = 0;
+        window.takePhoto = async () => {
+          window.photoStarts++;
+          window.captureState = 'waiting';
+          const video = document.createElement('video');
+          video.muted = true;
+          video.playsInline = true;
+          let stream;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { width: {ideal: 1280}, height: {ideal: 720} } });
+            window.track = stream.getVideoTracks()[0];
+            video.srcObject = stream;
+            await video.play();
+            const canvas = document.createElement('canvas');
+            canvas.width = window.photoWidth = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            const jpeg = canvas.toDataURL('image/jpeg', .7);
+            window.jpegLength = jpeg.startsWith('data:image/jpeg;base64,') ? jpeg.length : 0;
+            canvas.width = 32;
+            canvas.height = 18;
+            const context = canvas.getContext('2d');
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            window.mockPattern = pixels.some((value, i) => i % 4 === 0 && Math.abs(value - pixels[0]) > 20);
+            window.captureState = 'captured';
+          } catch (e) { window.captureState = e.name; }
+          finally { stream?.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+        };
         window.reacquireMic = async () => {
           window.track.stop();
           const fresh = await navigator.mediaDevices.getUserMedia({audio:{sampleRate:16000,channelCount:1}});
@@ -64,8 +93,9 @@ test('macOS main phone acquires mock audio in pet mode without navigating or sho
     try {
       const result = await run(exe, [`http://127.0.0.1:${server.address().port}`], { timeout: 50000 });
       if (result.stdout.includes('locked/asleep')) t.diagnostic('The fixture simulated unobscured windows on a locked/asleep display.');
-      assert.match(result.stdout, /passed: grant/);
-      assert.match(result.stdout, /passed: deny/);
+      for (const device of ['phone', 'camera']) for (const decision of ['grant', 'deny']) {
+        assert.ok(result.stdout.includes(`passed: ${device} ${decision}`));
+      }
     } catch (error) {
       if (error.code === 77 && /no WebKit mock capture/i.test(error.stdout)) {
         t.skip('This WebKit version has no mock capture device support');
@@ -73,8 +103,8 @@ test('macOS main phone acquires mock audio in pet mode without navigating or sho
       }
       throw error;
     }
-    assert.equal(requests.get('/main'), 2, 'each scenario retains the original main document');
-    assert.equal(requests.get('/pet'), 2, 'each scenario retains the original pet');
+    assert.equal(requests.get('/main'), 4, 'each scenario retains the original main document');
+    assert.equal(requests.get('/pet'), 4, 'each scenario retains the original pet');
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));

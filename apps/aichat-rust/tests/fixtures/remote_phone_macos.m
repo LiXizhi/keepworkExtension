@@ -43,8 +43,14 @@ static id Eval(WKWebView *view, NSString *js) {
 }
 @end
 
+static BOOL MockDevicesEnabled(WKPreferences *preferences) {
+    SEL getMock = NSSelectorFromString(@"_mockCaptureDevicesEnabled");
+    return [preferences respondsToSelector:getMock] && ((BOOL (*)(id, SEL))objc_msgSend)(preferences, getMock);
+}
+
 @interface PhoneDelegate : NSObject <WKUIDelegate>
 @property BOOL allow;
+@property WKMediaCaptureType expectedType;
 @property NSInteger port;
 @property NSUInteger requests;
 @end
@@ -52,10 +58,12 @@ static id Eval(WKWebView *view, NSString *js) {
 - (void)webView:(WKWebView *)view requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin
         initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))reply {
     BOOL trusted = [origin.protocol isEqual:@"http"] && [origin.host isEqual:@"127.0.0.1"] && origin.port == self.port &&
-        frame.mainFrame && [view.URL.path isEqual:@"/main"] && type == WKMediaCaptureTypeMicrophone;
+        frame.mainFrame && [view.URL.path isEqual:@"/main"] && type == self.expectedType;
+    BOOL mocked = MockDevicesEnabled(view.configuration.preferences);
     self.requests++;
-    reply(trusted && self.allow ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
-    Check(trusted, @"only the trusted main document requested microphone access");
+    reply(trusted && mocked && self.allow ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
+    Check(mocked, @"an unverified media source must never be granted access");
+    Check(trusted, @"only the expected device was requested by the trusted main document");
 }
 @end
 
@@ -84,7 +92,7 @@ static void ClickPet(WKWebView *pet) {
     Check(Until(^BOOL { return [Eval(pet, @"window.petClicks") integerValue] == 1; }, 2), @"pet button received native click");
 }
 
-static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
+static void Scenario(NSURL *base, BOOL allow, BOOL camera, BOOL simulateClearDisplay) {
     @autoreleasepool {
         WKWebViewConfiguration *cfg = [WKWebViewConfiguration new];
         cfg.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
@@ -96,7 +104,7 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
             puts("No WebKit mock capture"); exit(77);
         }
         ((void (*)(id, SEL, BOOL))objc_msgSend)(cfg.preferences, setMock, YES);
-        Check(((BOOL (*)(id, SEL))objc_msgSend)(cfg.preferences, getMock), @"mock capture enabled before creating any media-capable view");
+        Check(MockDevicesEnabled(cfg.preferences), @"mock capture enabled before creating any media-capable view");
         SEL setMediaDevices = NSSelectorFromString(@"_setMediaDevicesEnabled:");
         Check([cfg.preferences respondsToSelector:setMediaDevices], @"WebKit media devices fixture preference is available");
         ((void (*)(id, SEL, BOOL))objc_msgSend)(cfg.preferences, setMediaDevices, YES);
@@ -108,9 +116,11 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
         WKWebView *mainView = Load(main, cfg, [base URLByAppendingPathComponent:@"main"]);
         WKWebViewConfiguration *petConfig = [WKWebViewConfiguration new];
         petConfig.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(petConfig.preferences, setMediaDevices, NO);
         WKWebView *pet = Load(petWindow, petConfig, [base URLByAppendingPathComponent:@"pet"]);
         PhoneDelegate *delegate = [PhoneDelegate new];
         delegate.allow = allow;
+        delegate.expectedType = camera ? WKMediaCaptureTypeCamera : WKMediaCaptureTypeMicrophone;
         delegate.port = base.port.integerValue;
         mainView.UIDelegate = delegate;
         Check(Until(^BOOL { return [mainView.title isEqual:@"main"] && [pet.title isEqual:@"pet"]; }, 7), @"both documents loaded");
@@ -137,9 +147,11 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
             [mediaApi[@"mediaDevices"] isEqual:@"object"] && [mediaApi[@"getUserMedia"] isEqual:@"function"],
             [NSString stringWithFormat:@"secure mock media API must exist before capture: %@", mediaApi]);
         // Start in exactly the state where WebKit can defer getUserMedia. Reparenting must unblock this same request.
-        Eval(mainView, @"startPhone();true");
-        BOOL earlyDecision = Until(^BOOL { return ![Eval(mainView, @"captureState") isEqual:@"waiting"]; }, 0.25);
-        Check(!earlyDecision && delegate.requests == 0, @"the ordered-out main still awaits microphone access");
+        if (!camera) {
+            Eval(mainView, @"startPhone();true");
+            BOOL earlyDecision = Until(^BOOL { return ![Eval(mainView, @"captureState") isEqual:@"waiting"]; }, 0.25);
+            Check(!earlyDecision && delegate.requests == 0, @"the ordered-out main still awaits microphone access");
+        }
         void *owner = (__bridge void *)main;
         void *host = (__bridge void *)petWindow;
         Check(keepwork_attach_phone_view(owner, host, (__bridge void *)mainView) != 0, @"hidden main view attached");
@@ -147,15 +159,21 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
         Check(Until(^BOOL { return ![Eval(mainView, @"document.hidden") boolValue]; }, 3), @"main document is presented in the pet window");
         Check([Eval(mainView, @"[innerWidth, innerHeight].join('x')") isEqual:viewport], @"desktop viewport retained during presentation");
         ClickPet(pet);
+        if (camera) Eval(mainView, @"takePhoto();true");
         Check(Until(^BOOL { return ![Eval(mainView, @"captureState") isEqual:@"waiting"]; }, 6), @"mock capture makes a permission decision");
-        Check(delegate.requests == 1, @"exactly one site-level microphone permission decision");
+        Check(delegate.requests == 1, @"exactly one site-level media permission decision");
         if (delegate.allow) {
-            Check([Eval(mainView, @"captureState") isEqual:@"listening"], @"phone starts listening");
-            Check([Eval(mainView, @"track.label") hasPrefix:@"Mock"], @"only WebKit's synthetic microphone is used");
+            Check([Eval(mainView, @"captureState") isEqual:camera ? @"captured" : @"listening"],
+                [NSString stringWithFormat:@"mock capture completed: %@", Eval(mainView, @"captureState")]);
+            Check([Eval(mainView, @"track.label") hasPrefix:@"Mock"], @"only WebKit's synthetic capture device is used");
+            if (camera) {
+                Check([Eval(mainView, @"window.photoWidth > 0 && window.jpegLength > 1000 && window.mockPattern") boolValue], @"camera decoded the synthetic test pattern and encoded it to JPEG");
+                Check([Eval(mainView, @"track.readyState") isEqual:@"ended"], @"camera track stopped before returning to the original hierarchy");
+            }
         } else {
             Check([Eval(mainView, @"captureState") isEqual:@"NotAllowedError"], @"permission denied stays denied");
         }
-        if (delegate.allow) {
+        if (delegate.allow && !camera) {
             Eval(mainView, @"reacquireMic().catch(e=>window.reacquireError=e.name);true");
             Check(Until(^BOOL { return [Eval(mainView, @"window.samples || 0") integerValue] >= 2; }, 8),
                 @"an active listening call can reacquire the mock microphone and process nonzero 16 kHz Web Audio frames");
@@ -175,10 +193,10 @@ static void Scenario(NSURL *base, BOOL allow, BOOL simulateClearDisplay) {
         keepwork_restore_phone_view(owner);
         Check(main.visible && mainView.window == main && mainView.superview == parent && NSEqualRects(mainView.frame, frame), @"Dock restores desktop geometry and original parent");
         Check([mainView.URL isEqual:url] && [Eval(mainView, @"window.sessionMarker") isEqual:marker] &&
-            [Eval(mainView, @"window.phoneStarts") integerValue] == 1, @"one call in the original main JS context throughout");
+            [Eval(mainView, camera ? @"window.photoStarts" : @"window.phoneStarts") integerValue] == 1, @"one request in the original main JS context throughout");
         [main orderOut:nil];
         [petWindow orderOut:nil];
-        printf("passed: %s\n", allow ? "grant" : "deny");
+        printf("passed: %s %s\n", camera ? "camera" : "phone", allow ? "grant" : "deny");
     }
 }
 
@@ -193,8 +211,10 @@ int main(int argc, const char **argv) {
         BOOL simulateClearDisplay = [session[@"CGSSessionScreenIsLocked"] boolValue] || CGDisplayIsAsleep(CGMainDisplayID());
         if (simulateClearDisplay) puts("Using fixture window visibility on a locked/asleep display.");
         [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:NO block:^(NSTimer *timer) {
-            Scenario(base, YES, simulateClearDisplay);
-            Scenario(base, NO, simulateClearDisplay);
+            Scenario(base, YES, NO, simulateClearDisplay);
+            Scenario(base, NO, NO, simulateClearDisplay);
+            Scenario(base, YES, YES, simulateClearDisplay);
+            Scenario(base, NO, YES, simulateClearDisplay);
             [NSApp terminate:nil];
         }];
         [NSApp run];

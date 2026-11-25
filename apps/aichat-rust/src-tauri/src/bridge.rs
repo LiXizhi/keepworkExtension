@@ -169,6 +169,7 @@ pub fn build_main_window_init_script_with_launch_capability(
     petVoiceAudioVersion: 1,
     startupSignIn: true,
     ...(launchEnabled && ["darwin", "win32"].includes(bootstrap.platform) ? {{ desktopScreenshotVersion: 1 }} : {{}}),
+    ...(launchEnabled && bootstrap.platform === "darwin" ? {{ petCameraPresentationVersion: 1 }} : {{}}),
     ...(launchEnabled ? {{ launchIntents: true, petApprovalRevealVersion: 1, petApprovalReturnVersion: 1 }} : {{}}),
     ...(["darwin", "win32"].includes(bootstrap.platform) ? {{ browserSurfaceVersion: 1, remoteDialogueVersion: 1, remotePhoneVersion: 1, remotePhoneCaptionVersion: 1, remotePhoneActivityVersion: 1 }} : {{}}),
     ...(bootstrap.platform === "darwin" ? {{ browserSurfaceViewportVersion: 1, browserSurfaceScaleVersion: 1 }} : {{}}),
@@ -178,6 +179,9 @@ pub fn build_main_window_init_script_with_launch_capability(
     const bridge = Object.freeze({{
       version: 1,
       capabilities,
+      ...(capabilities.petCameraPresentationVersion === 1 ? {{
+        presentPetCamera: (active) => invokeLaunch("desktop_present_pet_camera", {{ active }}),
+      }} : {{}}),
       ...(capabilities.desktopScreenshotVersion === 1 ? {{
         captureScreenshot: async () => {{
           const shot = await invokeLaunch("desktop_capture_screenshot");
