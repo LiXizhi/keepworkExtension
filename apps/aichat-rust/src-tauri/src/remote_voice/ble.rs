@@ -353,10 +353,12 @@ async fn with_idle_buttons<T>(
     tokio::pin!(work);
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut key_changes = super::buttons::activity_changes();
     loop {
         tokio::select! {
             biased;
             output = &mut work => return output,
+            _ = key_changes.changed() => service.dispatch_idle_buttons(generation),
             _ = tick.tick() => service.dispatch_idle_buttons(generation),
         }
     }
@@ -699,12 +701,14 @@ async fn connection(
         )?;
         write(peripheral, &tx, GET_CAPS, cancel).await
     };
+    let setup_mode = *service.demo_mode.borrow();
     let mut startup_target = None;
     let mut stop = cancel.clone();
     let negotiation = tokio::select! {
         biased;
         _ = cancelled(&mut stop) => return Ok(()),
         result = with_idle_buttons(service, generation, startup::negotiate(&mut notifications, setup, || {
+            if setup_mode.active || *service.demo_mode.borrow() != setup_mode { return; }
             service.update(generation, "preparing-microphone", "", None);
             if !service.dialogue.active() {
                 startup_target = Some(service.prepare_recording_focus(generation));
@@ -732,9 +736,28 @@ async fn connection(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut health_ticks = 0;
     let mut cleared_at = None;
+    let mut demo_mode = setup_mode;
+    let mut demo_changes = service.demo_mode.subscribe();
+    let mut key_changes = super::buttons::activity_changes();
+    let mut voice_pressed = false;
+    let mut demo_press = false;
     loop {
+        let latest_mode = *demo_changes.borrow_and_update();
+        if latest_mode != demo_mode {
+            demo_mode = latest_mode;
+            let had_target = startup_target.take().is_some();
+            let was_recognizing = recognition.is_some();
+            demo_press |= voice_pressed;
+            gesture = RecordGesture::default();
+            cancel_utterance(&mut ptt, &mut recognition);
+            if had_target || was_recognizing {
+                service.update(generation, "ready", "", None);
+            }
+        }
         service.dispatch_home(generation);
-        if super::dialogue::take_ok() { service.dialogue.record("ok"); }
+        if super::dialogue::take_ok() && !service.demo_mode.borrow().active {
+            service.dialogue.record("ok");
+        }
         if service.poll_clear(generation) {
             cleared_at = Some(Instant::now());
             startup_target.take();
@@ -746,6 +769,8 @@ async fn connection(
         tokio::select! {
             biased;
             _=cancelled(&mut stop)=>return Ok(()),
+            _=demo_changes.changed()=>continue,
+            _=key_changes.changed()=>continue,
             event=events.next()=>match event {
                 Some(CentralEvent::DeviceDisconnected(id)) if id==peripheral.id()=>return Err(Failure::temporary("遥控器蓝牙已断开，将重新连接；上一段录音不会重发。")),
                 Some(CentralEvent::StateUpdate(CentralState::PoweredOff))=>return Err(Failure::temporary("蓝牙已关闭，请开启后重新连接。")),
@@ -799,9 +824,22 @@ async fn connection(
                 if let Some(item) = backlog.pop() { Ok(item) } else { notifications.next().await }
             } => {
                 let TimedNotification { packet: notification, at } = received?;
+                let discard_demo = demo_press || service.demo_mode.borrow().blocks(at);
+                if notification.uuid == CONTROL {
+                    let edge = match notification.value.as_slice() {
+                        [0x08 | 0x10, ..] | [0x04 | 0x11, _, 2, _, ..] => Some(true),
+                        [0x00 | 0x13, ..] => Some(false),
+                        _ => None,
+                    };
+                    if let Some(pressed) = edge {
+                        voice_pressed = pressed;
+                        demo_press = pressed && discard_demo;
+                        service.update_key_activity(generation, Some(pressed));
+                    }
+                }
                 let actions=if notification.uuid==CONTROL {
                     if !service.current(generation) { return Ok(()); }
-                    if cleared_at.is_some_and(|cutoff| at <= cutoff) {
+                    if discard_demo || cleared_at.is_some_and(|cutoff| at <= cutoff) {
                         ptt.discard_buffered_control(&notification.value)
                     } else {
                         handle_record_control(&notification.value, at, &service.dialogue, &mut gesture, &mut ptt, &mut recognition)
@@ -917,9 +955,14 @@ async fn connection(
 
         }
         if !gesture.defer_result(Instant::now()) && recognition.as_ref().is_some_and(|job| job.released && job.result.is_some()) {
+            let started = Instant::now();
             let mut job = recognition.take().unwrap();
             let mut result = job.finish();
             ptt.busy = false;
+            if *service.demo_mode.borrow() != demo_mode {
+                service.update(generation, "ready", "", None);
+                continue;
+            }
             if !operation(cancel, peripheral.is_connected(), 5).await? {
                 return Err(Failure::temporary("识别结束前蓝牙已断开，本段结果已丢弃。"));
             }
@@ -942,6 +985,10 @@ async fn connection(
                 gesture = RecordGesture::default();
                 cancel_utterance(&mut ptt, &mut recognition);
                 service.clear(generation);
+                continue;
+            }
+            if !service.input_allowed(generation, started) {
+                service.update(generation, "ready", "", None);
                 continue;
             }
             match result {

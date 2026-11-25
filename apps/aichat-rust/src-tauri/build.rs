@@ -52,6 +52,7 @@ fn main() {
             .file("src/app/pet_overlay_macos.m")
             .file("src/app/remote_phone_macos.m")
             .file("src/remote_voice/native_input_macos.m")
+            .file("src/remote_voice/demo_input_macos.m")
             .file("src/remote_voice/highlight_macos.m")
             .file("src/remote_voice/buttons_macos.m")
             .file("src/remote_voice/power_macos.m")
@@ -66,6 +67,7 @@ fn main() {
         println!("cargo:rerun-if-changed=src/app/pet_overlay_macos.m");
         println!("cargo:rerun-if-changed=src/app/remote_phone_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/native_input_macos.m");
+        println!("cargo:rerun-if-changed=src/remote_voice/demo_input_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/highlight_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/chromium_ax_macos.h");
         println!("cargo:rerun-if-changed=src/remote_voice/buttons_macos.m");

@@ -11,7 +11,7 @@
 <body>
   <main class="bumi-layout">
     <header class="bumi-header">
-      <div class="bumi-mark" aria-hidden="true">B</div>
+      <img class="bumi-portrait" src="/src/assets/bumi-robot.png" alt="Bumi 机器人" width="95" height="255">
       <div class="bumi-heading">
         <h1>Bumi 机器人</h1>
         <p>通过蓝牙直接控制你的机器人</p>
@@ -20,24 +20,41 @@
     </header>
 
     <section class="panel connection-panel" aria-labelledby="connection-title">
-      <div class="section-heading">
+      <div class="section-heading compact">
         <div>
           <h2 id="connection-title">连接</h2>
-          <p>打开机器人并退出手机 App 中的连接，然后扫描名称含“Bumi”或以“NTXB”开头的设备。</p>
+          <p>打开机器人并退出手机 App。点一次即可查找并连接名称含 “Bumi” 或以 NTXB 开头的设备。</p>
         </div>
-        <button id="scan" class="secondary" type="button">扫描设备</button>
       </div>
-      <label for="device-picker">附近的 Bumi</label>
-      <select id="device-picker" disabled>
-        <option value="">尚未扫描</option>
-      </select>
-      <p id="device-id" class="hint"></p>
+      <div id="device-choice" hidden>
+        <label for="device-picker">发现多台设备，请选择</label>
+        <select id="device-picker" disabled>
+          <option value="">请选择机器人…</option>
+        </select>
+        <p id="device-id" class="hint"></p>
+      </div>
       <div class="connection-actions">
-        <button id="connect" class="primary" type="button" disabled>连接机器人</button>
+        <button id="connect" class="primary" type="button">连接机器人</button>
+        <button id="cancel-connect" class="secondary" type="button" hidden>取消连接</button>
+        <button id="rescan" class="secondary" type="button" hidden>重新查找</button>
         <button id="disconnect" class="secondary" type="button" hidden>断开连接</button>
       </div>
-      <p id="operation" class="operation" role="status" aria-live="polite">点击“扫描设备”开始。</p>
+      <p id="operation" class="operation" role="status" aria-live="polite">查找设备约需 20 秒，未连接时最多自动重试 3 次。</p>
       <p id="error" class="error" role="alert"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="voice-expert-title">
+      <div class="section-heading compact">
+        <div>
+          <h2 id="voice-expert-title">语音控制专家</h2>
+          <p>对接已有的小米遥控器语音技能 mi-remote-voice。在 AIChat 召唤“Bumi 语音控制专家”后，把听写放进指令框，由本窗口执行。</p>
+        </div>
+      </div>
+      <div class="speech-controls">
+        <input id="voice-command" type="text" maxlength="80" placeholder="例如：连接、行走、前进、停止、跳舞" aria-label="语音控制指令" autocomplete="off">
+        <button id="voice-run" class="primary" type="button">执行</button>
+      </div>
+      <p id="voice-status" class="operation">说“连接”开始。查找大约需要 20 秒。只有多台设备时才需要选择。</p>
     </section>
 
     <section class="telemetry" aria-label="机器人状态">
@@ -53,22 +70,18 @@
       </div>
     </section>
 
-    <section class="panel monitor-panel" aria-labelledby="monitor-title">
-      <div class="section-heading">
-        <div>
-          <h2 id="monitor-title">蓝牙消息监听</h2>
-          <p>查看本机写出的蓝牙指令和机器人返回的通知。日志仅保留在当前窗口。</p>
-        </div>
-        <div class="monitor-actions">
-          <button id="listen-toggle" class="primary" type="button" disabled>开始监听</button>
-          <button id="clear-messages" class="secondary" type="button" disabled>清空</button>
-        </div>
+    <details class="panel monitor-panel">
+      <summary id="monitor-title">蓝牙消息监听</summary>
+      <p>查看本机写出的蓝牙指令和机器人返回的通知。日志仅保留在当前窗口。</p>
+      <div class="monitor-actions">
+        <button id="listen-toggle" class="primary" type="button" disabled>开始监听</button>
+        <button id="clear-messages" class="secondary" type="button" disabled>清空</button>
       </div>
       <p id="listener-status" class="operation">未开启监听</p>
       <div id="message-log" class="message-log" role="log" aria-label="机器人蓝牙消息">
         <p class="log-empty">开启监听后，点“查询电量”可检查蓝牙收发。</p>
       </div>
-    </section>
+    </details>
 
     <section class="panel" aria-labelledby="movement-title">
       <div class="section-heading compact">
@@ -90,12 +103,40 @@
           <button type="button" class="direction-backward" data-move="backward" aria-label="按住后退" aria-pressed="false" disabled>后退</button>
         </div>
         <div class="movement-help">
-          <p class="movement-note" id="stick-help">从圆心拖动摇杆，上下控制前后，左右控制转向，斜推可边走边转。推得越远，摇杆幅度越大。松手回中并发送停止指令。</p>
+          <label for="stick-horizontal">摇杆左右拖动</label>
+          <select id="stick-horizontal" disabled>
+            <option value="yaw" selected>转向</option>
+            <option value="lateral">侧移</option>
+          </select>
+          <p class="movement-note" id="stick-help">上下拖动控制前后，左右拖动按所选模式转向或侧移。拖得越远，速度指令越大。松手即发送停止指令。</p>
           <p class="movement-note">按住四周的按钮可低速点动。</p>
           <button type="button" id="stop-move" class="stop-move" disabled>停止</button>
         </div>
       </div>
     </section>
+
+    <section class="panel" aria-labelledby="remote-title">
+      <div class="section-heading compact">
+        <div>
+          <h2 id="remote-title">小米遥控器方向键</h2>
+          <p>配对一只 RC003。上、下控制前后，左、右控制转向，松开即发送停止指令。先检查按键，再在机器人站稳后开启遥控。开启后会弹出遥控框，遥控器按键不再触发窗口里的其他操作。</p>
+        </div>
+      </div>
+      <div class="mode-row">
+        <button type="button" class="secondary" id="remote-diagnose">检查按键</button>
+        <button type="button" class="primary" id="remote-toggle" disabled>开启方向键遥控</button>
+      </div>
+      <p id="remote-status" class="operation" role="status"></p>
+    </section>
+
+    <dialog id="remote-shield" class="remote-shield" tabindex="-1" aria-labelledby="remote-shield-title">
+      <h2 id="remote-shield-title">方向键遥控</h2>
+      <p>遥控器按键只移动机器人。方向键、确定键和其他按键不会点到这个窗口里的按钮或输入框。</p>
+      <p id="remote-shield-status" class="operation" role="status"></p>
+      <div class="mode-row">
+        <button type="button" class="primary" id="remote-shield-close">关闭遥控</button>
+      </div>
+    </dialog>
 
     <section class="panel standup-panel" aria-labelledby="standup-title">
       <div class="section-heading compact">
@@ -158,7 +199,7 @@
 
     <details class="protocol-details">
       <summary>连接说明与协议信息</summary>
-      <p>所有指令都在本机通过 BLE 发送，不经过云端。关闭此窗口会断开连接。当前界面不包含 Wi-Fi 配网、连续语音对话或自定义指令。</p>
+      <p>所有指令都在本机通过 BLE 发送，不经过云端。关闭此窗口会断开连接。打开窗口时不会自动连接。语音控制是单句指令，听写使用已有的 mi-remote-voice 技能。当前界面不包含 Wi-Fi 配网或连续语音对话。</p>
       <dl>
         <div><dt>GATT 服务</dt><dd>061e8f00-8a56-11f0-a62c-00155dff3a7e</dd></div>
         <div><dt>数据帧</dt><dd>55 AA · 长度 · 指令 · 长度校验</dd></div>

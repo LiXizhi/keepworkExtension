@@ -1,8 +1,8 @@
 //! Observe RC003 Home and Menu on Tao's existing Raw Input target (or a private
 //! message-only Raw Input window in the standalone companion). Windows permits
 //! only one registered raw keyboard target per process. Always chain Tao's handler.
-use super::buttons::ButtonStatus;
-use std::collections::VecDeque;
+use super::buttons::{record_activity, ButtonStatus};
+use std::collections::{HashSet, VecDeque};
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -17,8 +17,8 @@ use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_APPS, VK_BROWSER_BACK, VK_DOWN, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RIGHT,
-    VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
+    GetAsyncKeyState, VK_APPS, VK_BROWSER_BACK, VK_DOWN, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_UP, VK_VOLUME_DOWN, VK_VOLUME_MUTE, VK_VOLUME_UP,
 };
 use windows_sys::Win32::UI::Input::*;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -63,6 +63,27 @@ pub(super) fn is_suppressed_remote_vk(vk: u16) -> bool {
             | VK_VOLUME_DOWN
             | VK_VOLUME_UP
     )
+}
+
+fn is_observed_remote_vk(vk: u16) -> bool {
+    is_suppressed_remote_vk(vk) || vk == VK_RETURN
+}
+
+fn pressed_remote_keys(held: impl Fn(u16) -> bool) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (vk, key) in [
+        (VK_BROWSER_BACK, "back"), (VK_HOME, "home"), (VK_APPS, "menu"),
+        (VK_UP, "up"), (VK_DOWN, "down"), (VK_LEFT, "left"), (VK_RIGHT, "right"),
+        (VK_RETURN, "ok"),
+    ] {
+        if held(vk) {
+            keys.push(key.into());
+        }
+    }
+    if [VK_VOLUME_MUTE, VK_VOLUME_DOWN, VK_VOLUME_UP].into_iter().any(|vk| held(vk)) {
+        keys.push("volume".into());
+    }
+    keys
 }
 
 fn note_remote_key_at(vk: u16, release: bool, now_ms: u64) {
@@ -155,6 +176,7 @@ enum RemoteButton {
 struct KeyEdge {
     await_release: bool,
     down: Option<Instant>,
+    discard: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -238,6 +260,8 @@ struct RemotePresses {
     clear: KeyEdge,
     expired_clear: bool,
     pending: VecDeque<(RemoteButton, Instant)>,
+    demo_mode: bool,
+    visual_held: HashSet<u16>,
 }
 
 impl RemotePresses {
@@ -245,6 +269,7 @@ impl RemotePresses {
         if self.choice == choice {
             return false;
         }
+        super::buttons::source_changed();
         let same_physical = match (&self.choice, &choice) {
             (
                 SourceChoice::Unique { physical: old, .. },
@@ -257,24 +282,42 @@ impl RemotePresses {
         let preserve_clear =
             same_physical && (self.clear.await_release || self.clear.down.is_some());
         let clear_lost = !same_physical;
+        if !self.visual_held.is_empty() {
+            record_activity(Vec::new());
+        }
         *self = Self {
             choice,
             home: KeyEdge {
                 await_release: home_held || preserve_home,
                 down: None,
+                discard: false,
             },
             clear: KeyEdge {
                 await_release: clear_held || preserve_clear,
                 down: None,
+                discard: false,
             },
             expired_clear: false,
             pending: VecDeque::new(),
+            demo_mode: self.demo_mode,
+            visual_held: HashSet::new(),
         };
         clear_lost
     }
 
     fn has_handle(&self, device: usize) -> bool {
         matches!(&self.choice, SourceChoice::Unique { handles, .. } if handles.contains(&device))
+    }
+
+    fn visual_edge(&mut self, key: u16, release: bool) {
+        let changed = if release {
+            self.visual_held.remove(&key)
+        } else {
+            self.visual_held.insert(key)
+        };
+        if changed {
+            record_activity(pressed_remote_keys(|vk| self.visual_held.contains(&vk)));
+        }
     }
 
     fn edge(&mut self, device: usize, key: u16, release: bool, now: Instant) -> bool {
@@ -291,7 +334,8 @@ impl RemotePresses {
                 slot.await_release = false;
             }
         } else if release {
-            if slot.down.take().is_some_and(|down| {
+            let started = slot.down.take();
+            if !slot.discard && !self.demo_mode && started.is_some_and(|down| {
                 now.checked_duration_since(down)
                     .is_some_and(|elapsed| elapsed < SHORT_PRESS)
             }) {
@@ -303,8 +347,9 @@ impl RemotePresses {
                     self.expired_clear = false;
                 }
             }
-        } else {
-            slot.down.get_or_insert(now);
+        } else if slot.down.is_none() {
+            slot.down = Some(now);
+            slot.discard = self.demo_mode;
         }
         button == RemoteButton::Clear
     }
@@ -352,6 +397,16 @@ impl RemotePresses {
             }
         }
         false
+    }
+
+    fn set_demo_mode(&mut self, active: bool) {
+        if self.demo_mode != active {
+            self.demo_mode = active;
+            self.pending.clear();
+            self.expired_clear = false;
+            self.home.discard = true;
+            self.clear.discard = true;
+        }
     }
 
     fn status(&self) -> ButtonStatus {
@@ -572,8 +627,9 @@ unsafe fn handle_input(presses: &mut RemotePresses, raw: HRAWINPUT) {
     }
     let key = input.data.keyboard;
     let release = key.Flags & RI_KEY_BREAK as u16 != 0;
-    if is_suppressed_remote_vk(key.VKey) {
+    if is_observed_remote_vk(key.VKey) {
         note_remote_key_at(key.VKey, release, monotonic_ms());
+        presses.visual_edge(key.VKey, release);
     }
     let _ = presses.edge(header.hDevice as usize, key.VKey, release, Instant::now());
 }
@@ -590,6 +646,7 @@ unsafe extern "system" fn observe(
         if let Ok(mut monitor) = MONITOR.lock() {
             if message == WM_NCDESTROY {
                 clear_menu_suppression();
+                record_activity(Vec::new());
                 monitor.target = 0;
                 monitor.original_flags = None;
                 monitor.presses = RemotePresses::default();
@@ -755,6 +812,23 @@ impl HomeListener {
         MONITOR
             .lock()
             .is_ok_and(|mut monitor| monitor.presses.poll(RemoteButton::Clear, Instant::now()))
+    }
+
+    pub(super) fn set_demo_mode(&self, active: bool) {
+        if let Ok(mut monitor) = MONITOR.lock() {
+            monitor.presses.set_demo_mode(active);
+        }
+    }
+
+    pub(super) fn directions_released(&self) -> bool {
+        // Windows can report an autorepeat as an ordinary make. Use global
+        // key state only as a veto at arming, never as a source of movement.
+        MONITOR.lock().is_ok_and(|monitor| {
+            matches!(&monitor.presses.choice, SourceChoice::Unique { handles, .. } if handles.len() == 1)
+                && [VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT].into_iter().all(|key| {
+                    !monitor.presses.visual_held.contains(&key) && unsafe { GetAsyncKeyState(key.into()) >= 0 }
+                })
+        })
     }
 
     pub(super) fn status(&self) -> ButtonStatus {
@@ -985,5 +1059,38 @@ mod tests {
         note_remote_key_at(VK_HOME, true, 5_050);
         assert!(take_key_keyup_at(VK_HOME, 5_060));
         assert!(!take_key_keyup_at(VK_HOME, 5_070));
+    }
+
+    #[test]
+    fn pressed_visual_keys_release_independently() {
+        let held = [VK_HOME, VK_LEFT, VK_RETURN, VK_VOLUME_UP];
+        assert_eq!(pressed_remote_keys(|vk| held.contains(&vk)), ["home", "left", "ok", "volume"]);
+        for (code, key) in [(VK_UP, "up"), (VK_DOWN, "down"), (VK_LEFT, "left"), (VK_RIGHT, "right"), (VK_RETURN, "ok")] {
+            assert_eq!(pressed_remote_keys(|vk| vk == code), [key]);
+        }
+        assert!(pressed_remote_keys(|_| false).is_empty());
+        assert!(is_observed_remote_vk(VK_RETURN));
+        assert!(!is_suppressed_remote_vk(VK_RETURN));
+    }
+
+    #[test]
+    fn demo_mode_discards_queued_taps_and_releases_after_exit() {
+        let now = Instant::now();
+        let mut presses = RemotePresses::default();
+        presses.select(unique(11), false, false);
+        presses.edge(11, VK_HOME, false, now);
+        presses.edge(11, VK_HOME, true, now);
+        presses.set_demo_mode(true);
+        assert!(!presses.poll(RemoteButton::Home, now));
+        presses.edge(11, VK_HOME, false, now);
+        presses.edge(11, VK_HOME, true, now);
+        assert!(!presses.poll(RemoteButton::Home, now));
+        presses.edge(11, VK_APPS, false, now);
+        presses.set_demo_mode(false);
+        presses.edge(11, VK_APPS, true, now);
+        assert!(!presses.poll(RemoteButton::Clear, now));
+        presses.edge(11, VK_APPS, false, now);
+        presses.edge(11, VK_APPS, true, now);
+        assert!(presses.poll(RemoteButton::Clear, now));
     }
 }

@@ -16,7 +16,11 @@ class Control extends EventTarget {
   dataset = {};
   value = "";
   children = [];
+  open = false;
   style = { setProperty(name, value) { this[name] = value; } };
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  focus() {}
   setAttribute(name, value) { this[name] = value; }
   setPointerCapture(id) { this.captured = id; }
   hasPointerCapture(id) { return this.captured === id; }
@@ -32,11 +36,13 @@ class Control extends EventTarget {
 
 async function renderer(t, {
   beforeMove = () => {}, beforeMode = () => {}, beforeListen = () => {}, legacy = false, initial = {},
+  scanDevices = null, beforeScan = () => {}, beforeConnect = () => {},
+  remote = false, robotStatus = 1, beforeCapture = () => {}, readBattery = () => 83,
 } = {}) {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
   const ids = new Map();
   const groups = new Map();
-  for (const [tag] of html.matchAll(/<[a-z][\w-]*\b[^>]*>/g)) {
+  for (const [, tag, content] of html.matchAll(/(<[a-z][\w-]*\b[^>]*>)([^<]*)/g)) {
     const control = new Control();
     const id = tag.match(/\bid="([^"]+)"/)?.[1];
     if (id) ids.set(id, control);
@@ -51,24 +57,34 @@ async function renderer(t, {
     const data = tag.match(/\bdata-(command|query|move)="([^"]+)"/);
     if (data) {
       control.dataset[data[1]] = data[2];
+      if (data[1] === "move") {
+        control.textContent = content;
+        control.setAttribute("aria-label", tag.match(/\baria-label="([^"]+)"/)?.[1]);
+      }
       const selector = `[data-${data[1]}]`;
       if (!groups.has(selector)) groups.set(selector, []);
       groups.get(selector).push(control);
     }
   }
   const document = Object.assign(new Control(), {
+    hasFocus: () => true,
     getElementById: id => ids.get(id),
     createElement: () => new Control(),
     querySelectorAll: selector => groups.get(selector) || [],
   });
   const window = Object.assign(new Control(), { setTimeout, clearTimeout, setInterval, clearInterval, confirm: () => true });
   const robot = { id: "test-bumi", name: "Bumi", rssi: -50 };
-  const snapshot = { connected: robot, devices: [robot], available: true, walkMode: false, locomotionMode: null,
+  const snapshot = { ...(remote ? { remoteMotionVersion: 2 } : {}), connected: robot, devices: [robot], available: true, walkMode: false, locomotionMode: null,
     moving: false, status: null, battery: null, listening: false, ...initial };
   const actions = [];
   const moves = [];
+  const movementRequests = [];
+  const calls = [];
+  const connectionRequests = [];
   const listeners = new Set();
   const monitorRequests = [];
+  const captures = [];
+  const captureStops = [];
   async function listen(event, handle, options) {
     await beforeListen(event);
     const listener = { event, handle, target: options?.target };
@@ -80,9 +96,31 @@ async function renderer(t, {
       if (listener.event === event) listener.handle({ event, payload });
     }
   }
-  async function invoke(name, { request }) {
+  async function invoke(name, args) {
+    if (name === "bumi_remote_input") {
+      assert.ok(remote, "native remote capture requires an explicit user action");
+      if (args.enabled) {
+        assert.ok(args.events);
+        captures.push(args);
+        await beforeCapture();
+        return "Xiaomi RC003";
+      }
+      captureStops.push(args.captureId);
+      return;
+    }
     assert.equal(name, "bumi_control");
-    if (request.operation === "disconnect") {
+    const { request } = args;
+    calls.push(request.operation === "connect" ? `connect:${request.id}` : request.operation);
+    if (["scan", "connect", "cancelConnection"].includes(request.operation)) connectionRequests.push(request);
+    if (request.operation === "scan" && scanDevices) {
+      await beforeScan();
+      snapshot.devices = scanDevices.map(device => ({ ...device }));
+    } else if (request.operation === "connect" && scanDevices) {
+      await beforeConnect(request.id);
+      const found = snapshot.devices.find(device => device.id === request.id);
+      if (!found) throw new Error(`unknown device ${request.id}`);
+      snapshot.connected = { ...found };
+    } else if (request.operation === "disconnect") {
       Object.assign(snapshot, { connected: null, walkMode: false, locomotionMode: null, moving: false, status: null });
     } else if (request.operation === "listen") {
       monitorRequests.push(request.enabled);
@@ -99,13 +137,18 @@ async function renderer(t, {
         snapshot.walkMode = false;
         snapshot.locomotionMode = null;
       }
+      if (cmd.action === "battery") snapshot.battery = readBattery();
+      if (cmd.action === "status") snapshot.status = robotStatus;
       if (cmd.action === "move") {
-        assert.equal(Object.hasOwn(cmd, "vy"), false);
+        if (!remote) assert.equal(Object.hasOwn(cmd, "vy"), false);
+        movementRequests.push(JSON.parse(JSON.stringify(request)));
         assert.ok(Number.isInteger(cmd.vx) && Number.isInteger(cmd.vyaw));
         // Tauri's serialized IPC sends JavaScript -0 as an ordinary zero.
-        moves.push(JSON.parse(JSON.stringify([cmd.vx, cmd.vyaw])));
+        const axes = [cmd.vx, cmd.vyaw];
+        if (remote) axes.push(cmd.vy ?? 0);
+        moves.push(JSON.parse(JSON.stringify(axes)));
         await beforeMove(moves.length);
-        snapshot.moving = !!(cmd.vx || cmd.vyaw);
+        snapshot.moving = !!(cmd.vx || cmd.vyaw || cmd.vy);
       }
     }
     const result = { ...snapshot };
@@ -114,11 +157,11 @@ async function renderer(t, {
     }
     return result;
   }
-  vm.runInNewContext(script, { exports: {}, document, window, setTimeout, clearTimeout,
+  vm.runInNewContext(script, { exports: {}, document, window, Date, setTimeout, clearTimeout,
     require(name) {
       if (name === "@tauri-apps/api/event") return { listen };
       assert.equal(name, "@tauri-apps/api/core");
-      return { invoke };
+      return { invoke, Channel: class {} };
     },
   });
   await settle();
@@ -134,7 +177,8 @@ async function renderer(t, {
     assert.equal(forward.disabled, false);
   }
   return {
-    document, window, actions, moves, forward, chooseMode, monitorRequests, listeners, emit,
+    document, window, actions, moves, calls, forward, chooseMode, monitorRequests, listeners, emit,
+    captures, captureStops, movementRequests, connectionRequests, robotSnapshot: snapshot,
     stick(type, dx = 0, dy = 0, pointerId = 2) {
       // The user grabs the thumb off-center. Available drag radius is 100 px.
       document.getElementById("motion-stick").fire(type, {
@@ -280,7 +324,7 @@ test("legacy snapshots keep walk controls available and hide run", async t => {
   await settle();
   ui.release();
   await settle();
-  assert.deepEqual(ui.moves, [[40, 0], [0, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [0, 0]]);
 });
 
 test("NTXB exposes full-body walking through the existing run IPC command", async t => {
@@ -313,14 +357,14 @@ for (const mode of ["walk", "run"]) {
     }
     assert.deepEqual(ui.actions, [mode, "move"]);
     await ui.tick(99);
-    assert.deepEqual(ui.moves, [[40, 0]]);
+    assert.deepEqual(ui.moves, [[80, 0]]);
     await ui.tick(1);
     await ui.tick(100);
-    assert.deepEqual(ui.moves, [[40, 0], [40, 0], [40, 0]]);
+    assert.deepEqual(ui.moves, [[80, 0], [80, 0], [80, 0]]);
     ui.release();
     await settle();
     await ui.tick(1000);
-    assert.deepEqual(ui.moves, [[40, 0], [40, 0], [40, 0], [0, 0]]);
+    assert.deepEqual(ui.moves, [[80, 0], [80, 0], [80, 0], [0, 0]]);
   });
 }
 
@@ -328,8 +372,8 @@ test("four directions follow the official x/yaw axes: forward, backward, left tu
   const ui = await renderer(t);
   await ui.chooseMode("walk");
   const expected = {
-    forward: [40, 0], backward: [-40, 0],
-    left: [0, 40], right: [0, -40],
+    forward: [80, 0], backward: [-80, 0],
+    left: [0, 80], right: [0, -80],
   };
   for (const [direction, vector] of Object.entries(expected)) {
     const control = ui.document.querySelectorAll("[data-move]").find(button => button.dataset.move === direction);
@@ -367,6 +411,93 @@ test("portrait stick travel controls speed and maps the screen axes to forward a
   }
 });
 
+test("lateral stick travel uses vy proportionally, preserves vx, and sends zero on release", async t => {
+  const ui = await renderer(t, { remote: true });
+  await ui.chooseMode("walk");
+  const horizontal = ui.document.getElementById("stick-horizontal");
+  assert.equal(horizontal.disabled, false);
+  horizontal.value = "lateral";
+  horizontal.fire("change");
+  assert.deepEqual(ui.moves, []);
+  for (const [dx, dy, expected] of [
+    [-30, -40, [51, 0, 38]], [30, 40, [-51, 0, -38]],
+    [-100, 0, [0, 0, 127]], [120, -160, [102, 0, -76]],
+  ]) {
+    const start = ui.moves.length;
+    ui.stick("pointerdown");
+    assert.equal(horizontal.disabled, true);
+    ui.stick("pointermove", dx, dy);
+    await settle();
+    ui.stick("pointerup");
+    await settle();
+    assert.deepEqual(ui.moves.slice(start), [expected, stopped]);
+    assert.equal(horizontal.disabled, false);
+  }
+  horizontal.value = "yaw";
+  horizontal.fire("change");
+  ui.stick("pointerdown");
+  ui.stick("pointermove", -30, -40);
+  await settle();
+  ui.stick("pointerup");
+  await settle();
+  assert.deepEqual(ui.moves.slice(-2), [[51, 38, 0], stopped]);
+  assert.ok(ui.movementRequests.every(request => !Object.hasOwn(request, "remoteCaptureId")));
+});
+
+test("stick arrow keys follow the selected horizontal axis", async t => {
+  const ui = await renderer(t, { remote: true });
+  await ui.chooseMode("walk");
+  const horizontal = ui.document.getElementById("stick-horizontal");
+  const stick = ui.document.getElementById("motion-stick");
+  horizontal.value = "lateral";
+  horizontal.fire("change");
+  for (const [key, vector] of [["ArrowRight", [0, 0, -80]], ["ArrowUp", [80, 0, 0]]]) {
+    stick.fire("keydown", { key });
+    await settle();
+    stick.fire("keyup", { key });
+    await settle();
+    assert.deepEqual(ui.moves.slice(-2), [vector, stopped]);
+  }
+});
+
+function assertDirectionLabels(ui, expected) {
+  for (const button of ui.document.querySelectorAll("[data-move]")) {
+    const label = expected[button.dataset.move];
+    assert.equal(button.textContent, label, button.dataset.move);
+    assert.equal(button["aria-label"], "按住" + label);
+  }
+}
+
+const yawLabels = { left: "左转", right: "右转", forward: "前进", backward: "后退" };
+const lateralLabels = { ...yawLabels, left: "左移", right: "右移" };
+
+test("screen direction labels and their low-speed actions follow lateral mode and switching back to yaw", async t => {
+  const ui = await renderer(t, { remote: true });
+  await ui.chooseMode("walk");
+  const horizontal = ui.document.getElementById("stick-horizontal");
+  assertDirectionLabels(ui, yawLabels);
+  for (const [mode, labels, left, right] of [
+    ["lateral", lateralLabels, [0, 0, 80], [0, 0, -80]],
+    ["yaw", yawLabels, [0, 80, 0], [0, -80, 0]],
+  ]) {
+    const beforeChange = ui.moves.length;
+    horizontal.value = mode;
+    horizontal.fire("change");
+    assertDirectionLabels(ui, labels);
+    assert.equal(ui.moves.length, beforeChange);
+    for (const [side, vector] of [["left", left], ["right", right]]) {
+      const control = ui.document.querySelectorAll("[data-move]").find(button => button.dataset.move === side);
+      control.fire("pointerdown", { button: 0, pointerId: 1 });
+      await settle();
+      assert.equal(control["aria-pressed"], "true");
+      control.fire("pointerup", { pointerId: 1 });
+      await settle();
+      assert.deepEqual(ui.moves.slice(-2), [vector, stopped]);
+      assert.equal(control["aria-pressed"], "false");
+    }
+  }
+});
+
 test("fast drags sample the latest deflection, and returning to center stops immediately", async t => {
   const ui = await renderer(t);
   await ui.chooseMode("walk");
@@ -397,10 +528,10 @@ test("arrow keys on the stick keep the low-speed step and release only their own
   stick.fire("keydown", { key: "ArrowDown", repeat: true });
   stick.fire("keyup", { key: "ArrowLeft" });
   await settle();
-  assert.deepEqual(ui.moves, [[-40, 0]]);
+  assert.deepEqual(ui.moves, [[-80, 0]]);
   stick.fire("keyup", { key: "ArrowDown" });
   await settle();
-  assert.deepEqual(ui.moves, [[-40, 0], [0, 0]]);
+  assert.deepEqual(ui.moves, [[-80, 0], [0, 0]]);
 });
 
 for (const end of ["pointercancel", "stop", "blur"]) {
@@ -456,9 +587,9 @@ test("a 60 ms write keeps the second joystick frame at 100 ms from press", async
   finishFirst();
   await settle();
   await ui.tick(39);
-  assert.deepEqual(ui.moves, [[40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0]]);
   await ui.tick(1);
-  assert.deepEqual(ui.moves, [[40, 0], [40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [80, 0]]);
   ui.release();
   await settle();
   assert.deepEqual(ui.moves.at(-1), [0, 0]);
@@ -472,17 +603,17 @@ test("ticks missed during a write are skipped and the next available tick resume
   ui.press();
   for (let i = 0; i < 3; i++) await ui.tick(100);
   await ui.tick(20);
-  assert.deepEqual(ui.moves, [[40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0]]);
   finishFirst();
   await settle();
   await ui.tick(79);
-  assert.deepEqual(ui.moves, [[40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0]]);
   await ui.tick(1);
-  assert.deepEqual(ui.moves, [[40, 0], [40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [80, 0]]);
   ui.release();
   await settle();
   await ui.tick(500);
-  assert.deepEqual(ui.moves, [[40, 0], [40, 0], [0, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [80, 0], [0, 0]]);
 });
 
 test("a slow refresh stays single-flight and losing focus puts stop next", async t => {
@@ -494,12 +625,12 @@ test("a slow refresh stays single-flight and losing focus puts stop next", async
   await settle();
   await ui.tick(100);
   await ui.tick(1000);
-  assert.deepEqual(ui.moves, [[40, 0], [40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [80, 0]]);
   ui.window.fire("blur");
-  assert.deepEqual(ui.moves, [[40, 0], [40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [80, 0]]);
   finishWrite();
   await settle();
-  assert.deepEqual(ui.moves, [[40, 0], [40, 0], [0, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [80, 0], [0, 0]]);
   await ui.tick(1000);
   assert.equal(ui.moves.length, 3);
 });
@@ -513,7 +644,7 @@ test("a failed refresh triggers a zero frame and no further nonzero writes", asy
   await settle();
   await ui.tick(100);
   await ui.tick(1000);
-  assert.deepEqual(ui.moves, [[40, 0], [40, 0], [0, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [80, 0], [0, 0]]);
   assert.match(ui.document.getElementById("error").textContent, /Bluetooth write failed/);
 });
 
@@ -525,14 +656,14 @@ test("release followed by another press cannot replace a queued stop", async t =
   ui.press();
   ui.release();
   ui.press();
-  assert.deepEqual(ui.moves, [[40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0]]);
   finishWrite();
   await settle();
-  assert.deepEqual(ui.moves, [[40, 0], [0, 0], [40, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [0, 0], [80, 0]]);
   ui.release();
   await settle();
   await ui.tick(1000);
-  assert.deepEqual(ui.moves, [[40, 0], [0, 0], [40, 0], [0, 0]]);
+  assert.deepEqual(ui.moves, [[80, 0], [0, 0], [80, 0], [0, 0]]);
 });
 
 test("disconnecting during a hold cancels subsequent nonzero writes", async t => {
@@ -545,5 +676,566 @@ test("disconnecting during a hold cancels subsequent nonzero writes", async t =>
   await ui.tick(1000);
   assert.equal(ui.forward.disabled, true);
   assert.equal(ui.document.getElementById("disconnect").hidden, true);
-  assert.deepEqual(ui.moves.filter(([vx, vyaw]) => vx || vyaw), [[40, 0]]);
+  assert.deepEqual(ui.moves.filter(([vx, vyaw]) => vx || vyaw), [[80, 0]]);
+});
+
+test("one nearby robot connects from the single button without a device choice", async t => {
+  const ui = await renderer(t, {
+    initial: { connected: null, devices: [] },
+    scanDevices: [{ id: "only-bumi", name: "Bumi", rssi: -40 }],
+  });
+  const choice = ui.document.getElementById("device-choice");
+  assert.equal(choice.hidden, true);
+  ui.document.getElementById("connect").click();
+  await settle();
+  assert.equal(choice.hidden, true);
+  assert.deepEqual(ui.calls.filter(call => call === "scan" || String(call).startsWith("connect:")), ["scan", "connect:only-bumi"]);
+  assert.deepEqual(ui.actions, ["battery", "status"]);
+  assert.equal(ui.document.getElementById("battery").textContent, "83%");
+  assert.equal(ui.document.getElementById("robot-status").textContent, "准备（1）");
+  assert.match(ui.document.getElementById("operation").textContent, /电量和状态已更新/);
+  await ui.tick(80_000);
+  assert.equal(ui.calls.filter(call => call === "scan").length, 1);
+});
+
+test("a battery timeout preserves the last status and the next query can report zero percent", async t => {
+  let ready = false;
+  const ui = await renderer(t, {
+    initial: { status: 2 },
+    readBattery() {
+      if (!ready) throw new Error("4 秒内未收到 Bumi 的蓝牙通知。");
+      return 0;
+    },
+  });
+  const query = ui.document.querySelectorAll("[data-query]").find(item => item.dataset.query === "battery");
+  query.click();
+  await settle();
+  assert.equal(ui.document.getElementById("battery").textContent, "—");
+  assert.equal(ui.document.getElementById("robot-status").textContent, "行走（2）");
+  assert.match(ui.document.getElementById("error").textContent, /未收到 Bumi 的蓝牙通知/);
+  assert.equal(ui.document.getElementById("operation").textContent, "本次电量查询未完成。");
+  ready = true;
+  query.click();
+  await settle();
+  assert.equal(ui.document.getElementById("battery").textContent, "0%");
+  assert.equal(ui.document.getElementById("error").textContent, "");
+});
+
+test("several robots wait for a choice and connect only the selected device", async t => {
+  const ui = await renderer(t, {
+    initial: { connected: null, devices: [] },
+    scanDevices: [
+      { id: "a", name: "Bumi A", rssi: -40 },
+      { id: "b", name: "NTXB B", rssi: -55 },
+    ],
+  });
+  ui.document.getElementById("connect").click();
+  await settle();
+  const choice = ui.document.getElementById("device-choice");
+  assert.equal(choice.hidden, false);
+  assert.deepEqual(ui.calls.filter(call => String(call).startsWith("connect:")), []);
+  assert.match(ui.document.getElementById("operation").textContent, /请选择/);
+  await ui.tick(80_000);
+  assert.equal(ui.calls.filter(call => call === "scan").length, 1);
+  assert.equal(ui.calls.some(call => call.startsWith("connect:")), false);
+  const picker = ui.document.getElementById("device-picker");
+  picker.value = "b";
+  picker.fire("change");
+  await settle();
+  assert.deepEqual(ui.calls.filter(call => String(call).startsWith("connect:")), ["connect:b"]);
+  assert.deepEqual(ui.actions, ["battery", "status"]);
+  assert.equal(choice.hidden, true);
+});
+
+test("an empty scan retries every 20 seconds and stops after three automatic retries", async t => {
+  const ui = await renderer(t, {
+    initial: { connected: null, devices: [] },
+    scanDevices: [],
+  });
+  await click(ui, "connect");
+  const scanCount = () => ui.calls.filter(call => call === "scan").length;
+  assert.equal(scanCount(), 1);
+  for (let retry = 1; retry <= 3; retry++) {
+    await ui.tick(19_999);
+    assert.equal(scanCount(), retry);
+    await ui.tick(1);
+    assert.equal(scanCount(), retry + 1);
+  }
+  await ui.tick(80_000);
+  assert.equal(scanCount(), 4);
+  assert.equal(ui.document.getElementById("cancel-connect").hidden, true);
+  assert.equal(ui.document.getElementById("device-choice").hidden, true);
+  assert.equal(ui.calls.some(call => String(call).startsWith("connect:")), false);
+  assert.deepEqual(ui.actions, []);
+  await click(ui, "connect");
+  assert.equal(scanCount(), 5, "the user can start another connection cycle after exhaustion");
+});
+
+test("a cancelled retry wait cannot start another scan, and a new click can connect", async t => {
+  const devices = [];
+  const ui = await renderer(t, { initial: { connected: null, devices: [] }, scanDevices: devices });
+  await click(ui, "connect");
+  await ui.tick(20_000);
+  assert.equal(ui.calls.filter(call => call === "scan").length, 2);
+  await ui.tick(19_999);
+  await click(ui, "cancel-connect");
+  await ui.tick(80_000);
+  assert.equal(ui.calls.filter(call => call === "scan").length, 2);
+  assert.equal(ui.document.getElementById("cancel-connect").hidden, true);
+  devices.push({ id: "nearby", name: "Bumi", rssi: -40 });
+  await click(ui, "connect");
+  assert.deepEqual(ui.calls.filter(call => call.startsWith("connect:")), ["connect:nearby"]);
+  assert.deepEqual(ui.actions, ["battery", "status"]);
+});
+
+test("a full native scan window counts towards the twenty-second retry interval", async t => {
+  let finishScan;
+  let scans = 0;
+  const ui = await renderer(t, {
+    initial: { connected: null, devices: [] }, scanDevices: [],
+    beforeScan() {
+      if (++scans === 1) return new Promise(resolve => { finishScan = resolve; });
+    },
+  });
+  await click(ui, "connect");
+  await ui.tick(20_000);
+  assert.equal(scans, 1, "a slow native scan must finish before starting another");
+  finishScan();
+  await settle();
+  await ui.tick(0);
+  assert.equal(scans, 2);
+});
+
+test("cancelling an in-flight retry ignores a device returned by the cancelled scan", async t => {
+  let finishScan;
+  const devices = [];
+  let scans = 0;
+  const ui = await renderer(t, {
+    initial: { connected: null, devices: [] }, scanDevices: devices,
+    beforeScan() {
+      if (++scans === 2) return new Promise(resolve => { finishScan = resolve; });
+    },
+  });
+  await click(ui, "connect");
+  await ui.tick(20_000);
+  assert.equal(scans, 2);
+  await click(ui, "cancel-connect");
+  const scansSent = ui.connectionRequests.filter(request => request.operation === "scan");
+  assert.ok(scansSent[1].attemptId, "cancellation targets the request in flight");
+  const cancel = ui.connectionRequests.find(request => request.operation === "cancelConnection");
+  assert.equal(cancel?.attemptId, scansSent[1].attemptId);
+  devices.push({ id: "late", name: "Bumi", rssi: -40 });
+  finishScan();
+  await settle();
+  await ui.tick(80_000);
+  assert.equal(scans, 2);
+  assert.equal(ui.calls.some(call => call.startsWith("connect:")), false);
+  assert.deepEqual(ui.actions, []);
+  assert.equal(ui.document.getElementById("connection-state").dataset.state, "offline");
+  assert.equal(ui.document.getElementById("connect").disabled, false);
+});
+
+test("retrying an explicitly selected robot keeps that device and stops on success", async t => {
+  let first = true;
+  const ui = await renderer(t, {
+    initial: { connected: null, devices: [] },
+    scanDevices: [
+      { id: "a", name: "Bumi A", rssi: -35 }, { id: "b", name: "Bumi B", rssi: -60 },
+    ],
+    beforeConnect() {
+      if (first) { first = false; throw new Error("temporarily unreachable"); }
+    },
+  });
+  await click(ui, "connect");
+  const picker = ui.document.getElementById("device-picker");
+  picker.value = "b";
+  picker.fire("change");
+  await settle();
+  const connections = () => ui.calls.filter(call => call.startsWith("connect:"));
+  assert.deepEqual(connections(), ["connect:b"]);
+  await ui.tick(19_999);
+  assert.deepEqual(connections(), ["connect:b"]);
+  await ui.tick(1);
+  assert.deepEqual(connections(), ["connect:b", "connect:b"]);
+  assert.deepEqual(ui.actions, ["battery", "status"]);
+  await ui.tick(80_000);
+  assert.deepEqual(connections(), ["connect:b", "connect:b"]);
+  assert.equal(ui.document.getElementById("cancel-connect").hidden, true);
+});
+
+test("a late handshake after cancellation cannot show a connection or start device queries", async t => {
+  let finishHandshake;
+  const ui = await renderer(t, {
+    initial: { connected: null, devices: [] },
+    scanDevices: [{ id: "late-link", name: "Bumi", rssi: -50 }],
+    beforeConnect: () => new Promise(resolve => { finishHandshake = resolve; }),
+  });
+  await click(ui, "connect");
+  assert.ok(ui.calls.includes("connect:late-link"));
+  await click(ui, "cancel-connect");
+  finishHandshake();
+  await settle();
+  await ui.tick(80_000);
+  assert.equal(ui.document.getElementById("connection-state").dataset.state, "offline");
+  assert.equal(ui.document.getElementById("connect").disabled, false);
+  assert.equal(ui.calls.filter(call => call === "scan").length, 1);
+  assert.deepEqual(ui.actions, []);
+});
+
+test("a voice phrase jogs in the selected gait and then stops", async t => {
+  const ui = await renderer(t);
+  await ui.chooseMode("walk");
+  const input = ui.document.getElementById("voice-command");
+  input.value = "前进。";
+  ui.document.getElementById("voice-run").click();
+  await settle();
+  assert.ok(ui.moves.some(([vx, vyaw]) => vx === 80 && vyaw === 0));
+  await ui.tick(800);
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), [0, 0]);
+});
+
+function pushKeys(capture, ...keys) {
+  capture.events.onmessage({ keys, sampledAt: Date.now() });
+}
+
+async function click(ui, id) {
+  const button = ui.document.getElementById(id);
+  assert.ok(button && !button.disabled && !button.hidden, id + " should be available");
+  button.click();
+  await settle();
+}
+
+async function beginRemote(ui) {
+  await ui.chooseMode("walk");
+  await click(ui, "remote-toggle");
+  assert.equal(ui.captures.length, 1);
+  return ui.captures[0];
+}
+
+const stopped = [0, 0, 0];
+const nonzero = axes => axes.some(value => value !== 0);
+
+test("driving opens a shield that swallows remote keyboard events and closes with the session", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  const shield = ui.document.getElementById("remote-shield");
+  assert.equal(shield.open, false);
+  await ui.chooseMode("walk");
+  ui.document.getElementById("remote-diagnose").click();
+  await settle();
+  assert.equal(shield.open, false, "key check does not cover the page");
+  ui.window.fire("blur");
+  await settle();
+  await ui.chooseMode("walk");
+  await click(ui, "remote-toggle");
+  assert.equal(shield.open, true);
+  const key = new Event("keydown", { cancelable: true });
+  key.key = "Enter";
+  ui.window.dispatchEvent(key);
+  assert.equal(key.defaultPrevented, true);
+  ui.document.getElementById("remote-shield-close").click();
+  await settle();
+  assert.equal(shield.open, false);
+  assert.equal(ui.captures.length, 2);
+  assert.equal(ui.captureStops.length, 2);
+});
+
+test("remote diagnostics can display a key without connecting to a robot or sending a motion frame", async t => {
+  const ui = await renderer(t, { remote: true, initial: { connected: null, devices: [] } });
+  await click(ui, "remote-diagnose");
+  const capture = ui.captures[0];
+  pushKeys(capture);
+  pushKeys(capture, "left");
+  await settle();
+  assert.match(ui.document.getElementById("remote-status").textContent, /左|left/i);
+  await ui.tick(500);
+  pushKeys(capture);
+  assert.deepEqual(ui.moves, []);
+});
+
+test("remote driving queries the robot's actual walking state before enabling any movement", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 1 });
+  await ui.chooseMode("walk");
+  await click(ui, "remote-toggle");
+  assert.ok(ui.actions.includes("status"));
+  if (ui.captures.length) {
+    pushKeys(ui.captures[0]);
+    pushKeys(ui.captures[0], "up");
+  }
+  await ui.tick(500);
+  assert.deepEqual(ui.moves.filter(nonzero), []);
+});
+
+test("driving accepts a fresh single remote key, keeps forward/backward straight and waits for neutral after a chord", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  const capture = await beginRemote(ui);
+  pushKeys(capture, "down");
+  await ui.tick(200);
+  assert.deepEqual(ui.moves.filter(nonzero), [], "a key already held when arming must not start motion");
+  pushKeys(capture);
+  pushKeys(capture, "up");
+  await settle();
+  const forward = ui.moves.at(-1);
+  assert.ok(forward[0] > 0);
+  assert.equal(ui.movementRequests.at(-1).remoteCaptureId, capture.captureId);
+  assert.deepEqual(forward.slice(1), [0, 0]);
+  pushKeys(capture, "up");
+  await settle();
+  assert.equal(ui.moves.filter(nonzero).length, 1, "duplicate key state must not write again");
+  pushKeys(capture, "up", "down");
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), stopped);
+  const stoppedAt = ui.moves.length;
+  pushKeys(capture, "down");
+  await ui.tick(250);
+  assert.equal(ui.moves.length, stoppedAt);
+  pushKeys(capture);
+  pushKeys(capture, "down");
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), [-forward[0], 0, 0]);
+  assert.equal(ui.movementRequests.at(-1).remoteCaptureId, capture.captureId);
+  pushKeys(capture);
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), stopped);
+  assert.equal(Object.hasOwn(ui.movementRequests.at(-1), "remoteCaptureId"), false);
+});
+
+test("remote left and right hold a fixed yaw until release even with the screen stick set to lateral", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  await ui.chooseMode("walk");
+  const horizontal = ui.document.getElementById("stick-horizontal");
+  assert.equal(horizontal.disabled, false);
+  horizontal.value = "lateral";
+  horizontal.fire("change");
+  await click(ui, "remote-toggle");
+  const capture = ui.captures[0];
+  pushKeys(capture);
+  for (const [key, yaw] of [["left", 80], ["right", -80]]) {
+    const start = ui.moves.length;
+    pushKeys(capture, key);
+    await settle();
+    for (let i = 0; i < 6; i++) {
+      pushKeys(capture, key);
+      await ui.tick(100);
+    }
+    const frames = ui.moves.slice(start);
+    assert.ok(frames.length > 1);
+    for (const frame of frames) assert.deepEqual(frame, [0, yaw, 0]);
+    assert.ok(ui.movementRequests.slice(start).every(request => request.remoteCaptureId === capture.captureId));
+    pushKeys(capture);
+    await settle();
+    assert.deepEqual(ui.moves.at(-1), stopped);
+  }
+});
+
+for (const end of ["blur", "device removal", "stop button", "page hidden"]) {
+  test(end + " queues stop behind an in-flight remote write and rejects stale input", async t => {
+    let finish;
+    const busy = new Promise(resolve => { finish = resolve; });
+    const ui = await renderer(t, { remote: true, robotStatus: 2, beforeMove: count => count === 1 ? busy : undefined });
+    const capture = await beginRemote(ui);
+    pushKeys(capture);
+    pushKeys(capture, "up");
+    if (end === "blur") ui.window.fire("blur");
+    if (end === "device removal") capture.events.onmessage({ keys: [], sampledAt: Date.now(), error: "RC003 disconnected" });
+    if (end === "stop button") ui.document.getElementById("stop-move").click();
+    if (end === "page hidden") {
+      ui.document.hidden = true;
+      ui.document.fire("visibilitychange");
+    }
+    pushKeys(capture);
+    pushKeys(capture, "down");
+    await ui.tick(200);
+    assert.equal(ui.moves.length, 1, "a zero frame waits for the current write");
+    finish();
+    await settle();
+    await ui.tick(500);
+    assert.equal(ui.moves.length, 2);
+    assert.deepEqual(ui.moves[1], stopped);
+  });
+}
+
+test("stale or missing remote heartbeats cancel movement until a new capture", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  const capture = await beginRemote(ui);
+  pushKeys(capture);
+  pushKeys(capture, "up");
+  await settle();
+  assert.ok(ui.moves.at(-1)[0] > 0);
+  for (let i = 0; i < 8; i++) await ui.tick(100);
+  assert.deepEqual(ui.moves.at(-1), stopped, "holding a key cannot keep moving without native samples");
+  const stoppedAt = ui.moves.length;
+  capture.events.onmessage({ keys: ["down"], sampledAt: Date.now() - 3000 });
+  pushKeys(capture);
+  pushKeys(capture, "up");
+  await ui.tick(200);
+  assert.equal(ui.moves.length, stoppedAt);
+});
+
+test("ordinary keyboard arrows cannot drive or turn the robot while the remote owns motion", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  const capture = await beginRemote(ui);
+  pushKeys(capture);
+  const stick = ui.document.getElementById("motion-stick");
+  stick.fire("keydown", { key: "ArrowLeft" });
+  stick.fire("keyup", { key: "ArrowLeft" });
+  await ui.tick(100);
+  assert.deepEqual(ui.moves.filter(nonzero), []);
+});
+
+for (const version of [undefined, 3]) {
+  test(`missing or unknown motion capability (${version}) keeps ordinary yaw and disables lateral and remote driving`, async t => {
+    const ui = await renderer(t, { remote: true, initial: { remoteMotionVersion: version } });
+    await ui.chooseMode("walk");
+    assert.equal(ui.document.getElementById("stick-horizontal").disabled, true);
+    assert.equal(ui.document.getElementById("remote-toggle").disabled, true);
+    ui.stick("pointerdown");
+    ui.stick("pointermove", -30, -40);
+    await settle();
+    ui.stick("pointerup");
+    await settle();
+    assert.deepEqual(ui.moves, [[51, 38, 0], stopped]);
+    assert.ok(ui.movementRequests.every(request => !Object.hasOwn(request, "remoteCaptureId")));
+  });
+}
+
+test("losing three-axis support clears lateral selection before the next gesture", async t => {
+  const ui = await renderer(t, { remote: true });
+  await ui.chooseMode("walk");
+  const horizontal = ui.document.getElementById("stick-horizontal");
+  horizontal.value = "lateral";
+  horizontal.fire("change");
+  delete ui.robotSnapshot.remoteMotionVersion;
+  const status = ui.document.querySelectorAll("[data-query]").find(button => button.dataset.query === "status");
+  status.click();
+  await settle();
+  assert.equal(horizontal.disabled, true);
+  assert.equal(horizontal.value, "yaw");
+  assertDirectionLabels(ui, yawLabels);
+  ui.stick("pointerdown");
+  ui.stick("pointermove", -50, 0);
+  await settle();
+  ui.stick("pointerup");
+  await settle();
+  assert.deepEqual(ui.moves, [[0, 64, 0], stopped]);
+});
+
+test("the original three-axis host supports screen lateral motion but cannot arm remote yaw", async t => {
+  const ui = await renderer(t, { remote: true, initial: { remoteMotionVersion: 1 } });
+  await ui.chooseMode("walk");
+  assert.equal(ui.document.getElementById("remote-toggle").disabled, true);
+  const horizontal = ui.document.getElementById("stick-horizontal");
+  assert.equal(horizontal.disabled, false);
+  horizontal.value = "lateral";
+  horizontal.fire("change");
+  ui.stick("pointerdown");
+  ui.stick("pointermove", 50, 0);
+  await settle();
+  ui.stick("pointerup");
+  await settle();
+  assert.deepEqual(ui.moves, [[0, 0, -64], stopped]);
+  assert.ok(ui.movementRequests.every(request => !Object.hasOwn(request, "remoteCaptureId")));
+});
+
+test("a capture completing after blur cannot re-enable an old session", async t => {
+  let finish;
+  const registration = new Promise(resolve => { finish = resolve; });
+  const ui = await renderer(t, { remote: true, robotStatus: 2, beforeCapture: () => registration });
+  await ui.chooseMode("walk");
+  await click(ui, "remote-toggle");
+  assert.equal(ui.captures.length, 1);
+  const old = ui.captures[0];
+  ui.window.fire("blur");
+  finish();
+  await settle();
+  pushKeys(old);
+  pushKeys(old, "down");
+  await ui.tick(250);
+  assert.ok(ui.captureStops.includes(old.captureId));
+  assert.deepEqual(ui.moves.filter(nonzero), []);
+});
+
+test("disconnecting and reconnecting a robot requires a new remote session and a fresh press", async t => {
+  const robot = { id: "test-bumi", name: "Bumi", rssi: -50 };
+  const ui = await renderer(t, { remote: true, robotStatus: 2, scanDevices: [robot] });
+  const old = await beginRemote(ui);
+  pushKeys(old);
+  pushKeys(old, "up");
+  await settle();
+  await click(ui, "disconnect");
+  await ui.tick(100);
+  await click(ui, "connect");
+  await ui.chooseMode("walk");
+  const start = ui.moves.length;
+  pushKeys(old);
+  pushKeys(old, "down");
+  await ui.tick(200);
+  assert.deepEqual(ui.moves.slice(start).filter(nonzero), []);
+  await click(ui, "remote-toggle");
+  const current = ui.captures.at(-1);
+  assert.notEqual(current.captureId, old.captureId);
+  pushKeys(current);
+  pushKeys(current, "left");
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), [0, 80, 0]);
+  assert.equal(ui.movementRequests.at(-1).remoteCaptureId, current.captureId);
+  pushKeys(current);
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), stopped);
+  pushKeys(current, "up");
+  await settle();
+  assert.ok(ui.moves.at(-1)[0] > 0);
+  pushKeys(current);
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), stopped);
+});
+
+test("BLE link loss discards only the matching connection and a late movement response cannot restore it", async t => {
+  let finish;
+  const firstWrite = new Promise(resolve => { finish = resolve; });
+  const ui = await renderer(t, {
+    initial: { connectionId: "current-link" }, remote: true, robotStatus: 2,
+    beforeMove: count => count === 1 ? firstWrite : undefined,
+  });
+  const capture = await beginRemote(ui);
+  assert.ok([...ui.listeners].some(listener => listener.event === "bumi:disconnected" && listener.target === "bumi-control"));
+  ui.emit("bumi:disconnected", { id: "test-bumi", connectionId: "older-link" });
+  ui.emit("bumi:disconnected", { id: "different-robot", connectionId: "current-link" });
+  pushKeys(capture);
+  pushKeys(capture, "down");
+  assert.equal(ui.movementRequests.length, 1);
+  assert.equal(ui.movementRequests[0].remoteCaptureId, capture.captureId);
+  ui.emit("bumi:disconnected", { id: "test-bumi", connectionId: "current-link" });
+  assert.ok(ui.captureStops.includes(capture.captureId));
+  pushKeys(capture);
+  pushKeys(capture, "up");
+  finish();
+  await settle();
+  await ui.tick(500);
+  assert.deepEqual(ui.document.getElementById("connection-state").dataset.state, "offline");
+  assert.match(ui.document.getElementById("remote-status").textContent, /停止状态未知/);
+  assert.equal(ui.movementRequests.length, 1, "the disconnected transport cannot be sent stop or replayed movement");
+});
+
+test("a native release that overtakes a short tap sends stop and leaves the remote ready for a fresh press", async t => {
+  let rejectMove;
+  const write = new Promise((_, reject) => { rejectMove = reject; });
+  const ui = await renderer(t, {
+    remote: true, robotStatus: 2, beforeMove: count => count === 1 ? write : undefined,
+  });
+  const capture = await beginRemote(ui);
+  pushKeys(capture);
+  pushKeys(capture, "up");
+  pushKeys(capture);
+  rejectMove("遥控方向键已释放或遥控会话已结束。");
+  await settle();
+  assert.deepEqual(ui.moves[1], stopped);
+  assert.equal(ui.captureStops.length, 0);
+  pushKeys(capture, "down");
+  await settle();
+  assert.ok(ui.moves.at(-1)[0] < 0);
+  assert.equal(ui.movementRequests.at(-1).remoteCaptureId, capture.captureId);
+  pushKeys(capture);
+  await settle();
+  assert.deepEqual(ui.moves.at(-1), stopped);
 });

@@ -19,9 +19,11 @@ test("Bumi IPC is limited to its bundled local control window", () => {
   const own = permissions.find(part => part.includes('identifier = "allow-bumi-control"'));
   const main = permissions.find(part => part.includes('identifier = "allow-desktop-commands"'));
   assert.ok(own && main);
-  assert.ok(own.includes('"bumi_control"'));
-  assert.equal(main.includes('"bumi_control"'), false);
-  assert.equal((read("src/bridge.ts") + read("src-tauri/src/bridge.rs")).includes("bumi_control"), false);
+  for (const command of ["bumi_control", "bumi_remote_input"]) {
+    assert.ok(own.includes(`"${command}"`));
+    assert.equal(main.includes(`"${command}"`), false);
+    assert.equal((read("src/bridge.ts") + read("src-tauri/src/bridge.rs")).includes(command), false);
+  }
 
   const host = read("src-tauri/src/app/bumi.rs");
   assert.match(host, /fn trusted_page\(label: &str, url: &Url\)/);
@@ -68,6 +70,15 @@ test("Bumi control is available from every desktop menu and packaged as a local 
   assert.ok(html.includes('id="run-mode"'));
   assert.ok(html.includes('id="motion-stick"'));
   assert.ok(html.includes('id="direction-pad"'));
+  assert.match(html, /id="device-choice"[^>]*\bhidden\b/);
+  assert.match(html, /id="connect"/);
+  assert.match(html, /src="\/src\/assets\/bumi-robot\.png"/);
+  assert.ok(fs.existsSync(path.join(root, "src/assets/bumi-robot.png")));
+  assert.match(html, /id="voice-command"/);
+  assert.match(html, /mi-remote-voice/);
+  assert.match(html, /20 秒/);
+  assert.doesNotMatch(html, /id="scan"/);
+  assert.match(renderer, /请等待约 20 秒/);
   assert.ok(html.includes('id="speech-text"'));
   assert.match(html, /<section\b[^>]*aria-labelledby="speech-title"[^>]*\bhidden\b/);
   assert.ok(html.includes('id="listen-toggle"'));

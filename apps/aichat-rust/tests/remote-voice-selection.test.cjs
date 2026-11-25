@@ -9,6 +9,7 @@ const appRoot = path.resolve(__dirname, '..');
 const read = relative => fs.readFileSync(path.join(appRoot, relative), 'utf8');
 const deviceA = { id: '12345678-1234-5678-1234-567812345671', name: '小米遥控器 2 Pro', connected: true };
 const deviceB = { id: '12345678-1234-5678-1234-567812345672', name: '小米遥控器 2 Pro', connected: false };
+const remoteKeys = ['power', 'voice', 'up', 'down', 'left', 'right', 'ok', 'back', 'volume', 'home', 'menu', 'tv'];
 const copy = value => JSON.parse(JSON.stringify(value));
 const settle = () => new Promise(resolve => setImmediate(resolve));
 function snapshot(overrides = {}) {
@@ -22,6 +23,10 @@ function snapshot(overrides = {}) {
 // advanced status timer. No Bluetooth, input hooks, or Tauri application starts.
 async function renderer(initial = snapshot(), responses = {}) {
   const elements = new Map();
+  const eventListeners = new Map();
+  const captureListeners = new Map();
+  const windowListeners = new Map();
+  const hotspots = [];
   const timers = [];
   const calls = [];
   let current = copy(initial);
@@ -31,6 +36,15 @@ async function renderer(initial = snapshot(), responses = {}) {
       this.children = [];
       this.listeners = new Map();
       this.dataset = {};
+      this.classes = new Set();
+      this.classList = {
+        contains: name => this.classes.has(name),
+        toggle: (name, force) => {
+          const enabled = force === undefined ? !this.classes.has(name) : !!force;
+          if (enabled) this.classes.add(name); else this.classes.delete(name);
+          return enabled;
+        },
+      };
       this.disabled = false;
       this.hidden = false;
       this.checked = false;
@@ -66,11 +80,20 @@ async function renderer(initial = snapshot(), responses = {}) {
     }
     setAttribute(name, value) { this[name] = String(value); }
     removeAttribute(name) { delete this[name]; }
+    toggleAttribute(name, enabled) { if (enabled) this.setAttribute(name, ''); else this.removeAttribute(name); }
+    contains(element) { return element === this || this.children.some(child => child.contains(element)); }
     focus() { document.activeElement = this; }
-    fire(type) {
-      const event = { type, target: this, currentTarget: this, preventDefault() {} };
+    setPointerCapture() {}
+    fire(type, init = {}) {
+      const event = { type, target: this, currentTarget: this, button: 0, pointerId: 1, repeat: false,
+        preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...init };
+      for (const callback of captureListeners.get(type) || []) {
+        callback(event);
+        if (event.stopped) return event;
+      }
       this['on' + type]?.(event);
       for (const callback of this.listeners.get(type) || []) callback(event);
+      return event;
     }
     click() { if (!this.disabled) this.fire('click'); }
   }
@@ -93,15 +116,32 @@ async function renderer(initial = snapshot(), responses = {}) {
       select.appendChild(option);
     }
   }
+  for (const match of html.matchAll(/<button\b([^>]*class="[^"]*remote-hotspot[^"]*"[^>]*)>/g)) {
+    const element = new Element('button');
+    element.dataset.key = /\bdata-key="([^"]+)"/.exec(match[1])?.[1] || '';
+    for (const name of (/\bclass="([^"]+)"/.exec(match[1])?.[1] || '').split(/\s+/)) {
+      if (name) element.classes.add(name);
+    }
+    hotspots.push(element);
+  }
   const document = {
     activeElement: null,
+    addEventListener(type, callback) {
+      captureListeners.set(type, [...(captureListeners.get(type) || []), callback]);
+    },
     getElementById: id => elements.get(id) || null,
     createElement: tag => new Element(tag),
+    querySelectorAll(selector) {
+      assert.equal(selector, '.remote-hotspot');
+      return hotspots;
+    },
   };
   const invoke = async (command, args) => {
-    calls.push({ command, ...(args === undefined ? {} : { args: copy(args) }) });
+    calls.push({ command, ...(args === undefined || args.feedback ? {} : { args: copy(args) }) });
     if (responses[command]) return responses[command](args);
+    if (command === 'remote_voice_enter_demo') return true;
     if (command === 'remote_voice_status' || command === 'remote_voice_refresh_devices') return copy(current);
+    if (command === 'remote_voice_set_demo_mode') return args.enabled;
     if (command === 'remote_voice_start') {
       current = { ...current, running: true, state: 'connecting', config: copy(args.config) };
       return copy(current);
@@ -121,15 +161,24 @@ async function renderer(initial = snapshot(), responses = {}) {
   }).outputText;
   vm.runInNewContext(javascript, {
     exports: {}, document,
-    window: { setTimeout(callback) { timers.push(callback); return timers.length; } },
+    window: {
+      addEventListener(type, callback) { windowListeners.set(type, callback); },
+      setTimeout(callback) { timers.push(callback); return timers.length; },
+    },
     Option: class extends Element {
       constructor(text = '', value = '', defaultSelected = false, selected = false) {
         super('option'); this.textContent = text; this.value = value; this.selected = selected;
       }
     },
     require(name) {
-      assert.equal(name, '@tauri-apps/api/core');
-      return { invoke };
+      if (name === '@tauri-apps/api/core') return { invoke, Channel: class {} };
+      if (name === '@tauri-apps/api/event') return {
+        listen: async (event, callback) => {
+          eventListeners.set(event, callback);
+          return () => eventListeners.delete(event);
+        },
+      };
+      throw new Error('Unexpected renderer module: ' + name);
     },
   }, { filename: 'remote-voice.js' });
   await settle();
@@ -138,6 +187,7 @@ async function renderer(initial = snapshot(), responses = {}) {
     get(id) { const element = elements.get(id); assert.ok(element, 'missing settings element #' + id); return element; },
     async choose(id) { const picker = this.get('device-picker'); picker.value = id; picker.fire('change'); await settle(); },
     async click(id) { this.get(id).click(); await settle(); },
+    async blur() { windowListeners.get('blur')?.(); await settle(); },
     async poll(next) {
       current = copy(next);
       const callback = timers.shift();
@@ -146,8 +196,176 @@ async function renderer(initial = snapshot(), responses = {}) {
       await settle();
     },
     setSnapshot(next) { current = copy(next); },
+    hotspot(key) {
+      const element = hotspots.find(spot => spot.dataset.key === key);
+      assert.ok(element, 'missing remote hotspot ' + key);
+      return element;
+    },
+    async emitKeys(payload) {
+      const listener = eventListeners.get('aichat-desktop:remote-voice-keys');
+      assert.ok(listener, 'the native key activity listener must be registered');
+      listener({ payload });
+      await settle();
+    },
   };
 }
+
+test('native key activity highlights exactly the pressed diagram keys and releases them in order', async () => {
+  const view = await renderer();
+  let revision = 0;
+  for (const key of remoteKeys) {
+    await view.emitKeys({ revision: ++revision, pressedKeys: [key] });
+    for (const other of remoteKeys) {
+      assert.equal(view.hotspot(other).classList.contains('is-pressed'), other === key,
+        key + ' must not change the ' + other + ' hotspot');
+    }
+    assert.equal(view.hotspot(key)['aria-pressed'], 'true');
+    await view.emitKeys({ revision: ++revision, pressedKeys: [] });
+    assert.equal(view.hotspot(key).classList.contains('is-pressed'), false);
+    assert.equal(view.hotspot(key)['aria-pressed'], 'false');
+  }
+
+  await view.emitKeys({ revision: ++revision, pressedKeys: ['home', 'menu'] });
+  assert.equal(view.hotspot('home').classList.contains('is-pressed'), true);
+  assert.equal(view.hotspot('menu').classList.contains('is-pressed'), true);
+  await view.emitKeys({ revision: ++revision, pressedKeys: ['home'] });
+  assert.equal(view.hotspot('home').classList.contains('is-pressed'), true);
+  assert.equal(view.hotspot('menu').classList.contains('is-pressed'), false);
+  await view.emitKeys({ revision: 1, pressedKeys: ['tv'] });
+  assert.equal(view.hotspot('home').classList.contains('is-pressed'), true, 'stale snapshots cannot undo a newer release');
+  assert.equal(view.hotspot('tv').classList.contains('is-pressed'), false);
+  await view.emitKeys({ revision: ++revision, pressedKeys: [] });
+});
+
+test('legacy direction-pad activity uses a group highlight and honors current releases', async () => {
+  const view = await renderer();
+  const group = view.get('remote-dpad');
+  const directionKeys = ['up', 'down', 'left', 'right', 'ok'];
+  const pressed = () => directionKeys.filter(key => view.hotspot(key).classList.contains('is-pressed'));
+
+  await view.emitKeys({ revision: 1, pressedKeys: ['dpad'] });
+  assert.equal(group.classList.contains('legacy-pressed'), true);
+  assert.deepEqual(pressed(), []);
+  await view.emitKeys({ revision: 2, pressedKeys: ['dpad', 'up'] });
+  assert.equal(group.classList.contains('legacy-pressed'), false);
+  assert.deepEqual(pressed(), ['up']);
+  await view.emitKeys({ revision: 3, pressedKeys: [] });
+  await view.emitKeys({ revision: 2, pressedKeys: ['dpad', 'up'] });
+  assert.equal(group.classList.contains('legacy-pressed'), false);
+  assert.deepEqual(pressed(), []);
+});
+
+test('pointer and keyboard holds are momentary and independent of the pinned key guide', async () => {
+  const view = await renderer();
+  for (const key of [...remoteKeys, 'pairing']) {
+    const spot = view.hotspot(key);
+    spot.fire('pointerdown');
+    assert.equal(spot.classList.contains('is-pressed'), true, key + ' pointerdown');
+    spot.fire('pointerup');
+    assert.equal(spot.classList.contains('is-pressed'), false, key + ' pointerup');
+  }
+  const voice = view.hotspot('voice');
+  voice.fire('keydown', { key: ' ' });
+  assert.equal(voice.classList.contains('is-pressed'), true);
+  voice.fire('keydown', { key: ' ', repeat: true });
+  voice.fire('keyup', { key: ' ' });
+  assert.equal(voice.classList.contains('is-pressed'), false);
+  voice.fire('pointerdown');
+  voice.fire('pointercancel');
+  assert.equal(voice.classList.contains('is-pressed'), false);
+
+  voice.click();
+  assert.equal(voice.classList.contains('is-active'), true);
+  await view.emitKeys({ revision: 1, pressedKeys: ['voice'] });
+  await view.emitKeys({ revision: 2, pressedKeys: [] });
+  assert.equal(voice.classList.contains('is-active'), true, 'physical feedback does not unpin the usage guide');
+  assert.equal(voice.classList.contains('is-pressed'), false);
+});
+
+test('demo arrows and OK track simultaneous presses and release independently', async () => {
+  const view = await renderer();
+  await view.click('remote-demo-toggle');
+  const guide = view.get('remote-guide');
+  const keys = ['up', 'down', 'left', 'right', 'ok'];
+  const press = (type, key) => assert.equal(guide.fire(type, { key, code: key }).defaultPrevented, true);
+  const pressed = () => keys.filter(key => view.hotspot(key).classList.contains('is-pressed'));
+  for (const [arrow, key] of [['ArrowUp', 'up'], ['ArrowDown', 'down'], ['ArrowLeft', 'left'], ['ArrowRight', 'right']]) {
+    press('keydown', arrow);
+    assert.deepEqual(pressed(), [key]);
+    press('keydown', 'Enter');
+    assert.deepEqual(pressed(), [key, 'ok']);
+    press('keyup', arrow);
+    assert.deepEqual(pressed(), ['ok']);
+    press('keyup', 'Enter');
+    assert.deepEqual(pressed(), []);
+  }
+});
+
+test('demo is active only after native capture succeeds and ignores events from expired captures', async () => {
+  const channels = [];
+  let finish;
+  const view = await renderer(snapshot(), { remote_voice_enter_demo: ({ feedback }) => {
+    channels.push(feedback);
+    return new Promise((resolve, reject) => { finish = { resolve, reject }; });
+  } });
+  const toggle = view.get('remote-demo-toggle');
+  const guide = view.get('remote-guide');
+  const settings = view.get('voice-controls');
+  await view.click(toggle.id);
+  assert.equal(guide['data-demo'], undefined);
+  finish.reject(new Error('需要辅助功能权限'));
+  await settle();
+  assert.match(view.get('error').textContent, /辅助功能/);
+  assert.equal(settings.inert, false);
+  assert.equal(toggle.textContent, '进入演示');
+
+  await view.click(toggle.id);
+  await view.blur();
+  finish.resolve(true);
+  await settle();
+  assert.equal(guide['data-demo'], undefined);
+  assert.equal(view.calls.at(-1).args.enabled, false, 'blur releases capture even when activation was pending');
+
+  await view.click(toggle.id);
+  finish.resolve(true);
+  await settle();
+  assert.equal(guide['data-demo'], '');
+  channels[1].onmessage({ key: 'volume', pressed: true });
+  assert.equal(view.hotspot('volume')['aria-pressed'], 'false');
+  channels[2].onmessage({ key: 'volume', pressed: true });
+  assert.equal(view.hotspot('volume')['aria-pressed'], 'true');
+  channels[2].onmessage({ key: 'unavailable', pressed: false });
+  assert.equal(view.hotspot('volume')['aria-pressed'], 'false');
+  assert.equal(guide['data-demo'], undefined);
+  assert.equal(settings.inert, false);
+  await view.click(toggle.id);
+  finish.resolve(true);
+  await settle();
+  channels[3].onmessage({ key: 'ended', pressed: false });
+  assert.equal(toggle.textContent, '进入演示', 'native focus loss ends demo without a DOM blur');
+  assert.equal(view.get('error').textContent, '');
+  assert.equal(settings.inert, false);
+});
+
+test('losing window focus exits the demo and clears input held during it', async () => {
+  const view = await renderer();
+  const settings = view.get('voice-controls');
+  const spot = view.hotspot('voice');
+  await view.click('remote-demo-toggle');
+  assert.equal(settings.inert, true);
+  assert.equal(spot.fire('keydown', { key: 'Enter', code: 'Enter' }).defaultPrevented, true);
+  assert.equal(spot.classList.contains('is-pressed'), true);
+  assert.equal(view.get('refresh-devices').fire('click').defaultPrevented, true);
+  await view.blur();
+  assert.equal(settings.inert, false);
+  assert.equal(spot.classList.contains('is-pressed'), false);
+  await view.click('refresh-devices');
+  assert.deepEqual(view.calls.filter(call => call.command !== 'remote_voice_status'), [
+    { command: 'remote_voice_enter_demo' },
+    { command: 'remote_voice_set_demo_mode', args: { enabled: false } },
+    { command: 'remote_voice_refresh_devices', args: {} },
+  ]);
+});
 
 test('multiple remotes are distinguishable and require an explicit choice before connecting', async () => {
   const view = await renderer();

@@ -264,6 +264,7 @@ fn core(profile: &Path, fixture: &Fixture) -> Result<Arc<AppCore>, String> {
         pet_approval_return: Mutex::new(None),
         pet_audio: Arc::new(crate::pet_audio::PetAudioRelay::default()),
         remote_voice: Arc::new(crate::remote_voice::RemoteVoice::new(profile)),
+        remote_demo: Default::default(),
         pet_menu: crate::pet_menu::Session::default(),
         dev_server: Mutex::new(None),
         entry_url: Mutex::new(format!("{}/AIChat.html", fixture.origin)),

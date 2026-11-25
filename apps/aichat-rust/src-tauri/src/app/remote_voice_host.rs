@@ -2,7 +2,7 @@
 use super::state::AppCore;
 use crate::remote_voice::{RecordingFocus, VoiceConfig, VoiceSnapshot};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 const PREPARE_COMPOSER: &str = include_str!("remote_voice_composer.js");
 
@@ -127,7 +127,8 @@ pub(super) fn deliver_main_composer(
     #[cfg(target_os = "macos")]
     {
         let voice = app.state::<Arc<AppCore>>().remote_voice.clone();
-        deliver_main_composer_current(app, text, Arc::new(move || voice.current(generation)))
+        let started = std::time::Instant::now();
+        deliver_main_composer_current(app, text, Arc::new(move || voice.input_allowed(generation, started)))
     }
     #[cfg(not(target_os = "macos"))]
     { let _ = (app, generation, text); Ok(None) }
@@ -436,8 +437,11 @@ fn voice_settings_inner_size(app: &AppHandle) -> (f64, f64) {
 
 fn build_voice_settings(app: &AppHandle, focus: bool) -> tauri::Result<WebviewWindow> {
     let (width, height) = voice_settings_inner_size(app);
-    let theme = app.state::<Arc<AppCore>>().theme.current();
-    WebviewWindowBuilder::new(
+    let core = app.state::<Arc<AppCore>>();
+    let theme = core.theme.current();
+    let core = Arc::clone(&core);
+    let navigation_core = Arc::clone(&core);
+    let window = WebviewWindowBuilder::new(
         app,
         "remote-voice",
         WebviewUrl::App("remote-voice.html".into()),
@@ -449,9 +453,23 @@ fn build_voice_settings(app: &AppHandle, focus: bool) -> tauri::Result<WebviewWi
     .theme(Some(theme.native()))
     .background_color(theme.background())
     .initialization_script(&theme.document_theme_script())
-    .on_navigation(|url| trusted_voice_settings("remote-voice", url))
+    .on_navigation(move |url| {
+        let trusted = trusted_voice_settings("remote-voice", url);
+        if trusted {
+            navigation_core.remote_demo.stop(&navigation_core.remote_voice);
+        }
+        trusted
+    })
     .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-    .build()
+    .build()?;
+    #[cfg(windows)]
+    super::remote_demo::prepare_window(&window);
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Focused(false) | WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed) {
+            core.remote_demo.stop(&core.remote_voice);
+        }
+    });
+    Ok(window)
 }
 
 #[tauri::command]
@@ -462,6 +480,32 @@ pub(super) fn remote_voice_status(
     verify(&window)?;
     Ok(state.remote_voice.snapshot())
 }
+
+#[tauri::command]
+pub(super) fn remote_voice_set_demo_mode(
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    enabled: bool,
+) -> Result<bool, String> {
+    verify(&window)?;
+    if enabled {
+        state.remote_demo.start(&window, &state, None)
+    } else {
+        state.remote_demo.stop(&state.remote_voice);
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub(super) fn remote_voice_enter_demo(
+    window: WebviewWindow,
+    state: tauri::State<'_, Arc<AppCore>>,
+    feedback: tauri::ipc::Channel<super::remote_demo::KeyEdge>,
+) -> Result<bool, String> {
+    verify(&window)?;
+    state.remote_demo.start(&window, &state, Some(feedback))
+}
+
 #[tauri::command]
 pub(super) fn remote_voice_start(
     window: WebviewWindow,
@@ -508,6 +552,7 @@ pub(super) fn remote_voice_begin_input(
     state: tauri::State<'_, Arc<AppCore>>,
 ) -> Result<(), String> {
     verify(&window)?;
+    state.remote_demo.stop(&state.remote_voice);
     super::main_window::show_main_window(&app, &state);
     if let Some(main) = app.get_webview_window("main") {
         if main.url().is_ok_and(|url| crate::security::trusted_page(url.as_str(), state.current_dev_url().as_deref())) {

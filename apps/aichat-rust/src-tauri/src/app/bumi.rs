@@ -8,6 +8,7 @@ use url::Url;
 
 #[cfg(any(target_os = "macos", windows))]
 mod bluetooth;
+pub(super) mod remote_input;
 #[cfg(any(target_os = "macos", windows, test))]
 mod protocol;
 
@@ -21,17 +22,70 @@ pub(super) struct Control {
     window: Mutex<Option<watch::Sender<()>>>,
     #[cfg(any(target_os = "macos", windows))]
     bluetooth: tokio::sync::Mutex<bluetooth::Bluetooth>,
+    #[cfg(any(target_os = "macos", windows))]
+    attempts: Mutex<ConnectionAttempts>,
+    #[cfg(any(target_os = "macos", windows))]
+    remote: Mutex<remote_input::Sessions>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "camelCase")]
 pub(super) enum Request {
     Status,
-    Scan,
-    Connect { id: String },
+    Scan {
+        #[serde(rename = "attemptId", default)]
+        attempt_id: Option<String>,
+    },
+    Connect {
+        id: String,
+        #[serde(rename = "attemptId", default)]
+        attempt_id: Option<String>,
+    },
+    CancelConnection {
+        #[serde(rename = "attemptId")]
+        attempt_id: String,
+    },
     Disconnect,
     Listen { enabled: bool },
-    Send { command: Command },
+    Send {
+        command: Command,
+        #[serde(rename = "remoteCaptureId", default)]
+        remote_capture_id: Option<u64>,
+    },
+}
+
+// The BLE mutex serializes work. Cancellation has a separate lock so it can
+// interrupt an in-flight scan or GATT setup while that mutex is held.
+#[cfg(any(target_os = "macos", windows))]
+#[derive(Default)]
+struct ConnectionAttempts {
+    active: Option<(String, watch::Sender<()>)>,
+    cancelled: std::collections::VecDeque<String>,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+impl ConnectionAttempts {
+    fn start(&mut self, id: &str) -> Result<watch::Receiver<()>, String> {
+        if self.cancelled.iter().any(|previous| previous == id) {
+            return Err("已取消连接。".into());
+        }
+        let (stop, receiver) = watch::channel(());
+        self.active = Some((id.to_owned(), stop));
+        Ok(receiver)
+    }
+
+    fn cancel(&mut self, id: &str) {
+        if self.active.as_ref().is_some_and(|(active, _)| active == id) {
+            self.active = None;
+        }
+        // IPC can deliver cancel before scan/connect, or between those phases.
+        if !self.cancelled.iter().any(|previous| previous == id) {
+            if self.cancelled.len() == 32 {
+                self.cancelled.pop_front();
+            }
+            self.cancelled.push_back(id.to_owned());
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -47,9 +101,39 @@ pub(super) enum Command {
     StandToFall,
     Walk,
     Run,
-    Move { vx: i8, vyaw: i8 },
+    Move {
+        vx: i8,
+        vyaw: i8,
+        #[serde(default)]
+        vy: i8,
+    },
     Speak { text: String },
     Volume { percent: u8 },
+}
+
+impl Command {
+    const STOP: Self = Self::Move { vx: 0, vyaw: 0, vy: 0 };
+    /// Maximum magnitude of a single remote direction key.
+    const REMOTE_AXIS_MAX: i8 = 80;
+
+    fn motion_active(&self) -> Option<bool> {
+        match self {
+            Self::Move { vx, vyaw, vy } => Some(*vx != 0 || *vyaw != 0 || *vy != 0),
+            _ => None,
+        }
+    }
+
+    fn remote_direction(&self) -> Result<Option<&'static str>, &'static str> {
+        let max = Self::REMOTE_AXIS_MAX;
+        match self {
+            Self::Move { vx: 0, vyaw: 0, vy: 0 } => Ok(None),
+            Self::Move { vx, vyaw: 0, vy: 0 } if (1..=max).contains(vx) => Ok(Some("up")),
+            Self::Move { vx, vyaw: 0, vy: 0 } if (-max..=-1).contains(vx) => Ok(Some("down")),
+            Self::Move { vx: 0, vyaw, vy: 0 } if (1..=max).contains(vyaw) => Ok(Some("left")),
+            Self::Move { vx: 0, vyaw, vy: 0 } if (-max..=-1).contains(vyaw) => Ok(Some("right")),
+            _ => Err("方向键仅支持单轴前后移动或转向（幅度 1–80）。"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -70,6 +154,9 @@ struct Device {
 #[serde(rename_all = "camelCase")]
 pub(super) struct Snapshot {
     available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_motion_version: Option<u8>,
+    connection_id: Option<String>,
     devices: Vec<Device>,
     connected: Option<Device>,
     battery: Option<u8>,
@@ -119,6 +206,8 @@ fn open_on_window_thread(app: &AppHandle) -> tauri::Result<()> {
     let control = app.state::<Arc<Control>>().inner().clone();
     let (lifetime, closed) = watch::channel(());
     *control.window.lock().unwrap() = Some(lifetime);
+    #[cfg(any(target_os = "macos", windows))]
+    let navigation_owner = (Arc::clone(&control), closed.clone());
     let theme = app.state::<Arc<AppCore>>().theme.current();
     let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(PAGE.into()))
         .title("Bumi 机器人")
@@ -127,12 +216,24 @@ fn open_on_window_thread(app: &AppHandle) -> tauri::Result<()> {
         .theme(Some(theme.native()))
         .background_color(theme.background())
         .initialization_script(&theme.document_theme_script())
-        .on_navigation(|url| trusted_page(LABEL, url))
+        .on_navigation(move |url| {
+            let allowed = trusted_page(LABEL, url);
+            #[cfg(any(target_os = "macos", windows))]
+            if allowed {
+                // A reloaded document no longer owns its predecessor's IPC channel.
+                navigation_owner.0.remote.lock().unwrap().revoke_window(&navigation_owner.1);
+            }
+            allowed
+        })
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .build();
     match window {
         Ok(window) => {
             window.on_window_event(move |event| {
+                #[cfg(any(target_os = "macos", windows))]
+                if matches!(event, WindowEvent::Focused(false)) {
+                    control.remote.lock().unwrap().revoke_window(&closed);
+                }
                 if matches!(event, WindowEvent::Destroyed) {
                     control.close(&closed);
                 }
@@ -154,6 +255,11 @@ impl Control {
             .is_some_and(|current| current.subscribe().same_channel(closed))
         {
             window.take();
+            #[cfg(any(target_os = "macos", windows))]
+            {
+                *self.attempts.lock().unwrap() = ConnectionAttempts::default();
+                self.remote.lock().unwrap().revoke_window(closed);
+            }
         }
         #[cfg(any(target_os = "macos", windows))]
         {
@@ -180,19 +286,52 @@ pub(super) async fn bumi_control(
     }
     #[cfg(any(target_os = "macos", windows))]
     {
-        let lifetime = control
-            .window
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(watch::Sender::subscribe)
-            .ok_or("Bumi 控制窗口已关闭。")?;
-        let mut bluetooth = control
-            .bluetooth
-            .try_lock()
-            .map_err(|_| "蓝牙操作正在进行，请稍后重试。")?;
+        let attempt_id = match &request {
+            Request::Scan { attempt_id } | Request::Connect { attempt_id, .. } => attempt_id.as_deref(),
+            Request::CancelConnection { attempt_id } => Some(attempt_id.as_str()),
+            _ => None,
+        };
+        if attempt_id.is_some_and(|id| id.is_empty() || id.len() > 128) {
+            return Err("连接尝试 ID 无效。".into());
+        }
+        let lifetime = {
+            let window_owner = control.window.lock().unwrap();
+            let lifetime = window_owner.as_ref().ok_or("Bumi 控制窗口已关闭。")?.subscribe();
+            if let Request::CancelConnection { attempt_id } = &request {
+                control.attempts.lock().unwrap().cancel(attempt_id);
+            }
+            lifetime
+        };
+        let mut bluetooth = match &request {
+            Request::CancelConnection { .. } => control.bluetooth.lock().await,
+            Request::Send { command, .. } if command.motion_active() == Some(false) => {
+                control.bluetooth.lock().await
+            }
+            _ => control.bluetooth.try_lock().map_err(|_| "蓝牙操作正在进行，请稍后重试。")?,
+        };
+        let operation_lifetime = match &request {
+            Request::Scan { attempt_id: Some(id) } | Request::Connect { attempt_id: Some(id), .. } => {
+                let mut attempts = control.attempts.lock().unwrap();
+                if lifetime.has_changed().is_err() {
+                    return Err("Bumi 控制窗口已关闭。".into());
+                }
+                attempts.start(id)?
+            }
+            _ => lifetime.clone(),
+        };
+        let direction = match &request {
+            Request::Send { command, remote_capture_id: Some(id) } => {
+                command.remote_direction()?.map(|key| (*id, key))
+            }
+            _ => None,
+        };
+        let verify = || match direction {
+            Some((id, key)) => remote_input::verify_direction(&window, &control, id, key),
+            None => Ok(()),
+        };
+        verify()?;
         bluetooth
-            .request(window.app_handle(), request, lifetime)
+            .request(window.app_handle(), request, lifetime, operation_lifetime, verify)
             .await
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -201,6 +340,8 @@ pub(super) async fn bumi_control(
         if matches!(request, Request::Status) {
             return Ok(Snapshot {
                 available: false,
+                remote_motion_version: None,
+                connection_id: None,
                 devices: Vec::new(),
                 connected: None,
                 battery: None,
@@ -218,6 +359,41 @@ pub(super) async fn bumi_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn cancelling_interrupts_only_its_attempt_and_rejects_late_ipc() {
+        let mut attempts = ConnectionAttempts::default();
+        let scanning = attempts.start("first").unwrap();
+        attempts.cancel("cancelled-before-start");
+        assert!(attempts.start("cancelled-before-start").is_err());
+        assert_eq!(scanning.has_changed().ok(), Some(false));
+        attempts.cancel("first");
+        assert!(scanning.has_changed().is_err());
+        assert!(attempts.start("first").is_err());
+        let connecting = attempts.start("next").unwrap();
+        attempts.cancel("first");
+        assert_eq!(connecting.has_changed().ok(), Some(false));
+        drop(attempts);
+        assert!(connecting.has_changed().is_err());
+    }
+
+    #[test]
+    fn legacy_bumi_requests_omit_attempt_identity() {
+        for (input, id) in [
+            (r#"{"operation":"scan"}"#, None),
+            (r#"{"operation":"connect","id":"robot"}"#, None),
+            (r#"{"operation":"scan","attemptId":"attempt"}"#, Some("attempt")),
+            (r#"{"operation":"connect","id":"robot","attemptId":"attempt"}"#, Some("attempt")),
+        ] {
+            match serde_json::from_str::<Request>(input).unwrap() {
+                Request::Scan { attempt_id } | Request::Connect { attempt_id, .. } => {
+                    assert_eq!(attempt_id.as_deref(), id);
+                }
+                _ => panic!("unexpected request"),
+            }
+        }
+    }
 
     #[test]
     fn commands_are_limited_to_the_local_bumi_document() {

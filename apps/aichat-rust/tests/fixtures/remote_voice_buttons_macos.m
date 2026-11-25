@@ -364,6 +364,127 @@ static void status_reports_home_availability_separately(void) {
     finish(&context);
 }
 
+static void pressed_state_tracks_each_visual_key_without_queuing_actions(void) {
+    ButtonContext context; initialize(&context);
+    ButtonSource remote = source(1, "physical-remote-A");
+    applySources(&context, &remote, 1);
+    for (int button = MenuButton; button < ButtonCount; button++) {
+        buttonEdge(&context, 1, 7, buttonUsage[button], true, 100);
+        buttonEdge(&context, 1, 7, buttonUsage[button], true, 110);
+        assert(pressedMask(&context) == (1u << button));
+        buttonEdge(&context, 1, 7, buttonUsage[button], false, 120);
+        assert(pressedMask(&context) == 0);
+        assert(!pollContextAt(&context, 121));
+        assert(!pollHomeAt(&context, 121));
+    }
+    buttonEdge(&context, 1, 7, buttonUsage[UpButton], true, 200);
+    buttonEdge(&context, 1, 7, buttonUsage[OkButton], true, 201);
+    assert(pressedMask(&context) == ((1u << UpButton) | (1u << OkButton)));
+    buttonEdge(&context, 1, 7, buttonUsage[UpButton], false, 202);
+    assert(pressedMask(&context) == (1u << OkButton));
+    buttonEdge(&context, 1, 7, buttonUsage[OkButton], false, 203);
+    finish(&context);
+}
+
+static void demo_mode_keeps_visual_feedback_and_discards_taps(void) {
+    ButtonContext context; initialize(&context);
+    ButtonSource remote = source(1, "physical-remote-A");
+    applySources(&context, &remote, 1);
+    activeButtons = &context;
+
+    homeTap(&context, 1, 100);
+    keepwork_remote_buttons_set_demo_mode(true);
+    assert(!pollHomeAt(&context, 131));
+
+    buttonEdge(&context, 1, 7, buttonUsage[BackButton], true, 200);
+    assert(pressedMask(&context) == (1u << BackButton));
+    buttonEdge(&context, 1, 7, buttonUsage[BackButton], false, 230);
+    assert(!pressedMask(&context));
+    assert(!pollContextAt(&context, 231));
+
+    buttonEdge(&context, 1, 7, buttonUsage[HomeButton], true, 300);
+    keepwork_remote_buttons_set_demo_mode(false);
+    assert(pressedMask(&context) == (1u << HomeButton));
+    buttonEdge(&context, 1, 7, buttonUsage[HomeButton], false, 330);
+    assert(!pressedMask(&context));
+    assert(!pollHomeAt(&context, 331));
+
+    homeTap(&context, 1, 400);
+    assert(pollHomeAt(&context, 431));
+    activeButtons = NULL;
+    finish(&context);
+}
+
+static void volume_feedback_uses_the_selected_remote_keyboard_page(void) {
+    ButtonContext context; initialize(&context);
+    ButtonSource remote = source(1, "physical-remote-A");
+    applySources(&context, &remote, 1);
+    buttonEdge(&context, 1, 7, 0xE2, true, 100);   // Keyboard Left Alt
+    buttonEdge(&context, 1, 0x0C, 0xE9, true, 101); // Consumer Volume Increment
+    buttonEdge(&context, 2, 7, 0x80, true, 102);   // Other keyboard
+    assert(pressedMask(&context) == 0);
+
+    const uint32_t usages[] = {0x80, 0x81, 0x7F};
+    const RemoteButton buttons[] = {VolumeUpButton, VolumeDownButton, MuteButton};
+    for (size_t i = 0; i < sizeof(usages) / sizeof(usages[0]); i++) {
+        buttonEdge(&context, 1, 7, usages[i], true, 110);
+        assert(pressedMask(&context) == (1u << buttons[i]));
+        buttonEdge(&context, 1, 7, usages[i], false, 120);
+        assert(pressedMask(&context) == 0);
+    }
+    finish(&context);
+}
+
+static uint32_t reportedDirections[8];
+static size_t reportedDirectionCount;
+
+static void recordDirectionMask(uint32_t mask) {
+    assert(reportedDirectionCount < sizeof(reportedDirections) / sizeof(reportedDirections[0]));
+    reportedDirections[reportedDirectionCount++] = mask;
+}
+
+static int sourceChangeCount;
+static void countSourceChange(void) { sourceChangeCount++; }
+
+static void direction_capture_requires_neutral_and_expires_on_reenumeration(void) {
+    ButtonContext context;
+    initialize(&context);
+    context.sourceChanged = countSourceChange;
+    ButtonSource remote = source(7, "remote");
+    remote.needsRelease[LeftButton] = true;
+    applySources(&context, &remote, 1);
+    activeButtons = &context;
+    assert(!keepwork_remote_directions_released());
+    buttonEdge(&context, 7, 7, buttonUsage[LeftButton], false, 20);
+    assert(keepwork_remote_directions_released());
+    buttonEdge(&context, 7, 7, buttonUsage[RightButton], true, 30);
+    assert(!keepwork_remote_directions_released());
+    ButtonSource replacement = source(8, "remote");
+    applySources(&context, &replacement, 1);
+    assert(sourceChangeCount == 1);
+    activeButtons = NULL;
+    finish(&context);
+}
+
+static void rapid_directions_report_every_device_scoped_edge(void) {
+    ButtonContext context; initialize(&context);
+    ButtonSource remote = source(1, "physical-remote-A");
+    applySources(&context, &remote, 1);
+    context.reportPressed = recordDirectionMask;
+    buttonEdge(&context, 2, 7, buttonUsage[DownButton], true, 99);
+    buttonEdge(&context, 1, 7, buttonUsage[UpButton], true, 100);
+    buttonEdge(&context, 1, 7, buttonUsage[UpButton], true, 102);
+    buttonEdge(&context, 1, 7, buttonUsage[RightButton], true, 103);
+    buttonEdge(&context, 1, 7, buttonUsage[UpButton], false, 104);
+    buttonEdge(&context, 1, 7, buttonUsage[RightButton], false, 105);
+    assert(reportedDirectionCount == 4);
+    assert(reportedDirections[0] == (1u << UpButton));
+    assert(reportedDirections[1] == ((1u << UpButton) | (1u << RightButton)));
+    assert(reportedDirections[2] == (1u << RightButton));
+    assert(reportedDirections[3] == 0);
+    finish(&context);
+}
+
 int main(void) {
     assert(activeButtons == NULL);
     known_device_and_source_selection();
@@ -376,6 +497,11 @@ int main(void) {
     collections_share_one_press_and_reordering_drops_partial_edges();
     startup_held_or_unknown_state_requires_release_before_a_new_click();
     source_changes_and_shutdown_invalidate_pressed_and_pending_actions();
+    pressed_state_tracks_each_visual_key_without_queuing_actions();
+    demo_mode_keeps_visual_feedback_and_discards_taps();
+    volume_feedback_uses_the_selected_remote_keyboard_page();
+    rapid_directions_report_every_device_scoped_edge();
+    direction_capture_requires_neutral_and_expires_on_reenumeration();
     assert(activeButtons == NULL);
     puts("device-scoped remote button fixtures passed");
     return 0;

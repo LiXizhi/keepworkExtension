@@ -1,8 +1,9 @@
-// Passive, source-limited Back and Home button reader. Never remap/seize a keyboard or
-// inspect ordinary keyboard values. OK remains the system's native Enter.
+// Passive, source-limited remote button reader. Never remap/seize a keyboard or
+// inspect ordinary keyboard values. Observe OK without changing native Enter.
 #import <Foundation/Foundation.h>
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hid/IOHIDKeys.h>
+#import <IOKit/hid/IOHIDUsageTables.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <IOKit/IOKitLib.h>
 #import "hid_transport_macos.h"
@@ -16,8 +17,27 @@
 
 #define BUTTON_SOURCE_LIMIT 16
 #define TAP_CAPACITY 32
-typedef enum { BackButton, HomeButton, ButtonCount } RemoteButton;
-static const uint32_t buttonUsage[ButtonCount] = { [BackButton] = 0xF1, [HomeButton] = 0x4A };
+typedef enum {
+    BackButton, HomeButton, MenuButton,
+    UpButton, DownButton, LeftButton, RightButton, OkButton,
+    VolumeUpButton, VolumeDownButton, MuteButton, PowerButton,
+    ButtonCount
+} RemoteButton;
+static const uint32_t buttonUsage[ButtonCount] = {
+    [BackButton] = 0xF1, [HomeButton] = 0x4A, [MenuButton] = 0x65,
+    [UpButton] = 0x52, [DownButton] = 0x51, [LeftButton] = 0x50,
+    [RightButton] = 0x4F, [OkButton] = 0x28,
+    [VolumeUpButton] = kHIDUsage_KeyboardVolumeUp, [VolumeDownButton] = kHIDUsage_KeyboardVolumeDown,
+    [MuteButton] = kHIDUsage_KeyboardMute,
+    [PowerButton] = 0x66,
+};
+
+static int buttonForUsage(uint32_t usage) {
+    for (int button = 0; button < ButtonCount; button++) {
+        if (buttonUsage[button] == usage) return button;
+    }
+    return -1;
+}
 
 typedef struct {
     RemoteButton button;
@@ -28,6 +48,7 @@ typedef struct {
     uint32_t downMask;
     uint32_t releaseMask;
     uint64_t pressedAt;
+    bool suppressTap;
 } ButtonEdges;
 
 typedef struct {
@@ -57,6 +78,7 @@ typedef struct {
     bool ready;
     bool blocked;
     bool seenSource;
+    bool demoMode;
     ButtonEdges edges[ButtonCount];
     ButtonTap taps[TAP_CAPACITY];
     size_t tapHead;
@@ -69,6 +91,8 @@ typedef struct {
     bool cancelled;
     bool detached;
     CFRunLoopRef runloop;
+    void (*reportPressed)(uint32_t);
+    void (*sourceChanged)(void);
 } ButtonContext;
 
 static pthread_mutex_t buttonsLifecycle = PTHREAD_MUTEX_INITIALIZER;
@@ -101,6 +125,17 @@ static void clearEdges(ButtonContext *context) {
     memset(context->edges, 0, sizeof(context->edges));
     context->tapHead = 0;
     context->tapCount = 0;
+    if (context->reportPressed) context->reportPressed(0);
+}
+
+static uint32_t pressedMask(const ButtonContext *context) {
+    uint32_t mask = 0;
+    if (context->enabled && context->ready && !context->blocked) {
+        for (int button = 0; button < ButtonCount; button++) {
+            if (context->edges[button].downMask) mask |= 1u << button;
+        }
+    }
+    return mask;
 }
 
 static bool sameSources(const ButtonSource *a, size_t ac, const ButtonSource *b, size_t bc) {
@@ -134,6 +169,7 @@ static void applySources(ButtonContext *context, const ButtonSource *sources, si
     // autorepeat after a reorder could look like a fresh short press.
     if (count > BUTTON_SOURCE_LIMIT) count = 0;
     if (changed || reordered) {
+        if (context->seenSource && context->sourceChanged) context->sourceChanged();
         ButtonEdges previous[ButtonCount];
         memcpy(previous, context->edges, sizeof(previous));
         clearEdges(context);
@@ -180,16 +216,17 @@ static void buttonEdge(ButtonContext *context, uint64_t registry, uint32_t page,
     }
     size_t index = 0;
     while (index < context->sourceCount && context->sources[index].registry != registry) index++;
-    if (index == context->sourceCount || page != 7 || (usage != buttonUsage[BackButton] && usage != buttonUsage[HomeButton])) {
+    int button = page == 7 ? buttonForUsage(usage) : -1;
+    if (index == context->sourceCount || button < 0) {
         pthread_mutex_unlock(&context->mutex);
         return;
     }
-    RemoteButton button = usage == buttonUsage[HomeButton] ? HomeButton : BackButton;
     if (button == HomeButton && !context->sources[index].hasHome) {
         pthread_mutex_unlock(&context->mutex);
         return;
     }
     ButtonEdges *edges = &context->edges[button];
+    bool wasPressed = edges->downMask != 0;
     uint32_t bit = 1u << index;
     if (edges->releaseMask) {
         // Only the matching key can lift its startup or reconnect barrier.
@@ -203,11 +240,15 @@ static void buttonEdge(ButtonContext *context, uint64_t registry, uint32_t page,
             context->snapshot.code = 1;
         }
     } else if (down) {
-        if (!edges->downMask) edges->pressedAt = now;
+        if (!edges->downMask) {
+            edges->pressedAt = now;
+            edges->suppressTap = context->demoMode;
+        }
         edges->downMask |= bit;
     } else if (edges->downMask & bit) {
         edges->downMask &= ~bit;
-        if (!edges->downMask && now >= edges->pressedAt && now - edges->pressedAt < 1000) {
+        if (!edges->downMask && !edges->suppressTap && now >= edges->pressedAt && now - edges->pressedAt < 1000
+            && (button == BackButton || button == HomeButton)) {
             if (context->tapCount == TAP_CAPACITY) {
                 context->tapHead = (context->tapHead + 1) % TAP_CAPACITY;
                 context->tapCount--;
@@ -217,6 +258,9 @@ static void buttonEdge(ButtonContext *context, uint64_t registry, uint32_t page,
             context->tapCount++;
             if (button == BackButton) context->snapshot.code = 1;
         }
+    }
+    if (context->reportPressed && wasPressed != (edges->downMask != 0)) {
+        context->reportPressed(pressedMask(context));
     }
     pthread_mutex_unlock(&context->mutex);
 }
@@ -264,6 +308,7 @@ static void disableButtons(ButtonContext *context, uint32_t code) {
     context->blocked = true;
     context->enabled = false;
     context->ready = false;
+    if (context->sourceChanged) context->sourceChanged();
     context->snapshot.code = code;
     context->snapshot.ready = 0;
     clearEdges(context);
@@ -336,6 +381,9 @@ static bool sourceFromDevice(IOHIDDeviceRef device, ButtonSource *out) {
     if (!knownRemote(numberProperty(device, kIOHIDVendorIDKey), numberProperty(device, kIOHIDProductIDKey), transport, keyboard ? 1 : 0, keyboard ? 6 : 0)) return false;
     memset(out, 0, sizeof(*out));
     if (!sampleButton(device, BackButton, &out->needsRelease[BackButton])) return false;
+    for (RemoteButton key = UpButton; key <= RightButton; key++) {
+        sampleButton(device, key, &out->needsRelease[key]);
+    }
     out->hasHome = sampleButton(device, HomeButton, &out->needsRelease[HomeButton]);
     out->device = (uintptr_t)device;
     io_service_t service = IOHIDDeviceGetService(device);
@@ -397,7 +445,7 @@ static void inputValue(void *raw, IOReturn result, void *sender, IOHIDValueRef v
     if (!allowed) return;
     uint32_t page = IOHIDElementGetUsagePage(element);
     uint32_t usage = IOHIDElementGetUsage(element);
-    if (page != 7 || (usage != buttonUsage[BackButton] && usage != buttonUsage[HomeButton])) return;
+    if (page != 7 || buttonForUsage(usage) < 0) return;
     buttonEdge(context, registry, page, usage, IOHIDValueGetIntegerValue(value) != 0, monotonicMilliseconds());
 }
 
@@ -430,7 +478,10 @@ static void *buttonsThread(void *raw) {
             IOHIDManagerSetDeviceMatchingMultiple(manager, (__bridge CFArrayRef)matches);
             IOHIDManagerRegisterDeviceMatchingCallback(manager, deviceMatched, context);
             IOHIDManagerRegisterDeviceRemovalCallback(manager, deviceRemoved, context);
-            NSArray *buttons = @[buttonMatch(BackButton), buttonMatch(HomeButton)];
+            NSMutableArray *buttons = [NSMutableArray arrayWithCapacity:ButtonCount];
+            for (int button = 0; button < ButtonCount; button++) {
+                [buttons addObject:buttonMatch(button)];
+            }
             IOHIDManagerSetInputValueMatchingMultiple(manager, (__bridge CFArrayRef)buttons);
             IOHIDManagerRegisterInputValueCallback(manager, inputValue, context);
             IOHIDManagerScheduleWithRunLoop(manager, loop, kCFRunLoopDefaultMode);
@@ -486,7 +537,7 @@ static void *buttonsThread(void *raw) {
     }
 }
 
-int keepwork_remote_buttons_start(void) {
+int keepwork_remote_buttons_start(void (*reportPressed)(uint32_t), void (*sourceChanged)(void)) {
     if (!listenAllowed()) return 2;
     pthread_mutex_lock(&buttonsLifecycle);
     if (activeButtons) { pthread_mutex_unlock(&buttonsLifecycle); return 1; }
@@ -495,6 +546,8 @@ int keepwork_remote_buttons_start(void) {
     pthread_mutex_init(&context->mutex, NULL);
     pthread_cond_init(&context->condition, NULL);
     context->enabled = true;
+    context->reportPressed = reportPressed;
+    context->sourceChanged = sourceChanged;
     context->snapshot.code = 2;
     if (pthread_create(&context->thread, NULL, buttonsThread, context) != 0) {
         freeContext(context); pthread_mutex_unlock(&buttonsLifecycle); return 3;
@@ -510,6 +563,8 @@ int keepwork_remote_buttons_start(void) {
         context->cancelled = true;
         context->enabled = false;
         context->detached = true;
+        context->reportPressed = NULL;
+        context->sourceChanged = NULL;
         clearEdges(context);
         pthread_detach(context->thread);
         pthread_mutex_unlock(&context->mutex);
@@ -555,6 +610,24 @@ bool keepwork_remote_home_poll(void) {
     return toggle;
 }
 
+static void setDemoMode(ButtonContext *context, bool active) {
+    pthread_mutex_lock(&context->mutex);
+    if (context->demoMode != active) {
+        context->demoMode = active;
+        context->tapHead = 0;
+        context->tapCount = 0;
+        context->edges[BackButton].suppressTap = true;
+        context->edges[HomeButton].suppressTap = true;
+    }
+    pthread_mutex_unlock(&context->mutex);
+}
+
+void keepwork_remote_buttons_set_demo_mode(bool active) {
+    pthread_mutex_lock(&buttonsLifecycle);
+    if (activeButtons) setDemoMode(activeButtons, active);
+    pthread_mutex_unlock(&buttonsLifecycle);
+}
+
 // A CGEvent may name the HID event service below the selected IOHIDDevice.
 // Check the actual IOService ancestry; VID/PID and time proximity do not
 // identify the source of a particular Home keystroke.
@@ -591,6 +664,21 @@ bool keepwork_remote_home_sender(uint64_t sender) {
         entry = parent;
     }
     return false;
+}
+
+bool keepwork_remote_directions_released(void) {
+    bool released = false;
+    pthread_mutex_lock(&buttonsLifecycle);
+    if (activeButtons) {
+        pthread_mutex_lock(&activeButtons->mutex);
+        released = activeButtons->ready && !activeButtons->blocked;
+        for (RemoteButton key = UpButton; key <= RightButton; key++) {
+            if (activeButtons->edges[key].releaseMask || activeButtons->edges[key].downMask) released = false;
+        }
+        pthread_mutex_unlock(&activeButtons->mutex);
+    }
+    pthread_mutex_unlock(&buttonsLifecycle);
+    return released;
 }
 
 void keepwork_remote_buttons_status(ButtonSnapshot *out) {

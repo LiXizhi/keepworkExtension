@@ -49,6 +49,8 @@ identifier = "allow-remote-voice-settings"
 description = "Allows only the local remote-voice settings window to manage its worker."
 commands.allow = [
   "remote_voice_status",
+  "remote_voice_set_demo_mode",
+  "remote_voice_enter_demo",
   "remote_voice_start",
   "remote_voice_stop",
   "remote_voice_begin_input",
@@ -59,4 +61,4 @@ commands.allow = [
 [[permission]]
 identifier = "allow-bumi-control"
 description = "Allows the bundled Bumi window to discover and operate a selected robot."
-commands.allow = ["bumi_control"]
+commands.allow = ["bumi_control", "bumi_remote_input"]

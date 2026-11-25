@@ -24,7 +24,6 @@ impl Reading {
 // Movement follows RobotCommandSender.sendJoy -> BleCommand.createMoveCommand:
 // ROCKER (0x13) + vx, vyaw, vy as round(axis * 127). The two-byte form in the
 // Java TcpConversionToBleUtils is never called; a robot did not walk with it.
-// This control pad only requests longitudinal motion and turns.
 // CommandBtUtils uses DANCE_ID (30) + dance_id to play; keystroke 0 only enters dance mode.
 // The official UI calls keystrokes 3 and 4 Wave and Handshake, respectively.
 pub(super) fn frame(command: Command) -> Result<Vec<u8>, &'static str> {
@@ -39,7 +38,8 @@ pub(super) fn frame(command: Command) -> Result<Vec<u8>, &'static str> {
         Command::StandToFall => vec![0x12, 0x09],
         Command::Walk => vec![0x12, 0x01],
         Command::Run => vec![0x12, 0x02],
-        Command::Move { vx, vyaw } => vec![0x13, vx as u8, vyaw as u8, 0],
+        Command::Move { vy: i8::MIN, .. } => return Err("侧向速度必须在 −127 到 127 之间。"),
+        Command::Move { vx, vyaw, vy } => vec![0x13, vx as u8, vyaw as u8, vy as u8],
         Command::Speak { text } => {
             let text = text.trim();
             if text.is_empty() {
@@ -62,11 +62,22 @@ pub(super) fn frame(command: Command) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 
-// BatteryHandler and StatusHandler read a single binary byte after the opcode.
-pub(super) fn reading(bytes: &[u8]) -> Option<Reading> {
+fn frame_data(bytes: &[u8]) -> Option<&[u8]> {
     match bytes {
-        [0x55, 0xaa, 6, 0x26, percent, 6] if *percent <= 100 => Some(Reading::Battery(*percent)),
-        [0x55, 0xaa, 6, 0x51, status, 6] => Some(Reading::Status(*status as i8)),
+        [0x55, 0xaa, len, inner @ .., trailer]
+            if *len as usize == bytes.len() && len == trailer && !inner.is_empty() =>
+        {
+            Some(inner)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn reading(bytes: &[u8]) -> Option<Reading> {
+    match frame_data(bytes)? {
+        // Noetix BatteryHandler reads the first byte after BATTERY_RESULT.
+        [0x26, percent, ..] if *percent <= 100 => Some(Reading::Battery(*percent)),
+        [0x51, status] => Some(Reading::Status(*status as i8)),
         _ => None,
     }
 }
@@ -109,17 +120,10 @@ pub(super) fn describe(bytes: &[u8]) -> Description {
             .ok()
             .map(|text| text.chars().take(512).collect()),
     };
-    if bytes.len() < 5 || bytes[0] != 0x55 || bytes[1] != 0xaa {
-        return invalid();
-    }
-    let length = bytes[2] as usize;
-    if length != bytes.len() || bytes.last() != Some(&bytes[2]) {
-        return invalid();
-    }
-    let inner = &bytes[3..bytes.len() - 1];
-    let Some(&opcode) = inner.first() else {
+    let Some(inner) = frame_data(bytes) else {
         return invalid();
     };
+    let opcode = inner[0];
     if let Some(reading) = reading(bytes) {
         return Description {
             opcode: Some(opcode),
@@ -127,6 +131,17 @@ pub(super) fn describe(bytes: &[u8]) -> Description {
                 Reading::Battery(percent) => format!("电量：{percent}%"),
                 Reading::Status(status) => format!("运行状态码：{status}"),
             },
+            text: None,
+        };
+    }
+    if opcode == 0x26 {
+        let summary = match inner.get(1) {
+            Some(percent) => format!("电量应答值 {percent} 超出 0–100 范围"),
+            None => "电量应答缺少数值".into(),
+        };
+        return Description {
+            opcode: Some(opcode),
+            summary,
             text: None,
         };
     }
@@ -191,36 +206,116 @@ mod tests {
     fn movement_matches_the_official_three_axis_rocker_frame() {
         for (command, expected) in [
             (
-                Command::Move { vx: 40, vyaw: 0 },
+                Command::Move {
+                    vx: 40,
+                    vyaw: 0,
+                    vy: 0,
+                },
                 &[0x55, 0xaa, 8, 0x13, 40, 0, 0, 8][..],
             ),
             (
-                Command::Move { vx: -40, vyaw: 0 },
+                Command::Move {
+                    vx: -40,
+                    vyaw: 0,
+                    vy: 0,
+                },
                 &[0x55, 0xaa, 8, 0x13, 0xd8, 0, 0, 8],
             ),
             (
-                Command::Move { vx: 0, vyaw: 40 },
+                Command::Move {
+                    vx: 0,
+                    vyaw: 40,
+                    vy: 0,
+                },
                 &[0x55, 0xaa, 8, 0x13, 0, 40, 0, 8],
             ),
             (
-                Command::Move { vx: 0, vyaw: -40 },
+                Command::Move {
+                    vx: 0,
+                    vyaw: -40,
+                    vy: 0,
+                },
                 &[0x55, 0xaa, 8, 0x13, 0, 0xd8, 0, 8],
             ),
             (
-                Command::Move { vx: 0, vyaw: 0 },
-                &[0x55, 0xaa, 8, 0x13, 0, 0, 0, 8],
+                Command::Move {
+                    vx: 0,
+                    vyaw: 0,
+                    vy: 40,
+                },
+                &[0x55, 0xaa, 8, 0x13, 0, 0, 0x28, 8],
             ),
             (
-                Command::Move { vx: 51, vyaw: 38 },
+                Command::Move {
+                    vx: 0,
+                    vyaw: 0,
+                    vy: -40,
+                },
+                &[0x55, 0xaa, 8, 0x13, 0, 0, 0xd8, 8],
+            ),
+            (Command::STOP, &[0x55, 0xaa, 8, 0x13, 0, 0, 0, 8]),
+            (
+                Command::Move {
+                    vx: 51,
+                    vyaw: 38,
+                    vy: 0,
+                },
                 &[0x55, 0xaa, 8, 0x13, 0x33, 0x26, 0, 8],
             ),
             (
-                Command::Move { vx: -127, vyaw: 0 },
+                Command::Move {
+                    vx: -127,
+                    vyaw: 0,
+                    vy: 0,
+                },
                 &[0x55, 0xaa, 8, 0x13, 0x81, 0, 0, 8],
             ),
         ] {
             assert_eq!(frame(command).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn ipc_move_defaults_legacy_requests_to_zero_strafe() {
+        let legacy: Command =
+            serde_json::from_str(r#"{"action":"move","vx":0,"vyaw":40}"#).unwrap();
+        assert_eq!(frame(legacy).unwrap(), [0x55, 0xaa, 8, 0x13, 0, 40, 0, 8]);
+        for (vy, byte) in [(-127, 0x81), (127, 0x7f)] {
+            let command = serde_json::from_value(serde_json::json!({
+                "action": "move", "vx": 0, "vyaw": 0, "vy": vy,
+            }))
+            .unwrap();
+            assert_eq!(
+                frame(command).unwrap(),
+                [0x55, 0xaa, 8, 0x13, 0, 0, byte, 8]
+            );
+        }
+        assert!(frame(Command::Move {
+            vx: 0,
+            vyaw: 0,
+            vy: -128
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn remote_input_allows_bounded_forward_backward_yaw_and_stop() {
+        for (vx, vyaw, vy, expected) in [
+            (80, 0, 0, "up"),
+            (-80, 0, 0, "down"),
+            (0, 80, 0, "left"),
+            (0, -80, 0, "right"),
+        ] {
+            let command = Command::Move { vx, vyaw, vy };
+            assert_eq!(command.remote_direction(), Ok(Some(expected)));
+            assert_eq!(command.motion_active(), Some(true));
+        }
+        assert_eq!(Command::STOP.remote_direction(), Ok(None));
+        assert_eq!(Command::STOP.motion_active(), Some(false));
+        for (vx, vyaw, vy) in [(0, 0, 80), (0, 0, -80), (30, 30, 0), (81, 0, 0), (0, 81, 0), (0, -81, 0)] {
+            assert!(Command::Move { vx, vyaw, vy }.remote_direction().is_err());
+        }
+        assert!(Command::Walk.remote_direction().is_err());
     }
 
     #[test]
@@ -260,8 +355,34 @@ mod tests {
             &[0x55, 0xab, 6, 0x26, 42, 6],
             &[0x55, 0xaa, 6, 0x25, 42, 6],
             &[0x55, 0xaa, 5, 0x26, 5],
+            &[0x55, 0xaa, 7, 0x26, 101, 83, 7],
+            &[0x55, 0xaa, 7, 0x26, 83, 0, 6],
+            &[0x55, 0xaa, 7, 0x26, 83, 0, 0, 7],
         ] {
             assert_eq!(reading(invalid), None);
+        }
+    }
+
+    #[test]
+    fn reads_first_battery_byte_in_complete_extended_frames() {
+        for percent in [0, 83, 100] {
+            let frame = [0x55, 0xaa, 8, 0x26, percent, 0xff, 0x80, 8];
+            assert_eq!(reading(&frame), Some(Reading::Battery(percent)));
+            assert_eq!(describe(&frame).summary, format!("电量：{percent}%"));
+        }
+    }
+
+    #[test]
+    fn describes_battery_replies_without_a_valid_percentage() {
+        for (frame, summary) in [
+            (&[0x55, 0xaa, 5, 0x26, 5][..], "电量应答缺少数值"),
+            (&[0x55, 0xaa, 7, 0x26, 255, 0, 7], "电量应答值 255 超出 0–100 范围"),
+        ] {
+            let description = describe(frame);
+            assert_eq!(reading(frame), None);
+            assert_eq!(description.opcode, Some(0x26));
+            assert_eq!(description.summary, summary);
+            assert!(description.text.is_none());
         }
     }
 

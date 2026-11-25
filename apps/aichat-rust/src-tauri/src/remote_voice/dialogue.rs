@@ -14,6 +14,17 @@ static OK_EDGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0
 #[cfg(target_os = "macos")]
 static DEVICE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static OK_PRESSED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static DEMO_MODE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+pub(super) fn set_demo_mode(active: bool) {
+    DEMO_MODE.store(active, Ordering::Release);
+    if active {
+        DEVICE_EPOCH.fetch_add(1, Ordering::AcqRel);
+        OK_PRESSED.store(false, Ordering::Release);
+    }
+}
 
 #[cfg(target_os = "macos")]
 #[no_mangle]
@@ -28,7 +39,9 @@ pub extern "C" fn keepwork_remote_dialogue_ok_edge(down: bool) -> bool {
         CONSUMED => return true,
         _ => {}
     }
-    let consumed = if CONTROLS.load(Ordering::Acquire) {
+    let consumed = if DEMO_MODE.load(Ordering::Acquire) {
+        true
+    } else if CONTROLS.load(Ordering::Acquire) {
         OK_PRESSED.store(true, Ordering::Release);
         true
     } else {
@@ -42,6 +55,7 @@ pub extern "C" fn keepwork_remote_dialogue_ok_edge(down: bool) -> bool {
 pub(crate) fn pet_ok_current(device_epoch: u64) -> bool {
     extern "C" { fn keepwork_voice_input_modifiers() -> bool; }
     DEVICE_EPOCH.load(Ordering::Acquire) == device_epoch && !CONTROLS.load(Ordering::Acquire)
+        && !DEMO_MODE.load(Ordering::Acquire)
         && !unsafe { keepwork_voice_input_modifiers() }
 }
 pub(super) fn release_device() {

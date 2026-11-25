@@ -7,7 +7,7 @@ mod atvv;
 #[path = "remote_voice/auto_start.rs"]
 mod auto_start;
 #[path = "remote_voice/buttons.rs"]
-mod buttons;
+pub(crate) mod buttons;
 #[path = "remote_voice/gestures.rs"]
 mod gestures;
 #[path = "remote_voice/dialogue.rs"]
@@ -36,6 +36,7 @@ use buttons::{ButtonStatus, Buttons};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::watch;
 
 pub(crate) type RecordingFocus = Result<Option<tokio::sync::oneshot::Receiver<bool>>, String>;
@@ -84,6 +85,12 @@ pub struct VoiceDevice {
     pub name: String,
     pub connected: bool,
 }
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteKeyActivity {
+    pub revision: u64,
+    pub pressed_keys: Vec<String>,
+}
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceSnapshot {
@@ -98,7 +105,22 @@ pub struct VoiceSnapshot {
     pub config: VoiceConfig,
     pub buttons: ButtonStatus,
     pub auto_paused: bool,
+    pub key_revision: u64,
+    pub pressed_keys: Vec<String>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DemoMode {
+    active: bool,
+    changed_at: Option<Instant>,
+}
+
+impl DemoMode {
+    fn blocks(self, at: Instant) -> bool {
+        self.active || self.changed_at.is_some_and(|changed_at| at <= changed_at)
+    }
+}
+
 struct Inner {
     generation: u64,
     cancel: Option<watch::Sender<bool>>,
@@ -108,6 +130,8 @@ struct Inner {
     automatic: AutoPolicy,
     session_config: Option<VoiceConfig>,
     resume_config: Option<VoiceConfig>,
+    voice_pressed: bool,
+    key_activity: RemoteKeyActivity,
 }
 pub(crate) enum BackRoute { Pet, MainComposer, Native }
 
@@ -115,12 +139,14 @@ pub struct RemoteVoice {
     pub(crate) dialogue: Arc<dialogue::Dialogue>,
     config_path: PathBuf,
     inner: Mutex<Inner>,
+    demo_mode: watch::Sender<DemoMode>,
     auto_events: watch::Sender<()>,
     recording_focus: std::sync::OnceLock<Box<RecordingFocusCallback>>,
     composer_focus: std::sync::OnceLock<Box<ComposerFocusCallback>>,
     composer_delivery: std::sync::OnceLock<Box<ComposerDeliveryCallback>>,
     home_pressed: std::sync::OnceLock<Box<dyn Fn(u64) + Send + Sync>>,
     back_route: std::sync::OnceLock<Box<dyn Fn(u64) -> Result<BackRoute, String> + Send + Sync>>,
+    key_activity_callback: std::sync::OnceLock<Box<dyn Fn(RemoteKeyActivity) + Send + Sync>>,
 }
 impl RemoteVoice {
     pub fn new(profile: &Path) -> Self {
@@ -136,15 +162,18 @@ impl RemoteVoice {
             Err(_) => (VoiceConfig { auto_start: false, ..Default::default() }, "无法读取遥控器配置，自动开启已暂停。请检查配置文件权限。".into()),
         };
         let (auto_events, _) = watch::channel(());
+        let (demo_mode, _) = watch::channel(DemoMode::default());
         Self {
             config_path,
             auto_events,
+            demo_mode,
             recording_focus: std::sync::OnceLock::new(),
             composer_focus: std::sync::OnceLock::new(),
             composer_delivery: std::sync::OnceLock::new(),
             dialogue: Arc::new(dialogue::Dialogue::default()),
             home_pressed: std::sync::OnceLock::new(),
             back_route: std::sync::OnceLock::new(),
+            key_activity_callback: std::sync::OnceLock::new(),
             inner: Mutex::new(Inner {
                 generation: 0,
                 cancel: None,
@@ -153,6 +182,8 @@ impl RemoteVoice {
                 automatic: AutoPolicy::default(),
                 session_config: None,
                 resume_config: None,
+                voice_pressed: false,
+                key_activity: RemoteKeyActivity::default(),
                 snapshot: VoiceSnapshot {
                     supported: cfg!(any(target_os = "windows", target_os = "macos")),
                     running: false,
@@ -164,6 +195,8 @@ impl RemoteVoice {
                     config,
                     buttons: Buttons::new().status(),
                     auto_paused: false,
+                    key_revision: 0,
+                    pressed_keys: Vec::new(),
                 },
             }),
         }
@@ -195,12 +228,28 @@ impl RemoteVoice {
     pub(crate) fn set_back_route(&self, callback: impl Fn(u64) -> Result<BackRoute, String> + Send + Sync + 'static) {
         let _ = self.back_route.set(Box::new(callback));
     }
+    pub(crate) fn set_key_activity_callback(&self, callback: impl Fn(RemoteKeyActivity) + Send + Sync + 'static) {
+        let _ = self.key_activity_callback.set(Box::new(callback));
+    }
+    pub(crate) fn set_demo_mode(&self, active: bool) -> bool {
+        let inner = self.inner.lock().unwrap();
+        if self.demo_mode.borrow().active != active {
+            inner.buttons.set_demo_mode(active);
+            #[cfg(target_os = "macos")]
+            dialogue::set_demo_mode(active);
+            self.demo_mode.send_replace(DemoMode { active, changed_at: Some(Instant::now()) });
+        }
+        active
+    }
     fn prepare_composer(&self) -> RecordingFocus {
+        if self.demo_mode.borrow().active {
+            return Err("演示图解正在使用遥控器。".into());
+        }
         self.composer_focus.get().map_or(Ok(None), |callback| callback())
     }
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn prepare_recording_focus(&self, generation: u64) -> RecordingTarget {
-        if !self.current(generation) {
+        if !self.input_allowed(generation, Instant::now()) {
             return Err("语音输入已停止。".into());
         }
         // The host can inspect the pet/window state without holding the voice lock.
@@ -220,6 +269,8 @@ impl RemoteVoice {
         let mut snapshot = inner.snapshot.clone();
         snapshot.buttons = inner.buttons.status();
         snapshot.auto_paused = inner.automatic.suppressed && snapshot.config.auto_start;
+        snapshot.key_revision = inner.key_activity.revision;
+        snapshot.pressed_keys = inner.key_activity.pressed_keys.clone();
         snapshot
     }
 
@@ -281,6 +332,7 @@ impl RemoteVoice {
         {
             let _ = native.enable_remote_buttons();
             let _ = inner.buttons.start();
+            inner.buttons.set_demo_mode(self.demo_mode.borrow().active);
         }
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
@@ -294,14 +346,59 @@ impl RemoteVoice {
         let _ = (generation, receiver);
         Ok(())
     }
-    pub fn stop(&self) -> VoiceSnapshot {
-        let mut inner = self.inner.lock().unwrap();
-        inner.automatic.pause();
-        Self::stop_locked(&mut inner);
-        self.auto_events.send_replace(());
-        Self::snapshot_locked(&inner)
+    pub(crate) fn update_key_activity(&self, generation: u64, voice_pressed: Option<bool>) {
+        let updates = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) {
+                return;
+            }
+            let mut updates = Vec::new();
+            let mut states = inner.buttons.take_pressed_states().into_iter().peekable();
+            while let Some(mut pressed_keys) = states.next() {
+                // Publish queued HID edges before applying the new ATVV voice edge.
+                if states.peek().is_none() {
+                    inner.voice_pressed = voice_pressed.unwrap_or(inner.voice_pressed);
+                }
+                if inner.voice_pressed {
+                    pressed_keys.push("voice".into());
+                }
+                pressed_keys.sort();
+                if pressed_keys != inner.key_activity.pressed_keys {
+                    inner.key_activity.revision += 1;
+                    inner.key_activity.pressed_keys = pressed_keys;
+                    updates.push(inner.key_activity.clone());
+                }
+            }
+            updates
+        };
+        for activity in updates {
+            self.publish_key_activity(Some(activity));
+        }
     }
-    fn stop_locked(inner: &mut Inner) {
+    fn clear_key_activity(inner: &mut Inner) -> Option<RemoteKeyActivity> {
+        if !inner.voice_pressed && inner.key_activity.pressed_keys.is_empty() { return None; }
+        inner.voice_pressed = false;
+        inner.key_activity.revision += 1;
+        inner.key_activity.pressed_keys.clear();
+        Some(inner.key_activity.clone())
+    }
+    fn publish_key_activity(&self, activity: Option<RemoteKeyActivity>) {
+        if let (Some(callback), Some(activity)) = (self.key_activity_callback.get(), activity) {
+            callback(activity);
+        }
+    }
+    pub fn stop(&self) -> VoiceSnapshot {
+        let (snapshot, activity) = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.automatic.pause();
+            let activity = Self::stop_locked(&mut inner);
+            self.auto_events.send_replace(());
+            (Self::snapshot_locked(&inner), activity)
+        };
+        self.publish_key_activity(activity);
+        snapshot
+    }
+    fn stop_locked(inner: &mut Inner) -> Option<RemoteKeyActivity> {
         inner.resume_config = None;
         inner.snapshot.devices.clear();
         inner.snapshot.diagnostic.clear();
@@ -319,32 +416,42 @@ impl RemoteVoice {
         }
         .into();
         inner.snapshot.error.clear();
+        Self::clear_key_activity(inner)
     }
     pub fn shutdown(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.automatic.close();
-        Self::stop_locked(&mut inner);
-        self.auto_events.send_replace(());
+        let activity = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.automatic.close();
+            let activity = Self::stop_locked(&mut inner);
+            self.auto_events.send_replace(());
+            activity
+        };
+        self.publish_key_activity(activity);
     }
     pub fn set_auto_start(&self, enabled: bool) -> Result<VoiceSnapshot, String> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.automatic.shutdown { return Err("客户端正在退出。".into()); }
-        let mut config = inner.snapshot.config.clone();
-        config.auto_start = enabled;
-        atomic_json_write(&self.config_path, &config)?;
-        inner.snapshot.config = config;
-        if enabled {
-            inner.automatic.explicit_start();
-            if !inner.snapshot.running {
-                inner.snapshot.state = "waiting-paired".into();
-                inner.snapshot.error.clear();
-            }
-        } else {
-            inner.automatic.pause();
-            Self::stop_locked(&mut inner);
-        }
-        self.auto_events.send_replace(());
-        Ok(Self::snapshot_locked(&inner))
+        let (snapshot, activity) = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.automatic.shutdown { return Err("客户端正在退出。".into()); }
+            let mut config = inner.snapshot.config.clone();
+            config.auto_start = enabled;
+            atomic_json_write(&self.config_path, &config)?;
+            inner.snapshot.config = config;
+            let activity = if enabled {
+                inner.automatic.explicit_start();
+                if !inner.snapshot.running {
+                    inner.snapshot.state = "waiting-paired".into();
+                    inner.snapshot.error.clear();
+                }
+                None
+            } else {
+                inner.automatic.pause();
+                Self::stop_locked(&mut inner)
+            };
+            self.auto_events.send_replace(());
+            (Self::snapshot_locked(&inner), activity)
+        };
+        self.publish_key_activity(activity);
+        Ok(snapshot)
     }
 
     /// Explicit, local settings action. Discovery never arms keyboard input,
@@ -543,9 +650,15 @@ impl RemoteVoice {
     }
     pub(crate) fn current(&self, generation: u64) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.generation == generation
-            && inner.snapshot.running
+        Self::session_current(&inner, generation)
+    }
+    fn session_current(inner: &Inner, generation: u64) -> bool {
+        inner.generation == generation && inner.snapshot.running
             && inner.cancel.as_ref().is_some_and(|c| !*c.borrow())
+    }
+    pub(crate) fn input_allowed(&self, generation: u64, at: Instant) -> bool {
+        let inner = self.inner.lock().unwrap();
+        Self::session_current(&inner, generation) && !self.demo_mode.borrow().blocks(at)
     }
     fn update(&self, generation: u64, state: &str, error: &str, device: Option<String>) {
         let mut inner = self.inner.lock().unwrap();
@@ -574,6 +687,7 @@ impl RemoteVoice {
         inner.native.as_ref().ok_or("系统输入未就绪。")?.start()?;
         // Button availability is optional; it cannot disable working dictation.
         let _ = inner.buttons.start();
+        inner.buttons.set_demo_mode(self.demo_mode.borrow().active);
         Ok(())
     }
     fn disarm(&self, generation: u64) {
@@ -586,9 +700,12 @@ impl RemoteVoice {
                 native.disarm_ptt();
             }
         }
+        drop(inner);
+        self.update_key_activity(generation, Some(false));
     }
     async fn deliver_composer_text(&self, generation: u64, text: &str, complete: bool) -> Result<Option<Delivery>, String> {
-        if !self.current(generation) || text.trim().is_empty() { return Ok(Some(Delivery::Cancelled)); }
+        let started = Instant::now();
+        if !self.input_allowed(generation, started) || text.trim().is_empty() { return Ok(Some(Delivery::Cancelled)); }
         if text.len() > 64_000 || text.contains('\0') { return Err("识别文字超出长度限制或包含无效字符。".into()); }
         // Exact, complete commands keep their existing native semantics. A
         // partial command and ordinary sentences remain literal dictation.
@@ -603,7 +720,7 @@ impl RemoteVoice {
         // Never hold the voice mutex while the UI resolves/edits its composer.
         let Some(ack) = callback(generation, text)? else { return Ok(None); };
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), ack).await;
-        if !self.current(generation) { return Ok(Some(Delivery::Cancelled)); }
+        if !self.input_allowed(generation, started) { return Ok(Some(Delivery::Cancelled)); }
         match result {
             Ok(Ok(Ok(ComposerDelivery::Inserted))) => Ok(Some(Delivery::Pasted)),
             Ok(Ok(Ok(ComposerDelivery::NotApplicable))) => Ok(None),
@@ -612,6 +729,8 @@ impl RemoteVoice {
         }
     }
     async fn deliver_recognition(&self, generation: u64, owner: Option<&RecordingFeedback>, text: &str, complete: bool) -> bool {
+        let started = Instant::now();
+        if !self.input_allowed(generation, started) { return false; }
         if let Some(edit) = owner.and_then(|target| target.pet_delivery.as_ref()) {
             {
                 let mut inner = self.inner.lock().unwrap();
@@ -659,7 +778,7 @@ impl RemoteVoice {
             Ok(None) => {}
         }
         let mut inner = self.inner.lock().unwrap();
-        if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) {
+        if !Self::session_current(&inner, generation) || self.demo_mode.borrow().blocks(started) {
             return false;
         }
         let Some(native) = &inner.native else {
@@ -672,15 +791,16 @@ impl RemoteVoice {
     }
     fn poll_clear(&self, generation: u64) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.generation == generation
-            && inner.cancel.as_ref().is_some_and(|c| !*c.borrow())
+        Self::session_current(&inner, generation)
+            && !self.demo_mode.borrow().active
             && inner.buttons.poll_clear()
     }
     fn dispatch_home(&self, generation: u64) {
+        self.update_key_activity(generation, None);
         let pressed = {
             let inner = self.inner.lock().unwrap();
-            inner.generation == generation
-                && inner.cancel.as_ref().is_some_and(|c| !*c.borrow())
+            Self::session_current(&inner, generation)
+                && !self.demo_mode.borrow().active
                 && inner.buttons.poll_home()
         };
         if pressed {
@@ -706,7 +826,8 @@ impl RemoteVoice {
     }
     // The BLE loop cancels the utterance before invoking this mutation.
     fn clear(&self, generation: u64) {
-        if !self.current(generation) || self.dialogue.exit("back") { return; }
+        let started = Instant::now();
+        if !self.input_allowed(generation, started) || self.dialogue.exit("back") { return; }
         // The window queries may need the UI thread. Keep the voice mutex free.
         if let Some(route) = self.back_route.get() {
             match route(generation) {
@@ -727,7 +848,7 @@ impl RemoteVoice {
         }
         let native = {
             let inner = self.inner.lock().unwrap();
-            if inner.generation != generation || inner.cancel.as_ref().is_none_or(|c| *c.borrow()) { return; }
+            if !Self::session_current(&inner, generation) || self.demo_mode.borrow().blocks(started) { return; }
             let Some(native) = inner.native.clone() else { return; };
             native
         };
@@ -769,34 +890,37 @@ impl RemoteVoice {
         }
     }
     fn finish(&self, generation: u64, error: Option<String>) {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.generation != generation {
-            return;
-        }
-        inner.buttons.stop();
-        if let Some(native) = inner.native.take() {
-            native.stop();
-        }
-        let cancelled = inner.cancel.take().is_none_or(|c| *c.borrow());
-        inner.session_config = None;
-        inner.snapshot.running = false;
-        if inner.resume_config.is_some() {
-            inner.snapshot.state = if inner.automatic.asleep() { "sleeping" } else { "reconnecting" }.into();
-            inner.snapshot.error.clear();
-            self.auto_events.send_replace(());
-            return;
-        }
-        if let Some(error) = error.filter(|_| !cancelled) {
-            // The BLE loop has already handled retryable radio/transport failures.
-            inner.automatic.block();
-            inner.snapshot.state = "error".into();
-            inner.snapshot.error = error;
-        } else if !cancelled && inner.snapshot.state == "waiting-selection" {
-            inner.automatic.block();
-        } else {
-            inner.snapshot.state = "stopped".into();
-            inner.snapshot.error.clear();
-        }
+        let activity = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.generation != generation {
+                return;
+            }
+            inner.buttons.stop();
+            if let Some(native) = inner.native.take() {
+                native.stop();
+            }
+            let cancelled = inner.cancel.take().is_none_or(|c| *c.borrow());
+            inner.session_config = None;
+            inner.snapshot.running = false;
+            let activity = Self::clear_key_activity(&mut inner);
+            if inner.resume_config.is_some() {
+                inner.snapshot.state = if inner.automatic.asleep() { "sleeping" } else { "reconnecting" }.into();
+                inner.snapshot.error.clear();
+                self.auto_events.send_replace(());
+            } else if let Some(error) = error.filter(|_| !cancelled) {
+                // The BLE loop has already handled retryable radio/transport failures.
+                inner.automatic.block();
+                inner.snapshot.state = "error".into();
+                inner.snapshot.error = error;
+            } else if !cancelled && inner.snapshot.state == "waiting-selection" {
+                inner.automatic.block();
+            } else {
+                inner.snapshot.state = "stopped".into();
+                inner.snapshot.error.clear();
+            }
+            activity
+        };
+        self.publish_key_activity(activity);
     }
 }
 impl Drop for RemoteVoice {
@@ -862,6 +986,66 @@ mod tests {
         assert!(!serde_json::to_string(&voice.snapshot())
             .unwrap()
             .contains("private transcript"));
+    }
+
+    #[test]
+    fn key_activity_deduplicates_edges_and_stale_generations_cannot_change_the_guide() {
+        let voice = RemoteVoice::new(Path::new("unused-voice-fixture"));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        voice.set_key_activity_callback(move |activity| sink.lock().unwrap().push(activity));
+        let (cancel, _receiver) = watch::channel(false);
+        {
+            let mut inner = voice.inner.lock().unwrap();
+            inner.generation = 3;
+            inner.cancel = Some(cancel);
+            inner.snapshot.running = true;
+        }
+        voice.update_key_activity(3, Some(true));
+        voice.update_key_activity(3, Some(true));
+        assert_eq!(voice.snapshot().pressed_keys, ["voice"]);
+        voice.update_key_activity(2, Some(false));
+        assert_eq!(voice.snapshot().pressed_keys, ["voice"]);
+        voice.update_key_activity(3, Some(false));
+        assert!(voice.snapshot().pressed_keys.is_empty());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].revision, 1);
+        assert_eq!(events[0].pressed_keys, ["voice"]);
+        assert_eq!(events[1].revision, 2);
+        assert!(events[1].pressed_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn demo_mode_continues_key_activity_and_requires_a_fresh_action_after_exit() {
+        let _exclusive = dialogue::TEST_OWNER_LOCK.lock().await;
+        let voice = RemoteVoice::new(Path::new("unused-voice-fixture"));
+        let (cancel, _receiver) = watch::channel(false);
+        {
+            let mut inner = voice.inner.lock().unwrap();
+            inner.generation = 1;
+            inner.cancel = Some(cancel);
+            inner.snapshot.running = true;
+        }
+        let before = Instant::now();
+        assert!(voice.input_allowed(1, before));
+        assert!(voice.set_demo_mode(true));
+        let during = Instant::now();
+        let blocked_during_demo = !voice.input_allowed(1, during);
+        voice.update_key_activity(1, Some(true));
+        let pressed = voice.snapshot().pressed_keys;
+        voice.update_key_activity(1, Some(false));
+        let released = voice.snapshot().pressed_keys;
+        let enabled = voice.set_demo_mode(false);
+
+        assert!(blocked_during_demo);
+        assert_eq!(pressed, ["voice"]);
+        assert!(released.is_empty());
+        assert!(!enabled);
+        assert!(!voice.input_allowed(1, before));
+        assert!(!voice.input_allowed(1, during));
+        let after = voice.demo_mode.borrow().changed_at.unwrap() + std::time::Duration::from_nanos(1);
+        assert!(voice.input_allowed(1, after));
     }
 
     #[test]
