@@ -104,7 +104,15 @@ export async function verifyAgentJobConnection(s:AgentJobState, permissions?:str
 export const agentJobTools = [
     ['job_read','读取本轮作业或作业关联记录。只能读取服务端能力目录授予的作业范围。',{method:{type:'string',enum:['GET']},path:{type:'string'}}],
     ['job_knowledge','检索 CRM 已启用知识库，返回可引用的知识 ID、类别与摘录。答复须仅引用返回的真实知识 ID。',{query:{type:'string'},limit:{type:'integer',minimum:1,maximum:20},category:{type:'string'}}],
-    ['job_result','提交当前作业的真实结果。对外消息同时提供正文和证据；若引用知识库，请通过 citedKnowledgeIds 传入真实知识 ID。',{content:{type:'string'},result:{type:'object'},evidence:{type:'array',items:{type:'string'}},citedKnowledgeIds:{type:'array',items:{type:'string'}},facts:{type:'array',items:{type:'string'}},body:{type:'string'},channel:{type:'string'},customerId:{type:'string'},leadId:{type:'string'}}],
+    ['job_result','提交当前作业的真实结果。对外消息同时提供正文和证据；若引用知识库，请通过 citedKnowledgeIds 传入真实知识 ID。',{
+        content:{type:'string'},
+        result:{
+            type:'object',
+            description:'线索研究作业使用 result.fields 补全档案。每项包含字段名 field、字段值 value 和来源链接 evidence_url。仅提交摘要时省略 fields。',
+        },
+        evidence:{type:'array',items:{type:'string'}},citedKnowledgeIds:{type:'array',items:{type:'string'}},facts:{type:'array',items:{type:'string'}},
+        body:{type:'string'},channel:{type:'string'},customerId:{type:'string'},leadId:{type:'string'},
+    }],
     ['job_learn','保存一条有证据的本地复盘；不会改变 CRM 权限或作业状态。',{observation:{type:'string'},nextAction:{type:'string'},evidence:{type:'array',items:{type:'string'}}}],
     ['job_human','把当前作业交给人工。若需要审核对外消息，提供 body；CRM 会创建待审批消息，否则作业标记为结果未知。',{question:{type:'string'},recommendation:{type:'string'},evidence:{type:'array',items:{type:'string'}},citedKnowledgeIds:{type:'array',items:{type:'string'}},facts:{type:'array',items:{type:'string'}},body:{type:'string'},channel:{type:'string'},customerId:{type:'string'},leadId:{type:'string'}}],
 ].map(([name,description,properties])=>({type:'function',function:{name,description,parameters:{type:'object',properties}}}));
@@ -126,7 +134,7 @@ export class AgentJobCycle {
     readonly tools = agentJobTools;
     evidence:Set<string>;
     knowledgeIds:Set<string>;
-    toolSteps=0;
+    private localSteps=0;
     reported=false;
     finishedJob=false;
     private outcome='';
@@ -158,7 +166,6 @@ export class AgentJobCycle {
     private check(signal:AbortSignal) { if(signal.aborted || !this.state.enabled || Date.parse(this.state.expiresAt)<=Date.now())throw Error('销售工作已停止或授权已过期'); }
     async tool(name:string,a:any,signal:AbortSignal) {
         const s=this.state;this.check(signal);
-        this.toolSteps++;
         const meta={jobId:this.job};
         if(name==='job_read'||name==='crm_request'){
             if(a?.method!=='GET'||typeof a.path!=='string'||!(a.path==='/agent-jobs/'+this.job||this.subjectPath(a.path)))throw Error('本轮只允许读取当前作业及其关联记录');
@@ -186,7 +193,12 @@ export class AgentJobCycle {
         const field=(key:string)=>{if(typeof a?.[key]!=='string'||!a[key].trim()||a[key].length>2400)throw Error('需要简明的'+key);return a[key].trim();};
         if(name==='job_learn'||name==='sales_learn'){
             const observation=field('observation'),nextAction=field('nextAction');
-            const reportId='learning-'+randomUUID();s.learning=[...s.learning,{observation,nextAction,evidence,reportId}].slice(-12);this.save();this.notify('已保存复盘：'+observation,reportId);return {id:reportId,status:'已保存'};
+            const reportId='learning-'+randomUUID();
+            s.learning=[...s.learning,{observation,nextAction,evidence,reportId}].slice(-12);
+            this.save();
+            this.localSteps++;
+            this.notify('已保存复盘：'+observation,reportId);
+            return {id:reportId,status:'已保存'};
         }
         if(!['job_result','job_human','sales_report','sales_ask_human'].includes(name))throw Error('本轮未提供该工具');
         const human=name==='job_human'||name==='sales_ask_human';
@@ -210,13 +222,19 @@ export class AgentJobCycle {
                 ...(body?{body}:{}),
             },
         };
+        const details=a?.result && typeof a.result==='object' && !Array.isArray(a.result) ? a.result : undefined;
+        const fields=this.jobRecord.kind==='research_lead' && !human ? details?.fields : undefined;
+        if (fields!==undefined && (!Array.isArray(fields) || !fields.length))
+            throw Error('线索补全 fields 需为非空数组；仅提交摘要时请省略 fields');
         const result={
             summary:content,
-            details:a?.result&&typeof a.result==='object'&&!Array.isArray(a.result)?a.result:undefined,
+            details,
+            ...(fields!==undefined?{fields}:{}),
             evidence,
             ...(citedKnowledgeIds.length?{cited_knowledge_ids:citedKnowledgeIds,citations:citedKnowledgeIds}:{}),
             ...(this.jobRecord.context?.actionSpec||payload.require_action_nodes===true||citedKnowledgeIds.length?{nodes}:{}),
-            usage:{steps:this.toolSteps},
+            // CRM meters tagged reads and searches on arrival. Only local work and this submission remain.
+            usage:{steps:this.localSteps+1},
             job_kind:this.jobRecord.kind||null,
             learning:s.learning.slice(-3),
         };
@@ -225,7 +243,10 @@ export class AgentJobCycle {
         this.finishedJob=true;this.reported=true;this.asked=human;this.outcome=content;
         const id=String(receipt.approvalId||receipt.recordId||this.job);s.lastReport={id,content,evidence};
         s.status=receipt.pendingApproval?'待 CRM 审批':receipt.status==='人工待办'?'人工待处理':(this.asked?'人工待处理':'待巡查');
-        this.save();this.notify((receipt.pendingApproval?'已提交 CRM 审批：':'已完成 CRM 作业：')+content,id);return receipt;
+        this.save();
+        const status=receipt.status==='已完成'?'已完成 CRM 作业':(receipt.status || '已提交 CRM 作业');
+        this.notify((receipt.pendingApproval?'已提交 CRM 审批':status)+'：'+content,id);
+        return receipt;
     }
 }
 
