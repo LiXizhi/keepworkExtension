@@ -764,10 +764,15 @@ test("dictation excludes calls and rich drafts while remaining stoppable", async
 });
 
 test("missing call capability permits dictation and still allows an active call to stop", async () => {
-  for (const canCall of [false, undefined]) {
-    const pet = await renderer(snapshot({ ready: true, canCall, attention: "" }));
+  for (const [canCall, callUnavailableReason] of [[false, "当前 SDK 无可用的实时通话模型。"], [undefined, undefined]]) {
+    const pet = await renderer(snapshot({ ready: true, canCall, callUnavailableReason, attention: "" }));
     assert.equal(pet.element("dictation").disabled, false);
     assert.equal(pet.element("call").disabled, true);
+    const hint = pet.element("call").title;
+    if (callUnavailableReason) assert.equal(hint, callUnavailableReason);
+    else assert.match(hint, /AIChat.*语音/);
+    assert.equal(pet.element("call")["aria-description"], hint);
+    assert.equal(pet.element("status").textContent, hint);
     pet.element("call").click();
     await settle();
     assert.deepEqual(pet.calls, []);
@@ -776,6 +781,7 @@ test("missing call capability permits dictation and still allows an active call 
     assert.equal(pet.element("dictation").disabled, true);
     assert.equal(pet.element("call").disabled, false);
     assert.equal(pet.element("call-label").textContent, "结束通话");
+    assert.equal(pet.element("call").title, "结束通话");
     assert.equal(pet.element("mute").hidden, false);
     pet.element("dictation").click();
     pet.element("mute").click();
@@ -1699,6 +1705,10 @@ test("the visible pet shows remote setup, preserves an empty-press notice, and i
   const device = pet.element("remote-voice-indicator");
   assert.equal(device.dataset.icon, "link");
   assert.match(pet.element("remote-voice-label").textContent, /连接遥控器/);
+  assert.equal(pet.element("panel").classList.contains("remote-voice-station"), false,
+    "background Bluetooth setup must preserve the normal composer");
+  assert.match(pet.element("target").title, /我的分身/);
+  assert.ok(pet.element("call").title, "a disabled call must still explain its prerequisite");
   const originalFocus = pet.focusedId();
   phase = "ready";
   t.mock.timers.tick(1000);

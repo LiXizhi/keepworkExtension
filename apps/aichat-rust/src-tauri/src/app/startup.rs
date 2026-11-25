@@ -341,6 +341,7 @@ pub fn run() {
         local_model_supervisor,
         updates,
         pet: Arc::new(PetController::new(pet_prefs_path)),
+        pet_camera_view: Mutex::new(None),
         pet_approval_return: Mutex::new(None),
         pet_audio: Arc::new(pet_audio::PetAudioRelay::default()),
         remote_voice: Arc::new(crate::remote_voice::RemoteVoice::new(&profile_dir)),
@@ -427,6 +428,13 @@ pub fn run() {
             core_for_setup.remote_voice.set_recording_focus(move || {
                 super::pet_host::focus_pet_for_remote_voice(&pet_app)
             });
+            #[cfg(any(target_os = "macos", windows))]
+            {
+                let bumi_app = app_handle.clone();
+                core_for_setup.remote_voice.set_bumi_target(move |pressed, source| {
+                    super::bumi::remote_input::bind_voice(&bumi_app, pressed, source)
+                });
+            }
             let key_activity_app = app_handle.clone();
             core_for_setup.remote_voice.set_key_activity_callback(move |activity| {
                 let _ = key_activity_app.emit_to(
@@ -559,6 +567,7 @@ pub fn run() {
                 // Finished can arrive after the new page has published its pet
                 // snapshot, so it must leave that state intact.
                 if payload.event() == PageLoadEvent::Started {
+                    core_for_page_load.pet_camera_view.lock().unwrap().take();
                     core_for_page_load.remote_voice.dialogue.exit("navigation");
                     super::remote_phone_view::sync(window.app_handle());
                     core_for_page_load.pet_approval_return.lock().unwrap().take();
@@ -746,6 +755,7 @@ pub fn run() {
             super::screenshot::desktop_set_screenshot_permission,
             super::pet_approval::desktop_return_to_pet_after_approval,
             super::pet_approval::desktop_reveal_pet_approval,
+            super::remote_phone_view::desktop_present_pet_camera,
             main_window::desktop_page_connection_status,
             main_window::desktop_retry_page_connection,
             main_window::desktop_page_connection_attempt,

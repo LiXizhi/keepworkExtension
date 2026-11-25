@@ -261,6 +261,7 @@ fn core(profile: &Path, fixture: &Fixture) -> Result<Arc<AppCore>, String> {
             None,
         )),
         pet: Arc::new(PetController::new(profile.join("pet.json"))),
+        pet_camera_view: Mutex::new(None),
         pet_approval_return: Mutex::new(None),
         pet_audio: Arc::new(crate::pet_audio::PetAudioRelay::default()),
         remote_voice: Arc::new(crate::remote_voice::RemoteVoice::new(profile)),
@@ -573,6 +574,26 @@ async fn exercise_pet_phone_start(app: &AppHandle) -> Result<(), String> {
         }
     }
     println!("{}", json!({ "case": "pet-gesture-retains-main-phone" }));
+    // A one-shot camera can use the hidden main origin independently of a phone call.
+    let main = app.get_webview_window("main").ok_or("Missing camera owner")?;
+    let token = app.state::<Arc<AppCore>>().launch_intents.lock().unwrap().capability().to_owned();
+    let document = uuid::Uuid::new_v4().to_string();
+    for active in [true, false] {
+        if !super::remote_phone_view::desktop_present_pet_camera(
+            app.clone(), main.clone(), document.clone(), token.clone(), active,
+        ).await? {
+            return Err("Pet camera window presentation failed".into());
+        }
+        ui(app, move |app, _| {
+            let main = app.get_webview_window("main").ok_or("Missing camera window")?;
+            if main.is_visible().map_err(|e| e.to_string())? ||
+                unsafe { keepwork_startup_smoke_main_intact(main.ns_window().map_err(|e| e.to_string())?) } == active {
+                return Err(format!("Incorrect pet camera presentation for active={active}"));
+            }
+            Ok(())
+        }).await?;
+    }
+    println!("{}", json!({ "case": "pet-camera-retains-main-document" }));
     Ok(())
 }
 
@@ -655,22 +676,7 @@ async fn minimize_to_pet(app: &AppHandle, fixture: &FixtureState) -> Result<(), 
             })
             .await?;
         }
-        remote_ui(app, |app, _| {
-            let main = app
-                .get_webview_window("main")
-                .ok_or("Missing restored window")?;
-            let pet = app.get_webview_window("pet").ok_or("Missing pet")?;
-            let native = main.ns_window().map_err(|e| e.to_string())?;
-            if !main.is_visible().map_err(|e| e.to_string())?
-                || main.is_minimized().map_err(|e| e.to_string())?
-                || pet.is_visible().map_err(|e| e.to_string())?
-                || !unsafe { keepwork_startup_smoke_main_intact(native) }
-            {
-                return Err("Restore did not return to the retained main WebView".into());
-            }
-            Ok(())
-        })
-        .await?;
+        wait_for_restored_main(app, false).await?;
         if fixture.entries.load(Ordering::Relaxed) != entries {
             return Err("Minimize/restore reloaded the active document".into());
         }
@@ -681,6 +687,30 @@ async fn minimize_to_pet(app: &AppHandle, fixture: &FixtureState) -> Result<(), 
         );
     }
     Ok(())
+}
+
+// AppKit completes deminiaturization and WebKit focus asynchronously.
+async fn wait_for_restored_main(app: &AppHandle, require_focus: bool) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = ui(app, |app, core| {
+            let main = app.get_webview_window("main").ok_or("Missing restored window")?;
+            let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
+            let native = main.ns_window().map_err(|e| e.to_string())?;
+            Ok((core.page_connection.lock().unwrap().presentation(),
+                main.is_visible().map_err(|e| e.to_string())?,
+                main.is_minimized().map_err(|e| e.to_string())?,
+                pet.is_visible().map_err(|e| e.to_string())?,
+                unsafe { keepwork_startup_smoke_main_intact(native) },
+                unsafe { keepwork_startup_smoke_document_focused(native) }))
+        }).await?;
+        let (presentation, visible, minimized, pet, intact, focused) = state;
+        if presentation == Presentation::Main && visible && !minimized && !pet && intact && (!require_focus || focused) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline { return Err(format!("Main restore timed out: {state:?}")); }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
 }
 
 async fn dock_reopen(app: &AppHandle, fixture: &FixtureState) -> Result<(), String> {
@@ -756,22 +786,10 @@ async fn dock_reopen(app: &AppHandle, fixture: &FixtureState) -> Result<(), Stri
                 tokio::time::sleep(Duration::from_millis(40)).await;
             }
             wait_count(&fixture.dock_reopens, expected_event, "Dock reopen event").await?;
-            remote_ui(app, move |app, core| {
-                let main = app.get_webview_window("main").ok_or("Missing main window")?;
-                let pet = app.get_webview_window("pet").ok_or("Missing pet window")?;
-                let native = main.ns_window().map_err(|e| e.to_string())?;
-                if !main.is_visible().map_err(|e| e.to_string())?
-                    || main.is_minimized().map_err(|e| e.to_string())?
-                    || pet.is_visible().map_err(|e| e.to_string())?
-                    || core.settings().pet_visible != pet_enabled
-                    || core.page_connection.lock().unwrap().presentation() != Presentation::Main
-                    || !unsafe { keepwork_startup_smoke_main_intact(native) }
-                    || !unsafe { keepwork_startup_smoke_document_focused(native) }
-                {
-                    return Err(format!("Dock reopen failed: pet={pet_enabled}, temporary hide={temporary_hide}, repeat={repeat}"));
-                }
-                Ok(())
-            }).await?;
+            wait_for_restored_main(app, true).await?;
+            if app.state::<Arc<AppCore>>().settings().pet_visible != pet_enabled {
+                return Err(format!("Dock reopen changed the pet setting: pet={pet_enabled}"));
+            }
         }
         if fixture.entries.load(Ordering::Relaxed) != entries {
             return Err("Dock reopen reloaded the active document".into());
@@ -1349,6 +1367,7 @@ pub fn run_startup_smoke(profile: PathBuf) -> i32 {
                 pet_host::desktop_publish_pet_state,
                 super::pet_approval::desktop_return_to_pet_after_approval,
                 super::pet_approval::desktop_reveal_pet_approval,
+                super::remote_phone_view::desktop_present_pet_camera,
                 main_window::desktop_page_connection_status,
                 main_window::desktop_retry_page_connection,
                 main_window::desktop_page_connection_attempt,

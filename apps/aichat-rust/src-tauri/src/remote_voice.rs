@@ -58,6 +58,10 @@ impl Drop for RecordingFeedback {
     fn drop(&mut self) { (self.notify)(RecordingPhase::End); }
 }
 pub(crate) type RecordingTarget = Result<Option<RecordingFeedback>, String>;
+/// Bound at the physical key-down. A Bumi recording can only deliver a complete
+/// transcript to this capture, even if another window gains focus before release.
+pub(crate) type BumiDelivery = Arc<dyn Fn(Result<&str, &str>) -> Result<(), String> + Send + Sync>;
+type BumiTargetCallback = dyn Fn(Instant, &str) -> Option<BumiDelivery> + Send + Sync;
 type RecordingFocusCallback = dyn Fn() -> RecordingTarget + Send + Sync;
 type ComposerFocusCallback = dyn Fn() -> RecordingFocus + Send + Sync;
 
@@ -142,6 +146,7 @@ pub struct RemoteVoice {
     demo_mode: watch::Sender<DemoMode>,
     auto_events: watch::Sender<()>,
     recording_focus: std::sync::OnceLock<Box<RecordingFocusCallback>>,
+    bumi_target: std::sync::OnceLock<Box<BumiTargetCallback>>,
     composer_focus: std::sync::OnceLock<Box<ComposerFocusCallback>>,
     composer_delivery: std::sync::OnceLock<Box<ComposerDeliveryCallback>>,
     home_pressed: std::sync::OnceLock<Box<dyn Fn(u64) + Send + Sync>>,
@@ -168,6 +173,7 @@ impl RemoteVoice {
             auto_events,
             demo_mode,
             recording_focus: std::sync::OnceLock::new(),
+            bumi_target: std::sync::OnceLock::new(),
             composer_focus: std::sync::OnceLock::new(),
             composer_delivery: std::sync::OnceLock::new(),
             dialogue: Arc::new(dialogue::Dialogue::default()),
@@ -215,6 +221,12 @@ impl RemoteVoice {
     }
     pub(crate) fn set_recording_focus(&self, callback: impl Fn() -> RecordingTarget + Send + Sync + 'static) {
         let _ = self.recording_focus.set(Box::new(callback));
+    }
+    pub(crate) fn set_bumi_target(&self, callback: impl Fn(Instant, &str) -> Option<BumiDelivery> + Send + Sync + 'static) {
+        let _ = self.bumi_target.set(Box::new(callback));
+    }
+    fn bumi_target_at(&self, at: Instant, source: &str) -> Option<BumiDelivery> {
+        self.bumi_target.get().and_then(|callback| callback(at, source))
     }
     pub(crate) fn set_composer_focus(&self, callback: impl Fn() -> RecordingFocus + Send + Sync + 'static) {
         let _ = self.composer_focus.set(Box::new(callback));

@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { createBumiNavigation } from "./bumi-navigation";
 
 interface Device { id: string; name: string; rssi: number | null }
 type LocomotionMode = "walk" | "run";
@@ -15,6 +16,8 @@ interface Snapshot {
   walkMode: boolean;
   locomotionMode?: LocomotionMode | null;
   remoteMotionVersion?: number;
+  remoteVoiceCommandVersion?: number;
+  guidedMotionVersion?: number;
   listening: boolean;
 }
 interface BluetoothMessage {
@@ -35,7 +38,7 @@ type Command =
 type Request =
   | { operation: "status" | "disconnect" }
   | { operation: "listen"; enabled: boolean }
-  | { operation: "send"; command: Command; remoteCaptureId?: number };
+  | { operation: "send"; command: Command; remoteCaptureId?: number; voiceId?: number };
 interface Motion { vx: number; vyaw: number; vy?: number }
 
 const picker = document.getElementById("device-picker") as HTMLSelectElement;
@@ -94,7 +97,10 @@ let receivedFrames = 0;
 let eventsRegistered = false;
 
 type Direction = "up" | "down" | "left" | "right";
-interface RemoteSample { keys: Direction[]; sampledAt: number; error?: string }
+interface RemoteSample {
+  keys: Direction[]; sampledAt: number; error?: string;
+  voiceCommand?: string; voiceError?: string; voiceId?: number;
+}
 interface RemoteSession {
   id: number;
   drive: boolean;
@@ -102,6 +108,8 @@ interface RemoteSession {
   lastSample: number;
   held: string | null;
   blocked: boolean;
+  connectionId: string | null | undefined;
+  lastVoiceId: number;
   watchdog?: number;
 }
 const remoteDirections: Record<Direction, string> = { up: "上", down: "下", left: "左", right: "右" };
@@ -111,6 +119,14 @@ let nextCapture = Date.now();
 let remoteNote = "可先检查按键，诊断期间不会发送运动指令。";
 let lostConnectionId: string | null = null;
 let disconnectMonitor: Promise<void> | undefined;
+type LegDirection = "forward" | "left" | "right";
+type HeldLeg = { session: RemoteSession; pressId: number; timer?: number; writing: boolean };
+let heldLeg: HeldLeg | null = null;
+let stoppingLeg: HeldLeg | null = null;
+let nextPress = 0;
+const navigation = createBumiNavigation({
+  startLeg, stopLeg, canGuide: () => snapshot.guidedMotionVersion === 1,
+});
 
 function acceptSnapshot(next: Snapshot) {
   // A completed GATT request can arrive after its disconnect notification.
@@ -127,7 +143,7 @@ function sameMotion(left: Motion, right: Motion) {
   return left.vx === right.vx && left.vyaw === right.vyaw && (left.vy ?? 0) === (right.vy ?? 0);
 }
 function isZero(motion: Motion) { return motion.vx === 0 && motion.vyaw === 0 && !motion.vy; }
-function moving() { return snapshot.moving || !isZero(desiredMotion) || !!grip || !!stickKey; }
+function moving() { return snapshot.moving || !isZero(desiredMotion) || !!grip || !!stickKey || !!heldLeg || !!stoppingLeg; }
 function requestedMode(): LocomotionMode | null {
   if (snapshot.locomotionMode === undefined) return snapshot.walkMode ? "walk" : null;
   return snapshot.locomotionMode === "walk" || snapshot.locomotionMode === "run" ? snapshot.locomotionMode : null;
@@ -218,6 +234,7 @@ function render() {
   const connectionState = document.getElementById("connection-state")!;
   connectionState.dataset.state = connected ? "connected" : pending ? "working" : "offline";
   text("connection-state", connected ? isMoving ? "移动控制中" : "已连接" : pending ? "处理中" : "未连接");
+  text("device-help", snapshot.connected ? `当前设备：${snapshot.connected.name || "Bumi"}` : "开启机器人并退出手机 App，可连接 Bumi 或 NTXB 设备。");
   const showChoice = !connected && !pending && snapshot.devices.length > 1;
   document.getElementById("device-choice")!.hidden = !showChoice;
   picker.disabled = !showChoice || unavailable;
@@ -278,6 +295,8 @@ function render() {
   renderLogStatus();
   text("operation", operation);
   text("error", error || (unavailable ? "Bumi 蓝牙控制目前支持 macOS 和 Windows 桌面版。" : ""));
+  navigation.setRemoteActive(remote?.drive === true && remote.ready);
+  navigation.setMoving(isMoving || motionBusy || stopQueued);
   syncRemoteShield();
 }
 
@@ -347,6 +366,7 @@ function setMotion(next: Motion, force = false) {
     window.clearInterval(refreshTimer);
     stopQueued = true;
   } else if (starting) {
+    navigation.motionStarted();
     refreshTimer = window.setInterval(() => void pumpMotion(true), MOTION_REFRESH_MS);
   }
   desiredMotion = { ...next };
@@ -371,6 +391,7 @@ function endRemote(note: string) {
   const session = remote;
   if (!session) return;
   remote = null;
+  navigation.interruptLeg();
   window.clearInterval(session.watchdog);
   remoteNote = note;
   if (session.drive && !isZero(desiredMotion)) stopInput();
@@ -378,10 +399,116 @@ function endRemote(note: string) {
   render();
 }
 
+function drivingHere(session: RemoteSession) {
+  return remote === session && session.drive && session.ready && document.hasFocus() && !document.hidden &&
+    !disconnecting && !!snapshot.connected && !!session.connectionId && session.connectionId === snapshot.connectionId &&
+    Date.now() - session.lastSample <= REMOTE_TIMEOUT_MS;
+}
+
+function startLeg(direction: LegDirection, voiceId?: number) {
+  const session = remote;
+  if (!session || !drivingHere(session) || snapshot.guidedMotionVersion !== 1 || pending || moving() ||
+      motionBusy || stopQueued || motionFailed || session.held !== "" || session.blocked) return false;
+  const leg: HeldLeg = { session, pressId: ++nextPress, writing: false };
+  heldLeg = leg;
+  async function refresh() {
+    if (heldLeg !== leg || leg.writing) return;
+    if (!drivingHere(leg.session)) { endRemote("遥控连接已改变，导航步进已结束。"); return; }
+    leg.writing = true;
+    try {
+      const next = await invoke<Snapshot>("bumi_control", {
+        request: { operation: "guide", captureId: leg.session.id, pressId: leg.pressId, direction, voiceId },
+      });
+      if (heldLeg === leg && remote === leg.session) acceptSnapshot(next);
+    } catch (cause) {
+      if (heldLeg === leg && remote === leg.session) {
+        error = String(cause);
+        endRemote("导航步进未确认。请现场检查机器人并重新定位。");
+      }
+    } finally { leg.writing = false; }
+  }
+  leg.timer = window.setInterval(() => void refresh(), MOTION_REFRESH_MS);
+  void refresh();
+  render();
+  return true;
+}
+
+function stopLeg() {
+  const leg = heldLeg;
+  if (!leg) return;
+  heldLeg = null;
+  window.clearInterval(leg.timer);
+  stoppingLeg = leg;
+  void invoke<Snapshot>("bumi_control", {
+    request: { operation: "guide", captureId: leg.session.id, pressId: leg.pressId },
+  }).then(next => {
+    if (stoppingLeg === leg && snapshot.connectionId === leg.session.connectionId) acceptSnapshot(next);
+  }).catch(cause => {
+    motionFailed = true;
+    error = String(cause);
+    navigation.invalidatePose();
+    if (remote === leg.session) endRemote("停止未确认，请立即断开连接并现场核对。");
+  }).finally(() => {
+    if (stoppingLeg === leg) stoppingLeg = null;
+    render();
+  });
+  render();
+}
+
+// Only complete, single imperatives are executable. Questions, negations and
+// compound requests must not accidentally turn into a physical action.
+function remoteVoiceCommand(session: RemoteSession, sample: RemoteSample) {
+  const { voiceId, voiceCommand: raw } = sample;
+  if (!drivingHere(session) || snapshot.remoteVoiceCommandVersion !== 1 || !voiceId ||
+      !Number.isSafeInteger(voiceId) || voiceId <= session.lastVoiceId) return;
+  session.lastVoiceId = voiceId;
+  const feedback = (message: string) => {
+    text("voice-status", message);
+    text("remote-shield-voice", message);
+  };
+  if (typeof sample.voiceError === "string") { feedback(sample.voiceError.slice(0, 180)); return; }
+  if (typeof raw !== "string" || !raw.trim() || raw.length > 120) return;
+  const phrase = raw.trim().replace(/[。！!\s]+$/u, "").replace(/^(?:(?:小布米|布米|Bumi|机器人)[，,\s]*)?(?:请你|请)?/iu, "");
+  if (/^(?:停止|停下|停下来|停|别走了|不要走了|取消导航)$/u.test(phrase)) {
+    stopAllInput(true);
+    feedback("已请求停止移动，遥控已关闭。");
+    return;
+  }
+  if (session.held !== "" || session.blocked || pending || moving() || motionBusy || stopQueued || motionFailed) {
+    feedback("请松开方向键，等机器人停稳后重新说指令。");
+    return;
+  }
+  if (/^(?:跳舞|跳个舞|跳支舞|跳一支舞)(?:吧)?$/u.test(phrase)) {
+    navigation.invalidatePose();
+    feedback("正在向 Bumi 发送跳舞指令…");
+    void request({ operation: "send", command: { action: "dance" }, remoteCaptureId: session.id, voiceId },
+      commandLabels.dance).then(() => feedback(error || operation));
+    return;
+  }
+  if (phrase === "执行本段" || phrase === "继续本段") {
+    feedback(navigation.voiceStep(voiceId));
+    return;
+  }
+  if (phrase === "已到位" || phrase === "已经到位") {
+    feedback(navigation.confirmStep());
+    return;
+  }
+  const destination = /^(?:走到|走去|前往|去)([^，,。！？!?]{1,16})$/u.exec(phrase);
+  if (destination) {
+    feedback(navigation.plan(destination[1]));
+    return;
+  }
+  feedback("未识别这个指令。可以说“跳舞”“走到讲台”或“停止”。");
+}
+
 function remoteSample(session: RemoteSession, sample: RemoteSample) {
   if (session !== remote) return;
   if (sample.error) { endRemote(sample.error); return; }
   const age = Date.now() - sample.sampledAt;
+  if (sample.voiceCommand !== undefined || sample.voiceError !== undefined) {
+    if (Number.isFinite(age) && Math.abs(age) <= REMOTE_TIMEOUT_MS) remoteVoiceCommand(session, sample);
+    return;
+  }
   if (!Number.isFinite(age) || age < -REMOTE_TIMEOUT_MS || age > REMOTE_TIMEOUT_MS ||
       !Array.isArray(sample.keys) || sample.keys.some(key => !Object.prototype.hasOwnProperty.call(remoteDirections, key))) {
     endRemote("遥控器按键状态已失效，请重新开启。");
@@ -392,6 +519,13 @@ function remoteSample(session: RemoteSession, sample: RemoteSample) {
   if (held === session.held) return;
   const previous = session.held;
   session.held = held;
+  if (held && (heldLeg || stoppingLeg)) {
+    navigation.interruptLeg();
+    session.blocked = true;
+    remoteNote = "导航步进已中断。请松开方向键并核对机器人位置。";
+    render();
+    return;
+  }
   if (!session.drive) {
     const names = sample.keys.map(key => remoteDirections[key]).join(" + ");
     remoteNote = names ? `检测到方向键：${names}` : "四个方向键均已释放。";
@@ -419,6 +553,7 @@ function watchRobotDisconnect() {
     if (!payload.connectionId || snapshot.connectionId !== payload.connectionId ||
         snapshot.connected?.id !== payload.id) return;
     lostConnectionId = payload.connectionId;
+    navigation.invalidatePose();
     snapshot = { ...snapshot, connected: null, connectionId: null, moving: false, walkMode: false,
       locomotionMode: null, status: null, battery: null, listening: false };
     window.clearInterval(refreshTimer);
@@ -441,7 +576,7 @@ async function startRemote(drive: boolean) {
   if (drive && (!snapshot.connected || !requestedMode() || snapshot.remoteMotionVersion !== 2)) return;
   const session: RemoteSession = {
     id: ++nextCapture, drive, ready: false, lastSample: Date.now(), held: null,
-    blocked: true,
+    blocked: true, connectionId: snapshot.connectionId, lastVoiceId: 0,
   };
   remote = session;
   remoteNote = drive ? "正在确认机器人当前步态…" : "正在识别已配对的小米遥控器…";
@@ -460,12 +595,16 @@ async function startRemote(drive: boolean) {
     }
     const events = new Channel<RemoteSample>();
     events.onmessage = sample => remoteSample(session, sample);
-    const device = await invoke<string>("bumi_remote_input", { enabled: true, captureId: session.id, events, drive });
+    const voiceCommands = drive && snapshot.remoteVoiceCommandVersion === 1;
+    const device = await invoke<string>("bumi_remote_input", { enabled: true, captureId: session.id, events, drive, voiceCommands });
     if (remote !== session) {
       await invoke("bumi_remote_input", { enabled: false, captureId: session.id });
       return;
     }
     session.ready = true;
+    if (drive) text("remote-shield-voice", voiceCommands
+      ? "按住小米遥控器语音键，说“跳舞”或“走到讲台”，再松开。"
+      : "此版本支持方向键。语音也可以在窗口指令框手动执行。");
     if (session.held === null) session.lastSample = Date.now();
     remoteNote = drive ? `${device} · 上、下键控制前后，左、右键控制转向。` : `${device} · 请依次按下并松开四个方向键。`;
     session.watchdog = window.setInterval(() => {
@@ -527,9 +666,13 @@ async function request(request: Request, success = "", activity = "") {
         snapshot.status !== (requestedMode() === "walk" ? 2 : 3) || !requestedMode())) {
       endRemote("连接或步态已改变。请确认机器人状态后重新开启遥控。");
     }
-    if (request.operation === "status" && snapshot.listening) await registerMonitorEvents();
-    operation = success || (request.operation === "disconnect" ? "已断开连接。" : "状态已更新。");
-    if (request.operation === "disconnect") resetConnectionMotion();
+    if (request.operation === "status") {
+      if (snapshot.listening) await registerMonitorEvents();
+      operation = snapshot.connected ? "已读取机器人连接状态。" : connectionHint;
+    } else {
+      operation = success || (request.operation === "disconnect" ? "已断开连接。" : "状态已更新。");
+    }
+    if (request.operation === "disconnect") { resetConnectionMotion(); navigation.invalidatePose(); }
   } catch (cause) {
     error = String(cause);
     if (request.operation === "send" && request.command.action === "battery") {
@@ -548,6 +691,7 @@ function sendPostureCommand(action: PostureAction) {
   if (pending || disconnecting || moving() || motionFailed || !snapshot.connected) return;
   if (action === "run" && snapshot.locomotionMode === undefined) return;
   if (remote) endRemote("步态或姿态已切换，请重新开启遥控。");
+  navigation.invalidatePose();
   // A failed write can leave the robot's gait unknown. Require a fresh selection.
   snapshot.walkMode = false;
   if (snapshot.locomotionMode !== undefined) snapshot.locomotionMode = null;
@@ -724,6 +868,8 @@ function runVoiceCommand(raw: string) {
     return;
   }
   field.value = "";
+  const destination = phrase.match(/^(?:走到|走去|前往|去)(.{1,16})$/u);
+  if (destination) { voiceNote(navigation.plan(destination[1])); return; }
   if (phrase === "连接" || phrase === "连接机器人") {
     if (snapshot.connected) {
       voiceNote("已经连上了。");
@@ -981,4 +1127,4 @@ async function registerMonitorEvents() {
   }
 }
 render();
-void request({ operation: "status" }, connectionHint);
+void request({ operation: "status" });

@@ -1,6 +1,8 @@
 use super::{trusted_page, Control};
 use serde::Serialize;
 use std::sync::Arc;
+#[cfg(any(target_os = "macos", windows))]
+use tauri::{ipc::Channel, AppHandle, Manager};
 use tauri::{ipc::JavaScriptChannelId, Webview, WebviewWindow};
 
 #[cfg(any(target_os = "macos", windows))]
@@ -17,15 +19,70 @@ pub(crate) struct DirectionEvent {
     sampled_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice_id: Option<u64>,
 }
 
 #[cfg(any(target_os = "macos", windows))]
 const STALE: Duration = Duration::from_millis(500);
 
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Default)]
+struct VoiceTurn {
+    revision: u64,
+    state: VoiceState,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Default, PartialEq)]
+enum VoiceState {
+    #[default]
+    Recording,
+    Delivered,
+    Consumed,
+    Rejected,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl VoiceTurn {
+    fn begin(&mut self) -> Option<u64> {
+        self.revision = self.revision.checked_add(1)?;
+        self.state = VoiceState::Recording;
+        Some(self.revision)
+    }
+
+    fn publish(&mut self, revision: u64) -> bool {
+        if self.revision != revision || self.state != VoiceState::Recording {
+            return false;
+        }
+        self.state = VoiceState::Delivered;
+        true
+    }
+
+    fn consume(&mut self, revision: u64) -> bool {
+        if self.revision != revision || self.state != VoiceState::Delivered {
+            return false;
+        }
+        self.state = VoiceState::Consumed;
+        true
+    }
+
+    fn current_action(&self, revision: u64) -> bool {
+        self.revision == revision && self.state == VoiceState::Consumed
+    }
+}
+
 #[cfg(any(target_os = "macos", windows))]
 struct Capture {
     id: u64,
     drive: bool,
+    voice_channel: Option<Channel<DirectionEvent>>,
+    voice_turn: VoiceTurn,
+    armed_at: Instant,
     window: watch::Receiver<()>,
     cancel: watch::Sender<bool>,
     reader: Option<Arc<DirectionReader>>,
@@ -54,6 +111,167 @@ impl Sessions {
 #[cfg(any(target_os = "macos", windows))]
 fn focused(window: &WebviewWindow) -> bool {
     window.is_focused().unwrap_or(false) && window.is_visible().unwrap_or(false)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+impl Capture {
+    fn voice_live(&self) -> bool {
+        self.drive
+            && self.voice_channel.is_some()
+            && !*self.cancel.borrow()
+            && self.window.has_changed().is_ok()
+            && self.last_sample.elapsed() < STALE
+    }
+}
+
+/// A direction reader already enforces a single, connected RC003 and detects a
+/// changed HID source. Retain its exact capture, not a window label, across ASR.
+#[cfg(any(target_os = "macos", windows))]
+pub(in super::super) fn bind_voice(
+    app: &AppHandle,
+    pressed: Instant,
+    source: &str,
+) -> Option<crate::remote_voice::BumiDelivery> {
+    let core = app.state::<Arc<Control>>().inner().clone();
+    if !core
+        .remote
+        .lock()
+        .unwrap()
+        .active
+        .as_ref()
+        .is_some_and(Capture::voice_live)
+    {
+        return None;
+    }
+    let window = app.get_webview_window(super::LABEL)?;
+    if !focused(&window) {
+        return None;
+    }
+    let (owner, revision) = {
+        let mut sessions = core.remote.lock().unwrap();
+        let capture = sessions.active.as_mut()?;
+        if !capture.voice_live() || pressed < capture.armed_at || capture.reader.is_none() {
+            return None;
+        }
+        (capture.cancel.subscribe(), capture.voice_turn.begin()?)
+    };
+    #[cfg(windows)]
+    let source = source.to_owned();
+    #[cfg(not(windows))]
+    let _ = source;
+    Some(Arc::new(move |outcome| {
+        const EXPIRED: &str = "本次 Bumi 遥控已结束或已有新的录音，请重新按住语音键。";
+        if !focused(&window)
+            || !window
+                .url()
+                .is_ok_and(|url| trusted_page(window.label(), &url))
+        {
+            return Err(EXPIRED.into());
+        }
+        let mut sessions = core.remote.lock().unwrap();
+        let capture = sessions
+            .active
+            .as_mut()
+            .filter(|capture| {
+                capture.voice_live() && capture.cancel.subscribe().same_channel(&owner)
+            })
+            .ok_or(EXPIRED)?;
+        // STOP must still reach the controller while a direction is held.
+        let reader = capture.reader.as_ref().ok_or(EXPIRED)?;
+        reader.state()?;
+        #[cfg(windows)]
+        let outcome = if reader.matches_voice_source(&source) {
+            outcome
+        } else {
+            Err("无法确认语音与方向键来自同一只 RC003。请检查所选遥控器，再重新按住语音键。")
+        };
+        if !capture.voice_turn.publish(revision) {
+            return Err(EXPIRED.into());
+        }
+        let mut message = event(Vec::new(), Duration::ZERO, None);
+        match outcome {
+            Ok(text) => message.voice_command = Some(text.to_owned()),
+            Err(reason) => {
+                capture.voice_turn.state = VoiceState::Rejected;
+                message.voice_error = Some(reason.to_owned());
+            }
+        }
+        message.voice_id = Some(revision);
+        let channel = capture.voice_channel.clone().ok_or(EXPIRED)?;
+        drop(sessions);
+        channel
+            .send(message)
+            .map_err(|_| "Bumi 控制窗口已关闭。".to_owned())?;
+        outcome.map(|_| ()).map_err(str::to_owned)
+    }))
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn with_idle_voice<T>(
+    window: &WebviewWindow,
+    control: &Control,
+    id: u64,
+    action: impl FnOnce(&mut Capture) -> Result<T, String>,
+) -> Result<T, String> {
+    const BLOCKED: &str = "请松开方向键，并确认 Bumi 窗口仍在遥控。";
+    if !focused(window) {
+        return Err(BLOCKED.into());
+    }
+    let mut sessions = control.remote.lock().unwrap();
+    let capture = sessions
+        .active
+        .as_mut()
+        .filter(|c| c.id == id && c.voice_live())
+        .ok_or(BLOCKED)?;
+    let state = capture.reader.as_ref().ok_or(BLOCKED)?.state()?;
+    if !state.keys.is_empty() || state.revision != capture.delivered_revision {
+        return Err(BLOCKED.into());
+    }
+    action(capture)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub(super) fn verify_voice_idle(
+    window: &WebviewWindow,
+    control: &Control,
+    id: u64,
+) -> Result<(), String> {
+    with_idle_voice(window, control, id, |_| Ok(()))
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub(super) fn verify_guided_voice(
+    window: &WebviewWindow,
+    control: &Control,
+    id: u64,
+    voice_id: u64,
+    first: bool,
+) -> Result<(), String> {
+    with_idle_voice(window, control, id, |capture| {
+        let authorized = if first {
+            capture.voice_turn.consume(voice_id)
+        } else {
+            capture.voice_turn.current_action(voice_id)
+        };
+        if !authorized {
+            return Err("Bumi 语音指令已过期，或已经执行。".into());
+        }
+        Ok(())
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub(super) fn cancel_drive(control: &Control, capture_id: u64) {
+    if let Some(capture) = control
+        .remote
+        .lock()
+        .unwrap()
+        .active
+        .as_ref()
+        .filter(|c| c.id == capture_id && c.drive)
+    {
+        capture.cancel.send_replace(true);
+    }
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -93,6 +311,9 @@ fn event(keys: Vec<String>, age: Duration, error: Option<String>) -> DirectionEv
         keys,
         sampled_at: epoch.saturating_sub(age).as_millis() as u64,
         error,
+        voice_command: None,
+        voice_error: None,
+        voice_id: None,
     }
 }
 
@@ -105,6 +326,7 @@ pub(crate) async fn bumi_remote_input(
     capture_id: u64,
     events: Option<JavaScriptChannelId>,
     drive: Option<bool>,
+    voice_commands: Option<bool>,
 ) -> Result<String, String> {
     if !window
         .url()
@@ -114,7 +336,15 @@ pub(crate) async fn bumi_remote_input(
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = (control, enabled, capture_id, events, webview, drive);
+        let _ = (
+            control,
+            enabled,
+            capture_id,
+            events,
+            webview,
+            drive,
+            voice_commands,
+        );
         Err(super::UNSUPPORTED.into())
     }
     #[cfg(any(target_os = "macos", windows))]
@@ -146,6 +376,13 @@ pub(crate) async fn bumi_remote_input(
             session.active = Some(Capture {
                 id: capture_id,
                 drive: drive.unwrap_or(false),
+                voice_channel: if drive == Some(true) && voice_commands == Some(true) {
+                    Some(channel.clone())
+                } else {
+                    None
+                },
+                voice_turn: VoiceTurn::default(),
+                armed_at: Instant::now(),
                 window: lifetime.clone(),
                 cancel,
                 reader: None,
@@ -155,6 +392,7 @@ pub(crate) async fn bumi_remote_input(
             });
             lifetime
         };
+        core.guide.lock().unwrap().arm(capture_id);
         let setup = DirectionReader::open().and_then(|(reader, edges)| {
             if *cancelled.borrow() || !focused(&window) || lifetime.has_changed().is_err() {
                 return Err("Bumi 窗口已失去焦点。".into());
@@ -249,5 +487,31 @@ pub(crate) async fn bumi_remote_input(
             core.remote.lock().unwrap().active.take();
         });
         Ok(device)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VoiceTurn;
+
+    #[test]
+    fn only_the_current_complete_voice_turn_can_authorize_one_dance() {
+        let mut turn = VoiceTurn::default();
+        let first = turn.begin().unwrap();
+        assert!(!turn.consume(first));
+        let second = turn.begin().unwrap();
+        assert!(!turn.publish(first));
+        assert!(turn.publish(second));
+        assert!(!turn.current_action(second));
+        assert!(!turn.publish(second));
+        assert!(turn.consume(second));
+        assert!(turn.current_action(second));
+        assert!(!turn.consume(second));
+        assert!(!turn.publish(second));
+        let third = turn.begin().unwrap();
+        assert!(!turn.current_action(second));
+        assert!(turn.publish(third));
+        turn.begin();
+        assert!(!turn.consume(third));
     }
 }

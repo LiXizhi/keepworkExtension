@@ -7,9 +7,11 @@ const ts = require("typescript");
 
 const read = name => fs.readFileSync(path.join(__dirname, "..", name), "utf8");
 const html = read("bumi-control.html");
-const script = ts.transpileModule(read("src/bumi-control.ts"), {
+const compileRenderer = name => ts.transpileModule(read("src/" + name + ".ts"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
+const script = compileRenderer("bumi-control");
+const navigationScript = new vm.Script("(function(exports){" + compileRenderer("bumi-navigation") + "\n})");
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 class Control extends EventTarget {
@@ -35,7 +37,7 @@ class Control extends EventTarget {
 }
 
 async function renderer(t, {
-  beforeMove = () => {}, beforeMode = () => {}, beforeListen = () => {}, legacy = false, initial = {},
+  beforeMove = () => {}, beforeGuide = () => {}, beforeMode = () => {}, beforeListen = () => {}, legacy = false, initial = {},
   scanDevices = null, beforeScan = () => {}, beforeConnect = () => {},
   remote = false, robotStatus = 1, beforeCapture = () => {}, readBattery = () => 83,
 } = {}) {
@@ -74,11 +76,16 @@ async function renderer(t, {
   });
   const window = Object.assign(new Control(), { setTimeout, clearTimeout, setInterval, clearInterval, confirm: () => true });
   const robot = { id: "test-bumi", name: "Bumi", rssi: -50 };
-  const snapshot = { ...(remote ? { remoteMotionVersion: 2 } : {}), connected: robot, devices: [robot], available: true, walkMode: false, locomotionMode: null,
-    moving: false, status: null, battery: null, listening: false, ...initial };
+  const snapshot = {
+    ...(remote ? { remoteMotionVersion: 2, remoteVoiceCommandVersion: 1, guidedMotionVersion: 1, connectionId: "test-link" } : {}),
+    connected: robot, devices: [robot], available: true, walkMode: false, locomotionMode: null,
+    moving: false, status: null, battery: null, listening: false, ...initial,
+  };
   const actions = [];
+  const commandRequests = [];
   const moves = [];
   const movementRequests = [];
+  const guidanceRequests = [];
   const calls = [];
   const connectionRequests = [];
   const listeners = new Set();
@@ -125,15 +132,21 @@ async function renderer(t, {
     } else if (request.operation === "listen") {
       monitorRequests.push(request.enabled);
       snapshot.listening = request.enabled;
+    } else if (request.operation === "guide") {
+      assert.equal(snapshot.guidedMotionVersion, 1, "older hosts reject the optional operation");
+      guidanceRequests.push(JSON.parse(JSON.stringify(request)));
+      await beforeGuide(request);
+      snapshot.moving = !!request.direction;
     } else if (request.operation === "send") {
       const cmd = request.command;
       actions.push(cmd.action);
+      commandRequests.push(JSON.parse(JSON.stringify(request)));
       if (cmd.action === "walk" || cmd.action === "run") {
         await beforeMode(cmd.action);
         snapshot.walkMode = cmd.action === "walk";
         snapshot.locomotionMode = cmd.action;
       }
-      if (cmd.action === "wave") {
+      if (["dance", "wave", "handshake", "cheer", "standUp", "standToFall"].includes(cmd.action)) {
         snapshot.walkMode = false;
         snapshot.locomotionMode = null;
       }
@@ -157,13 +170,19 @@ async function renderer(t, {
     }
     return result;
   }
-  vm.runInNewContext(script, { exports: {}, document, window, Date, setTimeout, clearTimeout,
+  const context = vm.createContext({ exports: {}, document, window, Date, setTimeout, clearTimeout,
     require(name) {
       if (name === "@tauri-apps/api/event") return { listen };
+      if (name === "./bumi-navigation") {
+        const module = {};
+        navigationScript.runInContext(context)(module);
+        return module;
+      }
       assert.equal(name, "@tauri-apps/api/core");
       return { invoke, Channel: class {} };
     },
   });
+  vm.runInContext(script, context);
   await settle();
   const forward = document.querySelectorAll("[data-move]").find(control => control.dataset.move === "forward");
   assert.equal(forward.disabled, true);
@@ -178,7 +197,7 @@ async function renderer(t, {
   }
   return {
     document, window, actions, moves, calls, forward, chooseMode, monitorRequests, listeners, emit,
-    captures, captureStops, movementRequests, connectionRequests, robotSnapshot: snapshot,
+    captures, captureStops, commandRequests, guidanceRequests, movementRequests, connectionRequests, robotSnapshot: snapshot,
     stick(type, dx = 0, dy = 0, pointerId = 2) {
       // The user grabs the thumb off-center. Available drag radius is 100 px.
       document.getElementById("motion-stick").fire(type, {
@@ -190,6 +209,13 @@ async function renderer(t, {
     async tick(ms) { t.mock.timers.tick(ms); await settle(); },
   };
 }
+
+test("opening a connected robot shows its name and replaces the discovery instructions", async t => {
+  const connected = { id: "classroom", name: "NTXB-01", rssi: -50 };
+  const ui = await renderer(t, { initial: { connected } });
+  assert.equal(ui.document.getElementById("device-help").textContent, "当前设备：NTXB-01");
+  assert.equal(ui.document.getElementById("operation").textContent, "已读取机器人连接状态。");
+});
 
 test("the native monitor starts after both window event subscriptions are ready", async t => {
   let finishRegistration;
@@ -899,6 +925,11 @@ function pushKeys(capture, ...keys) {
   capture.events.onmessage({ keys, sampledAt: Date.now() });
 }
 
+function pushVoice(capture, voiceCommand, { sampledAt = Date.now(), voiceId = (capture.lastVoiceId || 0) + 1 } = {}) {
+  capture.lastVoiceId = Math.max(capture.lastVoiceId || 0, voiceId);
+  capture.events.onmessage({ keys: [], sampledAt, voiceId, voiceCommand });
+}
+
 async function click(ui, id) {
   const button = ui.document.getElementById(id);
   assert.ok(button && !button.disabled && !button.hidden, id + " should be available");
@@ -915,6 +946,231 @@ async function beginRemote(ui) {
 
 const stopped = [0, 0, 0];
 const nonzero = axes => axes.some(value => value !== 0);
+
+test("a final Xiaomi dance command writes one posture action directly from the armed Bumi remote", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  const capture = await beginRemote(ui);
+  pushKeys(capture);
+  assert.equal(capture.voiceCommands, true);
+  pushVoice(capture, "跳舞。");
+  pushVoice(capture, "跳舞。", { voiceId: 1 });
+  await settle();
+  assert.deepEqual(ui.actions.filter(action => action === "dance"), ["dance"]);
+  const dance = ui.commandRequests.find(request => request.command.action === "dance");
+  assert.equal(dance.remoteCaptureId, capture.captureId);
+  assert.equal(dance.voiceId, 1);
+  assert.equal(ui.robotSnapshot.locomotionMode, null);
+  assert.equal(ui.document.getElementById("remote-shield").open, false);
+  assert.deepEqual(ui.moves.filter(nonzero), []);
+});
+
+test("directions held during speech never become release events and a spoken stop preempts an in-flight turn", async t => {
+  let finish;
+  const firstWrite = new Promise(resolve => { finish = resolve; });
+  const ui = await renderer(t, {
+    remote: true, robotStatus: 2, beforeMove: count => count === 1 ? firstWrite : undefined,
+  });
+  const capture = await beginRemote(ui);
+  pushKeys(capture);
+  pushKeys(capture, "left");
+  pushVoice(capture, "跳舞");
+  pushVoice(capture, "走到讲台");
+  await settle();
+  assert.equal(ui.document.getElementById("remote-shield").open, true);
+  assert.equal(ui.actions.includes("dance"), false);
+  assert.deepEqual(ui.moves, [[0, 80, 0]]);
+  pushVoice(capture, "停止");
+  pushKeys(capture, "right");
+  finish();
+  await settle();
+  assert.deepEqual(ui.moves, [[0, 80, 0], stopped]);
+  assert.equal(ui.document.getElementById("remote-shield").open, false);
+});
+
+test("diagnostic, stale, and superseded Xiaomi voice events cannot dispatch robot actions", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  await click(ui, "remote-diagnose");
+  const diagnostic = ui.captures[0];
+  pushKeys(diagnostic);
+  pushVoice(diagnostic, "跳舞");
+  assert.equal(ui.actions.includes("dance"), false);
+  await click(ui, "remote-diagnose");
+  await ui.chooseMode("walk");
+  await click(ui, "remote-toggle");
+  const previous = ui.captures[1];
+  pushKeys(previous);
+  ui.window.fire("blur");
+  await settle();
+  await click(ui, "remote-toggle");
+  const active = ui.captures[2];
+  pushKeys(active);
+  pushVoice(previous, "跳舞");
+  active.events.onmessage({ keys: [], sampledAt: Date.now(), voiceId: 1, voiceError: "无法确认遥控器来源。" });
+  assert.match(ui.document.getElementById("remote-shield-voice").textContent, /来源/);
+  pushVoice(active, "跳舞", { voiceId: 1 });
+  pushVoice(active, "不要跳舞");
+  pushVoice(active, "跳舞", { sampledAt: Date.now() - 2_000 });
+  await settle();
+  assert.equal(ui.actions.includes("dance"), false);
+  assert.deepEqual(ui.moves.filter(nonzero), []);
+});
+
+test("recognized speech cannot keep an expired Xiaomi direction listener armed", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  const capture = await beginRemote(ui);
+  pushKeys(capture);
+  for (let i = 0; i < 7; i++) {
+    await ui.tick(100);
+    pushVoice(capture, "不要动");
+  }
+  assert.equal(ui.document.getElementById("remote-shield").open, false);
+  pushVoice(capture, "跳舞");
+  assert.equal(ui.actions.includes("dance"), false);
+});
+
+test("asking an armed Bumi remote for a destination opens the route guidance without issuing movement", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  const capture = await beginRemote(ui);
+  pushKeys(capture);
+  const guidance = ui.document.getElementById("nav-status");
+  const previous = guidance.textContent;
+  pushVoice(capture, "走到讲台。");
+  await settle();
+  assert.notEqual(guidance.textContent, previous);
+  assert.match(guidance.textContent, /讲台|目的地|地点|地图|位置/);
+  assert.deepEqual(ui.moves, []);
+  assert.deepEqual(ui.guidanceRequests, []);
+});
+
+function prepareNearbyGoal(ui, heading = 1) {
+  const grid = ui.document.getElementById("nav-grid");
+  const mode = ui.document.getElementById("nav-mode");
+  mode.value = "pose";
+  mode.fire("change");
+  ui.document.getElementById("nav-facing").value = String(heading);
+  grid.children[0].click();
+  mode.value = "goal";
+  mode.fire("change");
+  ui.document.getElementById("nav-name").value = "讲台";
+  grid.children[1].click();
+}
+
+test("a planned Bumi route drives only the current held leg and awaits observed arrival", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  await ui.chooseMode("walk");
+  prepareNearbyGoal(ui);
+  await click(ui, "remote-toggle");
+  const capture = ui.captures[0];
+  pushKeys(capture);
+  pushVoice(capture, "走到讲台");
+  await settle();
+  assert.equal(ui.document.getElementById("nav-route").hidden, false);
+  assert.deepEqual(ui.guidanceRequests, []);
+  const hold = ui.document.getElementById("nav-drive");
+  assert.equal(hold.disabled, false);
+  hold.fire("pointerdown", { button: 0, pointerId: 1, isPrimary: true });
+  await settle();
+  assert.equal(ui.guidanceRequests.length, 1);
+  const start = ui.guidanceRequests[0];
+  assert.equal(start.captureId, capture.captureId);
+  assert.equal(start.direction, "forward");
+  assert.ok(start.pressId > 0);
+  assert.deepEqual(ui.moves, [], "guided steps use a separate native operation");
+  hold.fire("pointerup", { button: 0, pointerId: 1, isPrimary: true });
+  await settle();
+  assert.ok(ui.guidanceRequests.some(request => request.pressId === start.pressId && !request.direction));
+  const beforeConfirm = ui.guidanceRequests.length;
+  await click(ui, "nav-confirm");
+  assert.match(ui.document.getElementById("nav-status").textContent, /已到达|已确认.*讲台|抵达/);
+  assert.equal(ui.guidanceRequests.length, beforeConfirm, "confirming position never starts another leg");
+});
+
+test("spoken Bumi route execution stops each pulse and requires a fresh observed pose before changing legs", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2 });
+  await ui.chooseMode("walk");
+  // B1 is to the right, so a robot facing up must turn before walking.
+  prepareNearbyGoal(ui, 0);
+  await click(ui, "remote-toggle");
+  const capture = ui.captures[0];
+  pushKeys(capture);
+  pushVoice(capture, "走到讲台");
+  pushVoice(capture, "已到位");
+  const confirm = ui.document.getElementById("nav-confirm");
+  assert.equal(confirm.disabled, true);
+  assert.deepEqual(ui.guidanceRequests, []);
+
+  async function keepRemoteAlive(ms) {
+    for (let elapsed = 0; elapsed < ms; elapsed += 100) {
+      pushKeys(capture);
+      await ui.tick(100);
+    }
+  }
+  for (const expected of ["right", "forward"]) {
+    const first = ui.guidanceRequests.length;
+    pushVoice(capture, "执行本段");
+    const voiceId = capture.lastVoiceId;
+    await settle();
+    assert.equal(ui.guidanceRequests[first]?.direction, expected);
+    pushVoice(capture, "已到位");
+    assert.equal(confirm.disabled, true, "confirmation while motion is active is ignored");
+    await keepRemoteAlive(400);
+    const writes = ui.guidanceRequests.slice(first);
+    assert.ok(writes.filter(request => request.direction).every(request =>
+      request.direction === expected && request.voiceId === voiceId));
+    assert.ok(writes.every(request => request.captureId === capture.captureId && request.pressId === writes[0].pressId));
+    assert.equal(writes.at(-1).direction, undefined, "the pulse requests zero speed even with a healthy remote");
+    assert.equal(confirm.disabled, false);
+    const stoppedAt = ui.guidanceRequests.length;
+    pushVoice(capture, "执行本段", { voiceId });
+    await keepRemoteAlive(600);
+    assert.equal(ui.guidanceRequests.length, stoppedAt, "replayed transcripts cannot repeat a completed pulse");
+    pushVoice(capture, "已到位");
+    pushVoice(capture, "已到位", { voiceId: capture.lastVoiceId });
+    await settle();
+    assert.equal(ui.guidanceRequests.length, stoppedAt, "confirming a turn never starts the following step");
+  }
+  assert.match(ui.document.getElementById("nav-status").textContent, /已确认到达讲台/);
+  assert.equal(ui.document.getElementById("nav-route").hidden, true);
+  assert.deepEqual(ui.moves, []);
+});
+
+test("a failed guided stop discards the pose and blocks both arrival confirmation and a stale dance", async t => {
+  const ui = await renderer(t, {
+    remote: true, robotStatus: 2,
+    beforeGuide: request => { if (!request.direction) throw new Error("stop not confirmed"); },
+  });
+  await ui.chooseMode("walk");
+  prepareNearbyGoal(ui);
+  await click(ui, "remote-toggle");
+  const capture = ui.captures[0];
+  pushKeys(capture);
+  pushVoice(capture, "走到讲台");
+  const hold = ui.document.getElementById("nav-drive");
+  hold.fire("pointerdown", { button: 0, pointerId: 3, isPrimary: true });
+  await settle();
+  hold.fire("pointerup", { pointerId: 3 });
+  await settle();
+  assert.equal(ui.document.getElementById("remote-shield").open, false);
+  assert.equal(ui.document.getElementById("nav-route").hidden, true);
+  assert.match(ui.document.getElementById("error").textContent, /stop not confirmed/);
+  pushVoice(capture, "跳舞");
+  assert.equal(ui.actions.includes("dance"), false);
+});
+
+test("an older Bumi host can still drive with keys while voice actions remain unavailable", async t => {
+  const ui = await renderer(t, { remote: true, robotStatus: 2, initial: { remoteVoiceCommandVersion: undefined } });
+  const capture = await beginRemote(ui);
+  assert.notEqual(capture.voiceCommands, true);
+  pushKeys(capture);
+  pushVoice(capture, "跳舞");
+  await settle();
+  assert.equal(ui.actions.includes("dance"), false);
+  pushKeys(capture, "up");
+  await settle();
+  pushKeys(capture);
+  await settle();
+  assert.deepEqual(ui.moves, [[80, 0, 0], stopped]);
+});
 
 test("driving opens a shield that swallows remote keyboard events and closes with the session", async t => {
   const ui = await renderer(t, { remote: true, robotStatus: 2 });

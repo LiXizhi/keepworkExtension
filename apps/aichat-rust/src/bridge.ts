@@ -86,6 +86,7 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
     ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { remoteNarrationPauseVersion: 1 as const } : {}),
     startupSignIn: true,
     ...(launchEnabled && ["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { desktopScreenshotVersion: 1 as const } : {}),
+    ...(launchEnabled && window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { petCameraPresentationVersion: 1 as const } : {}),
     ...(launchEnabled ? { launchIntents: true as const, petApprovalRevealVersion: 1 as const, petApprovalReturnVersion: 1 as const } : {}),
     ...(["darwin", "win32"].includes(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform || "") ? { browserSurfaceVersion: 1 as const, remoteDialogueVersion: 1 as const, remotePhoneVersion: 1 as const, remotePhoneCaptionVersion: 1 as const, remotePhoneActivityVersion: 1 as const } : {}),
     ...(window.__AICHAT_DESKTOP_BOOTSTRAP__?.platform === "darwin" ? { browserSurfaceViewportVersion: 1 as const, browserSurfaceScaleVersion: 1 as const } : {}),
@@ -156,6 +157,9 @@ export function installAIChatDesktopBridge(launchCapability = ""): AIChatDesktop
   const bridge: AIChatDesktopBridge = Object.freeze({
     version: 1,
     capabilities,
+    ...(capabilities.petCameraPresentationVersion === 1 ? {
+      presentPetCamera: (active: boolean): Promise<boolean> => invokeLaunch("desktop_present_pet_camera", { active }),
+    } : {}),
     ...(capabilities.desktopScreenshotVersion === 1 ? {
       captureScreenshot: async (): Promise<DesktopScreenshot> => {
         const shot = await invokeLaunch<DesktopScreenshot>("desktop_capture_screenshot");

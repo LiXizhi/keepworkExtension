@@ -13,11 +13,11 @@ const documentId = '42b7c128-a171-44c9-b226-85ff87bde647';
 const crypto = { randomUUID: () => documentId };
 const entryUrl = 'http://localhost:57175/';
 
-function typescriptBridge({ shell = false, subframe = false, url = entryUrl, capability = 'fixture-launch-token' } = {}) {
+function typescriptBridge({ shell = false, subframe = false, url = entryUrl, capability = 'fixture-launch-token', platform = 'darwin' } = {}) {
   const calls = [], listeners = new Map();
   const window = {
     location: new URL(url),
-    __AICHAT_DESKTOP_BOOTSTRAP__: { platform: 'darwin', entryUrl },
+    __AICHAT_DESKTOP_BOOTSTRAP__: { platform, entryUrl },
     addEventListener: (name, callback) => listeners.set(name, callback),
     postMessage() {},
     ...(shell ? { __AICHAT_PAGE_CONNECTION__: {} } : {}),
@@ -121,6 +121,8 @@ for (const implementation of ['injected', 'typescript']) {
     assert.equal(shell.window.aichatDesktop.captureScreenshot, undefined);
     assert.equal(shell.window.aichatDesktop.capabilities.petApprovalRevealVersion, undefined);
     assert.equal(shell.window.aichatDesktop.revealPetApproval, undefined);
+    assert.equal(shell.window.aichatDesktop.capabilities.petCameraPresentationVersion, undefined);
+    assert.equal(shell.window.aichatDesktop.presentPetCamera, undefined);
     const frame = implementation === 'injected'
       ? renderer('rust', 'darwin', true, false, { crypto, entryUrl })
       : typescriptBridge({ subframe: true });
@@ -135,7 +137,30 @@ for (const implementation of ['injected', 'typescript']) {
     assert.equal(fixture.window.aichatDesktop.capabilities.petApprovalRevealVersion, undefined);
     assert.equal(fixture.window.aichatDesktop.revealPetApproval, undefined);
     assert.equal(fixture.window.aichatDesktop.getLaunchIntent, undefined);
+    assert.equal(fixture.window.aichatDesktop.presentPetCamera, undefined);
     assert.equal(fixture.window.aichatDesktop.capabilities.files, true);
+  });
+
+  test(`${implementation} camera presentation binds both transitions to the current macOS AIChat document`, async () => {
+    const fixture = implementation === 'injected'
+      ? renderer('rust', 'darwin', false, false, { crypto, entryUrl })
+      : typescriptBridge();
+    const bridge = fixture.window.aichatDesktop;
+    assert.equal(bridge.capabilities.petCameraPresentationVersion, 1);
+    await bridge.presentPetCamera(true);
+    await bridge.presentPetCamera(false);
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls.slice(-2))), [true, false].map(active => ({
+      command: 'desktop_present_pet_camera', args: { document: documentId, token: 'fixture-launch-token', active },
+    })));
+    if (implementation === 'injected') fixture.fire(fixture.window, 'pagehide');
+    else fixture.pagehide();
+    const before = fixture.calls.length;
+    await assert.rejects(bridge.presentPetCamera(true), /no longer active/);
+    assert.equal(fixture.calls.length, before);
+    const windows = implementation === 'injected'
+      ? renderer('rust', 'win32', false, false, { crypto, entryUrl }) : typescriptBridge({ platform: 'win32' });
+    assert.equal(windows.window.aichatDesktop.capabilities.petCameraPresentationVersion, undefined);
+    assert.equal(windows.window.aichatDesktop.presentPetCamera, undefined);
   });
 }
 

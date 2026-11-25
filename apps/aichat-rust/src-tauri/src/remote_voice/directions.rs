@@ -67,6 +67,10 @@ pub(crate) struct DirectionReader {
 type Edges = broadcast::Receiver<(Instant, Directions)>;
 
 impl DirectionReader {
+    #[cfg(windows)]
+    pub(crate) fn matches_voice_source(&self, source: &str) -> bool {
+        self.listener.matches_voice_source(source)
+    }
     pub(crate) fn open() -> Result<(Self, Edges), String> {
         let listener = shared_listener().map_err(|error| format!("无法读取遥控方向键。{error}"))?;
         let (sender, edges) = broadcast::channel(32);

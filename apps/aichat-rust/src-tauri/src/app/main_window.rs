@@ -32,6 +32,7 @@ pub(super) fn handle_main_page_load(
 }
 
 pub fn show_main_window(app: &AppHandle, core: &AppCore) {
+    core.pet_camera_view.lock().unwrap().take();
     core.pet_approval_return.lock().unwrap().take();
     stop_pet_audio(app, core, None, "已打开主窗口，语音输入已停止", false);
     core.page_connection.lock().unwrap().set_foreground(true);

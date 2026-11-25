@@ -124,7 +124,7 @@ impl StartupQueue {
 pub(super) async fn negotiate(
     inbox: &mut NotificationInbox,
     setup: impl std::future::Future<Output = Result<(), Failure>>,
-    mut on_first_press: impl FnMut(),
+    mut on_first_press: impl FnMut(Instant),
 ) -> Result<(Caps, StartupQueue), Failure> {
     tokio::pin!(setup);
     let mut caps = None;
@@ -152,7 +152,7 @@ pub(super) async fn negotiate(
                 } else {
                     if first_press && packet.uuid == CONTROL && packet.value.len() <= 256 &&
                         matches!(packet.value.as_slice(), [0x08 | 0x10, ..] | [0x04 | 0x11, _, 2, _, ..]) {
-                        on_first_press();
+                        on_first_press(received.at);
                         first_press = false;
                     }
                     queue.push(received)?;

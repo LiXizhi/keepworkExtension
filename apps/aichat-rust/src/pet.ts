@@ -77,6 +77,7 @@ interface PetSnapshot {
   ready?: boolean;
   richDraft?: boolean;
   canCall?: boolean;
+  callUnavailableReason?: string;
   reply?: PetReply | null;
   petReplyPresentationVersion?: number;
   petStreamingSpeechVersion?: number;
@@ -642,9 +643,17 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const callBtn = $<HTMLButtonElement>("call");
     callBtn.classList.toggle("alternate-action", !!state.voice?.active);
     $("call-label").textContent = state.voice?.active ? "结束通话" : "通话";
-    callBtn.dataset.hint =
-      state.voice?.active ? "结束通话" : state.canCall ? "实时语音对话" : "请在 AIChat 中选择实时语音模型";
-    callBtn.disabled = !state.ready || (!state.canCall && !state.voice?.active) || !!state.dictating;
+    let callUnavailable = "";
+    if (!state.ready) callUnavailable = "请先连接 AIChat。";
+    else if (state.dictating) callUnavailable = "结束听写后即可通话。";
+    else if (!state.voice?.active && !state.canCall) {
+      callUnavailable = state.callUnavailableReason || (state.target === "persona"
+        ? "请在 AIChat 中配置分身的语音识别和朗读。"
+        : "请在 AIChat 中选择可用的实时语音模型。");
+    }
+    callBtn.disabled = !!callUnavailable;
+    callBtn.dataset.hint = callUnavailable || (state.voice?.active ? "结束通话" : "实时语音对话");
+    callBtn.setAttribute("aria-description", callBtn.dataset.hint);
 
     const muteBtn = $<HTMLButtonElement>("mute");
     muteBtn.hidden = !state.voice?.active;
@@ -660,7 +669,7 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
           ? `语音：${state.voice.muted ? "已静音" : callStatusLabels.get(state.voice.state || "") || "通话中"}`
           : state.busy
             ? "正在回复…"
-            : "");
+            : state.ready && !state.dictating ? callUnavailable : "");
     if (!state.ready && !state.richDraft && !state.dictating) {
       $("status").textContent = [$("status").textContent, "可先输入草稿，连接后点击发送。"]
         .filter(Boolean).join("\n");
@@ -930,10 +939,11 @@ function ensureDesktopPetBridge(): DesktopPetBridge {
     const phase = noAudioPress ? "retry" : activeRemotePress ? pressPhase : readiness;
     const cue = voiceCues[phase];
     indicator.hidden = !cue;
-    panel.classList.toggle("remote-voice-station", !!cue);
+    panel.classList.toggle("remote-voice-station", !!activeRemotePress && !!cue);
     paintStationHints();
     indicator.dataset.icon = cue?.[0] || "";
     const label = cue?.[1] || "";
+    indicator.title = activeRemotePress ? "" : label;
     if (indicatorLabel.textContent !== label) indicatorLabel.textContent = label;
   }
   // The settings window owns device IDs and configuration. The pet asks only
