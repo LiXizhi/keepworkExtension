@@ -46,14 +46,15 @@ mod feedback {
         SOURCE.get_or_init(|| (Mutex::new(States::default()), watch::channel(()).0))
     }
 
-    pub(in super::super) fn record(keys: Vec<String>) {
-        super::directions::record(&keys);
+    pub(in super::super) fn record(keys: Vec<String>) -> bool {
+        let menu_captured = super::directions::record(&keys);
         #[cfg(target_os = "macos")]
         super::demo_keys::notify(&keys);
         let (states, wake) = source();
         if states.lock().unwrap().record(keys) {
             wake.send_replace(());
         }
+        menu_captured
     }
 
     pub(in super::super) fn changes() -> watch::Receiver<()> {
@@ -284,13 +285,13 @@ mod platform {
         fn keepwork_remote_buttons_poll() -> bool;
         fn keepwork_remote_home_poll() -> bool;
         fn keepwork_remote_buttons_set_demo_mode(active: bool);
-        fn keepwork_remote_directions_released() -> bool;
+        fn keepwork_remote_directions_released(menu_switch: bool) -> bool;
         fn keepwork_remote_buttons_status(out: *mut Snapshot);
     }
     pub struct Listener;
 
-    pub(super) fn directions_released(_: &Listener) -> bool {
-        unsafe { keepwork_remote_directions_released() }
+    pub(super) fn directions_released(_: &Listener, menu_switch: bool) -> bool {
+        unsafe { keepwork_remote_directions_released(menu_switch) }
     }
 
     pub fn start() -> Result<Listener, String> {
@@ -394,8 +395,8 @@ mod platform {
     pub fn start() -> Result<Listener, String> {
         Listener::start()
     }
-    pub(super) fn directions_released(listener: &Listener) -> bool {
-        listener.directions_released()
+    pub(super) fn directions_released(listener: &Listener, menu_switch: bool) -> bool {
+        listener.directions_released(menu_switch)
     }
     pub fn poll_home(listener: &Listener) -> bool {
         listener.poll()

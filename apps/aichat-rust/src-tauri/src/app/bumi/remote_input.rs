@@ -1,4 +1,6 @@
 use super::{trusted_page, Control};
+#[cfg(any(target_os = "macos", windows))]
+use super::RemoteDirection;
 use serde::Serialize;
 use std::sync::Arc;
 #[cfg(any(target_os = "macos", windows))]
@@ -16,6 +18,8 @@ use tokio::sync::watch;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DirectionEvent {
     keys: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strafe: Option<bool>,
     sampled_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -106,6 +110,11 @@ impl Sessions {
             }
         }
     }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+pub(super) fn current_capture(core: &Control) -> Option<u64> {
+    core.remote.lock().unwrap().active.as_ref().map(|capture| capture.id)
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -240,6 +249,24 @@ pub(super) fn verify_voice_idle(
 }
 
 #[cfg(any(target_os = "macos", windows))]
+const EXPIRED_VOICE: &str = "Bumi 语音指令已过期，或已经执行。";
+
+#[cfg(any(target_os = "macos", windows))]
+pub(super) fn claim_voice(
+    window: &WebviewWindow,
+    control: &Control,
+    id: u64,
+    voice_id: u64,
+) -> Result<watch::Receiver<bool>, String> {
+    with_idle_voice(window, control, id, |capture| {
+        if !capture.voice_turn.consume(voice_id) {
+            return Err(EXPIRED_VOICE.into());
+        }
+        Ok(capture.cancel.subscribe())
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
 pub(super) fn verify_guided_voice(
     window: &WebviewWindow,
     control: &Control,
@@ -247,14 +274,12 @@ pub(super) fn verify_guided_voice(
     voice_id: u64,
     first: bool,
 ) -> Result<(), String> {
+    if first {
+        return claim_voice(window, control, id, voice_id).map(drop);
+    }
     with_idle_voice(window, control, id, |capture| {
-        let authorized = if first {
-            capture.voice_turn.consume(voice_id)
-        } else {
-            capture.voice_turn.current_action(voice_id)
-        };
-        if !authorized {
-            return Err("Bumi 语音指令已过期，或已经执行。".into());
+        if !capture.voice_turn.current_action(voice_id) {
+            return Err(EXPIRED_VOICE.into());
         }
         Ok(())
     })
@@ -279,7 +304,7 @@ pub(super) fn verify_direction(
     window: &WebviewWindow,
     control: &Control,
     id: u64,
-    key: &str,
+    direction: RemoteDirection,
 ) -> Result<(), String> {
     if focused(window) {
         let mut session = control.remote.lock().unwrap();
@@ -291,7 +316,9 @@ pub(super) fn verify_direction(
             {
                 if let Some(reader) = &capture.reader {
                     let state = reader.state()?;
-                    if state.revision == capture.delivered_revision && state.permits(key) {
+                    if state.revision == capture.delivered_revision
+                        && direction.key_for_mode(state.strafe).is_some_and(|key| state.permits(key))
+                    {
                         capture.issued_motion = true;
                         return Ok(());
                     }
@@ -309,6 +336,7 @@ fn event(keys: Vec<String>, age: Duration, error: Option<String>) -> DirectionEv
         .unwrap_or_default();
     DirectionEvent {
         keys,
+        strafe: None,
         sampled_at: epoch.saturating_sub(age).as_millis() as u64,
         error,
         voice_command: None,
@@ -327,6 +355,7 @@ pub(crate) async fn bumi_remote_input(
     events: Option<JavaScriptChannelId>,
     drive: Option<bool>,
     voice_commands: Option<bool>,
+    menu_switch: Option<bool>,
 ) -> Result<String, String> {
     if !window
         .url()
@@ -344,6 +373,7 @@ pub(crate) async fn bumi_remote_input(
             webview,
             drive,
             voice_commands,
+            menu_switch,
         );
         Err(super::UNSUPPORTED.into())
     }
@@ -393,12 +423,16 @@ pub(crate) async fn bumi_remote_input(
             lifetime
         };
         core.guide.lock().unwrap().arm(capture_id);
-        let setup = DirectionReader::open().and_then(|(reader, edges)| {
+        super::classroom::end_window(&core, &lifetime);
+        let menu_switch = menu_switch.unwrap_or(false);
+        let setup = DirectionReader::open(menu_switch).and_then(|(reader, edges)| {
             if *cancelled.borrow() || !focused(&window) || lifetime.has_changed().is_err() {
                 return Err("Bumi 窗口已失去焦点。".into());
             }
+            let mut initial = event(Vec::new(), Duration::ZERO, None);
+            initial.strafe = menu_switch.then_some(false);
             channel
-                .send(event(Vec::new(), Duration::ZERO, None))
+                .send(initial)
                 .map_err(|e| e.to_string())?;
             Ok((Arc::new(reader), edges))
         });
@@ -416,6 +450,7 @@ pub(crate) async fn bumi_remote_input(
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last = Instant::now();
             let mut keys = Vec::new();
+            let mut strafe = false;
             let mut delivered_revision = 0;
             let reason = loop {
                 let mut age = Duration::ZERO;
@@ -428,7 +463,11 @@ pub(crate) async fn bumi_remote_input(
                             age = at.elapsed();
                             delivered_revision = state.revision;
                             must_stop = state.keys.first().is_none_or(|key| !state.permits(key));
+                            strafe = state.strafe;
                             keys = state.keys;
+                            if !keys.is_empty() {
+                                super::classroom::end_window(&core, &lifetime);
+                            }
                         }
                         Err(_) => break "遥控按键状态不同步，请重新启用。",
                     },
@@ -455,7 +494,9 @@ pub(crate) async fn bumi_remote_input(
                             capture.delivered_revision = delivered_revision;
                             must_stop && std::mem::take(&mut capture.issued_motion)
                         });
-                if channel.send(event(keys.clone(), age, None)).is_err() {
+                let mut sample = event(keys.clone(), age, None);
+                sample.strafe = menu_switch.then_some(strafe);
+                if channel.send(sample).is_err() {
                     break "方向键接收通道已断开。";
                 }
                 // Complete the release before delivering a newer press. Raw
@@ -478,6 +519,7 @@ pub(crate) async fn bumi_remote_input(
                 capture.cancel.send_replace(true);
             }
             let _ = channel.send(event(Vec::new(), Duration::ZERO, Some(reason.into())));
+            super::classroom::end_window(&core, &lifetime);
             let _ = core
                 .bluetooth
                 .lock()

@@ -381,7 +381,7 @@ static bool sourceFromDevice(IOHIDDeviceRef device, ButtonSource *out) {
     if (!knownRemote(numberProperty(device, kIOHIDVendorIDKey), numberProperty(device, kIOHIDProductIDKey), transport, keyboard ? 1 : 0, keyboard ? 6 : 0)) return false;
     memset(out, 0, sizeof(*out));
     if (!sampleButton(device, BackButton, &out->needsRelease[BackButton])) return false;
-    for (RemoteButton key = UpButton; key <= RightButton; key++) {
+    for (RemoteButton key = MenuButton; key <= RightButton; key++) {
         sampleButton(device, key, &out->needsRelease[key]);
     }
     out->hasHome = sampleButton(device, HomeButton, &out->needsRelease[HomeButton]);
@@ -666,13 +666,13 @@ bool keepwork_remote_home_sender(uint64_t sender) {
     return false;
 }
 
-bool keepwork_remote_directions_released(void) {
+bool keepwork_remote_directions_released(bool menuSwitch) {
     bool released = false;
     pthread_mutex_lock(&buttonsLifecycle);
     if (activeButtons) {
         pthread_mutex_lock(&activeButtons->mutex);
         released = activeButtons->ready && !activeButtons->blocked;
-        for (RemoteButton key = UpButton; key <= RightButton; key++) {
+        for (RemoteButton key = menuSwitch ? MenuButton : UpButton; key <= RightButton; key++) {
             if (activeButtons->edges[key].releaseMask || activeButtons->edges[key].downMask) released = false;
         }
         pthread_mutex_unlock(&activeButtons->mutex);

@@ -572,6 +572,7 @@ pub fn run() {
                     super::remote_phone_view::sync(window.app_handle());
                     core_for_page_load.pet_approval_return.lock().unwrap().take();
                     core_for_page_load.launch_intents.lock().unwrap().invalidate_document();
+                    super::bumi::chat::invalidate_main(window.app_handle());
                     #[cfg(any(target_os = "macos", windows))]
                     super::browser_surface::reset(&window);
                     if let Some(identity) = core_for_page_load.pet_audio.reset_page() {
@@ -748,6 +749,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             super::bumi::bumi_control,
+            super::bumi::chat::desktop_bumi_classroom,
+            super::bumi::chat::bumi_chat_handoff,
             super::bumi::remote_input::bumi_remote_input,
             super::browser_surface::desktop_browser_surface,
             super::screenshot::desktop_capture_screenshot,

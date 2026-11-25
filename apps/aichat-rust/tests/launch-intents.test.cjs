@@ -91,6 +91,25 @@ for (const implementation of ['injected', 'typescript']) {
     assert.equal(fixture.calls.length, callsBeforePagehide);
   });
 
+  test(`${implementation} classroom commands belong to the current trusted document`, async () => {
+    const fixture = implementation === 'injected'
+      ? renderer('rust', 'darwin', false, false, { crypto, entryUrl })
+      : typescriptBridge();
+    const bridge = fixture.window.aichatDesktop;
+    assert.equal(bridge.capabilities.bumiClassroomVersion, 1);
+    assert.equal(bridge.capabilities.bumiCountedWalkVersion, 1);
+    assert.equal(bridge.capabilities.bumiWalkIntentVersion, 1);
+    const request = { operation: 'start', command: '往前走一步', taskId: documentId };
+    const pending = bridge.bumiClassroom(request);
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls.at(-1))), {
+      command: 'desktop_bumi_classroom', args: { document: documentId, token: 'fixture-launch-token', request },
+    });
+    if (implementation === 'injected') fixture.fire(fixture.window, 'pagehide');
+    else fixture.pagehide();
+    await assert.rejects(pending, /no longer active/);
+    await assert.rejects(bridge.bumiClassroom({ operation: 'observe' }), /no longer active/);
+  });
+
   test(`${implementation} screenshot bridge binds the action and settings to the active document`, async () => {
     const fixture = implementation === 'injected'
       ? renderer('rust', 'darwin', false, false, { crypto, entryUrl })
@@ -119,6 +138,10 @@ for (const implementation of ['injected', 'typescript']) {
     assert.equal(shell.window.aichatDesktop.getLaunchIntent, undefined);
     assert.equal(shell.window.aichatDesktop.capabilities.desktopScreenshotVersion, undefined);
     assert.equal(shell.window.aichatDesktop.captureScreenshot, undefined);
+    assert.equal(shell.window.aichatDesktop.bumiClassroom, undefined);
+    assert.equal(shell.window.aichatDesktop.capabilities.bumiClassroomVersion, undefined);
+    assert.equal(shell.window.aichatDesktop.capabilities.bumiCountedWalkVersion, undefined);
+    assert.equal(shell.window.aichatDesktop.capabilities.bumiWalkIntentVersion, undefined);
     assert.equal(shell.window.aichatDesktop.capabilities.petApprovalRevealVersion, undefined);
     assert.equal(shell.window.aichatDesktop.revealPetApproval, undefined);
     assert.equal(shell.window.aichatDesktop.capabilities.petCameraPresentationVersion, undefined);

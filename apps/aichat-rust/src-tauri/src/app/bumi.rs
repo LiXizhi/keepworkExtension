@@ -9,10 +9,16 @@ use url::Url;
 #[cfg(any(target_os = "macos", windows))]
 mod bluetooth;
 #[cfg(any(target_os = "macos", windows))]
+mod classroom;
+#[cfg(any(target_os = "macos", windows))]
 mod guided;
 pub(super) mod remote_input;
 #[cfg(any(target_os = "macos", windows, test))]
 mod protocol;
+mod model;
+mod vision;
+mod walk_intent;
+pub(super) mod chat;
 
 const LABEL: &str = "bumi-control";
 const PAGE: &str = "bumi-control.html";
@@ -22,6 +28,7 @@ const UNSUPPORTED: &str = "Bumi 蓝牙控制需要 macOS 或 Windows 桌面版�
 #[derive(Default)]
 pub(super) struct Control {
     window: Mutex<Option<watch::Sender<()>>>,
+    chat: Mutex<chat::Bridge>,
     #[cfg(any(target_os = "macos", windows))]
     bluetooth: tokio::sync::Mutex<bluetooth::Bluetooth>,
     #[cfg(any(target_os = "macos", windows))]
@@ -30,6 +37,14 @@ pub(super) struct Control {
     remote: Mutex<remote_input::Sessions>,
     #[cfg(any(target_os = "macos", windows))]
     guide: Mutex<guided::Lease>,
+    #[cfg(any(target_os = "macos", windows))]
+    classroom: Mutex<classroom::Sessions>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum ClassroomAction {
+    Forward, Backward, Left, Right, Handshake, Wave, Greet, AskDoorOrLectern, AskWhich,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +75,16 @@ pub(super) enum Request {
     },
     Disconnect,
     Listen { enabled: bool },
+    LocateVision(vision::LocateInput),
+    InterpretWalk(walk_intent::Input),
+    #[serde(rename_all = "camelCase")]
+    BeginClassroom { task_id: String, connection_id: String, capture_id: Option<u64>, voice_id: Option<u64>, pulse_profile: Option<ClassroomPulseProfile> },
+    #[serde(rename_all = "camelCase")]
+    ClassroomStep { task_id: String, sequence: u32, action: ClassroomAction },
+    #[serde(rename_all = "camelCase")]
+    ClassroomStop { task_id: String, sequence: u32 },
+    #[serde(rename_all = "camelCase")]
+    EndClassroom { task_id: String },
     Send {
         command: Command,
         #[serde(rename = "remoteCaptureId", default)]
@@ -69,12 +94,39 @@ pub(super) enum Request {
     },
 }
 
+/// Each profile names a complete, reproducible joystick pulse. Legacy callers
+/// omit the field to keep the original single-write calibration unchanged.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum ClassroomPulseProfile {
+    Gentle,
+    Standard,
+    Strong,
+}
+
+impl Request {
+    fn remote_voice_action(&self) -> Result<Option<(u64, u64)>, &'static str> {
+        match self {
+            Self::Send {
+                command: Command::Dance | Command::Wave | Command::Handshake | Command::Cheer | Command::Walk | Command::Run,
+                remote_capture_id: Some(id),
+                voice_id: Some(voice_id),
+            } => Ok(Some((*id, *voice_id))),
+            Self::Send { voice_id: Some(_), .. } => Err("Bumi 语音指令与遥控会话不匹配。"),
+            _ => Ok(None),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(super) enum GuidedDirection {
     Forward,
     Left,
     Right,
+    Backward,
+    StrafeLeft,
+    StrafeRight,
 }
 
 // The BLE mutex serializes work. Cancellation has a separate lock so it can
@@ -124,6 +176,18 @@ pub(super) enum Command {
     StandToFall,
     Walk,
     Run,
+    StartTeach,
+    StopTeach,
+    SaveTeach {
+        name: String,
+    },
+    TeachList,
+    PlayTeach {
+        id: u8,
+    },
+    DeleteTeach {
+        id: u8,
+    },
     Move {
         vx: i8,
         vyaw: i8,
@@ -132,6 +196,26 @@ pub(super) enum Command {
     },
     Speak { text: String },
     Volume { percent: u8 },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RemoteDirection {
+    Up,
+    Down,
+    Left { strafe: bool },
+    Right { strafe: bool },
+}
+
+impl RemoteDirection {
+    fn key_for_mode(self, strafe_mode: bool) -> Option<&'static str> {
+        match self {
+            Self::Up => Some("up"),
+            Self::Down => Some("down"),
+            Self::Left { strafe } if strafe == strafe_mode => Some("left"),
+            Self::Right { strafe } if strafe == strafe_mode => Some("right"),
+            _ => None,
+        }
+    }
 }
 
 impl Command {
@@ -146,15 +230,18 @@ impl Command {
         }
     }
 
-    fn remote_direction(&self) -> Result<Option<&'static str>, &'static str> {
+    fn remote_direction(&self) -> Result<Option<RemoteDirection>, &'static str> {
         let max = Self::REMOTE_AXIS_MAX;
+        use RemoteDirection::*;
         match self {
             Self::Move { vx: 0, vyaw: 0, vy: 0 } => Ok(None),
-            Self::Move { vx, vyaw: 0, vy: 0 } if (1..=max).contains(vx) => Ok(Some("up")),
-            Self::Move { vx, vyaw: 0, vy: 0 } if (-max..=-1).contains(vx) => Ok(Some("down")),
-            Self::Move { vx: 0, vyaw, vy: 0 } if (1..=max).contains(vyaw) => Ok(Some("left")),
-            Self::Move { vx: 0, vyaw, vy: 0 } if (-max..=-1).contains(vyaw) => Ok(Some("right")),
-            _ => Err("方向键仅支持单轴前后移动或转向（幅度 1–80）。"),
+            Self::Move { vx, vyaw: 0, vy: 0 } if (1..=max).contains(vx) => Ok(Some(Up)),
+            Self::Move { vx, vyaw: 0, vy: 0 } if (-max..=-1).contains(vx) => Ok(Some(Down)),
+            Self::Move { vx: 0, vyaw, vy: 0 } if (1..=max).contains(vyaw) => Ok(Some(Left { strafe: false })),
+            Self::Move { vx: 0, vyaw, vy: 0 } if (-max..=-1).contains(vyaw) => Ok(Some(Right { strafe: false })),
+            Self::Move { vx: 0, vyaw: 0, vy } if (1..=max).contains(vy) => Ok(Some(Left { strafe: true })),
+            Self::Move { vx: 0, vyaw: 0, vy } if (-max..=-1).contains(vy) => Ok(Some(Right { strafe: true })),
+            _ => Err("方向键仅支持单轴前后移动、转向或平移（幅度 1–80）。"),
         }
     }
 }
@@ -173,6 +260,15 @@ struct Device {
     rssi: Option<i16>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TeachAction {
+    pub(super) id: u8,
+    pub(super) name: String,
+    pub(super) duration: Option<u8>,
+    pub(super) time: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Snapshot {
@@ -182,7 +278,37 @@ pub(super) struct Snapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_motion_version: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    remote_menu_switch: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     remote_voice_command_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_voice_gestures: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_voice_continue: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_voice_step_directions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vision_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene_vision_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene_confidence_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    walk_intent_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene_walk_path_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene_inspection_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene_spoken_choice: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classroom_pulse_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    teach_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    walk_intent: Option<walk_intent::WalkIntent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vision_pose: Option<vision::VisionPose>,
     connection_id: Option<String>,
     devices: Vec<Device>,
     connected: Option<Device>,
@@ -191,7 +317,48 @@ pub(super) struct Snapshot {
     moving: bool,
     walk_mode: bool,
     locomotion_mode: Option<LocomotionMode>,
+    teach_recording: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    teach_actions: Option<Vec<TeachAction>>,
     listening: bool,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+impl Snapshot {
+    fn model_result(vision_pose: Option<vision::VisionPose>, walk_intent: Option<walk_intent::WalkIntent>) -> Self {
+        Self {
+            available: true,
+            guided_motion_version: Some(1),
+            remote_motion_version: Some(2),
+            remote_menu_switch: Some(true),
+            remote_voice_command_version: Some(1),
+            remote_voice_gestures: Some(true),
+            remote_voice_continue: Some(true),
+            remote_voice_step_directions: Some(true),
+            vision_version: Some(2),
+            scene_vision_version: Some(1),
+            scene_confidence_version: Some(1),
+            scene_walk_path_version: Some(1),
+            scene_inspection_version: Some(1),
+            scene_spoken_choice: Some(true),
+            classroom_pulse_version: Some(1),
+            teach_version: Some(1),
+            walk_intent_version: Some(1),
+            walk_intent,
+            vision_pose,
+            connection_id: None,
+            devices: Vec::new(),
+            connected: None,
+            battery: None,
+            status: None,
+            moving: false,
+            walk_mode: false,
+            locomotion_mode: None,
+            teach_recording: false,
+            teach_actions: None,
+            listening: false,
+        }
+    }
 }
 
 fn trusted_page(label: &str, url: &Url) -> bool {
@@ -248,6 +415,8 @@ fn open_on_window_thread(app: &AppHandle) -> tauri::Result<()> {
             #[cfg(any(target_os = "macos", windows))]
             if allowed {
                 // A reloaded document no longer owns its predecessor's IPC channel.
+                *navigation_owner.0.chat.lock().unwrap() = Default::default();
+                classroom::end_window(&navigation_owner.0, &navigation_owner.1);
                 navigation_owner.0.remote.lock().unwrap().revoke_window(&navigation_owner.1);
             }
             allowed
@@ -259,6 +428,7 @@ fn open_on_window_thread(app: &AppHandle) -> tauri::Result<()> {
             window.on_window_event(move |event| {
                 #[cfg(any(target_os = "macos", windows))]
                 if matches!(event, WindowEvent::Focused(false)) {
+                    classroom::end_window(&control, &closed);
                     control.remote.lock().unwrap().revoke_window(&closed);
                 }
                 if matches!(event, WindowEvent::Destroyed) {
@@ -282,8 +452,10 @@ impl Control {
             .is_some_and(|current| current.subscribe().same_channel(closed))
         {
             window.take();
+            *self.chat.lock().unwrap() = Default::default();
             #[cfg(any(target_os = "macos", windows))]
             {
+                *self.classroom.lock().unwrap() = classroom::Sessions::default();
                 *self.attempts.lock().unwrap() = ConnectionAttempts::default();
                 self.remote.lock().unwrap().revoke_window(closed);
             }
@@ -329,12 +501,40 @@ pub(super) async fn bumi_control(
             }
             lifetime
         };
+        match request {
+            Request::LocateVision(input) => {
+                let pose = vision::locate(window.app_handle(), input, lifetime).await?;
+                return Ok(Snapshot::model_result(Some(pose), None));
+            }
+            Request::InterpretWalk(input) => {
+                let intent = walk_intent::interpret(window.app_handle(), input, lifetime).await?;
+                return Ok(Snapshot::model_result(None, Some(intent)));
+            }
+            Request::BeginClassroom { task_id, connection_id, capture_id, voice_id, pulse_profile } =>
+                return classroom::begin(&window, &control, task_id, connection_id, capture_id, voice_id, pulse_profile, &lifetime),
+            Request::ClassroomStep { task_id, sequence, action } =>
+                return classroom::step(&window, control.inner(), lifetime, task_id, sequence, action).await,
+            Request::ClassroomStop { task_id, sequence } =>
+                return classroom::stop(&window, &control, lifetime, &task_id, sequence).await,
+            Request::EndClassroom { task_id } => {
+                classroom::end(&control, Some(&task_id));
+                return Ok(control.bluetooth.lock().await.snapshot());
+            }
+            Request::Disconnect | Request::Guide { direction: Some(_), .. } => classroom::end(&control, None),
+            Request::Send { ref command, .. } if !matches!(command,
+                Command::Battery | Command::Status | Command::TeachList | Command::Volume { .. } | Command::Speak { .. }
+            ) => classroom::end(&control, None),
+            _ => {}
+        }
         if let Request::Guide { capture_id, press_id, direction, voice_id } = request {
             return guided::request(&window, control.inner(), lifetime, capture_id, press_id, direction, voice_id).await;
         }
         let mut bluetooth = match &request {
             Request::CancelConnection { .. } => control.bluetooth.lock().await,
-            Request::Send { command, .. } if command.motion_active() == Some(false) => {
+            Request::Send { command, .. }
+                if command.motion_active() == Some(false)
+                    || matches!(command, Command::StopTeach) =>
+            {
                 control.bluetooth.lock().await
             }
             _ => control.bluetooth.try_lock().map_err(|_| "蓝牙操作正在进行，请稍后重试。")?,
@@ -349,24 +549,23 @@ pub(super) async fn bumi_control(
             }
             _ => lifetime.clone(),
         };
-        let dance = match &request {
-            Request::Send { command: Command::Dance, remote_capture_id: Some(id), voice_id: Some(voice_id) } => Some((*id, *voice_id)),
-            Request::Send { voice_id: Some(_), .. } => return Err("Bumi 语音指令与遥控会话不匹配。".into()),
-            _ => None,
-        };
+        let voice_action = request.remote_voice_action()?;
+        let voice_session = voice_action
+            .map(|(id, turn)| remote_input::claim_voice(&window, &control, id, turn))
+            .transpose()?;
         let direction = match &request {
-            Request::Send { command, remote_capture_id: Some(id), .. } if dance.is_none() => {
+            Request::Send { command, remote_capture_id: Some(id), .. } if voice_action.is_none() => {
                 command.remote_direction()?.map(|key| (*id, key))
             }
             _ => None,
         };
-        let verify = || match (direction, dance) {
+        let verify = || match (direction, voice_action) {
             (Some((id, key)), _) => remote_input::verify_direction(&window, &control, id, key),
-            (_, Some((id, voice_id))) => remote_input::verify_guided_voice(&window, &control, id, voice_id, true),
+            (_, Some((id, voice_id))) => remote_input::verify_guided_voice(&window, &control, id, voice_id, false),
             _ => Ok(()),
         };
         bluetooth
-            .request(window.app_handle(), request, lifetime, operation_lifetime, verify)
+            .request(window.app_handle(), request, lifetime, operation_lifetime, voice_session, verify)
             .await
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -377,7 +576,22 @@ pub(super) async fn bumi_control(
                 available: false,
                 guided_motion_version: None,
                 remote_motion_version: None,
+                remote_menu_switch: None,
                 remote_voice_command_version: None,
+                remote_voice_gestures: None,
+                remote_voice_continue: None,
+                remote_voice_step_directions: None,
+                vision_version: None,
+                scene_vision_version: None,
+                scene_confidence_version: None,
+                scene_walk_path_version: None,
+                scene_inspection_version: None,
+                scene_spoken_choice: None,
+                classroom_pulse_version: None,
+                teach_version: None,
+                walk_intent_version: None,
+                walk_intent: None,
+                vision_pose: None,
                 connection_id: None,
                 devices: Vec::new(),
                 connected: None,
@@ -386,6 +600,8 @@ pub(super) async fn bumi_control(
                 moving: false,
                 walk_mode: false,
                 locomotion_mode: None,
+                teach_recording: false,
+                teach_actions: None,
                 listening: false,
             });
         }
@@ -396,6 +612,22 @@ pub(super) async fn bumi_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spoken_postures_and_gaits_require_a_capture_and_exclude_other_commands() {
+        let request = |command, remote_capture_id| Request::Send {
+            command,
+            remote_capture_id,
+            voice_id: Some(2),
+        };
+        for command in [Command::Dance, Command::Wave, Command::Handshake, Command::Cheer, Command::Walk, Command::Run] {
+            assert!(request(command.clone(), None).remote_voice_action().is_err());
+            assert_eq!(request(command, Some(7)).remote_voice_action(), Ok(Some((7, 2))));
+        }
+        for other in [Command::StandUp, Command::StandToFall, Command::StartTeach, Command::STOP] {
+            assert!(request(other, Some(7)).remote_voice_action().is_err());
+        }
+    }
 
     #[cfg(any(target_os = "macos", windows))]
     #[test]

@@ -1,5 +1,5 @@
-use super::protocol::{self, Reading, NOTIFY, SERVICE, WRITE};
-use super::{Command, Device, LocomotionMode, Request, Snapshot};
+use super::protocol::{self, Reading, TeachListAssembler, NOTIFY, SERVICE, WRITE};
+use super::{Command, Device, LocomotionMode, Request, Snapshot, TeachAction};
 use btleplug::api::{
     Central, CentralEvent, CentralState, CharPropFlags, Characteristic, Manager as _,
     Peripheral as _, ScanFilter, ValueNotification, WriteType,
@@ -54,6 +54,10 @@ struct Connection {
     motion_owner: Option<u64>,
     locomotion_mode: Option<LocomotionMode>,
     gait_confirmed: bool,
+    voice_posture_owner: Option<watch::Receiver<bool>>,
+    teach_recording: bool,
+    teach_actions: Vec<TeachAction>,
+    teach_saved_at: Option<Instant>,
 }
 
 impl Bluetooth {
@@ -63,6 +67,7 @@ impl Bluetooth {
         request: Request,
         owner: watch::Receiver<()>,
         mut lifetime: watch::Receiver<()>,
+        voice_session: Option<watch::Receiver<bool>>,
         verify_remote: impl Fn() -> Result<(), String>,
     ) -> Result<Snapshot, String> {
         if owner.has_changed().is_err() || lifetime.has_changed().is_err() {
@@ -98,7 +103,11 @@ impl Bluetooth {
         }
 
         match request {
+            Request::BeginClassroom { .. } | Request::ClassroomStep { .. } | Request::ClassroomStop { .. } | Request::EndClassroom { .. } =>
+                return Err("课堂任务需要独立的控制会话。".into()),
             Request::Guide { .. } => return Err("导航步进需先验证当前遥控会话。".into()),
+            Request::InterpretWalk(_) => return Err("行走指令由独立的识别通道解析。".into()),
+            Request::LocateVision(_) => return Err("视觉定位请求已由独立通道处理。".into()),
             Request::Status => {}
             Request::Scan { .. } if self.connection.is_none() => {
                 self.devices.clear();
@@ -126,7 +135,7 @@ impl Bluetooth {
             Request::Send {
                 command,
                 remote_capture_id,
-                voice_id,
+                ..
             } => {
                 let monitor = self
                     .listener
@@ -134,18 +143,25 @@ impl Bluetooth {
                     .filter(|listener| listener.active.load(Ordering::Relaxed))
                     .map(|_| app);
                 let connection = self.connection.as_mut().ok_or(DISCONNECTED)?;
-                if voice_id.is_some() && (connection.moving || !connection.gait_confirmed) {
-                    return Err("请先停止移动，确认 Bumi 的行走步态后再跳舞。".into());
-                }
-                if command.motion_active() == Some(true) {
-                    if remote_capture_id.is_some() && !connection.gait_confirmed {
-                        return Err("请查询并确认机器人已进入所选步态。".into());
+                if let Some(session) = voice_session {
+                    connection
+                        .send_voice_action(command, &mut lifetime, monitor, session, verify_remote)
+                        .await?;
+                } else {
+                    if command.motion_active().is_none()
+                        && !matches!(command, Command::Status | Command::Battery | Command::TeachList
+                            | Command::Volume { .. } | Command::Speak { .. })
+                    {
+                        connection.voice_posture_owner = None;
                     }
+                    if command.motion_active() == Some(true) {
+                        if remote_capture_id.is_some() && !connection.gait_confirmed {
+                            return Err("请查询并确认机器人已进入所选步态。".into());
+                        }
+                    }
+                    verify_remote()?;
+                    connection.send(command, &mut lifetime, monitor, remote_capture_id).await?;
                 }
-                if command.motion_active() == Some(true) || voice_id.is_some() { verify_remote()?; }
-                connection
-                    .send(command, &mut lifetime, monitor, remote_capture_id)
-                    .await?;
             }
         }
 
@@ -158,7 +174,22 @@ impl Bluetooth {
             available: true,
             guided_motion_version: Some(1),
             remote_motion_version: Some(2),
+            remote_menu_switch: Some(true),
             remote_voice_command_version: Some(1),
+            remote_voice_gestures: Some(true),
+            remote_voice_continue: Some(true),
+            remote_voice_step_directions: Some(true),
+            vision_version: Some(2),
+            scene_vision_version: Some(1),
+            scene_confidence_version: Some(1),
+            scene_walk_path_version: Some(1),
+            scene_inspection_version: Some(1),
+            scene_spoken_choice: Some(true),
+            classroom_pulse_version: Some(1),
+            teach_version: Some(1),
+            walk_intent_version: Some(1),
+            walk_intent: None,
+            vision_pose: None,
             connection_id: self.connection.as_ref().map(|c| c.id.clone()),
             devices: self
                 .devices
@@ -183,6 +214,16 @@ impl Bluetooth {
                 .is_some_and(|connection| connection.moving),
             walk_mode: locomotion_mode == Some(LocomotionMode::Walk),
             locomotion_mode,
+            teach_recording: self
+                .connection
+                .as_ref()
+                .is_some_and(|connection| connection.teach_recording),
+            teach_actions: Some(
+                self.connection
+                    .as_ref()
+                    .map(|connection| connection.teach_actions.clone())
+                    .unwrap_or_default(),
+            ),
             listening: self
                 .listener
                 .as_ref()
@@ -288,7 +329,7 @@ impl Bluetooth {
         Err("没有可用的蓝牙适配器。请开启系统蓝牙，然后重试。".into())
     }
 
-    fn owned_by(&self, lifetime: &watch::Receiver<()>) -> bool {
+    pub(super) fn owned_by(&self, lifetime: &watch::Receiver<()>) -> bool {
         self.owner
             .as_ref()
             .is_some_and(|owner| owner.same_channel(lifetime))
@@ -335,6 +376,15 @@ impl Bluetooth {
             let _ = connection.cancel_link_monitor.send(());
             if connection.link_lost.load(Ordering::Acquire) {
                 return;
+            }
+            if connection.teach_recording {
+                let (_sender, mut lifetime) = watch::channel(());
+                if let Err(error) = connection
+                    .send(Command::StopTeach, &mut lifetime, None, None)
+                    .await
+                {
+                    eprintln!("Bumi: failed to stop teach recording before disconnect: {error}");
+                }
             }
             if connection.moving {
                 let (_sender, mut lifetime) = watch::channel(());
@@ -538,6 +588,10 @@ async fn connect(
                 motion_owner: None,
                 locomotion_mode: None,
                 gait_confirmed: false,
+                voice_posture_owner: None,
+                teach_recording: false,
+                teach_actions: Vec::new(),
+                teach_saved_at: None,
             })
         }
         Err(error) => {
@@ -576,6 +630,20 @@ fn report_link_loss(app: &AppHandle, id: &str, connection_id: &str, lost: &Atomi
     }
 }
 
+fn check_teach_recording(recording: bool, command: &Command) -> Result<(), &'static str> {
+    if !recording {
+        return Ok(());
+    }
+    if matches!(
+        command,
+        Command::StopTeach | Command::SaveTeach { .. } | Command::Battery | Command::Status
+    ) || command.motion_active() == Some(false)
+    {
+        return Ok(());
+    }
+    Err("正在示教录制中，请先停止录制。")
+}
+
 // A mode-changing write may reach the robot even if it times out. Drop the old
 // selection before writing and commit the returned mode only on success.
 fn prepare_locomotion_mode(
@@ -590,7 +658,11 @@ fn prepare_locomotion_mode(
         | Command::Handshake
         | Command::Cheer
         | Command::StandUp
-        | Command::StandToFall => None,
+        | Command::StandToFall
+        | Command::StartTeach
+        | Command::StopTeach
+        | Command::SaveTeach { .. }
+        | Command::PlayTeach { .. } => None,
         _ if current.is_none() && command.motion_active() == Some(true) => {
             return Err("请先进入行走模式或全身行走模式，再控制移动。");
         }
@@ -600,7 +672,88 @@ fn prepare_locomotion_mode(
     Ok(selected)
 }
 
+fn needs_voice_status(
+    moving: bool,
+    confirmed: bool,
+    previous: Option<&watch::Receiver<bool>>,
+    session: &watch::Receiver<bool>,
+) -> Result<bool, &'static str> {
+    if moving {
+        return Err("请等机器人停止移动后再说指令。");
+    }
+    if confirmed {
+        return Ok(false);
+    }
+    if previous.is_some_and(|capture| capture.same_channel(session)) {
+        return Ok(true);
+    }
+    Err("请先确认 Bumi 已进入所选步态，再开启遥控。")
+}
+
+fn ensure_ready_for_voice(status: Option<i8>) -> Result<(), String> {
+    match status {
+        Some(1..=3) => Ok(()),
+        Some(code) => Err(format!("机器人当前状态码为 {code}。请等机器人站稳并进入准备或行走状态后再说指令。")),
+        None => Err("未能确认机器人当前状态，请稍后再说指令。".into()),
+    }
+}
+
+fn confirm_voice_gait(
+    mode: &mut Option<LocomotionMode>,
+    confirmed: &mut bool,
+    status_result: Result<(), String>,
+) -> Result<(), String> {
+    let result = status_result.and_then(|_| {
+        if *confirmed {
+            Ok(())
+        } else {
+            Err("机器人还未确认所选步态。请等机器人站稳后重新说步态指令。".into())
+        }
+    });
+    if result.is_err() {
+        *mode = None;
+        *confirmed = false;
+    }
+    result
+}
+
 impl Connection {
+    async fn send_voice_action(
+        &mut self,
+        command: Command,
+        lifetime: &mut watch::Receiver<()>,
+        monitor: Option<&AppHandle>,
+        session: watch::Receiver<bool>,
+        verify_turn: impl Fn() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if needs_voice_status(
+            self.moving,
+            self.gait_confirmed,
+            self.voice_posture_owner.as_ref(),
+            &session,
+        )? {
+            self.send(Command::Status, lifetime, monitor, None).await?;
+            ensure_ready_for_voice(self.status)?;
+        }
+        // A new recording, a held key or a focus change during the status query
+        // invalidates the old command even when the robot itself is ready.
+        verify_turn()?;
+        let gait = matches!(command, Command::Walk | Command::Run);
+        // A timed-out write could have reached the robot. A new turn from this
+        // exact capture may check its current status without replaying the write.
+        self.voice_posture_owner = Some(session);
+        self.send(command, lifetime, monitor, None).await?;
+        if gait {
+            let status = self.send(Command::Status, lifetime, monitor, None).await;
+            confirm_voice_gait(
+                &mut self.locomotion_mode,
+                &mut self.gait_confirmed,
+                status.and_then(|()| verify_turn()),
+            )?;
+        }
+        Ok(())
+    }
+
     async fn send(
         &mut self,
         command: Command,
@@ -608,6 +761,7 @@ impl Connection {
         monitor: Option<&AppHandle>,
         remote_capture_id: Option<u64>,
     ) -> Result<(), String> {
+        check_teach_recording(self.teach_recording, &command)?;
         let motion_active = command.motion_active();
         if self.moving && motion_active.is_none() {
             self.write_frame(&protocol::frame(Command::STOP)?, lifetime, monitor)
@@ -622,8 +776,21 @@ impl Connection {
         if self.locomotion_mode.is_none() || matches!(command, Command::Status) {
             self.gait_confirmed = false;
         }
+        // Bumi persists the recording asynchronously. Give it the documented
+        // two seconds before requesting the library, including on older UIs.
+        if matches!(command, Command::TeachList) {
+            if let Some(saved_at) = self.teach_saved_at {
+                let wait = Duration::from_secs(2).saturating_sub(saved_at.elapsed());
+                if !wait.is_zero() {
+                    during(lifetime, 3, async { sleep(wait).await; Ok(()) }).await?;
+                }
+            }
+        }
         let frame = protocol::frame(command.clone())?;
-        let is_query = matches!(command, Command::Battery | Command::Status);
+        let is_query = matches!(
+            command,
+            Command::Battery | Command::Status | Command::TeachList
+        );
         let mut notifications = if is_query {
             Some(during(lifetime, 2, self.peripheral.notifications().map(map_error)).await?)
         } else {
@@ -637,20 +804,34 @@ impl Connection {
         }
         self.write_frame(&frame, lifetime, monitor).await?;
         self.locomotion_mode = selected;
+        match &command {
+            Command::StartTeach => self.teach_recording = true,
+            Command::StopTeach => self.teach_recording = false,
+            Command::SaveTeach { .. } => {
+                self.teach_recording = false;
+                self.teach_saved_at = Some(Instant::now());
+            }
+            Command::DeleteTeach { id } => self.teach_actions.retain(|item| item.id != *id),
+            _ => {}
+        }
         if motion_active == Some(false) {
             self.moving = false;
             self.motion_owner = None;
         }
 
         if let Some(notifications) = &mut notifications {
-            match query_reading(notifications, &command, lifetime).await? {
-                Reading::Battery(percent) => self.battery = Some(percent),
-                Reading::Status(status) => {
-                    self.status = Some(status);
-                    self.gait_confirmed = matches!(
-                        (self.locomotion_mode, status),
-                        (Some(LocomotionMode::Walk), 2) | (Some(LocomotionMode::Run), 3)
-                    );
+            if matches!(command, Command::TeachList) {
+                self.teach_actions = query_teach_list(notifications, lifetime).await?;
+            } else {
+                match query_reading(notifications, &command, lifetime).await? {
+                    Reading::Battery(percent) => self.battery = Some(percent),
+                    Reading::Status(status) => {
+                        self.status = Some(status);
+                        self.gait_confirmed = matches!(
+                            (self.locomotion_mode, status),
+                            (Some(LocomotionMode::Walk), 2) | (Some(LocomotionMode::Run), 3)
+                        );
+                    }
                 }
             }
         }
@@ -751,6 +932,41 @@ async fn query_reading(
     }
 }
 
+async fn query_teach_list(
+    mut notifications: impl Stream<Item = ValueNotification> + Unpin,
+    lifetime: &mut watch::Receiver<()>,
+) -> Result<Vec<TeachAction>, String> {
+    let mut received_notification = false;
+    let mut received_teach_fragment = false;
+    let mut assembler = TeachListAssembler::default();
+    let result = during(lifetime, 6, async {
+        while let Some(value) = notifications.next().await {
+            if value.uuid != NOTIFY {
+                continue;
+            }
+            received_notification = true;
+            if matches!(value.value.as_slice(), [0x55, 0xaa, _, 0x23, ..]) {
+                received_teach_fragment = true;
+            }
+            if let Some(list) = assembler.push(&value.value, Instant::now()) {
+                return list;
+            }
+        }
+        Err("Bumi 蓝牙连接已中断。".into())
+    })
+    .await;
+    match result {
+        Err(error) if error == TIMED_OUT => Err(if received_teach_fragment {
+            "已收到部分示教动作列表分片，但未在 6 秒内收齐。请重试或开启蓝牙消息监听排查。".into()
+        } else if received_notification {
+            "已收到蓝牙通知，但 6 秒内未收到示教动作列表回包（0x23）。可开启监听查看原始帧。".into()
+        } else {
+            "已发送动作库查询，6 秒内未收到 Bumi 的蓝牙通知。".into()
+        }),
+        other => other,
+    }
+}
+
 async fn during<T>(
     lifetime: &mut watch::Receiver<()>,
     seconds: u64,
@@ -791,6 +1007,48 @@ fn permission_denied() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{prepare_locomotion_mode, supported_name, Command, LocomotionMode};
+
+    #[test]
+    fn only_the_session_that_sent_the_posture_can_use_a_fresh_ready_status() {
+        use super::{ensure_ready_for_voice, needs_voice_status};
+        let (_first, first) = tokio::sync::watch::channel(false);
+        let (_new, new) = tokio::sync::watch::channel(false);
+        assert_eq!(needs_voice_status(false, true, None, &first), Ok(false));
+        assert_eq!(needs_voice_status(false, false, Some(&first), &first), Ok(true));
+        assert!(needs_voice_status(true, true, Some(&first), &first).is_err());
+        assert!(needs_voice_status(false, false, None, &first).is_err());
+        assert!(needs_voice_status(false, false, Some(&first), &new).is_err());
+        for code in [1, 2, 3] {
+            assert!(ensure_ready_for_voice(Some(code)).is_ok());
+        }
+        for status in [None, Some(0), Some(26), Some(30), Some(99)] {
+            assert!(ensure_ready_for_voice(status).is_err());
+        }
+    }
+
+    #[test]
+    fn unconfirmed_spoken_gait_allows_another_utterance_but_never_a_step() {
+        use super::{confirm_voice_gait, needs_voice_status};
+        let (_tx, session) = tokio::sync::watch::channel(false);
+        for (matched, status) in [
+            (false, Ok(())),
+            (false, Err("读取超时".to_owned())),
+            (true, Err("会话已失效".to_owned())),
+        ] {
+            let mut mode = Some(LocomotionMode::Run);
+            let mut confirmed = matched;
+            assert!(confirm_voice_gait(&mut mode, &mut confirmed, status).is_err());
+            assert!(!confirmed);
+            assert_eq!(mode, None);
+            assert!(prepare_locomotion_mode(&mut mode, &Command::Move { vx: 40, vy: 0, vyaw: 0 }).is_err());
+            assert_eq!(needs_voice_status(false, confirmed, Some(&session), &session), Ok(true));
+        }
+        let mut mode = Some(LocomotionMode::Walk);
+        let mut confirmed = true;
+        assert!(confirm_voice_gait(&mut mode, &mut confirmed, Ok(())).is_ok());
+        assert_eq!(mode, Some(LocomotionMode::Walk));
+        assert!(confirmed);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn battery_query_distinguishes_silence_other_notifications_and_invalid_readings() {
@@ -913,12 +1171,113 @@ mod tests {
             Command::Cheer,
             Command::StandUp,
             Command::StandToFall,
+            Command::StartTeach,
+            Command::StopTeach,
+            Command::SaveTeach {
+                name: "挥臂".into(),
+            },
+            Command::PlayTeach { id: 1 },
         ] {
             mode = Some(LocomotionMode::Run);
             assert_eq!(prepare_locomotion_mode(&mut mode, &action), Ok(None));
             assert_eq!(mode, None);
             assert!(prepare_locomotion_mode(&mut mode, &forward).is_err());
         }
+        mode = Some(LocomotionMode::Walk);
+        assert_eq!(
+            prepare_locomotion_mode(&mut mode, &Command::TeachList),
+            Ok(Some(LocomotionMode::Walk))
+        );
+        assert_eq!(
+            prepare_locomotion_mode(&mut mode, &Command::DeleteTeach { id: 1 }),
+            Ok(Some(LocomotionMode::Walk))
+        );
+    }
+
+    #[test]
+    fn teach_recording_blocks_motion_and_actions_until_stopped() {
+        use super::check_teach_recording;
+
+        assert!(check_teach_recording(true, &Command::StopTeach).is_ok());
+        assert!(check_teach_recording(
+            true,
+            &Command::SaveTeach {
+                name: "摆臂".into(),
+            }
+        )
+        .is_ok());
+        assert!(check_teach_recording(true, &Command::STOP).is_ok());
+        assert!(check_teach_recording(true, &Command::Battery).is_ok());
+        for blocked in [
+            Command::Walk,
+            Command::Run,
+            Command::Wave,
+            Command::StartTeach,
+            Command::TeachList,
+            Command::PlayTeach { id: 1 },
+            Command::DeleteTeach { id: 1 },
+            Command::Move {
+                vx: 40,
+                vyaw: 0,
+                vy: 0,
+            },
+        ] {
+            assert!(check_teach_recording(true, &blocked).is_err());
+            assert!(check_teach_recording(false, &blocked).is_ok());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn teach_list_query_reassembles_fragments_and_reports_timeouts() {
+        use super::{query_teach_list, TeachAction, ValueNotification, NOTIFY, SERVICE};
+        use futures_util::{stream, StreamExt};
+
+        fn frame(index: u8, total: u8, chunk: &[u8]) -> ValueNotification {
+            let len = (chunk.len() + 7) as u8;
+            let mut value = vec![0x55, 0xaa, len, 0x23, index, total];
+            value.extend_from_slice(chunk);
+            value.push(len);
+            ValueNotification {
+                uuid: NOTIFY,
+                service_uuid: SERVICE,
+                value,
+            }
+        }
+
+        let payload = r#"{"cmd":"teach_list","data":{"1":{"teach_id":1,"teach_name":"招手","teach_duration":6}}}"#.as_bytes();
+        let split = payload.len() / 2;
+        let (_owner, mut lifetime) = tokio::sync::watch::channel(());
+        let good = stream::iter([
+            ValueNotification {
+                uuid: NOTIFY,
+                service_uuid: SERVICE,
+                value: vec![0x55, 0xaa, 6, 0x51, 1, 6],
+            },
+            frame(0, 2, &payload[..split]),
+            frame(1, 2, &payload[split..]),
+        ])
+        .chain(stream::pending());
+        assert_eq!(
+            query_teach_list(good, &mut lifetime).await.unwrap(),
+            vec![TeachAction {
+                id: 1,
+                name: "招手".into(),
+                duration: Some(6),
+                time: None,
+            }]
+        );
+
+        let partial = stream::iter([frame(0, 2, &payload[..split])]).chain(stream::pending());
+        assert!(query_teach_list(partial, &mut lifetime)
+            .await
+            .unwrap_err()
+            .contains("部分示教动作列表分片"));
+
+        let silent = stream::pending::<ValueNotification>();
+        assert!(query_teach_list(silent, &mut lifetime)
+            .await
+            .unwrap_err()
+            .contains("未收到 Bumi 的蓝牙通知"));
     }
 
     #[test]

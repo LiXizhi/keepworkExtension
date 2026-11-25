@@ -3,6 +3,7 @@ identifier = "allow-desktop-commands"
 description = "Allows the trusted Keepwork main, pet and updates windows to use the desktop bridge commands."
 commands.allow = [
   "desktop_browser_surface",
+  "desktop_bumi_classroom",
   "desktop_page_connection_status",
   "desktop_retry_page_connection",
   "desktop_page_connection_attempt",
@@ -62,4 +63,4 @@ commands.allow = [
 [[permission]]
 identifier = "allow-bumi-control"
 description = "Allows the bundled Bumi window to discover and operate a selected robot."
-commands.allow = ["bumi_control", "bumi_remote_input"]
+commands.allow = ["bumi_control", "bumi_remote_input", "bumi_chat_handoff"]

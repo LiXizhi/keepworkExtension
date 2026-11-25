@@ -168,7 +168,7 @@ pub fn build_main_window_init_script_with_launch_capability(
     petDictationAudioVersion: 1,
     petVoiceAudioVersion: 1,
     startupSignIn: true,
-    ...(launchEnabled && ["darwin", "win32"].includes(bootstrap.platform) ? {{ desktopScreenshotVersion: 1 }} : {{}}),
+    ...(launchEnabled && ["darwin", "win32"].includes(bootstrap.platform) ? {{ desktopScreenshotVersion: 1, bumiClassroomVersion: 1, bumiCountedWalkVersion: 1, bumiWalkIntentVersion: 1 }} : {{}}),
     ...(launchEnabled && bootstrap.platform === "darwin" ? {{ petCameraPresentationVersion: 1 }} : {{}}),
     ...(launchEnabled ? {{ launchIntents: true, petApprovalRevealVersion: 1, petApprovalReturnVersion: 1 }} : {{}}),
     ...(["darwin", "win32"].includes(bootstrap.platform) ? {{ browserSurfaceVersion: 1, remoteDialogueVersion: 1, remotePhoneVersion: 1, remotePhoneCaptionVersion: 1, remotePhoneActivityVersion: 1 }} : {{}}),
@@ -181,6 +181,13 @@ pub fn build_main_window_init_script_with_launch_capability(
       capabilities,
       ...(capabilities.petCameraPresentationVersion === 1 ? {{
         presentPetCamera: (active) => invokeLaunch("desktop_present_pet_camera", {{ active }}),
+      }} : {{}}),
+      ...(capabilities.bumiClassroomVersion === 1 ? {{
+        bumiClassroom: async (request) => {{
+          const result = await invokeLaunch("desktop_bumi_classroom", {{ request }});
+          if (!launchLive) throw new Error("Classroom document is no longer active");
+          return result;
+        }},
       }} : {{}}),
       ...(capabilities.desktopScreenshotVersion === 1 ? {{
         captureScreenshot: async () => {{

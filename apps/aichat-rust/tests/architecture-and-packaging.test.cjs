@@ -245,8 +245,10 @@ test("macOS Info.plist and entitlements include microphone permission for voice/
     "utf8"
   );
   assert.match(infoPlist, /NSMicrophoneUsageDescription/);
+  assert.match(infoPlist, /NSCameraUsageDescription/);
   assert.match(infoPlist, /<string>Keepwork<\/string>/);
   assert.match(entitlements, /com\.apple\.security\.device\.audio-input/);
+  assert.match(entitlements, /com\.apple\.security\.device\.camera/);
 });
 
 test("capabilities restrict remote IPC to keepwork.com/chat and loopback dev servers", () => {

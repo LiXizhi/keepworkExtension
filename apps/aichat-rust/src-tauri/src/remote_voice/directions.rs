@@ -1,5 +1,5 @@
-//! RC003 direction changes have their own bounded queue. They never consume
-//! dictation's Home/Clear taps or the remote settings window's diagram events.
+//! RC003 movement controls have their own bounded queue. A capture can claim
+//! the Menu button for Bumi while dictation keeps receiving its other keys.
 use super::{platform, shared_listener};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
@@ -9,6 +9,8 @@ use tokio::sync::broadcast;
 pub(crate) struct Directions {
     pub(crate) keys: Vec<String>,
     pub(crate) revision: u64,
+    pub(crate) strafe: bool,
+    menu_switch: bool,
     conflicted: bool,
     revoked: bool,
 }
@@ -17,20 +19,30 @@ impl Directions {
     fn update(&mut self, keys: &[String]) -> bool {
         let directions: Vec<_> = keys
             .iter()
-            .filter(|k| matches!(k.as_str(), "up" | "down" | "left" | "right"))
+            .filter(|k| {
+                matches!(k.as_str(), "up" | "down" | "left" | "right")
+                    || (self.menu_switch && k.as_str() == "menu")
+            })
             .cloned()
             .collect();
         if directions == self.keys {
             return false;
         }
         self.conflicted = directions.len() > 1 || (self.conflicted && !directions.is_empty());
+        if self.keys.is_empty() && keys.len() == 1 && directions == ["menu"] {
+            self.strafe = !self.strafe;
+        }
         self.keys = directions;
         self.revision += 1;
         true
     }
 
     pub(crate) fn permits(&self, direction: &str) -> bool {
-        !self.revoked && !self.conflicted && self.keys.len() == 1 && self.keys[0] == direction
+        !self.revoked
+            && !self.conflicted
+            && self.keys.len() == 1
+            && self.keys[0] == direction
+            && direction != "menu"
     }
 }
 
@@ -41,13 +53,16 @@ struct Feed {
 
 static ACTIVE: Mutex<Weak<Feed>> = Mutex::new(Weak::new());
 
-pub(super) fn record(keys: &[String]) {
+/// Returns whether this report belongs to a capture that owns the Menu key.
+pub(super) fn record(keys: &[String]) -> bool {
     if let Some(feed) = ACTIVE.lock().unwrap().upgrade() {
         let mut state = feed.state.lock().unwrap();
         if state.update(keys) {
             let _ = feed.sender.send((Instant::now(), state.clone()));
         }
+        return state.menu_switch && !state.revoked;
     }
+    false
 }
 
 pub(in super::super) fn source_changed() {
@@ -71,11 +86,14 @@ impl DirectionReader {
     pub(crate) fn matches_voice_source(&self, source: &str) -> bool {
         self.listener.matches_voice_source(source)
     }
-    pub(crate) fn open() -> Result<(Self, Edges), String> {
+    pub(crate) fn open(menu_switch: bool) -> Result<(Self, Edges), String> {
         let listener = shared_listener().map_err(|error| format!("无法读取遥控方向键。{error}"))?;
         let (sender, edges) = broadcast::channel(32);
         let feed = Arc::new(Feed {
-            state: Mutex::new(Directions::default()),
+            state: Mutex::new(Directions {
+                menu_switch,
+                ..Directions::default()
+            }),
             sender,
         });
         // Install before sampling. Any change during startup makes the caller
@@ -87,8 +105,15 @@ impl DirectionReader {
                 "未找到可用的唯一 RC003 蓝牙遥控器。请检查配对和输入监控权限，然后重试。".into(),
             );
         }
-        if !platform::directions_released(&listener) || !edges.is_empty() {
-            return Err("请只连接一只 RC003，松开全部方向键，再重新启用。".into());
+        if !platform::directions_released(&listener, menu_switch) || !edges.is_empty() {
+            let buttons = if menu_switch {
+                "方向键和菜单键"
+            } else {
+                "方向键"
+            };
+            return Err(format!(
+                "请只连接一只 RC003，松开全部{buttons}，再重新启用。"
+            ));
         }
         Ok((
             Self {
@@ -114,10 +139,59 @@ impl DirectionReader {
 mod tests {
     use super::*;
 
+    fn keys(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn menu_switches_once_per_press_only_when_requested() {
+        let mut state = Directions {
+            menu_switch: true,
+            ..Directions::default()
+        };
+        let menu = keys(&["menu"]);
+        assert!(!state.strafe);
+        assert!(state.update(&menu));
+        assert!(state.strafe);
+        assert!(!state.permits("menu"));
+        assert!(!state.update(&menu));
+        assert!(state.update(&[]));
+        assert!(state.strafe);
+        assert!(state.update(&menu));
+        assert!(!state.strafe);
+        assert_eq!(state.revision, 3);
+
+        let mut legacy = Directions::default();
+        assert!(!legacy.update(&menu));
+        assert!(legacy.update(&keys(&["menu", "left"])));
+        assert!(legacy.permits("left"));
+        assert!(!legacy.strafe);
+    }
+
+    #[test]
+    fn menu_direction_chords_block_motion_until_all_controls_are_released() {
+        for remaining in ["left", "menu"] {
+            let left = keys(&["left"]);
+            let mut state = Directions {
+                menu_switch: true,
+                ..Directions::default()
+            };
+            state.update(&left);
+            assert!(state.permits("left"));
+            state.update(&keys(&["menu", "left"]));
+            assert!(!state.permits("left"));
+            state.update(&keys(&[remaining]));
+            assert!(!state.permits(remaining));
+            assert!(!state.strafe);
+            state.update(&[]);
+            state.update(&left);
+            assert!(state.permits("left"));
+        }
+    }
+
     #[test]
     fn simultaneous_directions_require_full_release_before_another_move() {
         let mut state = Directions::default();
-        let keys = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         state.update(&keys(&["voice", "up"]));
         assert!(state.permits("up"));
         assert!(!state.update(&keys(&["up"])));

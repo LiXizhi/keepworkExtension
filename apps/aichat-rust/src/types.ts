@@ -11,6 +11,9 @@ export interface DesktopCapabilities {
   readonly petCameraPresentationVersion?: 1;
   readonly petApprovalReturnVersion?: 1;
   readonly desktopScreenshotVersion?: 1;
+  readonly bumiClassroomVersion?: 1;
+  readonly bumiCountedWalkVersion?: 1;
+  readonly bumiWalkIntentVersion?: 1;
   readonly petApprovalRevealVersion?: 1;
   readonly petReplyPresentationVersion?: 1;
   readonly petStreamingSpeechVersion?: 1;
@@ -23,6 +26,21 @@ export interface DesktopCapabilities {
   readonly petVoiceAudioVersion?: 1;
   readonly startupSignIn: true;
   readonly launchIntents?: true;
+}
+
+export type BumiClassroomRequest =
+  | { operation: "start"; taskId: string; command: string; afterTaskId?: string }
+  | { operation: "clarify"; taskId: string; command: string }
+  | { operation: "status"; taskId: string }
+  | { operation: "stop"; taskId?: string; global?: boolean }
+  | { operation: "observe"; taskId?: string };
+
+export interface BumiClassroomResult {
+  status: "accepted" | "running" | "awaitingChoice" | "completed" | "stopping" | "stopped" | "failed" | "unavailable";
+  taskId?: string;
+  message?: string;
+  imageDataUrl?: string;
+  capturedAt?: number;
 }
 
 export interface LaunchIntent {
@@ -134,6 +152,7 @@ export interface AIChatDesktopBridge {
   onLaunchIntent?(callback: () => void): () => void;
   reportStartupSignIn(signedIn: boolean): Promise<boolean>;
   closeRemoteDialogue?(id: string): Promise<boolean>;
+  bumiClassroom?(request: BumiClassroomRequest): Promise<BumiClassroomResult>;
   captureScreenshot?(): Promise<DesktopScreenshot>;
   getScreenshotPermission?(): Promise<ScreenshotPermission>;
   setScreenshotPermission?(enabled: boolean): Promise<ScreenshotPermission>;

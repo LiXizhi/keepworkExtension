@@ -317,21 +317,24 @@ impl RemotePresses {
         matches!(&self.choice, SourceChoice::Unique { handles, .. } if handles.contains(&device))
     }
 
-    fn visual_edge(&mut self, key: u16, release: bool) {
+    fn visual_edge(&mut self, key: u16, release: bool) -> bool {
         let changed = if release {
             self.visual_held.remove(&key)
         } else {
             self.visual_held.insert(key)
         };
-        if changed {
-            record_activity(pressed_remote_keys(|vk| self.visual_held.contains(&vk)));
-        }
+        changed && record_activity(pressed_remote_keys(|vk| self.visual_held.contains(&vk)))
     }
 
     fn edge(&mut self, device: usize, key: u16, release: bool, now: Instant) -> bool {
         if !self.has_handle(device) {
             return false;
         }
+        let capture_owns_menu = is_observed_remote_vk(key) && self.visual_edge(key, release);
+        self.tap_edge(key, release, now, capture_owns_menu)
+    }
+
+    fn tap_edge(&mut self, key: u16, release: bool, now: Instant, capture_owns_menu: bool) -> bool {
         let (button, slot) = match key {
             VK_HOME => (RemoteButton::Home, &mut self.home),
             VK_APPS => (RemoteButton::Clear, &mut self.clear),
@@ -357,7 +360,9 @@ impl RemotePresses {
             }
         } else if slot.down.is_none() {
             slot.down = Some(now);
-            slot.discard = self.demo_mode;
+            // Latch ownership on the make edge. Closing Bumi while Menu is
+            // held must not deliver the break to dictation as a Clear tap.
+            slot.discard = self.demo_mode || (key == VK_APPS && capture_owns_menu);
         }
         button == RemoteButton::Clear
     }
@@ -637,7 +642,6 @@ unsafe fn handle_input(presses: &mut RemotePresses, raw: HRAWINPUT) {
     let release = key.Flags & RI_KEY_BREAK as u16 != 0;
     if is_observed_remote_vk(key.VKey) {
         note_remote_key_at(key.VKey, release, monotonic_ms());
-        presses.visual_edge(key.VKey, release);
     }
     let _ = presses.edge(header.hDevice as usize, key.VKey, release, Instant::now());
 }
@@ -828,13 +832,14 @@ impl HomeListener {
         }
     }
 
-    pub(super) fn directions_released(&self) -> bool {
+    pub(super) fn directions_released(&self, menu_switch: bool) -> bool {
         // Windows can report an autorepeat as an ordinary make. Use global
         // key state only as a veto at arming, never as a source of movement.
         MONITOR.lock().is_ok_and(|monitor| {
             matches!(&monitor.presses.choice, SourceChoice::Unique { handles, .. } if handles.len() == 1)
-                && [VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT].into_iter().all(|key| {
-                    !monitor.presses.visual_held.contains(&key) && unsafe { GetAsyncKeyState(key.into()) >= 0 }
+                && [VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_APPS].into_iter().all(|key| {
+                    (!menu_switch && key == VK_APPS) ||
+                        (!monitor.presses.visual_held.contains(&key) && unsafe { GetAsyncKeyState(key.into()) >= 0 })
                 })
         })
     }
@@ -1087,6 +1092,23 @@ mod tests {
         assert!(pressed_remote_keys(|_| false).is_empty());
         assert!(is_observed_remote_vk(VK_RETURN));
         assert!(!is_suppressed_remote_vk(VK_RETURN));
+    }
+
+    #[test]
+    fn bumi_menu_capture_consumes_clear_even_if_released_after_capture_closes() {
+        let now = Instant::now();
+        let mut presses = RemotePresses::default();
+        presses.select(unique(11), false, false);
+        presses.tap_edge(VK_APPS, false, now, true);
+        presses.tap_edge(VK_APPS, false, now, false);
+        presses.tap_edge(VK_APPS, true, now, false);
+        assert!(!presses.poll(RemoteButton::Clear, now));
+        presses.tap_edge(VK_APPS, false, now, false);
+        presses.tap_edge(VK_APPS, true, now, false);
+        assert!(presses.poll(RemoteButton::Clear, now));
+        presses.tap_edge(VK_HOME, false, now, true);
+        presses.tap_edge(VK_HOME, true, now, true);
+        assert!(presses.poll(RemoteButton::Home, now));
     }
 
     #[test]

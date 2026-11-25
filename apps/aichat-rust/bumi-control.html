@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost tauri://localhost; frame-src 'none'; object-src 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' mediastream: blob:; connect-src 'self' ipc: http://ipc.localhost tauri://localhost; frame-src 'none'; object-src 'none'; base-uri 'none'">
   <title>Bumi 机器人</title>
   <link rel="stylesheet" href="/src/typography.css">
   <link rel="stylesheet" href="/src/bumi-control.css">
@@ -53,13 +53,96 @@
       </section>
     </section>
 
+    <div id="classroom-home">
+      <section id="classroom-panel" class="panel classroom-panel" aria-labelledby="voice-expert-title">
+        <div class="movement-heading">
+          <h2 id="voice-expert-title">课堂摄像头与语音</h2>
+          <button id="classroom-stop" class="stop-move" type="button">停止</button>
+        </div>
+        <div class="classroom-workspace">
+          <div class="classroom-commands">
+            <label for="voice-command">识别目标或动作指令</label>
+            <input id="voice-command" type="text" maxlength="128" placeholder="例如：向前走一步" autocomplete="off">
+            <div class="classroom-command-actions">
+              <button type="button" id="vision-inspect-classroom" class="secondary" disabled>只识别，不移动</button>
+              <button id="voice-run" class="primary" type="button">执行指令</button>
+            </div>
+            <p id="vision-cloud-hint" class="movement-note">看图识别会将当前画面发送至 Keepwork。需要 AI 理解步数时，会发送这句口令的文字。两者使用 AIChat 主窗口的登录账号。</p>
+            <p id="vision-inspect-status" class="operation" role="status"></p>
+            <p id="voice-status" class="operation" role="status"></p>
+          </div>
+          <div id="vision-panel" class="vision-preview">
+            <div class="vision-preview-header">
+              <h3>教室画面</h3>
+              <button type="button" id="vision-toggle" class="secondary">开启摄像头</button>
+            </div>
+            <div class="camera-source">
+              <label for="vision-device">摄像头</label>
+              <select id="vision-device"><option value="">默认本机摄像头</option></select>
+              <label class="vision-check"><input type="checkbox" id="vision-mirror">水平镜像</label>
+            </div>
+            <p id="vision-corner-hint" class="vision-corner-hint" role="status" hidden></p>
+            <div id="vision-stage" class="vision-stage" hidden>
+              <video id="vision-video" playsinline muted></video>
+              <canvas id="vision-overlay" width="320" height="240"></canvas>
+            </div>
+            <p id="vision-status" class="operation" role="status"></p>
+            <details id="vision-snapshot" class="vision-snapshot" open hidden>
+              <summary><span id="vision-snapshot-label">最近识别画面</span> · <time id="vision-snapshot-time"></time></summary>
+              <canvas id="vision-snapshot-canvas" role="img" aria-label="识别静帧"></canvas>
+            </details>
+          </div>
+          <div class="classroom-options">
+            <div class="classroom-remote">
+              <p class="movement-note">使用小米 RC003 时，开启方向键遥控，按住语音键说一句，松开执行。</p>
+              <div class="classroom-command-actions">
+                <button type="button" class="secondary" id="remote-toggle" disabled>开启方向键遥控</button>
+                <button type="button" class="text-button" id="remote-diagnose">检查按键</button>
+              </div>
+              <p id="remote-status" class="operation" role="status"></p>
+            </div>
+            <label class="vision-check classroom-grant"><input id="chat-classroom-grant" type="checkbox" disabled>允许 AIChat 主聊天查看教室摄像头并控制本次连接的机器人</label>
+          </div>
+        </div>
+        <details class="vision-panel" id="classroom-settings">
+          <summary>行走设置（置信度、点动档位与地面标定）</summary>
+          <p class="movement-note">在行走模式下实测当前档位的单次步幅或转角，填入课堂行走要用的方向。需要按场地尺寸计算时，再标出四角并填写宽、深。</p>
+          <div class="vision-preview-tools">
+            <button type="button" id="vision-calibrate" disabled>标定地面四角</button>
+            <button type="button" id="vision-reset-quad">重置四角</button>
+          </div>
+          <div class="vision-controls">
+            <label id="class-confidence-setting" hidden>行走置信度阈值
+              <input id="class-confidence-threshold" type="number" min="0.01" max="1" step="0.01" value="0.75" required aria-describedby="class-confidence-help">
+              <small id="class-confidence-help">走向或跟随目标时，联合置信度须达到此值。默认 0.75。<span id="class-confidence-legacy" hidden>当前桌面宿主仅支持 0.75，恢复默认值后可继续。</span></small>
+            </label>
+            <label id="class-pulse-setting" hidden>课堂点动档位
+              <select id="class-pulse-profile" aria-describedby="class-pulse-help">
+                <option value="gentle">轻柔 · 幅度 40/127 · 0.4 秒</option>
+                <option value="standard" selected>标准 · 幅度 64/127 · 0.8 秒</option>
+                <option value="strong">加强 · 幅度 80/127 · 1.0 秒</option>
+              </select>
+              <small id="class-pulse-help">换档后需重新测量步幅和转角。</small>
+            </label>
+            <label>场地左右宽（米，可选）<input id="class-width" type="number" min="0.01" step="any" placeholder="自动估算"></label>
+            <label>场地前后深（米，可选）<input id="class-height" type="number" min="0.01" step="any" placeholder="自动估算"></label>
+            <label>前进一步（米）<input id="class-step" type="number" min="0.001" step="any" placeholder="本机实测值"></label>
+            <label>后退一步（米）<input id="class-backward" type="number" min="0.001" step="any" placeholder="本机实测值"></label>
+            <label>左转一次（度）<input id="class-left" type="number" min="0.1" max="179" step="any" placeholder="本机实测值"></label>
+            <label>右转一次（度）<input id="class-turn" type="number" min="0.1" max="179" step="any" placeholder="本机实测值"></label>
+            <label>招呼距离（米）<input id="class-greeting" type="number" min="0.01" step="any" value="0.8"></label>
+          </div>
+        </details>
+      </section>
+    </div>
+
     <div class="drive-deck">
       <section class="panel movement-panel" aria-labelledby="movement-title">
         <div class="movement-heading">
           <h2 id="movement-title">移动控制</h2>
           <button type="button" id="stop-move" class="stop-move" disabled>停止</button>
         </div>
-        <p class="description">确认机器人在平坦、无障碍物的地面上站稳后，选择步态。</p>
+        <p class="description">确认机器人在平坦、无障碍物的地面上站稳后，选择步态（全身行走带协调摆臂）。</p>
         <div class="mode-row">
           <button id="walk-mode" class="primary" type="button" disabled>进入行走模式</button>
           <button id="run-mode" class="secondary" type="button" hidden disabled>进入全身行走模式</button>
@@ -95,6 +178,34 @@
       </section>
     </div>
 
+    <section class="panel teach-panel" id="teach-panel" aria-labelledby="teach-title" hidden>
+      <div class="teach-heading">
+        <h2 id="teach-title">手臂示教与自定义动作库</h2>
+        <span id="teach-timer" class="teach-timer" hidden></span>
+      </div>
+      <p class="description">开始录制后，手动引导 Bumi 手臂做动作。点击“命名并结束录制”，输入名称并保存。录制最长 60 秒。</p>
+      <div class="mode-row">
+        <button id="teach-start" class="primary" type="button" disabled>开始示教录制</button>
+        <button id="teach-stop" class="stop-move" type="button" hidden disabled>命名并结束录制</button>
+      </div>
+      <div id="teach-save-box" class="teach-save-box" hidden>
+        <label for="teach-name">动作名称（最长 48 字节）</label>
+        <div class="teach-save-row">
+          <input id="teach-name" type="text" maxlength="48" placeholder="例如：挥臂打招呼" autocomplete="off">
+          <button id="teach-save" class="primary" type="button" disabled>保存动作</button>
+          <button id="teach-discard" class="secondary" type="button">放弃</button>
+        </div>
+      </div>
+      <p id="teach-status" class="operation" role="status"></p>
+      <div class="teach-lib-heading">
+        <h3>我的自定义动作</h3>
+        <button id="teach-refresh" class="secondary" type="button" disabled>刷新动作库</button>
+      </div>
+      <div id="teach-list" class="teach-list" role="list" aria-label="已保存的示教动作">
+        <p class="teach-empty">连接后点击“刷新动作库”，查看或回放已录制的自定义动作。</p>
+      </div>
+    </section>
+
     <section class="panel" aria-labelledby="posture-title">
       <h2 id="posture-title">起身与收纳</h2>
       <div class="posture-grid">
@@ -110,64 +221,6 @@
         </div>
       </div>
     </section>
-
-    <div class="input-deck">
-      <section class="panel" aria-labelledby="remote-title">
-        <h2 id="remote-title">小米遥控器</h2>
-        <p class="description">配对 RC003 并检查按键。机器人站稳后开启方向键遥控，上下控制前后，左右转向，松手即停止。</p>
-        <div class="mode-row">
-          <button type="button" class="secondary" id="remote-diagnose">检查按键</button>
-          <button type="button" class="primary" id="remote-toggle" disabled>开启方向键遥控</button>
-        </div>
-        <p id="remote-status" class="operation" role="status"></p>
-        <div id="nav-home">
-          <details id="nav-panel" class="nav-panel">
-            <summary>场地地图与目的地</summary>
-            <p class="movement-note">将现场划成方格，地图上方对应第 1 行。标出机器人所在格、朝向及沿途可通行格，把讲台旁等可停靠位置设为目的地。地图保存在本机。</p>
-            <div id="nav-route" class="nav-route" hidden>
-              <p id="nav-path"></p>
-              <div class="mode-row">
-                <button type="button" id="nav-drive" class="primary">按住执行本段</button>
-                <button type="button" id="nav-confirm" class="secondary">确认到位</button>
-                <button type="button" id="nav-cancel">取消路线</button>
-              </div>
-            </div>
-            <p id="nav-status" class="operation" role="status"></p>
-            <div class="nav-tools">
-              <label>点击格子设置
-                <select id="nav-mode">
-                  <option value="pose">机器人的位置</option>
-                  <option value="floor">可通行</option>
-                  <option value="goal" id="nav-goal-option">命名目的地</option>
-                  <option value="blocked">障碍物</option>
-                  <option value="unknown">清除标记</option>
-                </select>
-              </label>
-              <label id="nav-facing-label">机器人面向地图
-                <select id="nav-facing">
-                  <option value="0">上 ↑</option><option value="1">右 →</option>
-                  <option value="2">下 ↓</option><option value="3">左 ←</option>
-                </select>
-              </label>
-              <label id="nav-name-label" hidden>地点名称
-                <input id="nav-name" maxlength="16" placeholder="例如：讲台旁" autocomplete="off">
-              </label>
-            </div>
-            <div id="nav-grid" class="nav-grid" role="group" aria-label="场地图，从左到右 A 至 E，从上到下 1 至 5"></div>
-          </details>
-        </div>
-      </section>
-
-      <section class="panel" aria-labelledby="voice-expert-title">
-        <h2 id="voice-expert-title">Bumi 语音指令</h2>
-        <p class="description">开启方向键遥控后，按住语音键说出指令，松开执行。也可直接输入单句指令。</p>
-        <div class="speech-controls">
-          <input id="voice-command" type="text" maxlength="80" placeholder="例如：跳舞、走到讲台" aria-label="语音控制指令" autocomplete="off">
-          <button id="voice-run" class="primary" type="button">执行</button>
-        </div>
-        <p id="voice-status" class="operation" role="status">未连接时，可输入“连接”查找机器人。</p>
-      </section>
-    </div>
 
     <section class="panel" aria-labelledby="speech-title" hidden>
       <h2 id="speech-title">让 Bumi 说话</h2>
@@ -213,10 +266,10 @@
     </div>
     <dialog id="remote-shield" class="remote-shield" tabindex="-1" aria-labelledby="remote-shield-title">
       <h2 id="remote-shield-title">小米遥控器控制 Bumi</h2>
-      <p>保持此窗口在前台。按住方向键移动或转向，松开即请求停止。</p>
+      <p id="remote-shield-help">保持此窗口在前台。按住方向键移动或转向，松开即请求停止。</p>
       <p id="remote-shield-status" class="operation" role="status"></p>
       <p id="remote-shield-voice" class="operation" role="status"></p>
-      <div id="nav-shield"></div>
+      <div id="classroom-shield"></div>
       <div class="mode-row">
         <button type="button" class="primary" id="remote-shield-close">关闭遥控</button>
       </div>

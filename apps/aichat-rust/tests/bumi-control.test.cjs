@@ -68,6 +68,11 @@ test("Bumi control is available from every desktop menu and packaged as a local 
   assert.ok(html.includes('id="stop-move"'));
   assert.ok(html.includes('id="walk-mode"'));
   assert.ok(html.includes('id="run-mode"'));
+  assert.ok(html.includes('id="teach-panel"'));
+  assert.match(html, /id="teach-panel"[^>]*\bhidden\b/);
+  for (const id of ["teach-start", "teach-stop", "teach-save-box", "teach-name", "teach-save", "teach-discard", "teach-refresh", "teach-list"]) {
+    assert.ok(html.includes(`id="${id}"`), id);
+  }
   assert.ok(html.includes('id="motion-stick"'));
   assert.ok(html.includes('id="direction-pad"'));
   assert.match(html, /id="device-choice"[^>]*\bhidden\b/);
