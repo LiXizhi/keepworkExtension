@@ -53,6 +53,35 @@
       </section>
     </section>
 
+    <section class="panel box-link-panel" id="box-link-panel" aria-labelledby="box-link-title">
+      <div class="device-heading">
+        <h2 id="box-link-title">视频语音盒子</h2>
+        <span id="box-link-state" class="connection-state" data-state="offline">未连接</span>
+      </div>
+      <p class="description">电脑可与盒子连接同一路由器、让盒子加入电脑热点，或连接盒子的 xiaozhi-box-XXXX 热点。</p>
+      <form id="box-link-form">
+        <div class="box-link-addresses">
+          <label>盒子 IPv4 地址
+            <input id="box-link-ip" type="text" inputmode="decimal" maxlength="15" placeholder="盒子热点地址 192.168.5.1" autocomplete="off" spellcheck="false">
+          </label>
+          <label>配对码（如已设置）
+            <input id="box-link-key" type="password" maxlength="256" autocomplete="off">
+          </label>
+        </div>
+        <label id="box-link-devices" hidden>扫描结果
+          <select id="box-link-picker"><option value="">请选择盒子…</option></select>
+        </label>
+        <div class="connection-actions">
+          <button id="box-link-scan" class="secondary" type="button">扫描设备</button>
+          <button id="box-link-connect" class="primary" type="submit">连接盒子</button>
+          <button id="box-link-cancel" class="secondary" type="button" hidden>取消</button>
+          <button id="box-link-disconnect" class="secondary" type="button" hidden>断开盒子</button>
+        </div>
+      </form>
+      <p id="box-link-details" class="hint" hidden></p>
+      <p id="box-link-status" class="operation" role="status"></p>
+    </section>
+
     <div id="classroom-home">
       <section id="classroom-panel" class="panel classroom-panel" aria-labelledby="voice-expert-title">
         <div class="movement-heading">
@@ -276,5 +305,6 @@
     </dialog>
   </main>
   <script type="module" src="/src/bumi-control.ts"></script>
+  <script type="module" src="/src/bumi-box-link.ts"></script>
 </body>
 </html>

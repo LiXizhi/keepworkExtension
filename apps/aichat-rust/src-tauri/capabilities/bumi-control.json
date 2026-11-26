@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "bumi-control",
-  "description": "Bumi Bluetooth controls in the local desktop window.",
+  "description": "Bumi Bluetooth and Box Link connections in the local desktop window.",
   "local": true,
   "windows": ["bumi-control"],
   "permissions": ["allow-bumi-control", "core:event:allow-listen", "core:event:allow-unlisten"]

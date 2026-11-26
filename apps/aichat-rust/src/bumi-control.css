@@ -123,6 +123,17 @@ select {
 .hint:empty, .error:empty { display: none; }
 .connection-actions, .mode-row, .monitor-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .connection-actions button { font-weight: 600; }
+.box-link-panel form, .box-link-addresses { display: grid; gap: 8px; }
+.box-link-addresses { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+.box-link-panel label input, .box-link-panel label select { margin-top: 4px; }
+.box-link-panel label input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-input);
+  color: inherit;
+  background: var(--surface);
+}
+.box-link-panel label input::placeholder { color: var(--text-muted); font-size: 12px; }
 .operation, .error { font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
 .operation { color: var(--text-muted); }
 .error { color: var(--error); }

@@ -8,6 +8,7 @@ use url::Url;
 
 #[cfg(any(target_os = "macos", windows))]
 mod bluetooth;
+pub(super) mod box_link;
 #[cfg(any(target_os = "macos", windows))]
 mod classroom;
 #[cfg(any(target_os = "macos", windows))]
@@ -28,6 +29,7 @@ const UNSUPPORTED: &str = "Bumi 蓝牙控制需要 macOS 或 Windows 桌面版�
 #[derive(Default)]
 pub(super) struct Control {
     window: Mutex<Option<watch::Sender<()>>>,
+    box_link: Mutex<box_link::Link>,
     chat: Mutex<chat::Bridge>,
     #[cfg(any(target_os = "macos", windows))]
     bluetooth: tokio::sync::Mutex<bluetooth::Bluetooth>,
@@ -400,7 +402,6 @@ fn open_on_window_thread(app: &AppHandle) -> tauri::Result<()> {
     let control = app.state::<Arc<Control>>().inner().clone();
     let (lifetime, closed) = watch::channel(());
     *control.window.lock().unwrap() = Some(lifetime);
-    #[cfg(any(target_os = "macos", windows))]
     let navigation_owner = (Arc::clone(&control), closed.clone());
     let theme = app.state::<Arc<AppCore>>().theme.current();
     let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(PAGE.into()))
@@ -412,6 +413,12 @@ fn open_on_window_thread(app: &AppHandle) -> tauri::Result<()> {
         .initialization_script(&theme.document_theme_script())
         .on_navigation(move |url| {
             let allowed = trusted_page(LABEL, url);
+            if allowed {
+                let window = navigation_owner.0.window.lock().unwrap();
+                if window.as_ref().is_some_and(|current| current.subscribe().same_channel(&navigation_owner.1)) {
+                    navigation_owner.0.box_link.lock().unwrap().reset();
+                }
+            }
             #[cfg(any(target_os = "macos", windows))]
             if allowed {
                 // A reloaded document no longer owns its predecessor's IPC channel.
@@ -452,6 +459,7 @@ impl Control {
             .is_some_and(|current| current.subscribe().same_channel(closed))
         {
             window.take();
+            self.box_link.lock().unwrap().reset();
             *self.chat.lock().unwrap() = Default::default();
             #[cfg(any(target_os = "macos", windows))]
             {

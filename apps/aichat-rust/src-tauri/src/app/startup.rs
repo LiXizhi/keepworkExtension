@@ -749,6 +749,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             super::bumi::bumi_control,
+            super::bumi::box_link::bumi_box_link,
             super::bumi::chat::desktop_bumi_classroom,
             super::bumi::chat::bumi_chat_handoff,
             super::bumi::remote_input::bumi_remote_input,

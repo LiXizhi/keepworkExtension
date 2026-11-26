@@ -19,7 +19,7 @@ test("Bumi IPC is limited to its bundled local control window", () => {
   const own = permissions.find(part => part.includes('identifier = "allow-bumi-control"'));
   const main = permissions.find(part => part.includes('identifier = "allow-desktop-commands"'));
   assert.ok(own && main);
-  for (const command of ["bumi_control", "bumi_remote_input"]) {
+  for (const command of ["bumi_control", "bumi_remote_input", "bumi_box_link"]) {
     assert.ok(own.includes(`"${command}"`));
     assert.equal(main.includes(`"${command}"`), false);
     assert.equal((read("src/bridge.ts") + read("src-tauri/src/bridge.rs")).includes(command), false);
@@ -52,6 +52,7 @@ test("Bumi control is available from every desktop menu and packaged as a local 
   assert.match(html, /frame-src 'none'/);
   assert.match(html, /script-src 'self'/);
   assert.match(html, /src="\/src\/bumi-control\.ts"/);
+  assert.match(html, /src="\/src\/bumi-box-link\.ts"/);
   assert.doesNotMatch(html, /<(?:script|link)\b[^>]*(?:src|href)="https?:\/\//);
   for (const action of ["dance", "wave", "handshake", "cheer"]) {
     assert.ok(html.includes(`data-command="${action}" disabled`));
