@@ -466,7 +466,7 @@ impl MessagingService {
                 .collect()
         };
         for id in ids {
-            let _ = self.start(&id).await;
+            let _ = self.start_passive(&id).await;
         }
     }
 

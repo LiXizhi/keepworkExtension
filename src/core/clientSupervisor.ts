@@ -92,7 +92,7 @@ export class ClientSupervisor {
                 if (this.closed || !current?.enabled) continue;
                 if (allowed !== true) this.messaging.suspend(binding.id, allowed || 'waiting-client');
                 else if (current.status !== 'listening' && current.status !== 'connecting') {
-                    try { await this.messaging.start(binding.id); } catch { /* listener exposes its own error */ }
+                    try { await this.messaging.start(binding.id, { clearStaleSubscriptions: false }); } catch { /* listener exposes its own error */ }
                 }
             }
         })().finally(() => { this.pending = undefined; });

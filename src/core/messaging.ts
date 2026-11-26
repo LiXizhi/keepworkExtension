@@ -82,6 +82,49 @@ export function nextAutoReplyAt(times: number[], now: number): number {
     return Math.max(now, last + Math.min(REPLY_MAX_WAIT, spacing));
 }
 // Only failures requiring configuration/authorization repair leave automatic recovery.
+const DINGTALK_IM_EVENT_KEYS = new Set([
+    'user_im_message_receive_at',
+    'user_im_message_receive_o2o_all',
+    'user_im_message_receive_group_all',
+    'user_im_message_receive_group',
+]);
+function dingtalkSubscriptionIdSafe(id: unknown): id is string {
+    return typeof id === 'string' && id.length > 0 && id.length <= 256 && !id.startsWith('-') && /^[\x21-\x7e]+$/.test(id);
+}
+export function dingtalkHasLocalBusConflict(status: any): boolean {
+    const consumers = status?.bus?.live?.consumers;
+    if (Array.isArray(consumers)) return consumers.length > 0;
+    const state = String(status?.bus?.entry?.state || '').trim();
+    if (state.toLowerCase() === 'running') return true;
+    if (state) return false;
+    const holderPid = Number(status?.bus?.entry?.holder_pid || 0);
+    return Number.isFinite(holderPid) && holderPid > 0;
+}
+function dingtalkSubscriptionIsBlocking(row: any): boolean {
+    if (typeof row?.status === 'string' && row.status.toLowerCase() === 'deleted') return false;
+    const key = typeof (row?.event_key ?? row?.eventKey) === 'string' ? String(row.event_key ?? row.eventKey).trim() : '';
+    if (!key) return true;
+    return DINGTALK_IM_EVENT_KEYS.has(key) || key.startsWith('user_im_message_receive_');
+}
+export function dingtalkHasBlockingSubscriptions(status: any): boolean {
+    return Array.isArray(status?.subscriptions) && status.subscriptions.some(dingtalkSubscriptionIsBlocking);
+}
+export function dingtalkStaleImSubscriptionIds(status: any): string[] {
+    if (!Array.isArray(status?.subscriptions)) return [];
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const row of status.subscriptions) {
+        if (typeof row?.status === 'string' && row.status.toLowerCase() === 'deleted') continue;
+        const key = typeof (row?.event_key ?? row?.eventKey) === 'string' ? String(row.event_key ?? row.eventKey).trim() : '';
+        if (!DINGTALK_IM_EVENT_KEYS.has(key)) continue;
+        const subId = typeof (row?.subscribe_id ?? row?.subscribeId) === 'string' ? String(row.subscribe_id ?? row.subscribeId).trim() : '';
+        if (!dingtalkSubscriptionIdSafe(subId) || seen.has(subId)) continue;
+        seen.add(subId);
+        ids.push(subId);
+        if (ids.length >= 32) break;
+    }
+    return ids;
+}
 export function messagingNeedsRepair(error: any): boolean {
     const detail = typeof error?.detail === 'object' ? JSON.stringify(error.detail) : String(error?.detail || '');
     // Occupancy can outlive a daemon restart briefly. Keep checking read-only
@@ -171,10 +214,10 @@ export class MessagingService {
                 if(c.canRun(resource)){
                     if(view.mode==='draining'&&!r.admitting&&!r.active.size&&![...r.queues.values()].some(q=>q.length)){
                         r.pollAbort?.abort();r.stop?.();r.stop=undefined;this.releaseIdentity(r);
-                        await this.saveCheckpoint(r);if(c.snapshot(resource).lease?.draining){await c.request(resource,'release');r.status='standby';}else{r.status='stopped';await this.start(r.binding.id);}this.persist(r);
+                        await this.saveCheckpoint(r);if(c.snapshot(resource).lease?.draining){await c.request(resource,'release');r.status='standby';}else{r.status='stopped';await this.start(r.binding.id,{clearStaleSubscriptions:false});}this.persist(r);
                     }else if(!r.starting&&!['listening','reconnecting'].includes(r.status)){
                         const cp=view.checkpoint;if(cp){const box=this.box(r.binding.id);if(!Array.isArray(cp.paused)||!cp.paused.every((id:unknown)=>typeof id==='string')||!cp.autoReplyTimes||typeof cp.autoReplyTimes!=='object'||Object.values(cp.autoReplyTimes).some(times=>!Array.isArray(times)||!times.every(Number.isFinite)))throw Error('Invalid coordination checkpoint');box.paused=cp.paused;box.autoReplyTimes=cp.autoReplyTimes;this.saveInbox();if(cp.cursor&&!Number.isFinite(cp.cursor.since))throw Error('Invalid polling checkpoint');if(cp.cursor)fs.writeFileSync(path.join(this.home,r.binding.id+'.cursor.json'),JSON.stringify(cp.cursor),{mode:0o600});}
-                        await this.start(r.binding.id);
+                        await this.start(r.binding.id,{clearStaleSubscriptions:false});
                     }else await this.saveCheckpoint(r);
                 }else{if(r.stop||r.active.size)this.halt(r);r.status=reason?'coordination-ineligible':'standby';this.persist(r);}
             }catch(e){this.coordinationErrors.set(owner,(e as Error).message);if(!this.gatewayAllowed(r)){this.halt(r);r.status='coordination-error';}this.persist(r);}
@@ -728,7 +771,7 @@ export class MessagingService {
         try{const settings=JSON.parse(fs.readFileSync(path.join(home,'coordination-settings.json'),'utf8'));if(!settings||Array.isArray(settings)||typeof settings!=='object'||Object.values(settings).some(v=>typeof v!=='boolean'))throw Error('Invalid coordination settings');this.coordinationEnabled=settings;}catch(error:any){if(error.code!=='ENOENT')this.coordinationConfigurationError='Coordination settings unreadable; automatic messaging paused';}
         this.coordinationTimer=setInterval(()=>void this.syncCoordination(),10000);this.coordinationTimer.unref();
     }
-    resume() { for (const r of this.runs.values()) if (r.binding.enabled) void this.start(r.binding.id).catch(() => {}); }
+    resume() { for (const r of this.runs.values()) if (r.binding.enabled) void this.start(r.binding.id, { clearStaleSubscriptions: false }).catch(() => {}); }
     private add(binding: Binding) {
         let receipts: Receipt[] = [], seen: string[] = [];
         try { const data = JSON.parse(fs.readFileSync(path.join(this.home, binding.id + '.json'), 'utf8')); receipts = data.receipts || []; seen = data.seen || []; } catch { /* new binding */ }
@@ -886,7 +929,8 @@ export class MessagingService {
         const walk = (v: any) => { if (!v || typeof v !== 'object') return; const id = v.openConversationId || v.open_conversation_id || v.conversation_id; if (typeof id === 'string') groups.set(id,{id,name:String(v.name || v.title || v.conversationName || id)}); else for (const child of Object.values(v)) walk(child); };
         walk(result); return [...groups.values()].slice(0,50);
     }
-    async start(id: string) {
+    async start(id: string, options?: { clearStaleSubscriptions?: boolean }) {
+        const clearStaleSubscriptions = options?.clearStaleSubscriptions !== false;
         const r = this.get(id);
         this.claimChannel(r.binding.channel || 'dingtalk', r.binding.root);
         for (const other of this.runs.values()) if (other !== r && (other.binding.channel || 'dingtalk') === (r.binding.channel || 'dingtalk') && (other.binding.enabled || other.starting))
@@ -895,9 +939,9 @@ export class MessagingService {
         if (r.status === 'listening') return;
         clearTimeout(r.retry); r.retry = undefined; r.nextRetryAt = undefined;
         r.binding.enabled = true; this.persist(r);
-        r.starting = this.startRun(r).finally(() => { r.starting = undefined; }); return r.starting;
+        r.starting = this.startRun(r, clearStaleSubscriptions).finally(() => { r.starting = undefined; }); return r.starting;
     }
-    private async startRun(r: Runtime) {
+    private async startRun(r: Runtime, clearStaleSubscriptions = true) {
         if (this.closed) throw new Error('Service closed');
         const gate = this.startGuard ? await this.startGuard(r.binding) : true;
         if (gate !== true) {
@@ -930,11 +974,30 @@ export class MessagingService {
                 r.status='listening';r.retries=0;this.persist(r);return;
             }
             // Empty selection exposes no brain files; message-only replies remain usable.
-            const status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
-            const identity = status.identity;
+            let status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
+            let identity = status.identity;
             if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
             if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
-            if (status.bus?.live?.consumers?.length || status.subscriptions?.length) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
+            if (dingtalkHasLocalBusConflict(status)) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
+            if (clearStaleSubscriptions && dingtalkHasBlockingSubscriptions(status)) {
+                const staleIds = dingtalkStaleImSubscriptionIds(status);
+                if (staleIds.length) {
+                    for (const subId of staleIds) {
+                        if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
+                        try {
+                            await dws(['event','stop',subId,'--profile',r.binding.profile,'--yes','-f','json'], r.binding.root);
+                        } catch (error) {
+                            if (messagingNeedsRepair(error) || messagingNeedsLogin(error)) throw error;
+                        }
+                    }
+                    if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
+                    status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
+                    identity = status.identity;
+                    if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
+                    if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
+                }
+            }
+            if (dingtalkHasLocalBusConflict(status) || dingtalkHasBlockingSubscriptions(status)) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
             r.identity = r.binding.profile; r.self = identity.open_dingtalk_id || '';
             if (this.identities.has(r.identity)) throw new Error('This account already has a listener');
             this.identities.add(r.identity); r.ownsIdentity = true;
@@ -1023,7 +1086,7 @@ export class MessagingService {
             r.nextRetryAt = Date.now() + delay;
             r.retry = setTimeout(() => {
                 r.retry = undefined; r.nextRetryAt = undefined;
-                if (!this.closed && this.canRun(r)) void this.start(r.binding.id).catch(() => {});
+                if (!this.closed && this.canRun(r)) void this.start(r.binding.id, { clearStaleSubscriptions: false }).catch(() => {});
             }, delay);
             r.retry.unref();
         }

@@ -238,7 +238,7 @@ fn shell_spec() -> (String, Vec<String>) {
 // without a PowerShell cmdlet. New-Object stalls during startup on the native
 // Windows ARM64 runner even without a PTY. Static method syntax also preserves
 // Windows 7's inbox PowerShell 2.0 support; ::new requires PowerShell 5.0.
-const POWERSHELL_UTF8_INIT: &str = "$utf8 = [System.Activator]::CreateInstance([System.Text.UTF8Encoding]); [Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8; if ($PSDefaultParameterValues) { $PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; $PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8' }";
+const POWERSHELL_UTF8_INIT: &str = "$utf8 = [System.Activator]::CreateInstance([System.Text.UTF8Encoding]); [Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8; if ($PSDefaultParameterValues) { $PSDefaultParameterValues['Get-Content:Encoding'] = 'UTF8'; $PSDefaultParameterValues['Select-String:Encoding'] = 'UTF8' }; if ($PSVersionTable.PSVersion.Major -lt 6) { $env:PSModulePath = \"$PSHOME\\Modules\" }";
 
 fn base64_utf16le(text: &str) -> String {
     let mut bytes = Vec::with_capacity(text.len() * 2);

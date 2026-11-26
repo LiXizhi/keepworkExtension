@@ -866,13 +866,18 @@ impl MessagingService {
     // -----------------------------------------------------------------------
 
     pub async fn start(self: &Arc<Self>, id: &str) -> Result<(), MessageError> {
-        self.start_generation(id, None).await
+        self.start_generation(id, None, true).await
+    }
+
+    pub(crate) async fn start_passive(self: &Arc<Self>, id: &str) -> Result<(), MessageError> {
+        self.start_generation(id, None, false).await
     }
 
     async fn start_generation(
         self: &Arc<Self>,
         id: &str,
         expected: Option<u64>,
+        clear_stale_subscriptions: bool,
     ) -> Result<(), MessageError> {
         // A replacement must wait for the previous consumers to be reaped.
         // stop() remains synchronous and can cancel a start waiting for ready.
@@ -942,7 +947,9 @@ impl MessagingService {
             }
         }
         self.persist_all_snapshot();
-        let result = self.start_run(id, generation).await;
+        let result = self
+            .start_run(id, generation, clear_stale_subscriptions)
+            .await;
         let mut inner = self.lock();
         if let Some(run) = inner.runs.get_mut(id) {
             if run.generation != generation {
@@ -1000,6 +1007,7 @@ impl MessagingService {
         self: &Arc<Self>,
         id: &str,
         generation: u64,
+        clear_stale_subscriptions: bool,
     ) -> Result<(), MessageError> {
         let (binding, rules) = {
             let inner = self.lock();
@@ -1108,12 +1116,64 @@ impl MessagingService {
             return Ok(());
         }
 
-        // DingTalk: verify identity, then spawn the ndjson listener farm.
-        let status = dingtalk_status(&binding.root, &binding.profile).await?;
+        // DingTalk: verify identity, clean stale remote IM subscriptions on explicit
+        // connect when no local consumer is running, then spawn the ndjson listener farm.
+        let mut status = dingtalk_status(&binding.root, &binding.profile).await?;
         if !dingtalk_identity_matches(&status, &binding.profile) {
             let _ = &status;
             return Err(MessageError::bad(
                 "DWS identity does not match configured profile",
+            ));
+        }
+        if dingtalk_has_local_bus_conflict(&status) {
+            return Err(MessageError::bad(
+                "已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅",
+            ));
+        }
+        if clear_stale_subscriptions && dingtalk_has_blocking_subscriptions(&status) {
+            let stale_ids = dingtalk_stale_im_subscription_ids(&status);
+            if !stale_ids.is_empty() {
+                for sub_id in &stale_ids {
+                    {
+                        let inner = self.lock();
+                        if inner.closed
+                            || inner.runs.get(&binding_id).is_none_or(|run| {
+                                !run.binding.enabled || run.generation != generation
+                            })
+                        {
+                            return Ok(());
+                        }
+                    }
+                    if let Err(error) =
+                        dingtalk_stop_subscription(&binding.root, &binding.profile, sub_id).await
+                    {
+                        if needs_repair_text(&error.message) || MessageError::needs_login(&error) {
+                            return Err(error);
+                        }
+                    }
+                }
+                {
+                    let inner = self.lock();
+                    if inner.closed
+                        || inner.runs.get(&binding_id).is_none_or(|run| {
+                            !run.binding.enabled || run.generation != generation
+                        })
+                    {
+                        return Ok(());
+                    }
+                }
+                status = dingtalk_status(&binding.root, &binding.profile).await?;
+                if !dingtalk_identity_matches(&status, &binding.profile) {
+                    return Err(MessageError::bad(
+                        "DWS identity does not match configured profile",
+                    ));
+                }
+            }
+        }
+        if dingtalk_has_local_bus_conflict(&status) || dingtalk_has_blocking_subscriptions(&status)
+        {
+            return Err(MessageError::bad(
+                "已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅",
             ));
         }
         let identity = status["identity"].clone();
@@ -1121,20 +1181,6 @@ impl MessagingService {
             .as_str()
             .or(identity["openDingTalkId"].as_str())
             .unwrap_or("");
-        let consumers = status
-            .pointer("/bus/live/consumers")
-            .and_then(Value::as_array)
-            .map(|rows| !rows.is_empty())
-            .unwrap_or(false);
-        let subscriptions = status["subscriptions"]
-            .as_array()
-            .map(|rows| !rows.is_empty())
-            .unwrap_or(false);
-        if consumers || subscriptions {
-            return Err(MessageError::bad(
-                "已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅",
-            ));
-        }
         {
             let mut guard = self.lock();
             let inner: &mut Inner = &mut guard;
@@ -1366,7 +1412,9 @@ pub(crate) async fn reconnect_task(service: Arc<MessagingService>, id: String, g
             return;
         }
     }
-    let _ = service.start_generation(&id, Some(generation)).await;
+    let _ = service
+        .start_generation(&id, Some(generation), false)
+        .await;
 }
 
 pub(crate) fn channel_conflict(channel: &str, occupied: &str, root: String) -> Value {

@@ -1626,3 +1626,82 @@ test('manual refresh and live messages preserve identical IDs in different conve
  assert.deepEqual(rows.filter(m=>m.id==='self-shared').map(m=>m.conversation).sort(),['dm','other']);
  assert.equal(f.pending.length,0);assert.equal(f.sent.length,0);
 });
+
+test('explicit DingTalk connect clears stale remote IM subscriptions when no local consumer is running', async t => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-messaging-stale-')));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const root = path.join(dir, 'brain');
+    fs.mkdirSync(path.join(root, 'public'), { recursive: true });
+    let consumers = [];
+    let busEntry = { state: 'not_running', holder_pid: 0 };
+    let subscriptions = [
+        { subscribe_id: 'subId-group-all', event_key: 'user_im_message_receive_group_all', status: 'active' },
+        { subscribe_id: 'subId-o2o', event_key: 'user_im_message_receive_o2o_all', status: 'active' },
+        { subscribe_id: 'subId-at', event_key: 'user_im_message_receive_at', status: 'active' },
+        { subscribe_id: 'subId-cal', event_key: 'user_calendar_event_changed', status: 'active' },
+    ];
+    const stopped = [];
+    let listens = 0;
+    const serviceModule = load('messaging', {
+        './messagingFeishu': { feishuContext: load('messagingFeishu').feishuContext, feishuConversation: async () => [], feishuIdentity: async () => ({ id: 'corp:user', self: 'owner' }), pollFeishu: async () => () => {}, FeishuDelivery: class {} },
+        './aichatPresence': { latestAichatClient: () => null, latestAichatBrainRoot: () => root },
+        './messagingDingtalk': {
+            dingtalkConversation: async () => [],
+            loginDws: async () => {},
+            dws: async args => {
+                if (args[0] === 'event' && args[1] === 'status') {
+                    return {
+                        identity: { corp_id: 'corp', user_id: 'user', open_dingtalk_id: 'owner' },
+                        bus: consumers === null ? { entry: busEntry } : { entry: busEntry, live: { consumers } },
+                        subscriptions: structuredClone(subscriptions),
+                    };
+                }
+                if (args[0] === 'event' && args[1] === 'stop') {
+                    stopped.push(args);
+                    subscriptions = subscriptions.filter(s => s.subscribe_id !== args[2]);
+                    return { ok: true };
+                }
+                if (args[0] === 'profile') return { currentProfile: 'corp:user', profiles: [{ corpId: 'corp', userId: 'user' }] };
+                return { success: true, result: { conversationMessagesList: [], hasMore: false } };
+            },
+            listenDws: async () => { listens++; return () => {}; },
+            DingTalkDelivery: class {},
+        },
+        './messagingExecutor': { BeforeSubmission: class extends Error {}, messagingExecutorChoice: () => ({ backend: 'copilot', model: '' }), restrictedCliAnswer: async () => '', MessagingWorkers: class { close() {} } },
+    });
+    const service = new serviceModule.MessagingService(path.join(dir, 'state'), 8089);
+    t.after(() => service.close());
+    const binding = service.configure({ channel: 'dingtalk', root, profile: 'corp:user', config: policy.defaultMessageConfig(), prompt: policy.DEFAULT_PROMPT });
+
+    // Passive resume/reconnect does not delete remote subscriptions.
+    await assert.rejects(service.start(binding.id, { clearStaleSubscriptions: false }), /已有个人消息桥/);
+    assert.equal(stopped.length, 0);
+    assert.equal(listens, 0);
+
+    // Active local consumer is never displaced even on explicit connect.
+    consumers = [{ id: 'foreign' }];
+    await assert.rejects(service.start(binding.id), /已有个人消息桥/);
+    assert.equal(stopped.length, 0);
+    assert.equal(listens, 0);
+
+    // Running local bus without live consumer list is treated conservatively as occupied.
+    consumers = null;
+    busEntry = { state: 'running', holder_pid: 4242 };
+    await assert.rejects(service.start(binding.id), /已有个人消息桥/);
+    assert.equal(stopped.length, 0);
+
+    // With an orphan local bus (dead holder_pid), explicit connect clears only stale IM subscriptions and preserves calendar subscription.
+    busEntry = { state: 'orphan', holder_pid: 21168 };
+    await service.start(binding.id);
+    assert.deepEqual(stopped.map(args => args[2]), ['subId-group-all', 'subId-o2o', 'subId-at']);
+    assert.ok(stopped.every(args => args.includes('--profile') && args.includes('corp:user') && args.includes('--yes')));
+    assert.deepEqual(subscriptions.map(s => s.subscribe_id), ['subId-cal']);
+    assert.equal(service.view(binding.id).status, 'listening');
+    assert.equal(listens, 1);
+
+    // Unidentified or unsafe subscription IDs are never deleted and remain blocking.
+    service.stop(binding.id);
+    subscriptions = [{ subscribe_id: '--all', event_key: 'user_im_message_receive_at', status: 'active' }];
+    await assert.rejects(service.start(binding.id), /已有个人消息桥/);
+    assert.equal(stopped.length, 3);
+});

@@ -383,6 +383,9 @@ impl TerminalSessionManager {
             let mut cmd = Command::new(&shell);
             if shell.to_lowercase().contains("powershell") {
                 cmd.args(["-NoLogo", "-NoProfile"]);
+                // Prevent PowerShell 7's PSModulePath (when launched from pwsh)
+                // from breaking Windows PowerShell 5.1 cmdlet autoloading (e.g. Get-FileHash).
+                cmd.env_remove("PSModulePath");
             }
             cmd.current_dir(&cwd)
                 .env("TERM", "xterm-256color")

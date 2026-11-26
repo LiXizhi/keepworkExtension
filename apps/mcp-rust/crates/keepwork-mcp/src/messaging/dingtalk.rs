@@ -342,6 +342,140 @@ pub(crate) async fn dingtalk_call_checked(
         .map_err(|error| MessageError::bad(error.message))
 }
 
+pub(crate) const DINGTALK_IM_EVENT_KEYS: &[&str] = &[
+    "user_im_message_receive_at",
+    "user_im_message_receive_o2o_all",
+    "user_im_message_receive_group_all",
+    "user_im_message_receive_group",
+];
+
+fn dingtalk_subscription_id_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && !id.starts_with('-')
+        && id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+pub(crate) fn dingtalk_has_local_bus_conflict(status: &Value) -> bool {
+    if let Some(consumers) = status.pointer("/bus/live/consumers").and_then(Value::as_array) {
+        return !consumers.is_empty();
+    }
+    let state = status
+        .pointer("/bus/entry/state")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if state.eq_ignore_ascii_case("running") {
+        return true;
+    }
+    if !state.is_empty() {
+        // Explicit non-running states reported by DWS (e.g. "not_running", "orphan",
+        // "stopped") mean no live local bus is holding consumers, even when holder_pid
+        // still records the dead process ID.
+        return false;
+    }
+    let holder_pid = status
+        .pointer("/bus/entry/holder_pid")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    holder_pid > 0
+}
+
+fn dingtalk_subscription_is_blocking(row: &Value) -> bool {
+    if row
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("deleted"))
+    {
+        return false;
+    }
+    match row
+        .get("event_key")
+        .or_else(|| row.get("eventKey"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        Some(event_key) => {
+            DINGTALK_IM_EVENT_KEYS.contains(&event_key)
+                || event_key.starts_with("user_im_message_receive_")
+        }
+        None => true,
+    }
+}
+
+pub(crate) fn dingtalk_has_blocking_subscriptions(status: &Value) -> bool {
+    status["subscriptions"]
+        .as_array()
+        .map(|rows| rows.iter().any(dingtalk_subscription_is_blocking))
+        .unwrap_or(false)
+}
+
+pub(crate) fn dingtalk_stale_im_subscription_ids(status: &Value) -> Vec<String> {
+    let Some(rows) = status["subscriptions"].as_array() else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut ids = Vec::new();
+    for row in rows {
+        if row
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status.eq_ignore_ascii_case("deleted"))
+        {
+            continue;
+        }
+        let Some(event_key) = row
+            .get("event_key")
+            .or_else(|| row.get("eventKey"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if !DINGTALK_IM_EVENT_KEYS.contains(&event_key) {
+            continue;
+        }
+        let Some(sub_id) = row
+            .get("subscribe_id")
+            .or_else(|| row.get("subscribeId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if !dingtalk_subscription_id_safe(sub_id) || !seen.insert(sub_id.to_string()) {
+            continue;
+        }
+        ids.push(sub_id.to_string());
+        if ids.len() >= 32 {
+            break;
+        }
+    }
+    ids
+}
+
+pub(crate) async fn dingtalk_stop_subscription(
+    root: &str,
+    profile: &str,
+    subscribe_id: &str,
+) -> Result<Value, MessageError> {
+    if !dingtalk_subscription_id_safe(subscribe_id) {
+        return Err(MessageError::bad("Invalid DingTalk subscription ID"));
+    }
+    let args = vec![
+        "event".to_string(),
+        "stop".to_string(),
+        subscribe_id.to_string(),
+        "--profile".into(),
+        profile.to_string(),
+        "--yes".into(),
+        "-f".into(),
+        "json".into(),
+    ];
+    dingtalk_call_checked(root, &args).await
+}
+
 pub(crate) async fn dingtalk_status(root: &str, profile: &str) -> Result<Value, MessageError> {
     let args = vec![
         "event".to_string(),

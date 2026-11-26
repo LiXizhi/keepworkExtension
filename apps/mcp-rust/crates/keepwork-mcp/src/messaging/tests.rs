@@ -348,7 +348,6 @@ struct LifecycleFixture {
     service: Arc<MessagingService>,
 }
 
-#[cfg(unix)]
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl LifecycleFixture {
@@ -656,4 +655,173 @@ async fn start_failures_classify_occupied_and_invalid_identities_without_live_cl
         }
         assert!(f.service.lock().identities.is_empty());
     }
+}
+
+#[test]
+fn dingtalk_stale_subscription_classification_guards_local_and_non_im_entries() {
+    let stale_only = json!({
+        "bus": { "entry": { "state": "not_running", "holder_pid": 0 } },
+        "subscriptions": [
+            { "subscribe_id": "subId-group-all", "event_key": "user_im_message_receive_group_all", "status": "active" },
+            { "subscribe_id": "subId-o2o", "event_key": "user_im_message_receive_o2o_all", "status": "active" },
+            { "subscribe_id": "subId-at", "event_key": "user_im_message_receive_at", "status": "active" },
+            { "subscribe_id": "subId-cal", "event_key": "user_calendar_event_changed", "status": "active" },
+            { "subscribe_id": "subId-deleted", "event_key": "user_im_message_receive_group", "status": "deleted" },
+            { "subscribe_id": "--all", "event_key": "user_im_message_receive_at", "status": "active" }
+        ]
+    });
+    assert!(!dingtalk_has_local_bus_conflict(&stale_only));
+    assert!(dingtalk_has_blocking_subscriptions(&stale_only));
+    assert_eq!(
+        dingtalk_stale_im_subscription_ids(&stale_only),
+        vec!["subId-group-all", "subId-o2o", "subId-at"]
+    );
+
+    let calendar_only = json!({
+        "bus": { "entry": { "state": "not_running", "holder_pid": 0 } },
+        "subscriptions": [
+            { "subscribe_id": "subId-cal", "event_key": "user_calendar_event_changed", "status": "active" }
+        ]
+    });
+    assert!(!dingtalk_has_blocking_subscriptions(&calendar_only));
+    assert!(dingtalk_stale_im_subscription_ids(&calendar_only).is_empty());
+
+    let unidentified = json!({
+        "bus": { "live": { "consumers": [] } },
+        "subscriptions": [{ "subscribe_id": "subId-unknown" }]
+    });
+    assert!(!dingtalk_has_local_bus_conflict(&unidentified));
+    assert!(dingtalk_has_blocking_subscriptions(&unidentified));
+    assert!(dingtalk_stale_im_subscription_ids(&unidentified).is_empty());
+
+    let active_local = json!({
+        "bus": { "live": { "consumers": [{ "id": "other" }] } },
+        "subscriptions": []
+    });
+    assert!(dingtalk_has_local_bus_conflict(&active_local));
+
+    let running_without_live = json!({
+        "bus": { "entry": { "state": "running", "holder_pid": 1234 } },
+        "subscriptions": []
+    });
+    assert!(dingtalk_has_local_bus_conflict(&running_without_live));
+
+    let orphan_with_dead_pid = json!({
+        "bus": { "entry": { "state": "orphan", "holder_pid": 21168 } },
+        "subscriptions": [
+            { "subscribe_id": "subId-at", "event_key": "user_im_message_receive_at", "status": "active" }
+        ]
+    });
+    assert!(!dingtalk_has_local_bus_conflict(&orphan_with_dead_pid));
+    assert_eq!(
+        dingtalk_stale_im_subscription_ids(&orphan_with_dead_pid),
+        vec!["subId-at"]
+    );
+}
+
+#[tokio::test]
+async fn dingtalk_explicit_start_clears_stale_im_subscriptions_while_passive_resume_waits() {
+    let _env_lock = ENV_LOCK.lock().await;
+    struct CliOverride(Option<std::ffi::OsString>);
+    impl Drop for CliOverride {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("KEEPWORK_DWS_PATH", value),
+                None => std::env::remove_var("KEEPWORK_DWS_PATH"),
+            }
+        }
+    }
+    let _restore = CliOverride(std::env::var_os("KEEPWORK_DWS_PATH"));
+
+    let f = LifecycleFixture::new();
+    let root = f.home.join("brain");
+    let stopped_log = root.join(".stopped.log");
+    let cleared_flag = root.join(".cleared");
+
+    #[cfg(unix)]
+    let cli = {
+        use std::os::unix::fs::PermissionsExt;
+        let path = f.home.join("fake-dws-stale");
+        let script = r#"#!/bin/sh
+case "$1:$2" in
+  event:status)
+    if [ -f .cleared ]; then
+      printf '%s\n' '{"identity":{"corp_id":"corp","user_id":"user","open_dingtalk_id":"oid"},"bus":{"entry":{"state":"not_running","holder_pid":0}},"subscriptions":[{"subscribe_id":"subId-cal","event_key":"user_calendar_event_changed","status":"active"}]}'
+    else
+      printf '%s\n' '{"identity":{"corp_id":"corp","user_id":"user","open_dingtalk_id":"oid"},"bus":{"entry":{"state":"not_running","holder_pid":0}},"subscriptions":[{"subscribe_id":"subId-at","event_key":"user_im_message_receive_at","status":"active"},{"subscribe_id":"subId-o2o","event_key":"user_im_message_receive_o2o_all","status":"active"},{"subscribe_id":"subId-cal","event_key":"user_calendar_event_changed","status":"active"}]}'
+    fi
+    ;;
+  event:stop)
+    printf '%s\n' "$3" >> .stopped.log
+    if grep -q '^subId-at$' .stopped.log && grep -q '^subId-o2o$' .stopped.log; then
+      : > .cleared
+    fi
+    printf '%s\n' '{"ok":true}'
+    ;;
+  event:consume)
+    printf '%s\n' '[event] ready' >&2
+    /bin/cat >/dev/null
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"#;
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    };
+
+    #[cfg(windows)]
+    let cli = {
+        let path = f.home.join("fake-dws-stale.cmd");
+        let script = "@echo off\r\n\
+if \"%1\"==\"event\" if \"%2\"==\"status\" (\r\n\
+  if exist .cleared (\r\n\
+    echo {\"identity\":{\"corp_id\":\"corp\",\"user_id\":\"user\",\"open_dingtalk_id\":\"oid\"},\"bus\":{\"entry\":{\"state\":\"not_running\",\"holder_pid\":0}},\"subscriptions\":[{\"subscribe_id\":\"subId-cal\",\"event_key\":\"user_calendar_event_changed\",\"status\":\"active\"}]}\r\n\
+  ) else (\r\n\
+    echo {\"identity\":{\"corp_id\":\"corp\",\"user_id\":\"user\",\"open_dingtalk_id\":\"oid\"},\"bus\":{\"entry\":{\"state\":\"not_running\",\"holder_pid\":0}},\"subscriptions\":[{\"subscribe_id\":\"subId-at\",\"event_key\":\"user_im_message_receive_at\",\"status\":\"active\"},{\"subscribe_id\":\"subId-o2o\",\"event_key\":\"user_im_message_receive_o2o_all\",\"status\":\"active\"},{\"subscribe_id\":\"subId-cal\",\"event_key\":\"user_calendar_event_changed\",\"status\":\"active\"}]}\r\n\
+  )\r\n\
+  exit /b 0\r\n\
+)\r\n\
+if \"%1\"==\"event\" if \"%2\"==\"stop\" (\r\n\
+  echo %3>> .stopped.log\r\n\
+  findstr /x \"subId-at\" .stopped.log >nul && findstr /x \"subId-o2o\" .stopped.log >nul && type nul > .cleared\r\n\
+  echo {\"ok\":true}\r\n\
+  exit /b 0\r\n\
+)\r\n\
+if \"%1\"==\"event\" if \"%2\"==\"consume\" (\r\n\
+  >&2 echo [event] ready\r\n\
+  more >nul\r\n\
+  exit /b 0\r\n\
+)\r\n\
+exit /b 1\r\n";
+        std::fs::write(&path, script).unwrap();
+        path
+    };
+
+    std::env::set_var("KEEPWORK_DWS_PATH", &cli);
+    {
+        let mut inner = f.service.lock();
+        inner.identities.clear();
+        let run = inner.runs.get_mut("binding").unwrap();
+        run.status = "stopped".into();
+        run.identity.clear();
+        run.owns_identity = false;
+        run.binding.enabled = true;
+    }
+
+    // Passive resume must not delete remote subscriptions.
+    f.service.resume().await;
+    assert!(!stopped_log.exists(), "passive resume must not call event stop");
+    assert_eq!(f.service.view("binding").unwrap()["status"], "reconnecting");
+
+    // Explicit connect clears stale IM subscriptions and enters listening.
+    f.service.start("binding").await.unwrap();
+    assert!(cleared_flag.exists());
+    let stopped = std::fs::read_to_string(&stopped_log).unwrap();
+    let stopped_ids: Vec<&str> = stopped.lines().map(str::trim).collect();
+    assert_eq!(stopped_ids, vec!["subId-at", "subId-o2o"]);
+    assert_eq!(f.service.view("binding").unwrap()["status"], "listening");
+    f.service.close().await;
 }
