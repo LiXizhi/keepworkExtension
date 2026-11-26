@@ -77,6 +77,13 @@ pub(super) fn dismiss_main_window(app: &AppHandle, core: &Arc<AppCore>, action: 
             DismissAction::Minimize => return, // Already minimized by the OS.
             DismissAction::RemoteHome => {
                 if let Some(main) = app.get_webview_window("main") {
+                    #[cfg(target_os = "macos")]
+                    if main
+                        .ns_window()
+                        .is_ok_and(|window| unsafe { keepwork_begin_remote_main_minimize(window) })
+                    {
+                        return;
+                    }
                     let _ = main.minimize();
                 }
                 return;
@@ -102,6 +109,18 @@ pub(super) fn toggle_remote_home(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     if super::pet_home_overlay::handle_home(app, &core, &main) {
         return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // AppKit's flags can lag a remote minimize. If a separate close made
+        // the window hidden in the meantime, Home starts a new foreground intent.
+        let foreground = core.page_connection.lock().unwrap().wants_foreground();
+        if queue_restore_after_remote_minimize(&main, foreground) {
+            if !foreground {
+                show_main_window(app, &core);
+            }
+            return;
+        }
     }
     if main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false) {
         dismiss_main_window(app, &core, DismissAction::RemoteHome);
@@ -144,6 +163,21 @@ fn observe_main_focus(main: &WebviewWindow) {
 }
 
 #[cfg(target_os = "macos")]
+extern "C" {
+    fn keepwork_begin_remote_main_minimize(window: *mut std::ffi::c_void) -> bool;
+    fn keepwork_queue_restore_after_remote_minimize(
+        window: *mut std::ffi::c_void,
+        toggle: bool,
+    ) -> bool;
+}
+
+#[cfg(target_os = "macos")]
+fn queue_restore_after_remote_minimize(main: &WebviewWindow, toggle: bool) -> bool {
+    main.ns_window()
+        .is_ok_and(|window| unsafe { keepwork_queue_restore_after_remote_minimize(window, toggle) })
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn observe_main_minimize(main: &WebviewWindow) -> Result<(), String> {
     use std::ffi::c_void;
 
@@ -151,13 +185,22 @@ pub(super) fn observe_main_minimize(main: &WebviewWindow) -> Result<(), String> 
         fn keepwork_observe_main_minimize(
             window: *mut c_void,
             context: *mut c_void,
-            notify: extern "C" fn(*mut c_void),
+            notify: extern "C" fn(*mut c_void, bool),
             release: extern "C" fn(*mut c_void),
         );
     }
-    extern "C" fn notify(context: *mut c_void) {
+    extern "C" fn notify(context: *mut c_void, restore: bool) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            main_did_minimize(&*context.cast::<AppHandle>());
+            let app = &*context.cast::<AppHandle>();
+            let core = app.state::<Arc<AppCore>>();
+            if restore
+                && !core.quitting.load(Ordering::Relaxed)
+                && core.page_connection.lock().unwrap().wants_foreground()
+            {
+                show_main_window(app, &core);
+            } else {
+                main_did_minimize(app);
+            }
         }));
     }
     extern "C" fn release(context: *mut c_void) {
@@ -242,6 +285,16 @@ pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
                 connection.snapshot("").phase == Phase::Unavailable,
             )
         };
+        let main = handle.get_webview_window("main");
+        #[cfg(target_os = "macos")]
+        if foreground
+            && focus
+            && main
+                .as_ref()
+                .is_some_and(|window| queue_restore_after_remote_minimize(window, false))
+        {
+            return;
+        }
         if foreground {
             if let Some(pet) = handle.get_webview_window("pet")
                 .filter(|pet| pet.is_visible().unwrap_or(true))
@@ -252,7 +305,6 @@ pub(super) fn sync_window_presentation(app: &AppHandle, focus: bool) {
                 }
             }
         }
-        let main = handle.get_webview_window("main");
         match presentation {
             Presentation::Hidden => {
                 // Normal initialization stays off screen. Preserve the user's

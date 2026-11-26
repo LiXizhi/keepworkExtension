@@ -947,9 +947,8 @@ impl MessagingService {
             }
         }
         self.persist_all_snapshot();
-        let result = self
-            .start_run(id, generation, clear_stale_subscriptions)
-            .await;
+        // Keep the provider startup future out of the HTTP handler's poll frame.
+        let result = Box::pin(self.start_run(id, generation, clear_stale_subscriptions)).await;
         let mut inner = self.lock();
         if let Some(run) = inner.runs.get_mut(id) {
             if run.generation != generation {
