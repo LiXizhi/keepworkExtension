@@ -357,7 +357,10 @@ fn dingtalk_subscription_id_safe(id: &str) -> bool {
 }
 
 pub(crate) fn dingtalk_has_local_bus_conflict(status: &Value) -> bool {
-    if let Some(consumers) = status.pointer("/bus/live/consumers").and_then(Value::as_array) {
+    if let Some(consumers) = status
+        .pointer("/bus/live/consumers")
+        .and_then(Value::as_array)
+    {
         return !consumers.is_empty();
     }
     let state = status

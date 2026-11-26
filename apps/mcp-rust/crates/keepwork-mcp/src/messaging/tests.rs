@@ -813,7 +813,10 @@ exit /b 1\r\n";
 
     // Passive resume must not delete remote subscriptions.
     f.service.resume().await;
-    assert!(!stopped_log.exists(), "passive resume must not call event stop");
+    assert!(
+        !stopped_log.exists(),
+        "passive resume must not call event stop"
+    );
     assert_eq!(f.service.view("binding").unwrap()["status"], "reconnecting");
 
     // Explicit connect clears stale IM subscriptions and enters listening.

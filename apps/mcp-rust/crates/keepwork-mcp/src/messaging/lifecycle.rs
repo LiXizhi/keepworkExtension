@@ -1155,9 +1155,10 @@ impl MessagingService {
                 {
                     let inner = self.lock();
                     if inner.closed
-                        || inner.runs.get(&binding_id).is_none_or(|run| {
-                            !run.binding.enabled || run.generation != generation
-                        })
+                        || inner
+                            .runs
+                            .get(&binding_id)
+                            .is_none_or(|run| !run.binding.enabled || run.generation != generation)
                     {
                         return Ok(());
                     }
@@ -1412,9 +1413,7 @@ pub(crate) async fn reconnect_task(service: Arc<MessagingService>, id: String, g
             return;
         }
     }
-    let _ = service
-        .start_generation(&id, Some(generation), false)
-        .await;
+    let _ = service.start_generation(&id, Some(generation), false).await;
 }
 
 pub(crate) fn channel_conflict(channel: &str, occupied: &str, root: String) -> Value {
