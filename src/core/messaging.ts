@@ -974,36 +974,66 @@ export class MessagingService {
                 r.status='listening';r.retries=0;this.persist(r);return;
             }
             // Empty selection exposes no brain files; message-only replies remain usable.
-            let status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
-            let identity = status.identity;
-            if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
-            if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
-            if (dingtalkHasLocalBusConflict(status)) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
-            if (clearStaleSubscriptions && dingtalkHasBlockingSubscriptions(status)) {
-                const staleIds = dingtalkStaleImSubscriptionIds(status);
-                if (staleIds.length) {
-                    for (const subId of staleIds) {
-                        if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
-                        try {
-                            await dws(['event','stop',subId,'--profile',r.binding.profile,'--yes','-f','json'], r.binding.root);
-                        } catch (error) {
-                            if (messagingNeedsRepair(error) || messagingNeedsLogin(error)) throw error;
-                        }
-                    }
+            const maxConnectAttempts = clearStaleSubscriptions ? 3 : 1;
+            const settleDelaysMs = [0, 600, 1000];
+            for (let attempt = 0; ; attempt++) {
+                if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
+                let status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
+                let identity = status.identity;
+                if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
+                if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
+                if (attempt > 0 && dingtalkHasLocalBusConflict(status)) {
+                    await new Promise(resolve => setTimeout(resolve, 800));
                     if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
                     status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
                     identity = status.identity;
                     if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
                     if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
                 }
+                if (dingtalkHasLocalBusConflict(status)) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
+                if (clearStaleSubscriptions && dingtalkHasBlockingSubscriptions(status)) {
+                    for (let pass = 0; pass < settleDelaysMs.length; pass++) {
+                        const staleIds = dingtalkStaleImSubscriptionIds(status);
+                        if (!staleIds.length) break;
+                        for (const subId of staleIds) {
+                            if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
+                            try {
+                                await dws(['event','stop',subId,'--profile',r.binding.profile,'--yes','-f','json'], r.binding.root);
+                            } catch (error) {
+                                if (messagingNeedsRepair(error) || messagingNeedsLogin(error)) throw error;
+                            }
+                        }
+                        if (settleDelaysMs[pass] > 0) await new Promise(resolve => setTimeout(resolve, settleDelaysMs[pass]));
+                        if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
+                        status = await dws(['event','status','--profile',r.binding.profile,'-f','json'], r.binding.root);
+                        identity = status.identity;
+                        if (!identity?.corp_id || !identity?.user_id) throw new Error('DingTalk login required');
+                        if (`${identity.corp_id}:${identity.user_id}` !== r.binding.profile) throw new Error('DWS identity does not match configured profile');
+                        if (dingtalkHasLocalBusConflict(status) || !dingtalkHasBlockingSubscriptions(status)) break;
+                    }
+                }
+                if (dingtalkHasLocalBusConflict(status) || dingtalkHasBlockingSubscriptions(status)) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
+                r.identity = r.binding.profile; r.self = identity.open_dingtalk_id || '';
+                if (this.identities.has(r.identity)) throw new Error('This account already has a listener');
+                this.identities.add(r.identity); r.ownsIdentity = true;
+                if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
+                r.since = Date.now(); r.subscriptions = this.subscriptionKey(r,config);
+                try {
+                    r.stop = await listenDws(r.binding.root, r.binding.profile, this.subscriptionConfig(r,config), e => this.receive(r,e), () => this.disconnected(r));
+                    break;
+                } catch (error) {
+                    this.releaseIdentity(r);
+                    const message = error instanceof Error ? error.message : String(error || '');
+                    const retryable = clearStaleSubscriptions
+                        && attempt + 1 < maxConnectAttempts
+                        && this.canRun(r) && !this.closed
+                        && message !== 'Start cancelled'
+                        && !messagingNeedsRepair(error)
+                        && !messagingNeedsLogin(error);
+                    if (!retryable) throw error;
+                    await new Promise(resolve => setTimeout(resolve, 800 * (attempt + 1)));
+                }
             }
-            if (dingtalkHasLocalBusConflict(status) || dingtalkHasBlockingSubscriptions(status)) throw new Error('已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅');
-            r.identity = r.binding.profile; r.self = identity.open_dingtalk_id || '';
-            if (this.identities.has(r.identity)) throw new Error('This account already has a listener');
-            this.identities.add(r.identity); r.ownsIdentity = true;
-            if (!this.canRun(r) || this.closed) throw new Error('Start cancelled');
-            r.since = Date.now(); r.subscriptions = this.subscriptionKey(r,config);
-            r.stop = await listenDws(r.binding.root, r.binding.profile, this.subscriptionConfig(r,config), e => this.receive(r,e), () => this.disconnected(r));
             if (!this.canRun(r) || this.closed) { r.stop(); r.stop = undefined; this.releaseIdentity(r); r.status = 'stopped'; return; }
             r.status = 'listening'; r.retries = 0; this.startHistorySync(r); this.persist(r);
         } catch(error) {

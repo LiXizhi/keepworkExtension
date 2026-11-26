@@ -161,12 +161,14 @@ Transport failures and occupied listeners retain the enabled flag and retry ever
 Startup still attempts connection immediately. DingTalk checks status before starting a consumer:
 existing live local consumers (`bus.live.consumers`, or a running local bus with unknown live state)
 are always left untouched until the account is free, and passive background resume/reconnect never
-deletes remote subscriptions. When the user explicitly connects or starts DingTalk and no local
-consumer is running, MCP automatically clears stale remote IM subscriptions (`user_im_message_receive_*`
-with a valid `subscribe_id`) via `dws event stop <subscribe_id> --profile <profile> --yes -f json`,
-re-verifies `dws event status`, and then starts the listener; non-IM subscriptions and unidentified
-entries are never deleted. Invalid credentials, missing CLI and invalid local rules need repair;
-automatic recovery does not launch an authorization flow.
+deletes remote subscriptions. When the user explicitly connects or starts DingTalk and no live local
+consumer is running (including `not_running` or `orphan` local bus states), MCP automatically clears
+stale remote IM subscriptions (`user_im_message_receive_*` with a valid `subscribe_id`) via
+`dws event stop <subscribe_id> --profile <profile> --yes -f json` across up to three convergence
+passes, re-verifies `dws event status`, and retries transient listener startup failures up to two
+additional times inside the same connect request; non-IM subscriptions and unidentified entries are
+never deleted. Invalid credentials, missing CLI and invalid local rules need repair; automatic
+recovery does not launch an authorization flow.
 
 This is not a distributed lock. The in-memory identity guard and message deduplication are
 local to one daemon. DWS reports remote subscriptions as well as local consumers, but the

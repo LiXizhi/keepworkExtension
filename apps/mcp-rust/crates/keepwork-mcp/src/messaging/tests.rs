@@ -828,3 +828,119 @@ exit /b 1\r\n";
     assert_eq!(f.service.view("binding").unwrap()["status"], "listening");
     f.service.close().await;
 }
+
+#[tokio::test]
+async fn dingtalk_explicit_start_converges_after_transient_stop_and_listener_failures() {
+    let _env_lock = ENV_LOCK.lock().await;
+    struct CliOverride(Option<std::ffi::OsString>);
+    impl Drop for CliOverride {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("KEEPWORK_DWS_PATH", value),
+                None => std::env::remove_var("KEEPWORK_DWS_PATH"),
+            }
+        }
+    }
+    let _restore = CliOverride(std::env::var_os("KEEPWORK_DWS_PATH"));
+
+    let f = LifecycleFixture::new();
+    let root = f.home.join("brain");
+
+    #[cfg(unix)]
+    let cli = {
+        use std::os::unix::fs::PermissionsExt;
+        let path = f.home.join("fake-dws-converge");
+        let script = r#"#!/bin/sh
+case "$1:$2" in
+  event:status)
+    if [ -f .sub-cleared ]; then
+      printf '%s\n' '{"identity":{"corp_id":"corp","user_id":"user","open_dingtalk_id":"oid"},"bus":{"entry":{"state":"orphan","holder_pid":21168}},"subscriptions":[]}'
+    else
+      printf '%s\n' '{"identity":{"corp_id":"corp","user_id":"user","open_dingtalk_id":"oid"},"bus":{"entry":{"state":"orphan","holder_pid":21168}},"subscriptions":[{"subscribe_id":"subId-at","event_key":"user_im_message_receive_at","status":"active"}]}'
+    fi
+    ;;
+  event:stop)
+    if [ ! -f .stop-failed-once ]; then
+      : > .stop-failed-once
+      printf '%s\n' 'temporary api hiccup' >&2
+      exit 1
+    fi
+    : > .sub-cleared
+    printf '%s\n' '{"ok":true}'
+    ;;
+  event:consume)
+    if [ ! -f .consume-failed-once ]; then
+      : > .consume-failed-once
+      rm -f .sub-cleared
+      printf '%s\n' 'transient bus handshake EOF' >&2
+      exit 1
+    fi
+    printf '%s\n' '[event] ready' >&2
+    /bin/cat >/dev/null
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"#;
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    };
+
+    #[cfg(windows)]
+    let cli = {
+        let path = f.home.join("fake-dws-converge.cmd");
+        let script = "@echo off\r\n\
+if \"%1\"==\"event\" if \"%2\"==\"status\" (\r\n\
+  if exist .sub-cleared (\r\n\
+    echo {\"identity\":{\"corp_id\":\"corp\",\"user_id\":\"user\",\"open_dingtalk_id\":\"oid\"},\"bus\":{\"entry\":{\"state\":\"orphan\",\"holder_pid\":21168}},\"subscriptions\":[]}\r\n\
+  ) else (\r\n\
+    echo {\"identity\":{\"corp_id\":\"corp\",\"user_id\":\"user\",\"open_dingtalk_id\":\"oid\"},\"bus\":{\"entry\":{\"state\":\"orphan\",\"holder_pid\":21168}},\"subscriptions\":[{\"subscribe_id\":\"subId-at\",\"event_key\":\"user_im_message_receive_at\",\"status\":\"active\"}]}\r\n\
+  )\r\n\
+  exit /b 0\r\n\
+)\r\n\
+if \"%1\"==\"event\" if \"%2\"==\"stop\" (\r\n\
+  if not exist .stop-failed-once (\r\n\
+    type nul > .stop-failed-once\r\n\
+    >&2 echo temporary api hiccup\r\n\
+    exit /b 1\r\n\
+  )\r\n\
+  type nul > .sub-cleared\r\n\
+  echo {\"ok\":true}\r\n\
+  exit /b 0\r\n\
+)\r\n\
+if \"%1\"==\"event\" if \"%2\"==\"consume\" (\r\n\
+  if not exist .consume-failed-once (\r\n\
+    type nul > .consume-failed-once\r\n\
+    del /q .sub-cleared 2>nul\r\n\
+    >&2 echo transient bus handshake EOF\r\n\
+    exit /b 1\r\n\
+  )\r\n\
+  >&2 echo [event] ready\r\n\
+  more >nul\r\n\
+  exit /b 0\r\n\
+)\r\n\
+exit /b 1\r\n";
+        std::fs::write(&path, script).unwrap();
+        path
+    };
+
+    std::env::set_var("KEEPWORK_DWS_PATH", &cli);
+    {
+        let mut inner = f.service.lock();
+        inner.identities.clear();
+        let run = inner.runs.get_mut("binding").unwrap();
+        run.status = "stopped".into();
+        run.identity.clear();
+        run.owns_identity = false;
+        run.binding.enabled = true;
+    }
+
+    f.service.start("binding").await.unwrap();
+    assert!(root.join(".stop-failed-once").exists());
+    assert!(root.join(".consume-failed-once").exists());
+    assert!(root.join(".sub-cleared").exists());
+    assert_eq!(f.service.view("binding").unwrap()["status"], "listening");
+    f.service.close().await;
+}

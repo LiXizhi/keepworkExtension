@@ -1705,3 +1705,59 @@ test('explicit DingTalk connect clears stale remote IM subscriptions when no loc
     await assert.rejects(service.start(binding.id), /已有个人消息桥/);
     assert.equal(stopped.length, 3);
 });
+
+test('explicit DingTalk connect converges across partial stop failure and transient listener startup failure in one click', async t => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'keepwork-messaging-converge-')));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const root = path.join(dir, 'brain');
+    fs.mkdirSync(path.join(root, 'public'), { recursive: true });
+    let subscriptions = [
+        { subscribe_id: 'subId-1', event_key: 'user_im_message_receive_at', status: 'active' },
+        { subscribe_id: 'subId-2', event_key: 'user_im_message_receive_o2o_all', status: 'active' },
+    ];
+    let stopCalls = 0, listenAttempts = 0;
+    const serviceModule = load('messaging', {
+        './messagingFeishu': { feishuContext: load('messagingFeishu').feishuContext, feishuConversation: async () => [], feishuIdentity: async () => ({ id: 'corp:user', self: 'owner' }), pollFeishu: async () => () => {}, FeishuDelivery: class {} },
+        './aichatPresence': { latestAichatClient: () => null, latestAichatBrainRoot: () => root },
+        './messagingDingtalk': {
+            dingtalkConversation: async () => [],
+            loginDws: async () => {},
+            dws: async args => {
+                if (args[0] === 'event' && args[1] === 'status') {
+                    return {
+                        identity: { corp_id: 'corp', user_id: 'user', open_dingtalk_id: 'owner' },
+                        bus: { entry: { state: 'orphan', holder_pid: 9999 } },
+                        subscriptions: structuredClone(subscriptions),
+                    };
+                }
+                if (args[0] === 'event' && args[1] === 'stop') {
+                    stopCalls++;
+                    // Simulate transient stop failure on the second subscription in pass 1.
+                    if (stopCalls === 2) throw new Error('temporary dingtalk api timeout');
+                    subscriptions = subscriptions.filter(s => s.subscribe_id !== args[2]);
+                    return { ok: true };
+                }
+                return { success: true, result: { conversationMessagesList: [], hasMore: false } };
+            },
+            listenDws: async () => {
+                listenAttempts++;
+                if (listenAttempts === 1) {
+                    // Simulate a transient bus handshake exit that leaves a leaked subscription behind.
+                    subscriptions = [{ subscribe_id: 'subId-leaked', event_key: 'user_im_message_receive_at', status: 'active' }];
+                    throw new Error('DWS listener exited before ready');
+                }
+                return () => {};
+            },
+            DingTalkDelivery: class {},
+        },
+        './messagingExecutor': { BeforeSubmission: class extends Error {}, messagingExecutorChoice: () => ({ backend: 'copilot', model: '' }), restrictedCliAnswer: async () => '', MessagingWorkers: class { close() {} } },
+    });
+    const service = new serviceModule.MessagingService(path.join(dir, 'state'), 8089);
+    t.after(() => service.close());
+    const binding = service.configure({ channel: 'dingtalk', root, profile: 'corp:user', config: policy.defaultMessageConfig(), prompt: policy.DEFAULT_PROMPT });
+
+    await service.start(binding.id);
+    assert.equal(service.view(binding.id).status, 'listening');
+    assert.equal(listenAttempts, 2);
+    assert.equal(subscriptions.length, 0);
+});

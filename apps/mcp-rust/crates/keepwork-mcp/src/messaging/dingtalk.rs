@@ -184,7 +184,7 @@ async fn close_listener_child(child: &mut Child) {
     // Give DWS time to unregister its consumers and cancel its own subscriptions.
     // Only this Child handle may be force-reaped if graceful exit is unresponsive.
     if !matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await,
+        tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await,
         Ok(Ok(_))
     ) {
         let _ = child.start_kill();
@@ -906,9 +906,24 @@ pub(crate) async fn dingtalk_profiles(root: &str) -> Result<Value, MessageError>
         "-f".into(),
         "json".into(),
     ];
-    let result = dws_call(&args, root)
-        .await
-        .map_err(|error| MessageError::bad(error.message))?;
+    let mut attempt = 0u32;
+    let result = loop {
+        match dws_call(&args, root).await {
+            Ok(value) => break value,
+            Err(error) => {
+                let message_error = MessageError::bad(error.message);
+                if needs_repair_text(&message_error.message)
+                    || MessageError::needs_login(&message_error)
+                    || attempt >= 2
+                {
+                    return Err(message_error);
+                }
+                let delay_ms = 1000u64 << attempt;
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    };
     let mut found: Vec<Value> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let current = result["currentProfile"].as_str().unwrap_or("").to_string();

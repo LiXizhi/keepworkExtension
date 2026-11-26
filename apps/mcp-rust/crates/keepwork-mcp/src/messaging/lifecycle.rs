@@ -1115,52 +1115,42 @@ impl MessagingService {
             return Ok(());
         }
 
-        // DingTalk: verify identity, clean stale remote IM subscriptions on explicit
-        // connect when no local consumer is running, then spawn the ndjson listener farm.
-        let mut status = dingtalk_status(&binding.root, &binding.profile).await?;
-        if !dingtalk_identity_matches(&status, &binding.profile) {
-            let _ = &status;
-            return Err(MessageError::bad(
-                "DWS identity does not match configured profile",
-            ));
-        }
-        if dingtalk_has_local_bus_conflict(&status) {
-            return Err(MessageError::bad(
-                "已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅",
-            ));
-        }
-        if clear_stale_subscriptions && dingtalk_has_blocking_subscriptions(&status) {
-            let stale_ids = dingtalk_stale_im_subscription_ids(&status);
-            if !stale_ids.is_empty() {
-                for sub_id in &stale_ids {
-                    {
-                        let inner = self.lock();
-                        if inner.closed
-                            || inner.runs.get(&binding_id).is_none_or(|run| {
-                                !run.binding.enabled || run.generation != generation
-                            })
-                        {
-                            return Ok(());
-                        }
-                    }
-                    if let Err(error) =
-                        dingtalk_stop_subscription(&binding.root, &binding.profile, sub_id).await
-                    {
-                        if needs_repair_text(&error.message) || MessageError::needs_login(&error) {
-                            return Err(error);
-                        }
-                    }
-                }
-                {
-                    let inner = self.lock();
-                    if inner.closed
-                        || inner
-                            .runs
-                            .get(&binding_id)
-                            .is_none_or(|run| !run.binding.enabled || run.generation != generation)
-                    {
-                        return Ok(());
-                    }
+        // DingTalk: verify identity, converge stale remote IM subscription cleanup
+        // on explicit connect when no local consumer is running, then spawn the
+        // ndjson listener farm (with bounded in-request retries for transient
+        // listener startup blips on explicit connect).
+        let is_cancelled = || {
+            let inner = self.lock();
+            inner.closed
+                || inner
+                    .runs
+                    .get(&binding_id)
+                    .is_none_or(|run| !run.binding.enabled || run.generation != generation)
+        };
+        let max_connect_attempts: usize = if clear_stale_subscriptions { 3 } else { 1 };
+        let config = rules
+            .as_ref()
+            .map(|(config, _prompt)| config.clone())
+            .unwrap_or_default();
+        let program = resolve_dws().map_err(|error| MessageError::bad(error.message.clone()))?;
+        let sets = listener_args(&config, all_groups);
+        let mut connect_attempt = 0usize;
+        let (children, stop_tx, done_tx) = loop {
+            if is_cancelled() {
+                return Ok(());
+            }
+            let mut status = dingtalk_status(&binding.root, &binding.profile).await?;
+            if !dingtalk_identity_matches(&status, &binding.profile) {
+                return Err(MessageError::bad(
+                    "DWS identity does not match configured profile",
+                ));
+            }
+            // After reaping our own partially-failed child on a prior attempt,
+            // give the local DWS bus one brief settle window to clear that pipe.
+            if connect_attempt > 0 && dingtalk_has_local_bus_conflict(&status) {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                if is_cancelled() {
+                    return Ok(());
                 }
                 status = dingtalk_status(&binding.root, &binding.profile).await?;
                 if !dingtalk_identity_matches(&status, &binding.profile) {
@@ -1169,69 +1159,139 @@ impl MessagingService {
                     ));
                 }
             }
-        }
-        if dingtalk_has_local_bus_conflict(&status) || dingtalk_has_blocking_subscriptions(&status)
-        {
-            return Err(MessageError::bad(
-                "已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅",
-            ));
-        }
-        let identity = status["identity"].clone();
-        let open_id = identity["open_dingtalk_id"]
-            .as_str()
-            .or(identity["openDingTalkId"].as_str())
-            .unwrap_or("");
-        {
-            let mut guard = self.lock();
-            let inner: &mut Inner = &mut guard;
-            let run = inner.runs.get(&binding_id).unwrap();
-            if !run.binding.enabled || inner.closed || run.generation != generation {
-                return Ok(());
+            if dingtalk_has_local_bus_conflict(&status) {
+                return Err(MessageError::bad(
+                    "已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅",
+                ));
             }
-            if inner.identities.contains(&binding.profile) {
-                return Err(MessageError::bad("This account already has a listener"));
+            if clear_stale_subscriptions && dingtalk_has_blocking_subscriptions(&status) {
+                const SETTLE_DELAYS_MS: [u64; 3] = [0, 600, 1000];
+                for delay_ms in SETTLE_DELAYS_MS {
+                    let stale_ids = dingtalk_stale_im_subscription_ids(&status);
+                    if stale_ids.is_empty() {
+                        break;
+                    }
+                    for sub_id in &stale_ids {
+                        if is_cancelled() {
+                            return Ok(());
+                        }
+                        if let Err(error) =
+                            dingtalk_stop_subscription(&binding.root, &binding.profile, sub_id)
+                                .await
+                        {
+                            if needs_repair_text(&error.message)
+                                || MessageError::needs_login(&error)
+                            {
+                                return Err(error);
+                            }
+                        }
+                    }
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    if is_cancelled() {
+                        return Ok(());
+                    }
+                    status = dingtalk_status(&binding.root, &binding.profile).await?;
+                    if !dingtalk_identity_matches(&status, &binding.profile) {
+                        return Err(MessageError::bad(
+                            "DWS identity does not match configured profile",
+                        ));
+                    }
+                    if dingtalk_has_local_bus_conflict(&status)
+                        || !dingtalk_has_blocking_subscriptions(&status)
+                    {
+                        break;
+                    }
+                }
             }
-            let run = inner.runs.get_mut(&binding_id).unwrap();
-            inner.identities.insert(binding.profile.clone());
-            run.owns_identity = true;
-            run.identity = binding.profile.clone();
-            run.self_id = open_id.to_string();
-            run.since = now_ms();
-            if let Some(rules) = &rules {
-                run.subscriptions = subscription_key(&rules.0, all_groups);
+            if dingtalk_has_local_bus_conflict(&status)
+                || dingtalk_has_blocking_subscriptions(&status)
+            {
+                return Err(MessageError::bad(
+                    "已有个人消息桥正在监听此身份，或存在个人事件订阅；等待占用释放后自动连接，不会抢占或删除订阅",
+                ));
             }
-            run.status = "connecting".into();
-        }
-        let config = rules.map(|(config, _prompt)| config).unwrap_or_default();
-        let program = resolve_dws().map_err(|error| MessageError::bad(error.message.clone()))?;
-        let sets = listener_args(&config, all_groups);
-        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
-        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
-        {
-            let mut inner = self.lock();
-            if inner.closed {
-                return Ok(());
+            let identity = status["identity"].clone();
+            let open_id = identity["open_dingtalk_id"]
+                .as_str()
+                .or(identity["openDingTalkId"].as_str())
+                .unwrap_or("");
+            {
+                let mut guard = self.lock();
+                let inner: &mut Inner = &mut guard;
+                let run = inner.runs.get(&binding_id).unwrap();
+                if !run.binding.enabled || inner.closed || run.generation != generation {
+                    return Ok(());
+                }
+                if inner.identities.contains(&binding.profile) {
+                    return Err(MessageError::bad("This account already has a listener"));
+                }
+                let run = inner.runs.get_mut(&binding_id).unwrap();
+                inner.identities.insert(binding.profile.clone());
+                run.owns_identity = true;
+                run.identity = binding.profile.clone();
+                run.self_id = open_id.to_string();
+                run.since = now_ms();
+                if let Some(rules) = &rules {
+                    run.subscriptions = subscription_key(&rules.0, all_groups);
+                }
+                run.status = "connecting".into();
             }
-            let run = inner.runs.get_mut(id).unwrap();
-            if run.generation != generation || !run.binding.enabled {
-                return Ok(());
+            let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+            let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+            {
+                let mut inner = self.lock();
+                if inner.closed {
+                    return Ok(());
+                }
+                let run = inner.runs.get_mut(id).unwrap();
+                if run.generation != generation || !run.binding.enabled {
+                    return Ok(());
+                }
+                run.stop = Some(stop_tx.clone());
+                run.listener_done = Some(done_rx);
             }
-            run.stop = Some(stop_tx.clone());
-            run.listener_done = Some(done_rx);
-        }
-        let children = match start_listener_children(
-            &program,
-            &sets,
-            &binding.profile,
-            &binding.root,
-            &mut stop_rx,
-        )
-        .await
-        {
-            Ok(children) => children,
-            Err(error) => {
-                let _ = done_tx.send(true);
-                return Err(error);
+            match start_listener_children(
+                &program,
+                &sets,
+                &binding.profile,
+                &binding.root,
+                &mut stop_rx,
+            )
+            .await
+            {
+                Ok(children) => break (children, stop_tx, done_tx),
+                Err(error) => {
+                    let _ = done_tx.send(true);
+                    let retryable = clear_stale_subscriptions
+                        && connect_attempt + 1 < max_connect_attempts
+                        && !is_cancelled()
+                        && error.message != "Start cancelled"
+                        && !needs_repair_text(&error.message)
+                        && !MessageError::needs_login(&error);
+                    if !retryable {
+                        return Err(error);
+                    }
+                    {
+                        let mut guard = self.lock();
+                        let inner: &mut Inner = &mut guard;
+                        if let Some(run) = inner.runs.get_mut(&binding_id) {
+                            if run.generation == generation && run.owns_identity {
+                                let owned = std::mem::take(&mut run.identity);
+                                run.owns_identity = false;
+                                run.stop = None;
+                                run.listener_done = None;
+                                inner.identities.remove(&owned);
+                            }
+                        }
+                    }
+                    connect_attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        800 * connect_attempt as u64,
+                    ))
+                    .await;
+                }
             }
         };
         {
