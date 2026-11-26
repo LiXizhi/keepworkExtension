@@ -37,7 +37,18 @@ void keepwork_run_window_action(void *context, KeepworkMinimizeCallback action) 
     self.remoteMinimizeRequest = request;
     self.animationStarted = NO;
     self.restoreAfterMinimize = NO;
-    [window miniaturize:window];
+    // Two Home presses in the current UI turn can cancel before AppKit starts
+    // an animation. A press during a native animation waits for its completion.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.remoteMinimizeRequest != request || self.animationStarted) return;
+        if (self.restoreAfterMinimize) {
+            self.remoteMinimizeRequest = nil;
+            self.restoreAfterMinimize = NO;
+            self.notify(self.context, true);
+            return;
+        }
+        [window miniaturize:window];
+    });
     // AppKit can decline a minimize request. Expire only requests for which
     // AppKit never began the animation, so the next Home can try again.
     __weak KeepworkMinimizeObserver *weakObserver = self;
