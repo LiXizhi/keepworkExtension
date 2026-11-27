@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { configValue, confined, defaultMessageConfig, DEFAULT_PROMPT, digestMessage, incoming, Incoming, knowledgeContext, knowledgeDirectory, MessageConfig, readRules, RULE_DIR, trigger, conversationContext, automatedText } from './messagingPolicy';
 import { FeishuDelivery, feishuIdentity, pollFeishu, feishuConversation, feishuGroups, feishuNickname, setFeishuNickname, feishuGroupName, feishuSenderName } from './messagingFeishu';
-import { DingTalkDelivery, DwsError, dws, listenDws, loginDws, dingtalkConversation, dingtalkNickname, setDingtalkNickname, dingtalkGroupName, dingtalkSenderName } from './messagingDingtalk';
+import { DingTalkDelivery, DwsError, dws, listenDws, loginDws, dingtalkConversation, dingtalkNickname, setDingtalkNickname, dingtalkGroupName, dingtalkSenderName, parseDingTalkContacts, deliverDingTalkContact } from './messagingDingtalk';
 import { replyImageCapability, ReplyImageMetadata, parseReplyImage, stageReplyImage, saveReplyImageLedger, imageSendReceipt, imageReceiptIds, coalesceImageEchoes } from './messagingImage';
 import { AnswerInput, BeforeSubmission, messagingExecutorChoice, restrictedCliAnswer, MessagingWorkers } from './messagingExecutor';
 import { MessagingNicknames, NicknameTarget, nicknameKey } from './messagingNicknames';
@@ -442,6 +442,22 @@ export class MessagingService {
         this.assertAgentBinding(owner,agentId,binding);
         const b=this.get(binding).binding;
         return b.channel==='feishu' ? feishuGroups(b.root,b.profile,query) : this.groups(b.root,b.profile,query);
+    }
+    async searchDingTalkContacts(owner:string, agentId:string, binding:string, query:string) {
+        this.assertAgentBinding(owner,agentId,binding);
+        const b=this.get(binding).binding;
+        if ((b.channel || 'dingtalk') !== 'dingtalk') throw Object.assign(Error('当前渠道不支持按联系人发单聊'), {code:'UNSUPPORTED_FEATURE'});
+        const text = query.trim();
+        if (!text || text.length > 40 || /[\x00-\x1f]/.test(text)) throw Error('请输入联系人姓名');
+        const root = this.claimChannel('dingtalk', b.root);
+        return parseDingTalkContacts(await dws(['contact', 'user', 'search', '--query', text, '--profile', b.profile, '-f', 'json'], root));
+    }
+    async sendDingTalkContact(owner:string, agentId:string, binding:string, contactId:string, text:string, requestId:string) {
+        this.assertAgentBinding(owner,agentId,binding);
+        const b=this.get(binding).binding;
+        if ((b.channel || 'dingtalk') !== 'dingtalk') throw Object.assign(Error('当前渠道不支持按联系人发单聊'), {code:'UNSUPPORTED_FEATURE'});
+        const root = this.claimChannel('dingtalk', b.root);
+        return deliverDingTalkContact({ root, profile: b.profile, contactId, text, requestId });
     }
     private agentRoot?: (owner:string,agentId:string)=>string;
     private personaLookup?: (owner:string,agentId:string)=>{backend:string;model:string}|null;

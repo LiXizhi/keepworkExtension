@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Incoming, MessageConfig, splitReply, automatedSender, automatedText } from './messagingPolicy';
 import { cliSearchDirs, globalModuleDirs, cliChildEnv } from './cliPaths';
@@ -223,4 +224,74 @@ export async function dingtalkSenderName(root:string,profile:string,message:Inco
     const member=rows.find((row:any)=>row.openDingtalkId===message.sender);
     const name=member?.memberEmpName||member?.nick||member?.memberNick||member?.groupNick||member?.memberGroupNick;
     return typeof name==='string'&&name.trim()!==message.sender?name.trim().slice(0,256):'';
+}
+
+export type DingTalkContact = { id: string; name: string; title: string; userId: string };
+const CONTACT_ID = /^[A-Za-z0-9_-]{8,128}$/;
+export function parseDingTalkContacts(value: any): DingTalkContact[] {
+    if (!value || typeof value !== 'object' || value.success === false || value.error) throw Error('联系人搜索失败');
+    const rows = Array.isArray(value.result) ? value.result : Array.isArray(value.users) ? value.users : null;
+    if (!rows) throw Error('联系人搜索结果无法识别');
+    const contacts: DingTalkContact[] = [], seen = new Set<string>();
+    for (const row of rows) {
+        const id = String(row?.openDingTalkId || row?.openDingtalkId || '');
+        const name = String(row?.name || row?.nick || '').trim();
+        if (!CONTACT_ID.test(id) || !name || name.length > 80 || /[\x00-\x1f]/.test(name)) continue;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        contacts.push({ id, name, title: String(row?.title || '').trim().slice(0, 80), userId: String(row?.userId || '').trim().slice(0, 64) });
+        if (contacts.length >= 20) break;
+    }
+    return contacts;
+}
+export function contactSendKey(profile: string, contactId: string, text: string, requestId: string) {
+    return 'dm-' + createHash('sha256').update(JSON.stringify([profile, contactId, text, requestId])).digest('hex').slice(0, 40);
+}
+export type ContactSendReceipt = { state: 'sent' | 'unknown' | 'failed'; retried: boolean; error?: string };
+const contactDeliveries = new Map<string, ContactSendReceipt & { taskId?: string }>();
+function nestedString(value: any, key: string, depth = 0): string {
+    if (depth > 6 || !value || typeof value !== 'object') return '';
+    if (typeof value[key] === 'string' && value[key].trim()) return value[key].trim();
+    return nestedString(value.result, key, depth + 1) || nestedString(value.data, key, depth + 1);
+}
+function sendState(value: any): 'sent' | 'failed' | 'pending' | 'unknown' {
+    const status = nestedString(value, 'sendStatus').toUpperCase();
+    if (status === 'SUCCESS') return 'sent';
+    if (['FAILED', 'FAILURE', 'REJECTED', 'CANCELLED', 'CANCELED'].includes(status)) return 'failed';
+    if (['PENDING', 'SENDING', 'QUEUED', 'PROCESSING'].includes(status)) return 'pending';
+    return 'unknown';
+}
+/** Owner-initiated DM. A repeated key rechecks the first receipt and never sends again. */
+export async function deliverDingTalkContact(input: { root: string; profile: string; contactId: string; text: string; requestId: string }, call = dws, sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))): Promise<ContactSendReceipt> {
+    const { root, profile, contactId, requestId } = input;
+    const text = input.text.trim();
+    if (!path.isAbsolute(root)) throw Error('Local second-brain directory required');
+    if (!/^[^\s,:]+:[^\s,:]+$/.test(profile)) throw Error('Select a stable corpId:userId profile');
+    if (!CONTACT_ID.test(contactId)) throw Error('请先搜索并确认联系人');
+    if (!/^[\w-]{1,160}$/.test(requestId) || !text || text.length > 4000 || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) throw Error('单聊内容或请求编号无效');
+    const key = contactSendKey(profile, contactId, text, requestId);
+    const previous = contactDeliveries.get(key);
+    if (previous?.state === 'sent' || previous?.state === 'failed') return { state: previous.state, retried: true, error: previous.error };
+    const status = await call(['event', 'status', '--profile', profile, '--format', 'json'], root);
+    const identity = status?.identity;
+    if (!identity?.corp_id || !identity.user_id || `${identity.corp_id}:${identity.user_id}` !== profile) throw Error('DWS identity does not match configured profile');
+    let taskId = previous?.taskId || '';
+    if (!taskId) {
+        const sent = await call(['chat', '+messages-send', '--as', 'user', '--open-dingtalk-id', contactId, '--text', text, '--idempotency-key', key, '--profile', profile, '-f', 'json', '--yes'], root);
+        taskId = nestedString(sent, 'openTaskId');
+        contactDeliveries.set(key, { state: 'unknown', retried: false, taskId, error: '发送结果未知，请在钉钉核实，勿重复发送' });
+        if (!taskId) return { state: 'unknown', retried: false, error: '发送结果未知，请在钉钉核实，勿重复发送' };
+    }
+    let outcome: ContactSendReceipt = { state: 'unknown', retried: !!previous, error: '发送结果未知，请在钉钉核实，勿重复发送' };
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const value = await call(['chat', 'message', 'query-send-status', '--open-task-id', taskId, '--profile', profile, '--format', 'json', '--timeout', '4'], root);
+        const state = sendState(value);
+        if (state === 'sent') outcome = { state, retried: !!previous };
+        else if (state === 'failed') outcome = { state, retried: !!previous, error: '钉钉拒绝发送，请检查登录与权限后更换请求编号重试' };
+        else outcome = { state: 'unknown', retried: !!previous, error: '发送结果未知，请在钉钉核实，勿重复发送' };
+        contactDeliveries.set(key, { ...outcome, taskId });
+        if (state === 'sent' || state === 'failed') return outcome;
+        if (attempt < 3) await sleep(800);
+    }
+    return outcome;
 }

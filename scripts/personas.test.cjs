@@ -321,6 +321,31 @@ test('persona knows shared-memory and nickname rules; owner group assignment req
  assert.deepEqual(await action,{nickname:'Owner & Helper'});assert.equal(assigned[0][1],'helper');run.resolve('Assigned');await tick();
 });
 
+test('owner DingTalk contact send requires this turn’s search and approval',async t=>{
+ const f=fixture(t);
+ f.messaging.agentBindings=()=>[{id:'binding',channel:'dingtalk',profile:'corp:user'},{id:'feishu',channel:'feishu',profile:'app:user'}];
+ const searched=[],sent=[];
+ f.messaging.searchDingTalkContacts=async(owner,id,binding,query)=>{searched.push([owner,id,binding,query]);return query==='同名'?[{id:'contact-a',name:'同名',title:'研发'},{id:'contact-b',name:'同名',title:'运维'}]:[{id:'contact-a',name:'欧阳',title:'运维'}];};
+ f.messaging.sendDingTalkContact=async(...args)=>{sent.push(args);return {state:'sent',retried:false};};
+ f.service.submit('owner','first',{requestId:'dm-owner',text:'给联系人发单聊'});await tick();
+ const run=f.pending[0];
+ assert.match(run.input.prompt,/search_dingtalk_contacts/);assert.match(run.input.prompt,/不得默认第一个/);
+ assert.deepEqual(await run.executeTool('search_dingtalk_contacts',{}),[{binding:'binding',channel:'dingtalk',account:'corp:user'}]);
+ await assert.rejects(run.executeTool('send_dingtalk_contact',{binding:'binding',contactId:'contact-a',text:'好的',requestId:'dm-1'}),/搜索/);
+ const ambiguous=await run.executeTool('search_dingtalk_contacts',{binding:'binding',query:'同名'});
+ assert.equal(ambiguous.ambiguous,true);assert.equal(ambiguous.contacts.length,2);
+ const denied=run.executeTool('send_dingtalk_contact',{binding:'binding',contactId:'contact-a',text:'好的',requestId:'dm-1'});await tick();
+ const ask=f.service.read('owner','first').job.pending[0];assert.equal(ask.params.contact,'同名');assert.equal(ask.params.title,'研发');assert.equal(sent.length,0);
+ f.service.respond('owner','first',{id:ask.id,decision:'decline'});await assert.rejects(denied,/拒绝/);assert.equal(sent.length,0);
+ await run.executeTool('search_dingtalk_contacts',{binding:'binding',query:'欧阳'});
+ const action=run.executeTool('send_dingtalk_contact',{binding:'binding',contactId:'contact-a',text:'好的',requestId:'dm-1'});await tick();
+ const pending=f.service.read('owner','first').job.pending[0];assert.equal(pending.params.text,'好的');f.service.respond('owner','first',{id:pending.id,decision:'accept'});
+ assert.deepEqual(await action,{state:'sent',retried:false});
+ assert.deepEqual(sent[0].slice(0,6),['owner','first','binding','contact-a','好的','dm-1']);
+ await assert.rejects(run.executeTool('send_dingtalk_contact',{binding:'binding',contactId:'not-searched',text:'好的'}),/搜索/);
+ run.resolve('已发送');await tick();
+});
+
 test('group work approvals surface destination, preserve owner history and support cancellation',async t=>{
  const f=fixture(t);let cancelled=false;
  const controller=new AbortController(),request={owner:'owner',agentId:'first',root:fs.realpathSync(f.home),channel:'dingtalk',account:'corp:user',group:'group',message:'write report',tool:'write_file',args:{path:'report.md',content:'draft'},cancel:()=>{cancelled=true;}};

@@ -63,6 +63,8 @@ const ownerTools = [
     ['search_agent_groups','Find groups on an existing account; omit binding to list accounts. Only use for owner requests.',{binding:{type:'string'},query:{type:'string'}}],
     ['assign_agent_group','Assign a custom persona by editing your own group nickname, only after group search. Requires explicit owner approval.',{agentId:{type:'string'},binding:{type:'string'},group:{type:'string'},remove:{type:'boolean'}}],
     ['circles','Pass expectedScope from read to later requests. Read/design circles and manage their linked groups. Read or preview first; apply/deploy/publish/send/resolve/unbind require owner approval. Refresh imports X- groups without modifying external groups. pullPreview previews current group metadata and roles for local apply. publishPreview/publish require the platform group owner or administrator. Agents use their verified human owner CLI identity, never a virtual member. Never claim success without a receipt.',{action:{type:'string'},expectedScope:{type:'string'},receiptId:{type:'string'},organization:{type:'object'},expectedRevision:{type:'integer'},circleId:{type:'string'},ticket:{type:'string'},channel:{type:'string'},account:{type:'string'},query:{type:'string'},contacts:{type:'boolean'},groupId:{type:'string'},type:{type:'string'},requestId:{type:'string'},text:{type:'string'},replyId:{type:'string'},cursor:{type:'string'},confirm:{type:'boolean'},resolutions:{type:'object'}}],
+    ['search_dingtalk_contacts','Search contacts on a connected DingTalk account; omit binding to list accounts. Never send from this tool. Ask the owner when there is not exactly one candidate.',{binding:{type:'string'},query:{type:'string'}}],
+    ['send_dingtalk_contact','Send one private DingTalk text to a contact ID returned by search_dingtalk_contacts in this turn. Requires explicit owner approval. Do not claim delivery without state sent, and do not resend an unknown result.',{binding:{type:'string'},contactId:{type:'string'},text:{type:'string'},requestId:{type:'string'}}],
     ['read_inbox','Read this Agent’s linked DingTalk inbox',{binding:{type:'string'},conversation:{type:'string'}}],
 ].map(([name,description,properties])=>({type:'function',function:{name,description,parameters:{type:'object',properties}}}));
 const roleTools = ownerTools.map(tool=>['read_file','list_dir','write_file','run_terminal'].includes(String(tool.function.name))?{type:'function',function:{...tool.function,
@@ -305,7 +307,7 @@ export class Personas {
     private async run(p:Persona,text:string,signal:AbortSignal,ownerComposer:boolean){
         const runOwner=this.key(p.owner,p.id),agentJob=this.agentJobs.cycleFor(p,p.job?.id);
         const decisionId=agentJob?.state.decision?.id;
-        const job=p.job!;this.groupSearches.delete(this.key(p.owner,p.id));job.state='running';this.save(p);
+        const job=p.job!;this.groupSearches.delete(this.key(p.owner,p.id));this.contactSearches.delete(this.key(p.owner,p.id));job.state='running';this.save(p);
         const recent=job.contextMode==='isolated'?[]:p.messages.slice(-17,-1);
         const history=recent.map(m=>({role:m.role,content:personaModelHistoryText(m,8000)}));
         // Bounded extractive memory; no second model call or hidden execution.
@@ -469,6 +471,7 @@ export class Personas {
         });
     }
     private groupSearches = new Map<string,Set<string>>();
+    private contactSearches = new Map<string,Map<string,{id:string;name:string;title:string}>>();
     private async sendPeerMessage(sender: Persona, args: any, signal: AbortSignal) {
         const target = this.get(sender.owner, String(args?.personaId || ''));
         if (target.id === sender.id) throw Error('请选择另一个分身');
@@ -564,6 +567,23 @@ export class Personas {
             if(!this.groupSearches.get(this.key(p.owner,p.id))?.has(binding+'\0'+group))throw Error('请先搜索并确认群聊');
             await this.ownerApproval(p,{tool:name,agent:target.name,binding,group,remove:args?.remove===true},signal);
             return this.messaging.assignGroupNickname(p.owner,target.id,binding,group,args?.remove===true,signal);
+        }
+        if(name==='search_dingtalk_contacts') {
+            if(!args?.binding)return this.messaging.agentBindings(p.owner,p.id).filter((b:{channel?:string})=> (b.channel||'dingtalk')==='dingtalk').map((b:{id:string;channel?:string;profile:string})=>({binding:b.id,channel:b.channel||'dingtalk',account:b.profile}));
+            const binding=String(args.binding),contacts=await this.messaging.searchDingTalkContacts(p.owner,p.id,binding,String(args.query||''));
+            this.contactSearches.set(this.key(p.owner,p.id),new Map(contacts.map((c:{id:string;name:string;title:string})=>[binding+'\0'+c.id,c])));
+            return {ambiguous:contacts.length!==1,contacts};
+        }
+        if(name==='send_dingtalk_contact') {
+            const binding=String(args?.binding||''),contactId=String(args?.contactId||''),text=typeof args?.text==='string'?args.text.trim():'';
+            const contact=this.contactSearches.get(this.key(p.owner,p.id))?.get(binding+'\0'+contactId);
+            if(!contact)throw Error('请先搜索并确认联系人');
+            if(!text||text.length>4000)throw Error('单聊内容长度应为 1–4000 字符');
+            const requestId=typeof args?.requestId==='string'&&/^[\w-]{1,160}$/.test(args.requestId)?args.requestId:(p.job?.id||'owner');
+            await this.ownerApproval(p,{tool:name,binding,contact:contact.name,title:contact.title,text},signal);
+            if(signal.aborted)throw Error('已取消');
+            if(this.contactSearches.get(this.key(p.owner,p.id))?.get(binding+'\0'+contactId)?.name!==contact.name)throw Error('联系人已变化，请重新搜索');
+            return this.messaging.sendDingTalkContact(p.owner,p.id,binding,contactId,text,requestId);
         }
         if(name==='read_inbox')return this.messaging.inboxView(p.owner,p.id,String(args?.binding||''),String(args?.conversation||''));
         if(!p.root)throw Error('请先为分身选择本机第二大脑');
