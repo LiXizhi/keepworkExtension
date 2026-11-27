@@ -160,7 +160,11 @@ impl TeachListAssembler {
         self.last_slice_at = None;
     }
 
-    pub(super) fn push(&mut self, bytes: &[u8], now: Instant) -> Option<Result<Vec<TeachAction>, String>> {
+    pub(super) fn push(
+        &mut self,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Option<Result<Vec<TeachAction>, String>> {
         let [0x23, index, total, chunk @ ..] = frame_data(bytes)? else {
             return None;
         };
@@ -229,7 +233,12 @@ fn parse_teach_item(fallback_key: Option<&str>, value: &serde_json::Value) -> Op
             serde_json::Value::String(s) => {
                 // Older clients appended one duration byte. Printable suffixes
                 // are indistinguishable from a legitimate part of the name.
-                Some(s.trim().trim_end_matches(char::is_control).trim_end().to_owned())
+                Some(
+                    s.trim()
+                        .trim_end_matches(char::is_control)
+                        .trim_end()
+                        .to_owned(),
+                )
             }
             serde_json::Value::Null => None,
             other => Some(other.to_string()),
@@ -293,8 +302,9 @@ pub(super) fn parse_teach_list(text: &str) -> Result<Vec<TeachAction>, String> {
     if let Some(obj) = root.as_object() {
         if let Some(inner) = obj.get("data") {
             root = match inner {
-                serde_json::Value::String(nested) => teach_json(nested)
-                    .map_err(|_| "示教动作列表内层 JSON 解析失败。".to_owned())?,
+                serde_json::Value::String(nested) => {
+                    teach_json(nested).map_err(|_| "示教动作列表内层 JSON 解析失败。".to_owned())?
+                }
                 other => other.clone(),
             };
         }
@@ -538,7 +548,15 @@ mod tests {
         }
         assert!(Command::STOP.remote_direction().unwrap().is_none());
         assert_eq!(Command::STOP.motion_active(), Some(false));
-        for (vx, vyaw, vy) in [(0, 0, 81), (0, 0, -81), (30, 30, 0), (0, 30, 30), (81, 0, 0), (0, 81, 0), (0, -81, 0)] {
+        for (vx, vyaw, vy) in [
+            (0, 0, 81),
+            (0, 0, -81),
+            (30, 30, 0),
+            (0, 30, 30),
+            (81, 0, 0),
+            (0, 81, 0),
+            (0, -81, 0),
+        ] {
             assert!(Command::Move { vx, vyaw, vy }.remote_direction().is_err());
         }
         assert!(Command::Walk.remote_direction().is_err());
@@ -602,7 +620,10 @@ mod tests {
     fn describes_battery_replies_without_a_valid_percentage() {
         for (frame, summary) in [
             (&[0x55, 0xaa, 5, 0x26, 5][..], "电量应答缺少数值"),
-            (&[0x55, 0xaa, 7, 0x26, 255, 0, 7], "电量应答值 255 超出 0–100 范围"),
+            (
+                &[0x55, 0xaa, 7, 0x26, 255, 0, 7],
+                "电量应答值 255 超出 0–100 范围",
+            ),
         ] {
             let description = describe(frame);
             assert_eq!(reading(frame), None);
@@ -643,16 +664,15 @@ mod tests {
             (Command::PlayTeach { id: 3 }, &[0x55, 0xaa, 6, 0x14, 3, 6]),
             (Command::DeleteTeach { id: 7 }, &[0x55, 0xaa, 6, 0x1b, 7, 6]),
             (
-                Command::SaveTeach { name: "挥臂".into() },
+                Command::SaveTeach {
+                    name: "挥臂".into(),
+                },
                 &[0x55, 0xaa, 11, 0x19, 0xe6, 0x8c, 0xa5, 0xe8, 0x87, 0x82, 11],
             ),
         ] {
             assert_eq!(frame(command).unwrap(), expected);
         }
-        assert!(frame(Command::SaveTeach {
-            name: "   ".into(),
-        })
-        .is_err());
+        assert!(frame(Command::SaveTeach { name: "   ".into() }).is_err());
         assert!(frame(Command::SaveTeach {
             name: "a\nb".into(),
         })
@@ -669,8 +689,12 @@ mod tests {
 
     #[test]
     fn legacy_save_duration_is_never_encoded_in_the_name() {
-        let save: Command = serde_json::from_str(r#"{"action":"saveTeach","name":"测试","duration":5}"#).unwrap();
-        assert_eq!(frame(save).unwrap(), [0x55, 0xaa, 11, 0x19, 0xe6, 0xb5, 0x8b, 0xe8, 0xaf, 0x95, 11]);
+        let save: Command =
+            serde_json::from_str(r#"{"action":"saveTeach","name":"测试","duration":5}"#).unwrap();
+        assert_eq!(
+            frame(save).unwrap(),
+            [0x55, 0xaa, 11, 0x19, 0xe6, 0xb5, 0x8b, 0xe8, 0xaf, 0x95, 11]
+        );
     }
 
     #[test]
@@ -727,7 +751,10 @@ mod tests {
             ]
         );
         // Empty map and array both succeed cleanly.
-        assert_eq!(parse_teach_list(r#"{"cmd":"teach_list","data":{}}"#).unwrap(), vec![]);
+        assert_eq!(
+            parse_teach_list(r#"{"cmd":"teach_list","data":{}}"#).unwrap(),
+            vec![]
+        );
         assert_eq!(
             parse_teach_list(r#"[{"teach_id":4,"teach_name":"招手","teach_duration":3}]"#).unwrap(),
             vec![TeachAction {
@@ -740,7 +767,10 @@ mod tests {
         // Out-of-order fragment drops until a fresh index 0 arrives.
         assert!(assembler.push(&teach_frame(1, 2, b"{}"), now).is_none());
         assert_eq!(
-            assembler.push(&teach_frame(0, 1, b"[]"), now).unwrap().unwrap(),
+            assembler
+                .push(&teach_frame(0, 1, b"[]"), now)
+                .unwrap()
+                .unwrap(),
             vec![]
         );
         assert!(parse_teach_list("not-json").is_err());

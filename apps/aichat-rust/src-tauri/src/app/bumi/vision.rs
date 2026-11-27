@@ -7,8 +7,15 @@ use std::time::Duration;
 use tauri::AppHandle;
 use tokio::sync::watch;
 
+mod directions;
+mod single_frame_route;
+mod walk_continue;
+mod walk_path;
+use walk_path::{parse_walk_path, WalkIssueKind};
+
 const MAX_IMAGE_DATA_URL_LEN: usize = 700_000;
 const MAX_REASON_CHARS: usize = 80;
+const NOMINAL_FORWARD_STEP_M: f64 = 0.4;
 const MOTION_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(20);
 const READ_ONLY_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -31,6 +38,16 @@ pub(super) struct VisionPose {
     pub inspection: Option<Inspection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub walk_path: Option<WalkPath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    walk_continue: Option<walk_continue::WalkContinue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    single_frame_route: Option<single_frame_route::Route>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    directions: Option<Vec<directions::Direction>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direction_steps: Option<Vec<Option<u32>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pulse_directions: Option<Vec<directions::PulseSegment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timing_ms: Option<ResponseTiming>,
 }
@@ -65,6 +82,10 @@ pub(super) struct Inspection {
 struct InspectionQuery {
     target: String,
     calibrated_floor: bool,
+    #[serde(default)]
+    directions_only: bool,
+    #[serde(default)]
+    pulse_directions: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -93,6 +114,8 @@ pub(super) struct SceneObservation {
     path_clear: bool,
     #[serde(default)]
     rear_clear: bool,
+    #[serde(skip_serializing)]
+    rear_clearance_m: Option<f64>,
     #[serde(default)]
     turn_clear: bool,
     #[serde(default)]
@@ -130,6 +153,14 @@ pub(in super::super) struct LocateInput {
     scene_scale: Option<SceneScale>,
     inspection: Option<InspectionQuery>,
     walk_path: Option<WalkPathQuery>,
+    /// `passive` (or omitted) keeps the fixed classroom camera. `dominant` treats
+    /// the frame as the robot's forward camera and searches without seeing its body.
+    #[serde(default)]
+    search_view: Option<String>,
+    /// After a settled forward pulse, ask whether another forward pulse is reasonable.
+    #[serde(default)]
+    walk_continue: Option<walk_continue::WalkContinueQuery>,
+    single_frame_route: Option<single_frame_route::Query>,
 }
 
 #[derive(Deserialize)]
@@ -153,7 +184,46 @@ struct SceneScale {
 struct WalkPathQuery {
     direction: WalkDirection,
     calibrated_floor: bool,
-    step_m: f64,
+    floor_size_m: Option<WalkFloorSize>,
+    step_m: Option<f64>,
+    /// Ground point marked on the previous dominant-view frame, in normalized image coordinates.
+    #[serde(default)]
+    prior_anchor: Option<FloorPoint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalkFloorSize {
+    width: f64,
+    depth: f64,
+}
+
+const UNMEASURED_WALK_CLEARANCE_M: f64 = 0.8;
+
+const WALK_CORRIDOR: &str = "只检查下一步，从机器人当前落脚处沿指定方向，到本步所需距离为止，留足整个机身宽度和落脚余量。\
+    按地面透视和桌椅腿的接地点判断横向位置和远近，同时检查桌沿等悬空部件在机身高度内是否伸入。\
+    侧方或终点以外的桌椅，若没有侵入或遮住这段通路，不影响本步。\
+    通路内有障碍、台阶、落差，或所需区域被遮挡、超出画面、宽度看不清时停止。";
+
+impl WalkPathQuery {
+    fn clearance_hint(&self) -> String {
+        let required = self.step_m.unwrap_or(UNMEASURED_WALK_CLEARANCE_M);
+        let measure = if let Some(size) = &self.floor_size_m {
+            format!("右图对应标定地面，左右宽{}米、前后深{}米。核对左图的高度和遮挡。\
+                在右图沿指定方向的地面中心线上标 clearTo，取从双脚出发、机身全宽均可见且可通过的连续空地末端。\
+                clearTo 与 robot 的坐标及置信度格式相同，不能定位填 null，由程序换算距离。",
+                size.width, size.depth)
+        } else if self.step_m.is_none() {
+            "根据可辨认的尺度估算这段连续空地的长度 clearDistanceM（米），无法估算填 null。".into()
+        } else {
+            String::new()
+        };
+        format!("{WALK_CORRIDOR}本步所需距离为{required}米。{measure}\
+            从通路起点沿指定方向核对两侧边界及落脚处。把地面的深色材质、阴影与立起的实体边缘分开。\
+            只有整段畅通、尺度可靠且距离足够时 clear=true。若停止，issueKind 用 obstacle（实体侵入）、occluded（所需地面被遮住）或 uncertain（尺度或视角不足）。\
+            对前两类，在与 robot 相同的坐标系标出通路内最先受影响的地面位置 issuePoint，含 x、y、confidence。\
+            不要标整个沙发或桌子的中心，无法定位就填 null。reason 说明可见依据。通畅时 issueKind 和 issuePoint 填 null。")
+    }
 }
 
 #[derive(Deserialize)]
@@ -170,6 +240,10 @@ pub(super) struct WalkPath {
     heading_point: FloorPoint,
     clear: bool,
     reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issue_kind: Option<WalkIssueKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issue_point: Option<FloorPoint>,
 }
 
 fn default_scene_confidence() -> f64 {
@@ -184,7 +258,9 @@ impl LocateInput {
     fn request_timeout(&self) -> Duration {
         // Allow time to receive a late result and report why the robot stayed
         // stopped. The camera loop separately checks scene age before moving.
-        if self.scene_target.is_some() || self.walk_path.is_some() {
+        if self.scene_target.is_some() || self.walk_path.is_some() || self.walk_continue.is_some()
+            || self.single_frame_route.is_some() || self.inspection.as_ref().is_some_and(|q| q.pulse_directions)
+        {
             MOTION_OBSERVATION_TIMEOUT
         } else {
             READ_ONLY_TIMEOUT
@@ -210,6 +286,9 @@ impl LocateInput {
         if self.scene_target.is_some() != self.scene_scale.is_some() {
             return Err("连续场景观察需要目标描述和场景尺度参数。".into());
         }
+        if self.inspection.as_ref().is_some_and(|q| q.pulse_directions && !q.directions_only) {
+            return Err("单图点动需要同时请求走法。".into());
+        }
         if self.inspection.is_some()
             && (self.scene_target.is_some()
                 || self.target_name.is_some()
@@ -219,8 +298,18 @@ impl LocateInput {
             return Err("只识别目标不能同时查询路线或地图。".into());
         }
         if let Some(walk) = &self.walk_path {
-            if !walk.step_m.is_finite() || walk.step_m <= 0.0 || walk.step_m > 100.0 {
-                return Err("请填写当前档位、当前方向的实测步幅。".into());
+            if let Some(size) = &walk.floor_size_m {
+                if !walk.calibrated_floor || self.is_dominant()
+                    || ![size.width, size.depth].into_iter().all(|m| m > 0.0 && m <= 1000.0)
+                {
+                    return Err("场地宽深需要有效的固定机位地面标定，单位为米。".into());
+                }
+            }
+            if walk
+                .step_m
+                .is_some_and(|m| !m.is_finite() || m <= 0.0 || m > 100.0)
+            {
+                return Err("当前档位的步幅超出范围。".into());
             }
             if self.inspection.is_some()
                 || self.scene_target.is_some()
@@ -229,6 +318,27 @@ impl LocateInput {
                 || self.goal_cell.is_some()
             {
                 return Err("点动通路观察必须单独请求。".into());
+            }
+        }
+        if let Some(query) = &self.single_frame_route {
+            if self.is_dominant() || self.walk_path.is_some() || self.walk_continue.is_some()
+                || self.inspection.is_some() || self.scene_target.is_some() || self.target_name.is_some()
+                || self.goal_name.is_some() || self.goal_cell.is_some()
+            {
+                return Err("单图路线仅支持固定机位，须单独请求。".into());
+            }
+            query.validate()?;
+        }
+        if let Some(query) = &self.walk_continue {
+            query.validate()?;
+            if self.walk_path.is_some()
+                || self.inspection.is_some()
+                || self.scene_target.is_some()
+                || self.target_name.is_some()
+                || self.goal_name.is_some()
+                || self.goal_cell.is_some()
+            {
+                return Err("继续行走判断必须单独请求。".into());
             }
         }
         if let Some(scale) = &self.scene_scale {
@@ -249,9 +359,39 @@ impl LocateInput {
                 return Err("场地或机器人移动标定值超出范围。".into());
             }
         }
+        if let Some(view) = self.search_view.as_deref() {
+            if view != "passive" && view != "dominant" {
+                return Err("寻找视角只支持被动视角或主导视角。".into());
+            }
+        }
+        if self.is_dominant()
+            && self.scene_target.is_none()
+            && self.inspection.is_none()
+            && self.walk_path.is_none()
+            && self.walk_continue.is_none()
+        {
+            return Err("主导视角只用于识别目标、连续观察、点动通路或继续行走判断。".into());
+        }
+        if self
+            .walk_path
+            .as_ref()
+            .is_some_and(|walk| walk.prior_anchor.is_some())
+            && !self.is_dominant()
+        {
+            return Err("地面参照点只在主导视角的点动观察中使用。".into());
+        }
+        if self
+            .walk_path
+            .as_ref()
+            .and_then(|walk| walk.prior_anchor.as_ref())
+            .is_some_and(|point| !point.on_floor())
+        {
+            return Err("上一次地面参照点超出画面。".into());
+        }
         if let Some(name) = self
             .scene_target
             .as_ref()
+            .or(self.single_frame_route.as_ref().map(|query| &query.target))
             .or(self.target_name.as_ref())
             .or(self.inspection.as_ref().map(|query| &query.target))
         {
@@ -263,6 +403,10 @@ impl LocateInput {
             }
         }
         Ok(())
+    }
+
+    fn is_dominant(&self) -> bool {
+        self.search_view.as_deref() == Some("dominant")
     }
 }
 
@@ -282,7 +426,85 @@ fn cell_label(cell: u8, size: u8) -> String {
     format!("{col}{row}")
 }
 
+fn rear_clearance_hint(step_m: Option<f64>) -> String {
+    match step_m {
+        Some(step) => format!("只有机身正后方至少{step}米、覆盖机身宽度的地面可见且无障碍时 rearClear 为 true。"),
+        None => format!("额外返回 rearClearanceM，即机身正后方覆盖机身宽度、可见且无障碍的连续地面距离（米）。看不到身后或缺少可靠尺度时填 null。只有该距离至少{UNMEASURED_WALK_CLEARANCE_M}米时 rearClear 才为 true。"),
+    }
+}
+
+fn dominant_prompt(input: &LocateInput) -> Option<String> {
+    let intro = "你是小布米的主视觉，也就是装在机器人正前方的主导视角摄像头。画面里通常看不到机器人自己的白色圆头和胸前橙色饰板。不要因为没看见机身就放弃。画面下方是近处地面，上方是正前方。坐标按整张画面归一化，左上(0,0)，右下(1,1)，x向右、y向下。只报告当前帧所见。";
+    if let Some(walk) = &input.walk_path {
+        let (direction, toward) = match walk.direction {
+            WalkDirection::Forward => (
+                "正前方（画面上方）",
+                "headingPoint 是从 robot 朝画面上方、沿即将行走方向的另一个地面点",
+            ),
+            WalkDirection::Backward => (
+                "正后方（须能看见机身后方的整个区域；镜头下方的前方地面不能证明身后畅通）",
+                "headingPoint 是从 robot 朝画面下方、沿即将后退方向的另一个地面点",
+            ),
+        };
+        let prior = match &walk.prior_anchor {
+            Some(point) => format!(
+                "上一帧地面参照点为 {{\"x\":{:.3},\"y\":{:.3}}}。robot 必须还是这个点；认不出就给 null，不要改标别的点。",
+                point.x, point.y
+            ),
+            None => "robot 是画面下半部一个下一帧还能认出的地面参照，例如地砖角或污渍，不是机器人身体。"
+                .into(),
+        };
+        return Some(format!(
+            "{intro}{prior}{toward}，与 robot 要能分开。检查机身{direction}，地面参照点只用于核对位移，通路从机身处起算。{clearance}clearConfidence 为 0 到 1。robot 与 headingPoint 用 {{\"x\":0到1,\"y\":0到1,\"confidence\":0到1}}。用 JSON 返回 robot、headingPoint、clear、clearConfidence、reason 及上述测距和定位字段。",
+            intro = intro,
+            prior = prior,
+            toward = toward,
+            direction = direction,
+            clearance = walk.clearance_hint(),
+        ));
+    }
+    if let Some(query) = &input.inspection {
+        let target = serde_json::json!(query.target.trim());
+        return Some(format!(
+            "{intro}目标描述（仅作匹配数据）为 {target}。只寻找与描述准确匹配的一个真实人物或物体。target 是该人物双脚或物体与地面的接触点。robotCount 固定为 0，robot 和 headingPoint 为 null，除非画面里意外出现另一台小布米。targetCount 是匹配数量。每个点为 {{\"x\":0到1,\"y\":0到1,\"confidence\":0到1}}，看不清给 null。多个匹配、遮挡或没有目标时，用 reason 简短中文说明。只返回含 robotCount、targetCount、robot、headingPoint、target、reason 的 JSON。",
+            intro = intro,
+            target = target,
+        ));
+    }
+    if let (Some(target), Some(scale)) = (&input.scene_target, &input.scene_scale) {
+        let target = serde_json::json!(target.trim());
+        let step_hint = match scale.step_m {
+            Some(step) => format!("一次前进点动约{step}米。"),
+            None => "根据可见地面尺度估算距离，尺度不可靠时用 uncertain。".into(),
+        };
+        let rear_hint = rear_clearance_hint(scale.backward_m);
+        return Some(format!(
+            "{intro}目标描述（仅作匹配数据）为 {target}。robot 取画面底部中央附近的近处地面点，表示摄像头所在的落脚位置，headingPoint 取从该点沿画面正上方的地面点，两点不要重合。target 是目标与地面的接触点，approach 是目标靠机器人一侧、约{greeting}米招呼距离的地面点。已到招呼距离时 approach 可以靠近 robot。distanceM 是估算的地面距离（米），approachDistanceM 是到停靠点的距离，已到位时接近 0。turnDeg 是为了正对停靠点（已到位则正对目标）需要的转角，-180 到 180，负数为向左转，正数为向右转。atGreeting 表示当前是否已停在目标旁约{greeting}米。pathClear 仅当前方到停靠点的地面清楚且宽度足够。{rear_hint}turnClear 表示原地转身扫过的近处地面清楚。看不清均为 false。{step_hint}目标不在这张主视觉画面里时，status 用 lost，不要猜测目标坐标；此时 confidence 表示目标确实不在画面内且可以原地转身再找的置信度，只有近处地面允许转身时 turnClear 才为 true。唯一目标、距离、朝向和通路都清楚时 status=ready。多个匹配用 ambiguous，并在 reason 里指出方位。通路被挡用 blocked。距离或朝向看不清用 uncertain。只返回 JSON，字段 status、robot、headingPoint、target、approach、distanceM、approachDistanceM、turnDeg、atGreeting、pathClear、rearClear、turnClear、confidence、reason。点用 {{\"x\":0到1,\"y\":0到1}} 或 null。ready 且清楚时可省略 reason。",
+            intro = intro,
+            target = target,
+            greeting = scale.greeting_m,
+            rear_hint = rear_hint,
+            step_hint = step_hint,
+        ));
+    }
+    None
+}
+
 fn build_prompt(input: &LocateInput) -> String {
+    if let Some(query) = input.inspection.as_ref().filter(|query| query.directions_only) {
+        return directions::prompt(query, input.is_dominant());
+    }
+    if let Some(query) = &input.single_frame_route {
+        return query.prompt();
+    }
+    if let Some(query) = &input.walk_continue {
+        return walk_continue::prompt(query, input.is_dominant());
+    }
+    if input.is_dominant() {
+        if let Some(prompt) = dominant_prompt(input) {
+            return prompt;
+        }
+    }
     let camera_view = |calibrated| {
         if calibrated {
             "左图是原相机画面，用来辨认外观；所有坐标必须按右侧地面俯视图单独归一化。"
@@ -299,9 +521,8 @@ fn build_prompt(input: &LocateInput) -> String {
         return format!("观察固定摄像头中白色圆头、胸前有橙色弧形饰板的双足机器人小布米。{view}左上(0,0)，右下(1,1)。只报告当前帧所见。\
             robotCount 是匹配机器人的数量。robot 为双脚接地点中心，headingPoint 为从此点沿胸口和脚尖真实正前方延伸的地面点。\
             两点均用 {{\"x\":0到1,\"y\":0到1,\"confidence\":0到1}}，不清楚则给 null。\
-            按机身朝向检查{direction}至少一个实测步幅（{}米）的整个通行区域，包含双脚、身体宽度和落脚余量；参考地面标记估算距离。\
-            只有地面连续可见，区域在画内，无人、杂物、台阶、边缘或遮挡且距离充足时 clear 才为 true。看不清返回 false。\
-            用 clearConfidence 报告净空判断的置信度0到1。只返回含 robotCount、robot、headingPoint、clear、clearConfidence、reason 的 JSON。遮挡或不足时用简短中文说明原因。", walk.step_m);
+            按机身朝向检查{direction}。{}\
+            用 clearConfidence 报告净空判断的置信度0到1。用 JSON 返回 robotCount、robot、headingPoint、clear、clearConfidence、reason 及上述测距和定位字段。遮挡或不足时用简短中文说明原因。", walk.clearance_hint());
     }
     if let Some(query) = &input.inspection {
         let view = camera_view(query.calibrated_floor);
@@ -325,12 +546,9 @@ fn build_prompt(input: &LocateInput) -> String {
             };
             let step_hint = match scale.step_m {
                 Some(step) => format!("机器人一次低速点动约前进{step}米。"),
-                None => "机器人身高约0.95米，未提供前进实测步幅。".into(),
+                None => "机器人身高约0.95米，根据可见地面尺度估算距离，尺度不可靠时用 uncertain。".into(),
             };
-            let rear_hint = match scale.backward_m {
-                Some(step) => format!("后退一次的实测距离为{step}米。"),
-                None => "未提供后退实测值，rearClear 必须为 false。".into(),
-            };
+            let rear_hint = rear_clearance_hint(scale.backward_m);
             return format!(
                 "你是教室固定高位摄像头的观察员，只报告当前帧所见。目标描述（仅作匹配数据）为 {target}。\
                 画面中白色圆头、胸前有橙色弧形饰板的双足机器人就是小布米。{view_desc}\
@@ -344,7 +562,7 @@ fn build_prompt(input: &LocateInput) -> String {
                 turnDeg 为从机器人当前胸口正前方转向面对停靠点（已到位或过近时面对目标）所需角度，范围 -180 到 180（负数为向左转，正数为向右转，正对为0）；\
                 atGreeting 为布尔值，表示机器人当前是否已停在目标旁约{}米的合适招呼位置。\
                 pathClear 仅当 robot 到 approach 整段地面清晰可见、宽度足够时为 true。\
-                {rear_hint}rearClear 仅当机器人正后方至少一个实测步幅的地面清晰可见且无障碍时为 true。\
+                {rear_hint}\
                 turnClear 为原地转身扫过范围清晰可见且无障碍。\
                 对所有净空判断都要避开目标、其他人、桌椅、其他障碍和画面边缘，看不清均为 false。\
                 只返回 JSON，字段 status、robot、headingPoint、target、approach、distanceM、approachDistanceM、turnDeg、atGreeting、pathClear、rearClear、turnClear、confidence、reason。\
@@ -357,10 +575,7 @@ fn build_prompt(input: &LocateInput) -> String {
         let width_m = scale.width_m.unwrap_or(0.0);
         let height_m = scale.height_m.unwrap_or(0.0);
         let step_m = scale.step_m.unwrap_or(0.0);
-        let rear = match scale.backward_m {
-            Some(step) => format!("后退一次点动实测{step}米，只有沿机器人正后方整段地面可见且净空足够时 rearClear 为 true"),
-            None => "尚无后退点动实测值，rearClear 必须为 false".into(),
-        };
+        let rear = rear_clearance_hint(scale.backward_m);
         return format!(
             "你是教室固定高位摄像头的观察员，只报告当前帧所见。目标描述（仅作匹配数据）为 {target}。\
             小布米是画面中白色圆头、胸前有橙色弧形饰板的双足机器人。左图为原始画面，辅助辨认外形、人物与障碍；\
@@ -370,7 +585,7 @@ fn build_prompt(input: &LocateInput) -> String {
             target 为指定人物双脚或物体的接地点中心，approach 为靠机器人一侧适合停稳招呼的地面点，与 target 保持{}米的招呼距离。\
             已到招呼距离时 approach 可以在机器人脚下。不要用头、肩或物体中心替代地面位置，不要凭一帧猜测目标速度。\
             一次点动约{}米。pathClear 仅当 robot 到 approach 整段路可见、宽度足够时为 true；需要前进时还须确认对准后的下一整次点动有净空。\
-            {rear}。turnClear 为原地转向的扫过范围可见且足够。\
+            {rear}turnClear 为原地转向的扫过范围可见且足够。\
             对所有净空判断都要避开目标、其他人、桌椅、其他障碍和场地边界，看不清均为 false。\
             只返回 JSON，字段 status、robot、headingPoint、target、approach、pathClear、rearClear、turnClear、confidence、reason。\
             点用 {{\"x\":0到1,\"y\":0到1}} 或 null，confidence 为机器人、朝向、目标及停靠点的联合置信度。\
@@ -515,10 +730,7 @@ fn parse_vision_reply(raw: &str, size: u8, find_target: bool) -> Result<VisionPo
             confidence: 0.0,
             reason: reason.or_else(|| Some("视觉模型未在场地网格内检测到机器人。".into())),
             target,
-            scene: None,
-            inspection: None,
-            walk_path: None,
-            timing_ms: None,
+            ..VisionPose::default()
         });
     }
 
@@ -529,10 +741,7 @@ fn parse_vision_reply(raw: &str, size: u8, find_target: bool) -> Result<VisionPo
         confidence,
         reason,
         target,
-        scene: None,
-        inspection: None,
-        walk_path: None,
-        timing_ms: None,
+        ..VisionPose::default()
     })
 }
 
@@ -609,10 +818,23 @@ fn parse_scene_reply(
     auto_mode: bool,
     min_confidence: f64,
 ) -> Result<VisionPose, String> {
+    parse_scene_reply_view(raw, rear_calibrated, auto_mode, min_confidence, false)
+}
+
+fn parse_scene_reply_view(
+    raw: &str,
+    rear_calibrated: bool,
+    auto_mode: bool,
+    min_confidence: f64,
+    dominant: bool,
+) -> Result<VisionPose, String> {
     let object = extract_json_object(raw).ok_or("视觉模型未返回场景观察结果。")?;
     let mut scene: SceneObservation =
         serde_json::from_str(object).map_err(|_| "视觉模型返回的场景观察格式无效。")?;
-    scene.rear_clear &= rear_calibrated;
+    scene.rear_clear &= rear_calibrated
+        || scene.rear_clearance_m.is_some_and(|metres| {
+            (UNMEASURED_WALK_CLEARANCE_M..=100.0).contains(&metres)
+        });
     scene.distance_m = scene
         .distance_m
         .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
@@ -644,7 +866,24 @@ fn parse_scene_reply(
             scene.reason = Some(message.chars().take(MAX_REASON_CHARS).collect());
         }
     }
-    if scene.status != SceneStatus::Ready {
+    // A dominant-view miss can still authorize one in-place look, but only when
+    // the model is confident the target is absent and the near ground can turn.
+    let scan = scene.status == SceneStatus::Lost
+        && dominant
+        && scene.turn_clear
+        && (min_confidence..=1.0).contains(&scene.confidence);
+    if scan {
+        scene.robot = None;
+        scene.heading_point = None;
+        scene.target = None;
+        scene.approach = None;
+        scene.path_clear = false;
+        scene.rear_clear = false;
+        scene.distance_m = None;
+        scene.approach_distance_m = None;
+        scene.turn_deg = None;
+        scene.at_greeting = None;
+    } else if scene.status != SceneStatus::Ready {
         scene.robot = None;
         scene.heading_point = None;
         scene.target = None;
@@ -666,9 +905,7 @@ fn parse_scene_reply(
         reason: None,
         target: None,
         scene: Some(scene),
-        inspection: None,
-        walk_path: None,
-        timing_ms: None,
+        ..VisionPose::default()
     })
 }
 
@@ -678,25 +915,29 @@ fn read_markers_json(raw: &str) -> Result<serde_json::Value, String> {
 }
 
 fn inspection_markers(result: &serde_json::Value) -> Inspection {
-    let marker = |key: &str| -> Option<FloorPoint> {
-        let candidate = result.get(key)?;
-        if !(0.75..=1.0).contains(&candidate.get("confidence")?.as_f64()?) {
-            return None;
-        }
-        let point = FloorPoint {
-            x: candidate.get("x")?.as_f64()?,
-            y: candidate.get("y")?.as_f64()?,
-        };
-        point.on_floor().then_some(point)
+    inspection_markers_in(result, true)
+}
+
+fn confident_marker(result: &serde_json::Value, key: &str) -> Option<FloorPoint> {
+    let marker = result.get(key)?;
+    if !(0.75..=1.0).contains(&marker.get("confidence")?.as_f64()?) {
+        return None;
+    }
+    let point = FloorPoint {
+        x: marker.get("x")?.as_f64()?,
+        y: marker.get("y")?.as_f64()?,
     };
-    let robot = (result["robotCount"].as_u64() == Some(1))
-        .then(|| marker("robot"))
-        .flatten();
+    point.on_floor().then_some(point)
+}
+
+fn inspection_markers_in(result: &serde_json::Value, require_robot_count: bool) -> Inspection {
+    let robot_allowed = !require_robot_count || result["robotCount"].as_u64() == Some(1);
+    let robot = robot_allowed.then(|| confident_marker(result, "robot")).flatten();
     let target_count = result["targetCount"].as_u64();
     let target = (target_count == Some(1))
-        .then(|| marker("target"))
+        .then(|| confident_marker(result, "target"))
         .flatten();
-    let heading_point = marker("headingPoint").filter(|front| {
+    let heading_point = confident_marker(result, "headingPoint").filter(|front| {
         robot
             .as_ref()
             .is_some_and(|feet| (front.x - feet.x).hypot(front.y - feet.y) >= 0.005)
@@ -731,26 +972,19 @@ fn parse_inspection_reply(raw: &str) -> Result<VisionPose, String> {
     })
 }
 
+#[cfg(test)]
 fn parse_walk_path_reply(raw: &str) -> Result<VisionPose, String> {
-    let result = read_markers_json(raw)?;
-    let marks = inspection_markers(&result);
-    let (Some(robot), Some(heading_point)) = (marks.robot, marks.heading_point) else {
-        return Err(marks
-            .reason
-            .unwrap_or_else(|| "画面未能确认唯一的小布米、双脚位置和朝向。".into()));
-    };
-    let clear = result["clear"].as_bool() == Some(true)
-        && result["clearConfidence"]
-            .as_f64()
-            .is_some_and(|c| (0.75..=1.0).contains(&c));
-    Ok(VisionPose {
-        walk_path: Some(WalkPath {
-            robot,
-            heading_point,
-            clear,
-            reason: marks.reason,
-        }),
-        ..VisionPose::default()
+    parse_walk_path_view(raw, false, false)
+}
+
+#[cfg(test)]
+fn parse_walk_path_view(raw: &str, dominant: bool, needs_distance: bool) -> Result<VisionPose, String> {
+    parse_walk_path(raw, dominant, &WalkPathQuery {
+        direction: WalkDirection::Forward,
+        calibrated_floor: false,
+        floor_size_m: None,
+        step_m: (!needs_distance).then_some(0.15),
+        prior_anchor: None,
     })
 }
 
@@ -758,7 +992,7 @@ async fn request_pose(input: LocateInput, token: &str, url: &str) -> Result<Visi
     let prompt = build_prompt(&input);
     let body = serde_json::json!({
         "model": "keepwork-pro", "stream": true, "reasoning": false,
-        "max_tokens": if input.scene_target.is_some() { 512 } else { 256 },
+        "max_tokens": if input.single_frame_route.is_some() { 1024 } else if input.scene_target.is_some() || input.walk_path.is_some() { 512 } else { 256 },
         "messages": [{ "role": "user", "content": [
             { "type": "text", "text": prompt },
             { "type": "image_url", "image_url": { "url": input.image_data_url } }
@@ -766,16 +1000,33 @@ async fn request_pose(input: LocateInput, token: &str, url: &str) -> Result<Visi
     });
     let (text, timing) =
         request_model(token, url, &body, input.request_timeout(), "视觉定位").await?;
-    let mut pose = if input.walk_path.is_some() {
-        parse_walk_path_reply(&text)
-    } else if input.inspection.is_some() {
-        parse_inspection_reply(&text)
+    let mut pose = if let Some(query) = &input.single_frame_route {
+        query.parse_reply(&text).map(|route| VisionPose {
+            single_frame_route: Some(route),
+            ..VisionPose::default()
+        })
+    } else if input.walk_continue.is_some() {
+        walk_continue::parse_reply(&text).map(|verdict| VisionPose {
+            walk_continue: Some(verdict),
+            ..VisionPose::default()
+        })
+    } else if let Some(walk) = &input.walk_path {
+        parse_walk_path(&text, input.is_dominant(), walk)
+    } else if let Some(query) = &input.inspection {
+        if query.pulse_directions {
+            directions::parse_pulses(&text)
+        } else if query.directions_only {
+            directions::parse_reply(&text)
+        } else {
+            parse_inspection_reply(&text)
+        }
     } else if let Some(scale) = &input.scene_scale {
-        parse_scene_reply(
+        parse_scene_reply_view(
             &text,
             scale.backward_m.is_some(),
             scale.auto,
             scale.min_confidence,
+            input.is_dominant(),
         )
     } else {
         parse_vision_reply(&text, input.grid_size, input.target_name.is_some())
@@ -858,11 +1109,27 @@ mod tests {
         query.target_name = Some("讲台".into());
         assert!(query.validate().is_err());
         query.target_name = None;
-        query.walk_path.as_mut().unwrap().step_m = 0.0;
+        query.walk_path.as_mut().unwrap().step_m = Some(0.0);
         assert!(query.validate().is_err());
+        query.walk_path.as_mut().unwrap().step_m = None;
+        assert!(query.validate().is_ok());
+        assert!(build_prompt(&query).contains("clearDistanceM"));
 
         let mut result = serde_json::json!({"robotCount":1,"robot":{"x":0.4,"y":0.5,"confidence":0.9},
             "headingPoint":{"x":0.5,"y":0.5,"confidence":0.92},"clear":true,"clearConfidence":0.91});
+        for (distance, allowed) in [
+            (serde_json::Value::Null, false),
+            (0.79.into(), false),
+            (0.8.into(), true),
+            (101.0.into(), false),
+        ] {
+            result["clearDistanceM"] = distance;
+            let walk = parse_walk_path_view(&result.to_string(), false, true)
+                .unwrap()
+                .walk_path
+                .unwrap();
+            assert_eq!(walk.clear, allowed);
+        }
         let parse = |data: &serde_json::Value| {
             parse_walk_path_reply(&data.to_string()).map(|p| p.walk_path.unwrap())
         };
@@ -879,6 +1146,80 @@ mod tests {
         result["robotCount"] = 1.into();
         result["headingPoint"] = serde_json::Value::Null;
         assert!(parse(&result).is_err());
+    }
+
+    #[test]
+    fn counted_walk_in_both_views_checks_one_pulse_and_body_height() {
+        for view in ["passive", "dominant"] {
+            let input: LocateInput = serde_json::from_value(serde_json::json!({
+                "imageDataUrl": FRAME, "searchView":view,
+                "walkPath":{"direction":"forward","calibratedFloor":false}
+            })).unwrap();
+            input.validate().unwrap();
+            let prompt = build_prompt(&input);
+            for concept in ["下一步", "接地点", "终点以外", "悬空", "遮挡", "0.8米"] {
+                assert!(prompt.contains(concept), "{view} omitted {concept}");
+            }
+        }
+    }
+
+    #[test]
+    fn counted_walk_floor_dimensions_require_a_calibrated_fixed_frame() {
+        let mut request = serde_json::json!({
+            "imageDataUrl":FRAME, "walkPath":{"direction":"forward","calibratedFloor":true,
+                "floorSizeM": {"width":3.7,"depth":2.1}}
+        });
+        let input = |value: &serde_json::Value| {
+            serde_json::from_value::<LocateInput>(value.clone()).unwrap()
+        };
+        let valid = input(&request);
+        valid.validate().unwrap();
+        let prompt = build_prompt(&valid);
+        assert!(prompt.contains("3.7") && prompt.contains("2.1"));
+        request["searchView"] = "dominant".into();
+        assert!(input(&request).validate().is_err());
+        request.as_object_mut().unwrap().remove("searchView");
+        request["walkPath"]["calibratedFloor"] = false.into();
+        assert!(input(&request).validate().is_err());
+        request["walkPath"]["calibratedFloor"] = true.into();
+        for (axis, invalid) in [("width", 0.0), ("width", -1.0), ("depth", 1001.0)] {
+            let mut invalid_size = request.clone();
+            invalid_size["walkPath"]["floorSizeM"][axis] = invalid.into();
+            assert!(input(&invalid_size).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn counted_walk_requires_confident_visible_clearance_even_when_distant_furniture_is_reported() {
+        let result = serde_json::json!({
+            "robotCount":1, "robot":{"x":0.4,"y":0.5,"confidence":0.9},
+            "headingPoint":{"x":0.5,"y":0.5,"confidence":0.9},
+            "clear":true,"clearConfidence":0.91,"clearDistanceM":1.3,
+            "reason":"椅腿在右侧，通路内有约1.3米可见空地"
+        });
+        let parse = |data: &serde_json::Value| {
+            parse_walk_path_view(&data.to_string(), false, true).unwrap().walk_path.unwrap()
+        };
+        assert!(parse(&result).clear);
+        let mut obstacle = result.clone();
+        obstacle["clear"] = false.into();
+        obstacle["reason"] = "椅腿伸入了下一步的落脚位置".into();
+        let blocked = parse(&obstacle);
+        assert!(!blocked.clear);
+        assert!(blocked.reason.unwrap().contains("椅腿"));
+
+        for (field, value, expected_detail) in [
+            ("clearDistanceM", serde_json::Value::Null, "0.8"),
+            ("clearDistanceM", 0.61.into(), "0.61"),
+            ("clearConfidence", 0.62.into(), "置信"),
+        ] {
+            let mut unclear = result.clone();
+            unclear[field] = value;
+            let blocked = parse(&unclear);
+            assert!(!blocked.clear);
+            let reason = blocked.reason.unwrap();
+            assert!(reason.contains(expected_detail), "{field}: {reason}");
+        }
     }
 
     #[test]
@@ -906,6 +1247,105 @@ mod tests {
     }
 
     #[test]
+    fn dominant_view_searches_without_the_robot_body_and_passive_prompts_stay() {
+        let passive: LocateInput = serde_json::from_value(serde_json::json!({
+            "imageDataUrl": FRAME,
+            "inspection": {"target": "垃圾桶", "calibratedFloor": false}
+        }))
+        .unwrap();
+        let mut explicit = serde_json::json!({
+            "imageDataUrl": FRAME,
+            "inspection": {"target": "垃圾桶", "calibratedFloor": false},
+            "searchView": "passive"
+        });
+        let same: LocateInput = serde_json::from_value(explicit.clone()).unwrap();
+        assert_eq!(build_prompt(&passive), build_prompt(&same));
+        assert!(!build_prompt(&passive).contains("主视觉"));
+
+        explicit["searchView"] = "dominant".into();
+        let dominant: LocateInput = serde_json::from_value(explicit).unwrap();
+        dominant.validate().unwrap();
+        let prompt = build_prompt(&dominant);
+        assert!(
+            prompt.contains("主视觉")
+                && prompt.contains("垃圾桶")
+                && prompt.contains("robotCount 固定为 0")
+        );
+        assert!(!prompt.contains("只标注本帧中可见的小布米"));
+
+        let mut grid = serde_json::json!({
+            "imageDataUrl": FRAME, "goalName": "讲台", "goalCell": 1, "searchView": "dominant"
+        });
+        assert!(serde_json::from_value::<LocateInput>(grid.clone())
+            .unwrap()
+            .validate()
+            .is_err());
+        grid["searchView"] = "overhead".into();
+        assert!(serde_json::from_value::<LocateInput>(grid)
+            .unwrap()
+            .validate()
+            .is_err());
+
+        let mut walk = serde_json::json!({
+            "imageDataUrl": FRAME,
+            "searchView": "dominant",
+            "walkPath": {"direction": "forward", "calibratedFloor": true, "stepM": 0.2,
+                "priorAnchor": {"x": 0.4, "y": 0.8}}
+        });
+        let walk_input: LocateInput = serde_json::from_value(walk.clone()).unwrap();
+        walk_input.validate().unwrap();
+        let walk_prompt = build_prompt(&walk_input);
+        assert!(
+            walk_prompt.contains("主视觉")
+                && walk_prompt.contains("0.400")
+                && walk_prompt.contains("0.2米")
+        );
+        assert!(!walk_prompt.contains("观察固定摄像头"));
+        walk["searchView"] = "passive".into();
+        assert!(serde_json::from_value::<LocateInput>(walk)
+            .unwrap()
+            .validate()
+            .is_err());
+
+        let anchor = serde_json::json!({
+            "robot": {"x": 0.42, "y": 0.81, "confidence": 0.9},
+            "headingPoint": {"x": 0.42, "y": 0.62, "confidence": 0.88},
+            "clear": true, "clearConfidence": 0.91
+        });
+        let parsed = parse_walk_path_view(&anchor.to_string(), true, false)
+            .unwrap()
+            .walk_path
+            .unwrap();
+        assert!(parsed.clear && (parsed.robot.y - 0.81).abs() < 1e-6);
+        assert!(parse_walk_path_reply(&anchor.to_string()).is_err());
+
+        let lost = serde_json::json!({
+            "status": "lost", "turnClear": true, "confidence": 0.86, "reason": "目标不在主视觉内"
+        });
+        let scene = parse_scene_reply_view(&lost.to_string(), false, true, 0.75, true)
+            .unwrap()
+            .scene
+            .unwrap();
+        assert_eq!(scene.status, SceneStatus::Lost);
+        assert!(scene.turn_clear && scene.robot.is_none() && scene.confidence >= 0.75);
+        let ignored = parse_scene_reply_view(&lost.to_string(), false, true, 0.75, false)
+            .unwrap()
+            .scene
+            .unwrap();
+        assert!(!ignored.turn_clear && ignored.confidence == 0.0);
+
+        let approach = serde_json::json!({
+            "imageDataUrl": FRAME,
+            "searchView": "dominant",
+            "sceneTarget": "穿粉色上衣的人",
+            "sceneScale": {"auto": true, "greetingM": 0.8, "stepM": 0.18}
+        });
+        let scene_prompt = build_prompt(&serde_json::from_value(approach).unwrap());
+        assert!(scene_prompt.contains("主视觉") && scene_prompt.contains("status 用 lost"));
+        assert!(!scene_prompt.contains("教室固定高位摄像头"));
+    }
+
+    #[test]
     fn parses_plain_fenced_and_chinese_vlm_replies() {
         let fenced = "```json\n{\"detected\":true,\"cell\":\"C2\",\"facing\":\"right\",\"confidence\":0.92,\"reason\":\"双脚位于C2\"}\n```";
         assert_eq!(
@@ -917,10 +1357,7 @@ mod tests {
                 confidence: 0.92,
                 reason: Some("双脚位于C2".into()),
                 target: None,
-                scene: None,
-                inspection: None,
-                walk_path: None,
-                timing_ms: None,
+                ..VisionPose::default()
             }
         );
 
@@ -1217,6 +1654,14 @@ mod tests {
         assert_eq!(ok.at_greeting, Some(false));
         assert!(ok.rear_clear);
 
+        for (metres, expected) in [(None, false), (Some(0.79), false), (Some(0.8), true)] {
+            let mut frame = ready.clone();
+            frame["rearClearanceM"] = serde_json::json!(metres);
+            let scene = parse_scene_reply(&frame.to_string(), false, true, default_scene_confidence())
+                .unwrap().scene.unwrap();
+            assert_eq!(scene.rear_clear, expected);
+        }
+
         let mut missing_turn = ready.clone();
         missing_turn["turnDeg"] = serde_json::Value::Null;
         let downgraded = parse_scene_reply(
@@ -1373,6 +1818,9 @@ mod tests {
             scene_scale: None,
             inspection: None,
             walk_path: None,
+            search_view: None,
+            walk_continue: None,
+            single_frame_route: None,
         }
     }
 

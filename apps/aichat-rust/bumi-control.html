@@ -37,8 +37,6 @@
           <button id="disconnect" class="secondary" type="button" hidden>断开连接</button>
         </div>
       </header>
-      <p id="operation" class="operation" role="status" aria-live="polite">查找设备约需 20 秒，未连接时最多自动重试 3 次。</p>
-      <p id="error" class="error" role="alert"></p>
       <section class="telemetry" aria-label="机器人状态">
         <div class="metric">
           <span>电量</span>
@@ -46,43 +44,73 @@
           <button type="button" class="text-button" data-query="battery" disabled>查询电量</button>
         </div>
         <div class="metric">
-          <span>上次查询状态</span>
+          <span>机器人状态</span>
           <strong id="robot-status">—</strong>
           <button type="button" class="text-button" data-query="status" disabled>查询状态</button>
         </div>
       </section>
     </section>
 
-    <section class="panel box-link-panel" id="box-link-panel" aria-labelledby="box-link-title">
-      <div class="device-heading">
-        <h2 id="box-link-title">视频语音盒子</h2>
-        <span id="box-link-state" class="connection-state" data-state="offline">未连接</span>
+    <div class="control-toolbar" id="control-toolbar">
+      <div class="toolbar-actions">
+        <nav class="section-shortcuts" aria-label="控制台分区">
+          <button type="button" data-bumi-target="manual-controls" aria-controls="manual-controls" aria-current="location">手动遥控</button>
+          <button type="button" data-bumi-target="classroom-home" aria-controls="classroom-home">课堂任务</button>
+          <button type="button" data-bumi-target="robot-actions" aria-controls="robot-actions">动作库</button>
+          <button type="button" data-bumi-target="device-tools" aria-controls="device-tools">设备工具</button>
+        </nav>
+        <button type="button" id="stop-move" class="stop-move" disabled>停止</button>
       </div>
-      <p class="description">电脑可与盒子连接同一路由器、让盒子加入电脑热点，或连接盒子的 xiaozhi-box-XXXX 热点。</p>
-      <form id="box-link-form">
-        <div class="box-link-addresses">
-          <label>盒子 IPv4 地址
-            <input id="box-link-ip" type="text" inputmode="decimal" maxlength="15" placeholder="盒子热点地址 192.168.5.1" autocomplete="off" spellcheck="false">
-          </label>
-          <label>配对码（如已设置）
-            <input id="box-link-key" type="password" maxlength="256" autocomplete="off">
-          </label>
+      <p id="operation" class="operation" role="status" aria-live="polite">查找设备约需 20 秒，未连接时最多自动重试 3 次。</p>
+      <p id="error" class="error" role="alert"></p>
+    </div>
+
+    <section id="manual-controls" class="panel movement-panel" tabindex="-1" aria-labelledby="movement-title">
+      <div class="movement-heading">
+        <h2 id="movement-title">手动遥控</h2>
+      </div>
+      <p class="description">让机器人在平坦、空旷的地面站稳，再选择步态。全身行走时，手臂会随步伐摆动。</p>
+      <div class="mode-row">
+        <button id="walk-mode" class="primary" type="button" disabled>进入行走模式</button>
+        <button id="run-mode" class="secondary" type="button" hidden disabled>进入全身行走模式</button>
+      </div>
+      <div class="movement-layout">
+        <div class="direction-pad" id="direction-pad" role="group" aria-label="步伐控制">
+          <button type="button" class="direction-forward" data-move="forward" aria-label="按住前进" aria-pressed="false" disabled>前进</button>
+          <button type="button" class="direction-left" data-move="left" aria-label="按住左转" aria-pressed="false" disabled>左转</button>
+          <button type="button" id="motion-stick" class="motion-stick" aria-label="步伐摇杆" aria-describedby="stick-help" disabled></button>
+          <button type="button" class="direction-right" data-move="right" aria-label="按住右转" aria-pressed="false" disabled>右转</button>
+          <button type="button" class="direction-backward" data-move="backward" aria-label="按住后退" aria-pressed="false" disabled>后退</button>
         </div>
-        <label id="box-link-devices" hidden>扫描结果
-          <select id="box-link-picker"><option value="">请选择盒子…</option></select>
-        </label>
-        <div class="connection-actions">
-          <button id="box-link-scan" class="secondary" type="button">扫描设备</button>
-          <button id="box-link-connect" class="primary" type="submit">连接盒子</button>
-          <button id="box-link-cancel" class="secondary" type="button" hidden>取消</button>
-          <button id="box-link-disconnect" class="secondary" type="button" hidden>断开盒子</button>
+        <div class="movement-help">
+          <fieldset id="stick-horizontal" aria-describedby="stick-status" disabled>
+            <legend>屏幕左右操作</legend>
+            <div class="horizontal-options">
+              <div class="horizontal-option">
+                <input type="radio" id="stick-yaw" name="stick-horizontal" value="yaw" checked>
+                <label for="stick-yaw">转向<span>原地改变朝向</span></label>
+              </div>
+              <div class="horizontal-option">
+                <input type="radio" id="stick-lateral" name="stick-horizontal" value="lateral">
+                <label for="stick-lateral">侧移<span>保持朝向，左右移动</span></label>
+              </div>
+            </div>
+          </fieldset>
+          <p class="movement-note" id="stick-status">连接机器人并选择步态后可使用。</p>
+          <p class="movement-note" id="stick-help">摇杆拖得越远越快。按住屏幕方向键，松开即停。</p>
         </div>
-      </form>
-      <p id="box-link-details" class="hint" hidden></p>
-      <p id="box-link-status" class="operation" role="status"></p>
+      </div>
+      <div class="classroom-remote">
+        <div><h3>小米遥控器</h3><p class="movement-note">RC003 可用方向键移动，按住语音键说话，松开执行。</p></div>
+        <div class="classroom-command-actions">
+          <button type="button" class="secondary" id="remote-toggle" disabled>开启方向键遥控</button>
+          <button type="button" class="text-button" id="remote-diagnose">检查按键</button>
+        </div>
+        <p id="remote-status" class="operation" role="status"></p>
+      </div>
     </section>
 
-    <div id="classroom-home">
+    <div id="classroom-home" role="region" aria-label="课堂任务" tabindex="-1">
       <section id="classroom-panel" class="panel classroom-panel" aria-labelledby="voice-expert-title">
         <div class="movement-heading">
           <h2 id="voice-expert-title">课堂摄像头与语音</h2>
@@ -91,24 +119,44 @@
         <div class="classroom-workspace">
           <div class="classroom-commands">
             <label for="voice-command">识别目标或动作指令</label>
-            <input id="voice-command" type="text" maxlength="128" placeholder="例如：向前走一步" autocomplete="off">
+            <div class="classroom-command-input">
+              <input id="voice-command" type="text" maxlength="128" placeholder="例如：向前走一步" autocomplete="off">
+              <button type="button" id="voice-input" class="secondary" aria-pressed="false">语音输入</button>
+            </div>
             <div class="classroom-command-actions">
               <button type="button" id="vision-inspect-classroom" class="secondary" disabled>只识别，不移动</button>
               <button id="voice-run" class="primary" type="button">执行指令</button>
+              <button id="class-route-walk" class="primary" type="button" hidden disabled>单图规划并行走</button>
+              <button id="class-trial-step" class="secondary" type="button" title="按当前档位前进一步后停下，无需摄像头" hidden disabled>前进试走一步</button>
             </div>
-            <p id="vision-cloud-hint" class="movement-note">看图识别会将当前画面发送至 Keepwork。需要 AI 理解步数时，会发送这句口令的文字。两者使用 AIChat 主窗口的登录账号。</p>
+            <p class="movement-note">没有遥控器时可用电脑麦克风。语音发往 Keepwork 转成文字，核对后再执行，不会自动移动。</p>
+            <p id="vision-cloud-hint" class="movement-note">识别时会用 AIChat 主窗口的账号将当前画面发往 Keepwork；解析步数时会发送口令文字。</p>
             <p id="vision-inspect-status" class="operation" role="status"></p>
             <p id="voice-status" class="operation" role="status"></p>
           </div>
           <div id="vision-panel" class="vision-preview">
             <div class="vision-preview-header">
               <h3>教室画面</h3>
+              <label class="vision-check"><input type="checkbox" id="vision-mirror">水平镜像</label>
               <button type="button" id="vision-toggle" class="secondary">开启摄像头</button>
             </div>
             <div class="camera-source">
-              <label for="vision-device">摄像头</label>
-              <select id="vision-device"><option value="">默认本机摄像头</option></select>
-              <label class="vision-check"><input type="checkbox" id="vision-mirror">水平镜像</label>
+              <div class="camera-field">
+                <label for="vision-device">摄像头</label>
+                <div class="settings-select">
+                  <select id="vision-device"><option value="">默认本机摄像头</option></select>
+                </div>
+              </div>
+              <div class="camera-field" id="vision-search-setting" hidden>
+                <label for="vision-search-view">寻找视角</label>
+                <div class="settings-select">
+                  <select id="vision-search-view" disabled aria-describedby="vision-search-help">
+                    <option value="passive" selected>被动视角 · 固定机位</option>
+                    <option value="dominant">主导视角 · 机器人前方</option>
+                  </select>
+                </div>
+                <p id="vision-search-help" class="vision-search-help" hidden></p>
+              </div>
             </div>
             <p id="vision-corner-hint" class="vision-corner-hint" role="status" hidden></p>
             <div id="vision-stage" class="vision-stage" hidden>
@@ -122,79 +170,94 @@
             </details>
           </div>
           <div class="classroom-options">
-            <div class="classroom-remote">
-              <p class="movement-note">使用小米 RC003 时，开启方向键遥控，按住语音键说一句，松开执行。</p>
-              <div class="classroom-command-actions">
-                <button type="button" class="secondary" id="remote-toggle" disabled>开启方向键遥控</button>
-                <button type="button" class="text-button" id="remote-diagnose">检查按键</button>
-              </div>
-              <p id="remote-status" class="operation" role="status"></p>
-            </div>
             <label class="vision-check classroom-grant"><input id="chat-classroom-grant" type="checkbox" disabled>允许 AIChat 主聊天查看教室摄像头并控制本次连接的机器人</label>
+            <label class="vision-check classroom-grant" id="class-walk-continue-setting" hidden><input id="class-walk-continue" type="checkbox" checked disabled>前进后自动截屏，由 AI 判断是否继续行走</label>
+            <div id="class-route-plan-setting" hidden>
+              <label class="vision-check classroom-grant"><input id="class-route-plan" type="checkbox" disabled aria-describedby="class-route-plan-help">单图规划</label>
+              <small id="class-route-plan-help"></small>
+            </div>
           </div>
         </div>
         <details class="vision-panel" id="classroom-settings">
-          <summary>行走设置（置信度、点动档位与地面标定）</summary>
-          <p class="movement-note">在行走模式下实测当前档位的单次步幅或转角，填入课堂行走要用的方向。需要按场地尺寸计算时，再标出四角并填写宽、深。</p>
-          <div class="vision-preview-tools">
-            <button type="button" id="vision-calibrate" disabled>标定地面四角</button>
-            <button type="button" id="vision-reset-quad">重置四角</button>
-          </div>
-          <div class="vision-controls">
-            <label id="class-confidence-setting" hidden>行走置信度阈值
-              <input id="class-confidence-threshold" type="number" min="0.01" max="1" step="0.01" value="0.75" required aria-describedby="class-confidence-help">
-              <small id="class-confidence-help">走向或跟随目标时，联合置信度须达到此值。默认 0.75。<span id="class-confidence-legacy" hidden>当前桌面宿主仅支持 0.75，恢复默认值后可继续。</span></small>
-            </label>
-            <label id="class-pulse-setting" hidden>课堂点动档位
-              <select id="class-pulse-profile" aria-describedby="class-pulse-help">
-                <option value="gentle">轻柔 · 幅度 40/127 · 0.4 秒</option>
-                <option value="standard" selected>标准 · 幅度 64/127 · 0.8 秒</option>
-                <option value="strong">加强 · 幅度 80/127 · 1.0 秒</option>
-              </select>
-              <small id="class-pulse-help">换档后需重新测量步幅和转角。</small>
-            </label>
-            <label>场地左右宽（米，可选）<input id="class-width" type="number" min="0.01" step="any" placeholder="自动估算"></label>
-            <label>场地前后深（米，可选）<input id="class-height" type="number" min="0.01" step="any" placeholder="自动估算"></label>
-            <label>前进一步（米）<input id="class-step" type="number" min="0.001" step="any" placeholder="本机实测值"></label>
-            <label>后退一步（米）<input id="class-backward" type="number" min="0.001" step="any" placeholder="本机实测值"></label>
-            <label>左转一次（度）<input id="class-left" type="number" min="0.1" max="179" step="any" placeholder="本机实测值"></label>
-            <label>右转一次（度）<input id="class-turn" type="number" min="0.1" max="179" step="any" placeholder="本机实测值"></label>
-            <label>招呼距离（米）<input id="class-greeting" type="number" min="0.01" step="any" value="0.8"></label>
-          </div>
+          <summary>行走设置</summary>
+          <p class="movement-note">默认每次点动停稳后，再拍照核对位置和通路。</p>
+          <section class="settings-group" aria-labelledby="class-task-settings-title">
+            <h3 id="class-task-settings-title">任务参数</h3>
+            <div class="vision-controls walking-fields">
+              <label id="class-pulse-setting" hidden>课堂点动档位
+                <span class="settings-select">
+                  <select id="class-pulse-profile" aria-describedby="class-pulse-help">
+                    <option value="gentle">轻柔 · 40/127 · 0.4 秒</option>
+                    <option value="standard" selected>标准 · 64/127 · 0.8 秒</option>
+                    <option value="strong">加强 · 80/127 · 1.0 秒</option>
+                  </select>
+                </span>
+                <small id="class-pulse-help">档位决定摇杆幅度和持续时间。换档会清空手动填写的步幅与转角。</small>
+              </label>
+              <label>招呼距离（米）<input id="class-greeting" type="number" min="0.01" step="any" value="0.8"></label>
+              <label id="class-confidence-setting" hidden>行走置信度阈值
+                <input id="class-confidence-threshold" type="number" min="0.01" max="1" step="0.01" value="0.75" required aria-describedby="class-confidence-help">
+                <small id="class-confidence-help">走向或跟随目标所需的最低置信度。默认 0.75。<span id="class-confidence-legacy" hidden>当前桌面宿主仅支持 0.75，恢复默认值后可继续。</span></small>
+              </label>
+            </div>
+          </section>
+          <details class="settings-group" id="class-manual-calibration">
+            <summary>手动标定步幅与转角（可选）</summary>
+            <p class="movement-note">如果已量过本机在当前档位的一次点动，可以填入对应方向的距离或转角，供行走时参考。</p>
+            <div class="vision-controls pulse-fields">
+              <div class="pulse-pair" role="group" aria-label="前后移动">
+                <label>前进一步<span class="pulse-measure">
+                  <input id="class-step" type="number" min="0.001" step="any" aria-label="前进一步（米）">
+                  <span aria-hidden="true">米</span>
+                </span></label>
+                <label>后退一步<span class="pulse-measure">
+                  <input id="class-backward" type="number" min="0.001" step="any" aria-label="后退一步（米）">
+                  <span aria-hidden="true">米</span>
+                </span></label>
+              </div>
+              <div class="pulse-pair" role="group" aria-label="原地转向">
+                <label>左转一次<span class="pulse-measure">
+                  <input id="class-left" type="number" min="0.1" max="179" step="any" aria-label="左转一次（度）">
+                  <span aria-hidden="true">度</span>
+                </span></label>
+                <label>右转一次<span class="pulse-measure">
+                  <input id="class-turn" type="number" min="0.1" max="179" step="any" aria-label="右转一次（度）">
+                  <span aria-hidden="true">度</span>
+                </span></label>
+              </div>
+            </div>
+            <details class="estimate-helper">
+              <summary>用多次点动估算平均值</summary>
+              <p class="movement-note">同一档位、同一方向逐次点动，填入次数和总量。测量前进时先关闭自动续走。</p>
+              <div class="vision-controls estimate-fields">
+                <label>方向<span class="settings-select"><select id="class-estimate-direction">
+                  <option value="step">前进</option><option value="backward">后退</option>
+                  <option value="left">左转</option><option value="turn">右转</option>
+                </select></span></label>
+                <label>点动次数<input id="class-estimate-count" type="number" step="1" min="1" value="3"></label>
+                <label><span id="class-estimate-unit">总位移（厘米）</span><input id="class-estimate-total" type="number" min="0" step="any"></label>
+                <button id="class-estimate-apply" type="button" class="secondary">计算并填入</button>
+              </div>
+              <p id="class-estimate-result" class="operation" role="status"></p>
+            </details>
+          </details>
+          <details class="settings-group floor-settings">
+            <summary>固定摄像头地面标定（可选）</summary>
+            <p class="movement-note">要用实际场地尺寸计算位置，请先在摄像头画面标出四角，再填宽和深。</p>
+            <div class="vision-preview-tools">
+              <button type="button" id="vision-calibrate" disabled>标定地面四角</button>
+              <button type="button" id="vision-reset-quad">重置四角</button>
+            </div>
+            <div class="vision-controls">
+              <label>场地左右宽（米）<input id="class-width" type="number" min="0.01" step="any" placeholder="自动估算"></label>
+              <label>场地前后深（米）<input id="class-height" type="number" min="0.01" step="any" placeholder="自动估算"></label>
+            </div>
+          </details>
         </details>
       </section>
     </div>
 
-    <div class="drive-deck">
-      <section class="panel movement-panel" aria-labelledby="movement-title">
-        <div class="movement-heading">
-          <h2 id="movement-title">移动控制</h2>
-          <button type="button" id="stop-move" class="stop-move" disabled>停止</button>
-        </div>
-        <p class="description">确认机器人在平坦、无障碍物的地面上站稳后，选择步态（全身行走带协调摆臂）。</p>
-        <div class="mode-row">
-          <button id="walk-mode" class="primary" type="button" disabled>进入行走模式</button>
-          <button id="run-mode" class="secondary" type="button" hidden disabled>进入全身行走模式</button>
-        </div>
-        <div class="movement-layout">
-          <div class="direction-pad" id="direction-pad" role="group" aria-label="步伐控制">
-            <button type="button" class="direction-forward" data-move="forward" aria-label="按住前进" aria-pressed="false" disabled>前进</button>
-            <button type="button" class="direction-left" data-move="left" aria-label="按住左转" aria-pressed="false" disabled>左转</button>
-            <button type="button" id="motion-stick" class="motion-stick" aria-label="步伐摇杆" aria-describedby="stick-help" disabled></button>
-            <button type="button" class="direction-right" data-move="right" aria-label="按住右转" aria-pressed="false" disabled>右转</button>
-            <button type="button" class="direction-backward" data-move="backward" aria-label="按住后退" aria-pressed="false" disabled>后退</button>
-          </div>
-          <div class="movement-help">
-            <label for="stick-horizontal">摇杆左右拖动</label>
-            <select id="stick-horizontal" disabled>
-              <option value="yaw" selected>转向</option>
-              <option value="lateral">侧移</option>
-            </select>
-            <p class="movement-note" id="stick-help">上下拖动控制前后，拖得越远速度越快。按住方向键可低速点动，松手即发送停止指令。</p>
-          </div>
-        </div>
-      </section>
-
+    <div id="robot-actions" class="control-group" role="region" aria-label="动作库" tabindex="-1">
       <section class="panel actions-panel" aria-labelledby="actions-title">
         <h2 id="actions-title">常用动作</h2>
         <p class="description">执行前，请确认周围留有足够空间。</p>
@@ -205,103 +268,135 @@
           <button type="button" data-command="cheer" disabled>欢呼</button>
         </div>
       </section>
+      <section class="panel teach-panel" id="teach-panel" aria-labelledby="teach-title" hidden>
+        <div class="teach-heading">
+          <h2 id="teach-title">手臂示教与自定义动作库</h2>
+          <span id="teach-timer" class="teach-timer" hidden></span>
+        </div>
+        <p class="description">开始录制后，手动引导 Bumi 手臂做动作。点击“命名并结束录制”，输入名称并保存。录制最长 60 秒。</p>
+        <div class="mode-row">
+          <button id="teach-start" class="primary" type="button" disabled>开始示教录制</button>
+          <button id="teach-stop" class="stop-move" type="button" hidden disabled>命名并结束录制</button>
+        </div>
+        <div id="teach-save-box" class="teach-save-box" hidden>
+          <label for="teach-name">动作名称（最长 48 字节）</label>
+          <div class="teach-save-row">
+            <input id="teach-name" type="text" maxlength="48" placeholder="例如：挥臂打招呼" autocomplete="off">
+            <button id="teach-save" class="primary" type="button" disabled>保存动作</button>
+            <button id="teach-discard" class="secondary" type="button">放弃</button>
+          </div>
+        </div>
+        <p id="teach-status" class="operation" role="status"></p>
+        <div class="teach-lib-heading">
+          <h3>我的自定义动作</h3>
+          <button id="teach-refresh" class="secondary" type="button" disabled>刷新动作库</button>
+        </div>
+        <div id="teach-list" class="teach-list" role="list" aria-label="已保存的示教动作">
+          <p class="teach-empty">连接后点击“刷新动作库”，查看或回放已录制的自定义动作。</p>
+        </div>
+      </section>
+      <section class="panel" aria-labelledby="posture-title">
+        <h2 id="posture-title">起身与收纳</h2>
+        <div class="posture-grid">
+          <div>
+            <h3>一键起身</h3>
+            <p>仅限正面朝上平躺、四肢自然摆放、双腿伸直时使用。地面须平坦防滑，周围 3m × 3m 内无人且无杂物。</p>
+            <button type="button" class="posture-button" data-command="standUp" disabled>确认环境并起身…</button>
+          </div>
+          <div>
+            <h3>一键收纳</h3>
+            <p>仅从站姿开始。地面须平坦防滑，周围无人且无杂物。完成后请扶稳机器人，让它坐于地面。</p>
+            <button type="button" class="posture-button" data-command="standToFall" disabled>确认环境并收纳…</button>
+          </div>
+        </div>
+      </section>
+      <section class="panel" aria-labelledby="speech-title" hidden>
+        <h2 id="speech-title">让 Bumi 说话</h2>
+        <p class="description">输入要播放的文字，最长 120 个 UTF-8 字节。</p>
+        <div class="speech-controls">
+          <input id="speech-text" type="text" maxlength="120" placeholder="例如：大家好，我是 Bumi" aria-label="让机器人说的内容" disabled>
+          <button id="speak" class="primary" type="button" disabled>说话</button>
+        </div>
+      </section>
     </div>
 
-    <section class="panel teach-panel" id="teach-panel" aria-labelledby="teach-title" hidden>
-      <div class="teach-heading">
-        <h2 id="teach-title">手臂示教与自定义动作库</h2>
-        <span id="teach-timer" class="teach-timer" hidden></span>
-      </div>
-      <p class="description">开始录制后，手动引导 Bumi 手臂做动作。点击“命名并结束录制”，输入名称并保存。录制最长 60 秒。</p>
-      <div class="mode-row">
-        <button id="teach-start" class="primary" type="button" disabled>开始示教录制</button>
-        <button id="teach-stop" class="stop-move" type="button" hidden disabled>命名并结束录制</button>
-      </div>
-      <div id="teach-save-box" class="teach-save-box" hidden>
-        <label for="teach-name">动作名称（最长 48 字节）</label>
-        <div class="teach-save-row">
-          <input id="teach-name" type="text" maxlength="48" placeholder="例如：挥臂打招呼" autocomplete="off">
-          <button id="teach-save" class="primary" type="button" disabled>保存动作</button>
-          <button id="teach-discard" class="secondary" type="button">放弃</button>
+    <div id="device-tools" class="control-group" role="region" aria-label="设备工具" tabindex="-1">
+      <section class="panel box-link-panel" id="box-link-panel" aria-labelledby="box-link-title">
+        <div class="device-heading">
+          <h2 id="box-link-title">视频语音盒子</h2>
+          <span id="box-link-state" class="connection-state" data-state="offline">未连接</span>
         </div>
-      </div>
-      <p id="teach-status" class="operation" role="status"></p>
-      <div class="teach-lib-heading">
-        <h3>我的自定义动作</h3>
-        <button id="teach-refresh" class="secondary" type="button" disabled>刷新动作库</button>
-      </div>
-      <div id="teach-list" class="teach-list" role="list" aria-label="已保存的示教动作">
-        <p class="teach-empty">连接后点击“刷新动作库”，查看或回放已录制的自定义动作。</p>
-      </div>
-    </section>
-
-    <section class="panel" aria-labelledby="posture-title">
-      <h2 id="posture-title">起身与收纳</h2>
-      <div class="posture-grid">
-        <div>
-          <h3>一键起身</h3>
-          <p>仅限正面朝上平躺、四肢自然摆放、双腿伸直时使用。地面须平坦防滑，周围 3m × 3m 内无人且无杂物。</p>
-          <button type="button" class="posture-button" data-command="standUp" disabled>确认环境并起身…</button>
+        <p class="description">电脑和盒子在同一网络时，地址留空即可自动查找。直连 xiaozhi-box-XXXX 热点时，可填 192.168.5.1。</p>
+        <form id="box-link-form">
+          <div class="box-link-addresses">
+            <label>盒子 IPv4 地址
+              <input id="box-link-ip" type="text" inputmode="decimal" maxlength="15" placeholder="留空自动查找" autocomplete="off" spellcheck="false">
+            </label>
+            <label>配对码（如已设置）
+              <input id="box-link-key" type="password" maxlength="256" autocomplete="off">
+            </label>
+          </div>
+          <label id="box-link-devices" hidden>扫描结果
+            <select id="box-link-picker"><option value="">请选择盒子…</option></select>
+          </label>
+          <div id="box-link-wifi" class="wifi-results" hidden>
+            <span id="box-link-wifi-title"></span>
+            <ul id="box-link-wifi-list" class="wifi-list" aria-label="附近的 Wi-Fi 热点"></ul>
+          </div>
+          <div class="connection-actions">
+            <button id="box-link-connect" class="primary" type="submit">连接盒子</button>
+            <button id="box-link-scan" class="secondary" type="button">扫描设备</button>
+            <button id="box-link-wifi-scan" class="secondary" type="button">扫描热点</button>
+            <button id="box-link-cancel" class="secondary" type="button" hidden>取消</button>
+            <button id="box-link-disconnect" class="secondary" type="button" hidden>断开盒子</button>
+          </div>
+        </form>
+        <p id="box-link-details" class="hint" hidden></p>
+        <p id="box-link-status" class="operation" role="status"></p>
+      </section>
+      <section class="panel volume-panel" aria-labelledby="volume-title">
+        <div class="volume-heading">
+          <h2 id="volume-title">音量</h2>
+          <output id="volume-value" for="volume">50%</output>
         </div>
-        <div>
-          <h3>一键收纳</h3>
-          <p>仅从站姿开始。地面须平坦防滑，周围无人且无杂物。完成后请扶稳机器人，让它坐于地面。</p>
-          <button type="button" class="posture-button" data-command="standToFall" disabled>确认环境并收纳…</button>
+        <div class="volume-controls">
+          <input id="volume" type="range" min="0" max="100" step="1" value="50" aria-label="机器人音量" disabled>
+          <button id="set-volume" class="secondary" type="button" disabled>设置音量</button>
         </div>
+      </section>
+      <div class="diagnostics">
+        <details class="monitor-panel">
+          <summary id="monitor-title">蓝牙消息监听</summary>
+          <p>查看本机写出的蓝牙指令和机器人返回的通知。日志仅保留在当前窗口。</p>
+          <div class="monitor-actions">
+            <button id="listen-toggle" class="primary" type="button" disabled>开始监听</button>
+            <button id="clear-messages" class="secondary" type="button" disabled>清空</button>
+          </div>
+          <p id="listener-status" class="operation">未开启监听</p>
+          <div id="message-log" class="message-log" role="log" aria-label="机器人蓝牙消息">
+            <p class="log-empty">开启监听后，点“查询电量”可检查蓝牙收发。</p>
+          </div>
+        </details>
+        <details class="protocol-details">
+          <summary>连接说明与协议信息</summary>
+          <p>电脑通过 BLE 向机器人发送动作指令。遥控器的录音使用已有的 mi-remote-voice 语音输入服务，由 Keepwork 云端识别。打开窗口后手动连接，关闭窗口会断开机器人。</p>
+          <dl>
+            <div><dt>GATT 服务</dt><dd>061e8f00-8a56-11f0-a62c-00155dff3a7e</dd></div>
+            <div><dt>数据帧</dt><dd>55 AA · 长度 · 指令 · 长度校验</dd></div>
+          </dl>
+        </details>
       </div>
-    </section>
-
-    <section class="panel" aria-labelledby="speech-title" hidden>
-      <h2 id="speech-title">让 Bumi 说话</h2>
-      <p class="description">输入要播放的文字，最长 120 个 UTF-8 字节。</p>
-      <div class="speech-controls">
-        <input id="speech-text" type="text" maxlength="120" placeholder="例如：大家好，我是 Bumi" aria-label="让机器人说的内容" disabled>
-        <button id="speak" class="primary" type="button" disabled>说话</button>
-      </div>
-    </section>
-
-    <section class="panel volume-panel" aria-labelledby="volume-title">
-      <div class="volume-heading">
-        <h2 id="volume-title">音量</h2>
-        <output id="volume-value" for="volume">50%</output>
-      </div>
-      <div class="volume-controls">
-        <input id="volume" type="range" min="0" max="100" step="1" value="50" aria-label="机器人音量" disabled>
-        <button id="set-volume" class="secondary" type="button" disabled>设置音量</button>
-      </div>
-    </section>
-
-    <div class="diagnostics">
-      <details class="monitor-panel">
-        <summary id="monitor-title">蓝牙消息监听</summary>
-        <p>查看本机写出的蓝牙指令和机器人返回的通知。日志仅保留在当前窗口。</p>
-        <div class="monitor-actions">
-          <button id="listen-toggle" class="primary" type="button" disabled>开始监听</button>
-          <button id="clear-messages" class="secondary" type="button" disabled>清空</button>
-        </div>
-        <p id="listener-status" class="operation">未开启监听</p>
-        <div id="message-log" class="message-log" role="log" aria-label="机器人蓝牙消息">
-          <p class="log-empty">开启监听后，点“查询电量”可检查蓝牙收发。</p>
-        </div>
-      </details>
-      <details class="protocol-details">
-        <summary>连接说明与协议信息</summary>
-        <p>电脑通过 BLE 向机器人发送动作指令。遥控器的录音使用已有的 mi-remote-voice 语音输入服务，由 Keepwork 云端识别。打开窗口后手动连接，关闭窗口会断开机器人。</p>
-        <dl>
-          <div><dt>GATT 服务</dt><dd>061e8f00-8a56-11f0-a62c-00155dff3a7e</dd></div>
-          <div><dt>数据帧</dt><dd>55 AA · 长度 · 指令 · 长度校验</dd></div>
-        </dl>
-      </details>
     </div>
+
     <dialog id="remote-shield" class="remote-shield" tabindex="-1" aria-labelledby="remote-shield-title">
-      <h2 id="remote-shield-title">小米遥控器控制 Bumi</h2>
+      <div class="remote-heading">
+        <h2 id="remote-shield-title">小米遥控器控制 Bumi</h2>
+        <button type="button" class="secondary" id="remote-shield-close">关闭遥控</button>
+      </div>
       <p id="remote-shield-help">保持此窗口在前台。按住方向键移动或转向，松开即请求停止。</p>
       <p id="remote-shield-status" class="operation" role="status"></p>
       <p id="remote-shield-voice" class="operation" role="status"></p>
       <div id="classroom-shield"></div>
-      <div class="mode-row">
-        <button type="button" class="primary" id="remote-shield-close">关闭遥控</button>
-      </div>
     </dialog>
   </main>
   <script type="module" src="/src/bumi-control.ts"></script>

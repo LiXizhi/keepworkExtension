@@ -20,15 +20,23 @@ export interface ClassroomInspection {
   robot?: Point2D;
   headingPoint?: Point2D;
   target?: Point2D;
+  /** Endpoints of forward segments, ending at the planned stop. Same coordinates as robot. */
+  route?: Point2D[];
   capturedAt: number;
+}
+
+export interface WalkIssueMarker {
+  point: Point2D;
+  kind: "obstacle" | "occluded";
 }
 
 export interface ClassroomCamera {
   readonly calibrated: boolean;
+  readonly source?: "classroom" | "forward";
   captureFreshFrame(): Promise<string>;
   showObservation(target: string, scene: EmbodiedObservation, imageDataUrl?: string, minConfidence?: number): void;
   showInspection(target: string, result: ClassroomInspection, imageDataUrl: string): void;
-  showInputFrame(imageDataUrl: string, capturedAt: number): void;
+  showInputFrame(imageDataUrl: string, capturedAt: number, issue?: WalkIssueMarker): void;
   clearObservation(clearSnapshot?: boolean): void;
   isCurrent(): boolean;
   matchesSource(): boolean;
@@ -36,15 +44,28 @@ export interface ClassroomCamera {
 }
 
 type CalibratedCamera = { deviceId: string; width: number; height: number };
+type CameraView = CanvasImageSource & { videoWidth: number; videoHeight: number };
+const BOX_CAMERA_ID = "xiaozhi-box";
+
+interface BoxCameraChoice { label: string }
+interface BoxCameraHost {
+  current?: () => BoxCameraChoice | null;
+  open?: (onFrame: (jpegBase64: string) => void, onEnded: (reason: string) => void) => Promise<() => void>;
+}
+
+export type SearchView = "passive" | "dominant";
 
 interface VisionConfig {
   quad: FloorQuad;
   calibratedCamera?: CalibratedCamera;
   mirror: boolean;
   minSceneConfidence: number;
+  searchView: SearchView;
+  walkContinue: boolean;
 }
 
 interface ClassroomVisionBridge {
+  onTrackingReset?(): void;
   inspectClassroom?(camera: ClassroomCamera, target: string): Promise<string>;
   canInspectClassroom?(): boolean | string;
   inspectionTarget?(): string;
@@ -52,8 +73,8 @@ interface ClassroomVisionBridge {
 
 const CALIBRATION_KEY = "keepwork.bumi.vision-calibration.v1";
 const MARKER_MAX_AGE_MS = 5000;
-const FLOOR_FRAME_SIDE = 512;
-const MAX_RAW_FRAME_SIDE = 768;
+const MAX_CAMERA_LONG_EDGE = 1280;
+const MAX_IMAGE_DATA_URL_LEN = 700_000; // Also enforced by the native vision endpoint.
 const cornerNames = ["左上", "右上", "右下", "左下"];
 
 export const DEFAULT_FLOOR_QUAD: FloorQuad = [
@@ -92,12 +113,23 @@ function storedConfig(): Record<string, unknown> {
   return {};
 }
 
+export function readSearchView(): SearchView {
+  const setting = document.getElementById("vision-search-setting");
+  const select = document.getElementById("vision-search-view") as HTMLSelectElement | null;
+  // Hidden means this host does not advertise the switch. A disabled control can
+  // still be the active choice while a classroom task is running.
+  if (!select || setting?.hidden !== false) return "passive";
+  return select.value === "dominant" ? "dominant" : "passive";
+}
+
 export function loadVisionConfig(): VisionConfig {
   const candidate = storedConfig() as Partial<VisionConfig>;
   const config: VisionConfig = {
     quad: DEFAULT_FLOOR_QUAD.map(point => ({ ...point })) as FloorQuad,
     mirror: candidate.mirror === true,
     minSceneConfidence: validSceneConfidenceThreshold(candidate.minSceneConfidence) ? candidate.minSceneConfidence : defaultSceneConfidence,
+    searchView: candidate.searchView === "dominant" ? "dominant" : "passive",
+    walkContinue: candidate.walkContinue !== false,
   };
   if (Array.isArray(candidate.quad) && candidate.quad.length === 4 && candidate.quad.every(validPoint) && validFloorQuad(candidate.quad)) {
     config.quad = candidate.quad;
@@ -118,6 +150,8 @@ export function saveVisionConfig(config: VisionConfig): void {
     for (const name of ["vlmPreset", "vlmEndpoint", "vlmModel", "apiKey"]) delete saved[name];
     window.localStorage.setItem(CALIBRATION_KEY, JSON.stringify({
       ...saved, quad: config.quad, mirror: config.mirror, minSceneConfidence: config.minSceneConfidence,
+      searchView: config.searchView === "dominant" ? "dominant" : "passive",
+      walkContinue: config.walkContinue !== false,
       calibratedCamera: config.calibratedCamera?.deviceId ? config.calibratedCamera : undefined,
     }));
   } catch { /* Keep session calibration in memory. */ }
@@ -195,14 +229,37 @@ function classroomRawRect(side: number, videoWidth: number, videoHeight: number)
   return { left: Math.floor((side - w) / 2), top: Math.floor((side - h) / 2), w, h };
 }
 
+// Keep the highest-resolution encoding that fits the native request. All
+// attempts below use the already captured pixels, including the rectified floor.
+function classroomJpeg(canvas: HTMLCanvasElement): string {
+  let reduced: HTMLCanvasElement | undefined;
+  for (const [scale, quality] of [[1, 0.88], [1, 0.72], [0.75, 0.8], [0.5, 0.76], [0.25, 0.72]]) {
+    let frame = canvas;
+    if (scale < 1) {
+      reduced ??= document.createElement("canvas");
+      reduced.height = Math.max(1, Math.round(canvas.height * scale));
+      reduced.width = Math.max(1, Math.round(canvas.width * reduced.height / canvas.height));
+      const ctx = reduced.getContext("2d");
+      if (!ctx) throw new Error("摄像头截图编码失败。");
+      ctx.drawImage(canvas, 0, 0, reduced.width, reduced.height);
+      frame = reduced;
+    }
+    const jpeg = frame.toDataURL("image/jpeg", quality);
+    if (!jpeg.startsWith("data:image/jpeg;base64,") || jpeg.length <= 23) throw new Error("摄像头截图编码失败。");
+    if (jpeg.length <= MAX_IMAGE_DATA_URL_LEN) return jpeg;
+  }
+  throw new Error("摄像头截图压缩后仍超出大小上限。");
+}
+
 // One exposure supplies both views. People can be identified in the full image,
 // while feet and clear floor are measured in the rectified right-hand view.
-export function composeClassroomFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement, quad: FloorQuad): string {
-  const side = FLOOR_FRAME_SIDE;
+export function composeClassroomFrame(video: CameraView, canvas: HTMLCanvasElement, quad: FloorQuad): string {
+  if (!video.videoWidth || !video.videoHeight) throw new Error("摄像头画面尚未就绪。");
+  const side = Math.min(MAX_CAMERA_LONG_EDGE, Math.max(video.videoWidth, video.videoHeight));
   canvas.width = side * 2;
   canvas.height = side;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx || !video.videoWidth || !video.videoHeight) throw new Error("摄像头画面尚未就绪。");
+  if (!ctx) throw new Error("摄像头画面尚未就绪。");
   const { left, top, w, h } = classroomRawRect(side, video.videoWidth, video.videoHeight);
   ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, side, side);
@@ -225,23 +282,19 @@ export function composeClassroomFrame(video: HTMLVideoElement, canvas: HTMLCanva
     }
   }
   ctx.putImageData(output, side, 0);
-  ctx.strokeStyle = "rgba(70,220,255,0.8)";
-  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(left + corners[0].x * w, top + corners[0].y * h);
   for (const p of [...corners.slice(1), corners[0]]) ctx.lineTo(left + p.x * w, top + p.y * h);
-  ctx.stroke();
-  const jpeg = canvas.toDataURL("image/jpeg", 0.82);
-  if (!jpeg.startsWith("data:image/jpeg;base64,") || jpeg.length <= 23) throw new Error("摄像头截图编码失败。");
-  return jpeg;
+  strokeWithOutline(ctx, 1.5);
+  return classroomJpeg(canvas);
 }
 
 // Uncalibrated classroom capture: send the unmirrored camera frame preserving
 // aspect ratio so the vision model can estimate robot heading, distance, and
 // clearance directly from floor markers and robot scale without manual setup.
-export function composeAutoClassroomFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement): string {
+export function composeAutoClassroomFrame(video: CameraView, canvas: HTMLCanvasElement): string {
   if (!video.videoWidth || !video.videoHeight) throw new Error("摄像头画面尚未就绪。");
-  const scale = Math.min(1, MAX_RAW_FRAME_SIDE / Math.max(video.videoWidth, video.videoHeight));
+  const scale = Math.min(1, MAX_CAMERA_LONG_EDGE / Math.max(video.videoWidth, video.videoHeight));
   const w = Math.max(1, Math.round(video.videoWidth * scale));
   const h = Math.max(1, Math.round(video.videoHeight * scale));
   canvas.width = w;
@@ -249,9 +302,7 @@ export function composeAutoClassroomFrame(video: HTMLVideoElement, canvas: HTMLC
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("摄像头画面尚未就绪。");
   ctx.drawImage(video, 0, 0, w, h);
-  const jpeg = canvas.toDataURL("image/jpeg", 0.82);
-  if (!jpeg.startsWith("data:image/jpeg;base64,") || jpeg.length <= 23) throw new Error("摄像头截图编码失败。");
-  return jpeg;
+  return classroomJpeg(canvas);
 }
 
 type SceneMarkers = ClassroomInspection & { name: string; approach?: Point2D };
@@ -261,25 +312,30 @@ function freshMarkers(capturedAt: number | undefined) {
   return capturedAt !== undefined && Number.isFinite(capturedAt) && capturedAt <= now && now - capturedAt < MARKER_MAX_AGE_MS;
 }
 
+// Both edges stay legible as the camera pans between light and dark surfaces.
+function strokeWithOutline(ctx: CanvasRenderingContext2D, width: number) {
+  ctx.lineWidth = width + 2;
+  ctx.strokeStyle = "#171717";
+  ctx.stroke();
+  ctx.lineWidth = width;
+  ctx.strokeStyle = "#fff";
+  ctx.stroke();
+}
+
 function drawMarker(ctx: CanvasRenderingContext2D, width: number, height: number, point: Point2D, text: string,
-  color: string, placement: "above" | "below" | "left") {
+  placement: "above" | "below" | "left") {
   ctx.beginPath();
   ctx.arc(point.x, point.y, 6, 0, Math.PI * 2);
-  ctx.lineWidth = 5;
-  ctx.strokeStyle = "#142034";
-  ctx.stroke();
-  ctx.lineWidth = 2.5;
-  ctx.strokeStyle = color;
-  ctx.stroke();
+  strokeWithOutline(ctx, 2.5);
   ctx.font = "bold 12px sans-serif";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   const labelWidth = Math.min(width - 2, Math.ceil(ctx.measureText?.(text).width ?? text.length * 12) + 10);
   const x = clamp(placement === "left" ? point.x - labelWidth - 9 : point.x + 7, 1, width - labelWidth - 1);
   const y = clamp(point.y + (placement === "above" ? -26 : placement === "below" ? 7 : -10), 1, height - 21);
-  ctx.fillStyle = "rgba(12, 21, 36, 0.90)";
+  ctx.fillStyle = "rgba(16, 16, 16, 0.90)";
   ctx.fillRect(x, y, labelWidth, 20);
-  ctx.fillStyle = color;
+  ctx.fillStyle = "#fff";
   ctx.fillText(text, x + 5, y + 10, labelWidth - 10);
 }
 
@@ -296,24 +352,32 @@ function drawHeading(ctx: CanvasRenderingContext2D, from: Point2D, to: Point2D) 
   ctx.lineTo(tip.x - ux * 7 - uy * 4, tip.y - uy * 7 + ux * 4);
   ctx.moveTo(tip.x, tip.y);
   ctx.lineTo(tip.x - ux * 7 + uy * 4, tip.y - uy * 7 - ux * 4);
-  ctx.strokeStyle = "#17202e";
-  ctx.lineWidth = 5;
-  ctx.stroke();
-  ctx.strokeStyle = "#ffba5c";
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
+  strokeWithOutline(ctx, 2.5);
 }
 
 function paintDetections(ctx: CanvasRenderingContext2D, w: number, h: number, mirror: boolean, marks: SceneMarkers) {
   const pixel = (p: Point2D) => ({ x: (mirror ? 1 - p.x : p.x) * w, y: p.y * h });
-  if (marks.approach) drawMarker(ctx, w, h, pixel(marks.approach), "停靠点", "#fbc472", "left");
-  if (marks.target) drawMarker(ctx, w, h, pixel(marks.target), "目标：" + marks.name, "#79f2a7", "below");
+  if (marks.robot && marks.route?.length) {
+    const origin = pixel(marks.robot);
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    for (const waypoint of marks.route) {
+      const point = pixel(waypoint);
+      ctx.lineTo(point.x, point.y);
+    }
+    strokeWithOutline(ctx, 2.5);
+    drawMarker(ctx, w, h, pixel(marks.route[marks.route.length - 1]), "计划停靠点", "left");
+  }
+  if (marks.approach) drawMarker(ctx, w, h, pixel(marks.approach), "停靠点", "left");
+  if (marks.target) drawMarker(ctx, w, h, pixel(marks.target), "目标：" + marks.name, "below");
   if (marks.robot) {
     const robot = pixel(marks.robot);
     if (marks.headingPoint) drawHeading(ctx, robot, pixel(marks.headingPoint));
-    drawMarker(ctx, w, h, robot, "小布米", "#76daff", "above");
+    drawMarker(ctx, w, h, robot, "小布米", "above");
   }
 }
+
+type RoutePlanMode = "walk" | "preview" | "unavailable";
 
 export function createBumiVision(bridge: ClassroomVisionBridge) {
   const toggleBtn = document.getElementById("vision-toggle") as HTMLButtonElement | null;
@@ -322,6 +386,14 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
   const inspectStatus = document.getElementById("vision-inspect-status");
   const deviceSelect = document.getElementById("vision-device") as HTMLSelectElement | null;
   const mirrorToggle = document.getElementById("vision-mirror") as HTMLInputElement | null;
+  const searchSelect = document.getElementById("vision-search-view") as HTMLSelectElement | null;
+  const searchSetting = document.getElementById("vision-search-setting");
+  const searchHelp = document.getElementById("vision-search-help");
+  const walkContinueSetting = document.getElementById("class-walk-continue-setting");
+  const walkContinueToggle = document.getElementById("class-walk-continue") as HTMLInputElement | null;
+  const routePlanSetting = document.getElementById("class-route-plan-setting");
+  const routePlanToggle = document.getElementById("class-route-plan") as HTMLInputElement | null;
+  const manualCalibration = document.getElementById("class-manual-calibration");
   const confidenceField = document.getElementById("class-confidence-threshold") as HTMLInputElement | null;
   const confidenceSetting = document.getElementById("class-confidence-setting");
   const confidenceLegacyHint = document.getElementById("class-confidence-legacy");
@@ -342,10 +414,16 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     return {
       stop: (_reason?: string) => {},
       isActive: () => false,
+      isReady: () => false,
       readConfidenceThreshold: () => defaultSceneConfidence,
       syncConfidenceField: (_supported: boolean, _busy: boolean) => {},
+      syncSearchView: (_supported: boolean, _busy: boolean) => {},
+      syncWalkContinue: (_supported: boolean, _busy: boolean) => {},
+      walkContinueEnabled: () => false,
+      syncRoutePlan: (_mode: RoutePlanMode, _busy: boolean) => {},
+      routePlanEnabled: () => false,
       inspectTarget: async (_target: string) => {},
-      acquireClassroomCamera: (_onInvalidated: (reason: string) => void): ClassroomCamera => {
+      acquireClassroomCamera: (_onInvalidated: (reason: string) => void, _rawFrame = false): ClassroomCamera => {
         throw new Error("当前窗口没有可用的课堂摄像头。");
       },
       classroomActive: () => false,
@@ -386,14 +464,107 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
   let calibratedStream: MediaStream | null = null;
   let classroom: { release(reason?: string): void; checkGeometry(): boolean } | null = null;
   let sceneMarkers: SceneMarkers | null = null;
+  let boxFrames: (HTMLCanvasElement & CameraView) | null = null;
+  let closeBoxCamera: (() => void) | undefined;
+  let boxCameraLabel = "";
+  let boxSerial = 0;
+  let boxSession = 0;
+  let boxSize = "";
+  let deviceListGeneration = 0;
+  const boxWaiters = new Set<() => void>();
   if (mirrorToggle) mirrorToggle.checked = config.mirror;
+  if (searchSetting) searchSetting.hidden = true;
+  if (searchHelp) searchHelp.hidden = true;
+  function describeSearchView() {
+    if (searchHelp) searchHelp.textContent = config.searchView === "dominant"
+      ? "从机器人正前方寻找目标，画面中无需出现机身。"
+      : "从教室观察，让小布米和目标同时入镜。";
+  }
+  if (searchSelect) {
+    searchSelect.value = config.searchView;
+    searchSelect.disabled = true;
+    describeSearchView();
+    searchSelect.addEventListener("change", () => {
+      bridge.onTrackingReset?.();
+      config.searchView = searchSelect.value === "dominant" ? "dominant" : "passive";
+      describeSearchView();
+      saveVisionConfig(config);
+    });
+  }
+  function syncSearchView(supported: boolean, busy: boolean) {
+    if (searchSetting) searchSetting.hidden = !supported;
+    if (searchHelp) searchHelp.hidden = !supported;
+    if (!searchSelect) return;
+    searchSelect.disabled = !supported || busy;
+    if (searchSelect.value !== "dominant" && searchSelect.value !== "passive") searchSelect.value = config.searchView;
+  }
+  if (walkContinueSetting) walkContinueSetting.hidden = true;
+  if (walkContinueToggle) {
+    walkContinueToggle.checked = config.walkContinue;
+    walkContinueToggle.disabled = true;
+    walkContinueToggle.addEventListener("change", () => {
+      config.walkContinue = walkContinueToggle.checked;
+      saveVisionConfig(config);
+    });
+  }
+  function syncWalkContinue(supported: boolean, busy: boolean) {
+    if (walkContinueSetting) walkContinueSetting.hidden = !supported;
+    if (!walkContinueToggle) return;
+    walkContinueToggle.disabled = !supported || busy;
+  }
+  function walkContinueEnabled(): boolean {
+    if (!walkContinueToggle || walkContinueSetting?.hidden !== false) return false;
+    return walkContinueToggle.checked;
+  }
+
+  let routePlanMode: RoutePlanMode | undefined;
+  function syncRoutePlan(mode: RoutePlanMode, busy: boolean) {
+    const supported = mode !== "unavailable";
+    if (routePlanSetting) routePlanSetting.hidden = !supported;
+    if (!routePlanToggle) return;
+    if (mode !== routePlanMode) routePlanToggle.checked = mode === "walk";
+    routePlanMode = mode;
+    routePlanToggle.disabled = !supported || busy;
+    syncManualCalibration();
+  }
+  function routePlanEnabled(): boolean {
+    return routePlanSetting?.hidden === false && routePlanToggle?.checked === true;
+  }
+  function syncManualCalibration() {
+    if (manualCalibration) manualCalibration.hidden = routePlanEnabled();
+  }
+  routePlanToggle?.addEventListener("change", syncManualCalibration);
+  syncRoutePlan("unavailable", false);
+
+  function cameraOpen(): boolean {
+    if (!stream || stream.active === false) return false;
+    if (boxFrames) return boxFrames.width > 0 && boxFrames.height > 0;
+    return videoEl.readyState >= 2;
+  }
+
+  function frameSize() {
+    if (boxFrames?.width && boxFrames.height) return { width: boxFrames.width, height: boxFrames.height };
+    return { width: videoEl.videoWidth, height: videoEl.videoHeight };
+  }
+
+  function noteBoxFrame() {
+    boxSerial++;
+    const size = boxFrames ? `${boxFrames.width}x${boxFrames.height}` : "";
+    if (boxSize && size !== boxSize) {
+      if (classroom && !classroom.checkGeometry()) classroom.release("摄像头画幅已变化，课堂任务已停止。");
+      else if (!classroom && stream) resetTracking();
+    }
+    boxSize = size;
+    for (const waiter of [...boxWaiters]) waiter();
+    if (stream) drawPreview();
+  }
 
   function setStatus(message: string) {
     if (statusEl && statusEl.textContent !== message) statusEl.textContent = message;
   }
 
   function inspectionUnavailable(): string | undefined {
-    if (!stream || stream.active === false || videoEl.readyState < 2) return "请先开启教室摄像头，等预览画面出现后再识别。";
+    if (!cameraOpen()) return "请先开启教室摄像头，等预览画面出现后再识别。";
     if (calibratingIndex >= 0) return "请先完成或取消地面四角标定。";
     if (classroom) return "正在使用摄像头，请等当前观察完成或停止当前任务。";
     if (!bridge.inspectClassroom) return "当前桌面宿主不支持只识别。";
@@ -406,7 +577,8 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     if (inspectButton) inspectButton.disabled = !bridge.inspectionTarget?.() || !!inspectionUnavailable();
   }
 
-  function resetTracking() {
+  function resetTracking(invalidatePreview = true) {
+    if (invalidatePreview) bridge.onTrackingReset?.();
     if (inspectStatus) inspectStatus.textContent = "";
     classroom?.release("摄像头或机器人状态已变化，本次观察已取消。");
     cancelCalibration();
@@ -422,7 +594,9 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     }
     if (preview) preview.hidden = !stream;
     if (deviceSelect) deviceSelect.disabled = !!pendingStart;
-    if (videoEl.style) videoEl.style.transform = config.mirror ? "scaleX(-1)" : "";
+    const mirror = config.mirror ? "scaleX(-1)" : "";
+    if (videoEl.style) videoEl.style.transform = mirror;
+    if (boxFrames?.style) boxFrames.style.transform = mirror;
     refreshTarget();
     if (cornerHint) {
       cornerHint.hidden = calibratingIndex < 0;
@@ -430,35 +604,48 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     }
     if (calibrateBtn) {
       calibrateBtn.textContent = calibratingIndex >= 0 ? "取消标定" : "标定地面四角";
-      calibrateBtn.disabled = !stream || videoEl.readyState < 2;
+      calibrateBtn.disabled = !cameraOpen();
     }
   }
 
   async function refreshDevices() {
-    if (!deviceSelect || typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) return;
+    if (!deviceSelect) return;
+    const generation = ++deviceListGeneration;
+    let devices: MediaDeviceInfo[] = [];
     try {
-      const devices = (await navigator.mediaDevices.enumerateDevices()).filter(item => item.kind === "videoinput");
-      const current = deviceSelect.value;
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = devices.length ? "默认本机摄像头" : "未发现摄像头设备";
-      deviceSelect.replaceChildren(placeholder);
-      devices.forEach((device, idx) => {
-        const option = document.createElement("option");
-        option.value = device.deviceId;
-        option.textContent = device.label || `摄像头 ${idx + 1}`;
-        deviceSelect.appendChild(option);
-      });
-      if (devices.some(item => item.deviceId === current)) deviceSelect.value = current;
-      return devices;
-    } catch { /* Ignore enumeration errors before permission is granted. */ }
+      if (typeof navigator !== "undefined" && navigator.mediaDevices?.enumerateDevices) {
+        devices = (await navigator.mediaDevices.enumerateDevices()).filter(item => item.kind === "videoinput");
+      }
+    } catch { /* Enumeration can fail before the system camera permission is granted. */ }
+    if (generation !== deviceListGeneration) return;
+    const current = deviceSelect.value;
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = devices.length ? "默认本机摄像头" : boxCameraLabel ? "请选择摄像头" : "未发现摄像头设备";
+    deviceSelect.replaceChildren(placeholder);
+    devices.forEach((device, idx) => {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label || `摄像头 ${idx + 1}`;
+      deviceSelect.appendChild(option);
+    });
+    if (boxCameraLabel) {
+      const option = document.createElement("option");
+      option.value = BOX_CAMERA_ID;
+      option.textContent = boxCameraLabel;
+      deviceSelect.appendChild(option);
+    }
+    const known = current === BOX_CAMERA_ID ? !!boxCameraLabel : devices.some(item => item.deviceId === current);
+    if (known) deviceSelect.value = current;
+    return devices;
   }
 
   function drawPreview() {
     if (!overlay) return;
-    if (videoEl.videoWidth && videoEl.videoHeight) {
-      const ratio = videoEl.videoWidth / videoEl.videoHeight;
-      if (preview?.style) preview.style.aspectRatio = `${videoEl.videoWidth} / ${videoEl.videoHeight}`;
+    const size = frameSize();
+    if (size.width && size.height) {
+      const ratio = size.width / size.height;
+      if (preview?.style) preview.style.aspectRatio = `${size.width} / ${size.height}`;
       const width = Math.max(1, Math.round(overlay.clientWidth || 320));
       const height = Math.max(1, Math.round(width / ratio));
       if (overlay.width !== width) overlay.width = width;
@@ -475,10 +662,19 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
       const y = corner.y * height;
       ctx.beginPath();
       ctx.arc(x, y, index === calibratingIndex ? 7 : 5, 0, Math.PI * 2);
-      ctx.fillStyle = index === calibratingIndex ? "#f59e0b" : "#38bdf8";
-      ctx.fill();
+      if (index === calibratingIndex) {
+        ctx.fillStyle = "#171717";
+        ctx.fill();
+      }
+      strokeWithOutline(ctx, index === calibratingIndex ? 3 : 1.5);
       ctx.font = "bold 12px sans-serif";
-      ctx.fillText(cornerNames[index], clamp(x + 8, 0, width - 25), clamp(y - 8, 12, height));
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+      const labelX = clamp(x + 9, 0, width - 28), labelY = clamp(y - 8, 15, height - 2);
+      ctx.fillStyle = "#171717";
+      ctx.fillRect(labelX, labelY - 13, 28, 16);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(cornerNames[index], labelX + 2, labelY);
     });
   }
 
@@ -491,7 +687,7 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     if (snapshotCanvas) snapshotCanvas.width = snapshotCanvas.width;
   }
   function paintSnapshot(source: CanvasImageSource, rect: { left: number; top: number; w: number; h: number },
-    capturedAt: number, marks?: SceneMarkers) {
+    capturedAt: number, marks?: SceneMarkers, issue?: WalkIssueMarker) {
     if (!snapshot || !snapshotCanvas || !snapshotTime) return;
     const ctx = snapshotCanvas.getContext("2d");
     if (!ctx) return;
@@ -506,18 +702,22 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     ctx.drawImage(source, rect.left, rect.top, rect.w, rect.h, 0, 0, width, height);
     if (mirrorImage) ctx.restore();
     if (marks) paintDetections(ctx, width, height, config.mirror, marks);
+    const issueLabel = issue?.kind === "obstacle" ? "疑似障碍" : "看不清处";
+    if (issue) drawMarker(ctx, width, height, { x: issue.point.x * width, y: issue.point.y * height }, issueLabel, "below");
     const time = new Date(capturedAt);
     snapshotTime.textContent = time.toLocaleTimeString("zh-CN", { hour12: false });
     snapshotTime.setAttribute?.("datetime", time.toISOString());
-    const label = marks ? "最近识别画面" : "本次识别原图";
+    const label = issue ? "本次通路判断" : marks?.route ? "本次规划路线" : marks ? "最近识别画面" : "本次识别原图";
     if (snapshotLabel) snapshotLabel.textContent = label;
     const points = marks
-      ? [marks.robot && "小布米", marks.target && ("目标：" + marks.name), marks.approach && "停靠点"].filter(Boolean)
+      ? [marks.robot && "小布米", marks.target && ("目标：" + marks.name), marks.approach && "停靠点",
+        marks.route?.length && "计划停靠点"].filter(Boolean)
       : [];
-    snapshotCanvas.setAttribute?.("aria-label", [label, ...points].join("，"));
+    snapshotCanvas.setAttribute?.("aria-label", [label, ...points, ...(issue ? [issueLabel] : [])].join("，"));
     snapshot.hidden = false;
   }
-  function saveClassroomSnapshot(imageDataUrl: string, capturedAt: number, marks?: SceneMarkers, cropCamera?: CalibratedCamera) {
+  function saveClassroomSnapshot(imageDataUrl: string, capturedAt: number, marks?: SceneMarkers,
+    cropCamera?: CalibratedCamera, issue?: WalkIssueMarker) {
     clearSnapshot();
     if (!snapshot || !Number.isFinite(capturedAt) || capturedAt <= 0 || capturedAt > Date.now()
       || !/^data:image\/jpeg;base64,/i.test(imageDataUrl) || typeof Image === "undefined") return;
@@ -527,13 +727,14 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
       if (generation !== snapshotGeneration || !stream || document.hidden || !document.hasFocus()) return;
       const rect = cropCamera ? classroomRawRect(image.naturalHeight, cropCamera.width, cropCamera.height)
         : { left: 0, top: 0, w: image.naturalWidth, h: image.naturalHeight };
-      if (rect.w > 0 && rect.h > 0) paintSnapshot(image, rect, capturedAt, marks);
+      if (rect.w > 0 && rect.h > 0) paintSnapshot(image, rect, capturedAt, marks, issue);
     };
     image.onerror = () => { if (generation === snapshotGeneration) clearSnapshot(); };
     image.src = imageDataUrl;
   }
 
   function currentCamera(): CalibratedCamera {
+    if (boxFrames) return { deviceId: BOX_CAMERA_ID, width: boxFrames.width, height: boxFrames.height };
     const track = stream?.getVideoTracks?.()[0];
     return { deviceId: track?.getSettings?.().deviceId || "", width: videoEl.videoWidth, height: videoEl.videoHeight };
   }
@@ -546,16 +747,18 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
       && (saved.deviceId ? saved.deviceId === current.deviceId : calibratedStream === stream);
   }
 
-  function acquireClassroomCamera(onInvalidated: (reason: string) => void): ClassroomCamera {
+  function acquireClassroomCamera(onInvalidated: (reason: string) => void, rawFrame = false): ClassroomCamera {
     if (inspection) {
       inspection.camera.release();
       inspection = null;
     }
     if (classroom) throw new Error("摄像头正在执行课堂任务。");
     if (!stream) throw new Error("请先开启教室摄像头。");
-    if (calibratingIndex >= 0) throw new Error("请先完成或取消当前的场地四角标定。");
-    const calibrated = calibratedForActiveCamera();
-    const toImage = calibrated ? buildFloorToImageHomography(classroomCorners(config.quad)) : null;
+    if (!rawFrame && calibratingIndex >= 0) throw new Error("请先完成或取消当前的场地四角标定。");
+    const calibrated = !rawFrame && calibratedForActiveCamera();
+    // Latch the viewpoint with the lease. Dominant view sends the raw forward frame.
+    const floorFrame = calibrated && readSearchView() !== "dominant";
+    const toImage = floorFrame ? buildFloorToImageHomography(classroomCorners(config.quad)) : null;
     const sourceStream = stream;
     const sourceQuad = JSON.stringify(config.quad);
     const initialCamera = currentCamera();
@@ -567,10 +770,11 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
         && now.width === initialCamera.width && now.height === initialCamera.height
         && now.deviceId === initialCamera.deviceId;
     };
-    const available = () => stream?.active !== false && videoEl.readyState >= 2 && !document.hidden
-      && track?.readyState !== "ended" && !track?.muted && geometryValid();
+    const available = () => !document.hidden && stream?.active !== false && geometryValid() && (boxFrames
+      ? boxFrames.width > 0 && boxFrames.height > 0
+      : videoEl.readyState >= 2 && track?.readyState !== "ended" && !track?.muted);
     if (!available()) throw new Error("摄像头画面尚未就绪。");
-    resetTracking();
+    resetTracking(!rawFrame);
     const canvas = document.createElement("canvas");
     let cancelFrame: (() => void) | undefined;
     function showMarkers(name: string, detection: ClassroomInspection, imageDataUrl?: string, approach?: Point2D) {
@@ -578,7 +782,7 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
       sceneMarkers = null;
       const unproject = (p?: Point2D) => {
         if (!validPoint(p)) return undefined;
-        return calibrated ? (toImage && projectPoint(toImage, p)) ?? undefined : p;
+        return floorFrame ? (toImage && projectPoint(toImage, p)) ?? undefined : p;
       };
       const fresh = freshMarkers(detection.capturedAt);
       let marks: SceneMarkers | undefined;
@@ -589,7 +793,12 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
       }
       // Keep delayed markers on their original JPEG when they are too old for the live preview.
       if (fresh && marks) sceneMarkers = marks;
-      if (isCurrent() && imageDataUrl) saveClassroomSnapshot(imageDataUrl, detection.capturedAt, marks, marks && calibrated ? initialCamera : undefined);
+      if (isCurrent() && imageDataUrl) {
+        // Keep the planned path on the exposure used to plan it, including after the robot moves.
+        const route = detection.route?.map(unproject);
+        const snapshotMarks = marks && route && route.every(validPoint) ? { ...marks, route } : marks;
+        saveClassroomSnapshot(imageDataUrl, detection.capturedAt, snapshotMarks, marks && floorFrame ? initialCamera : undefined);
+      }
       else clearSnapshot();
       drawPreview();
     }
@@ -611,9 +820,10 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     const isCurrent = () => classroom === owner && available();
     return {
       calibrated,
+      source: boxFrames ? "forward" : "classroom",
       isCurrent,
       matchesSource: () => sourceStream === stream && geometryValid()
-        && calibratedForActiveCamera() === calibrated && JSON.stringify(config.quad) === sourceQuad,
+        && (rawFrame || (calibratedForActiveCamera() === calibrated && JSON.stringify(config.quad) === sourceQuad)),
       release: () => owner.release(),
       clearObservation(clearArchived = false) {
         if (classroom !== owner) return;
@@ -624,10 +834,14 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
       showInspection(name, detection, imageDataUrl) {
         showMarkers(name, detection, imageDataUrl);
       },
-      showInputFrame(imageDataUrl, capturedAt) {
+      showInputFrame(imageDataUrl, capturedAt, issue) {
         if (!isCurrent()) return;
         sceneMarkers = null;
-        saveClassroomSnapshot(imageDataUrl, capturedAt);
+        // The raw archive is unmirrored. For a composite, the model reported
+        // this point on the right-hand floor view, not on the entire JPEG.
+        const marker = floorFrame && issue
+          ? { ...issue, point: { x: (1 + issue.point.x) / 2, y: issue.point.y } } : issue;
+        saveClassroomSnapshot(imageDataUrl, capturedAt, undefined, undefined, marker);
         drawPreview();
       },
       showObservation(name, observation, imageDataUrl, minConfidence = defaultSceneConfidence) {
@@ -650,6 +864,32 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
             reject(new Error("摄像头状态已变化或上次截图尚未完成。"));
             return;
           }
+          const source = boxFrames;
+          if (source) {
+            const frame = source;
+            const initial = boxSerial;
+            const timeout = window.setTimeout(() => fail("摄像头未提供新帧，请检查画面。"), 2000);
+            function finish(error?: Error, frame?: string) {
+              window.clearTimeout(timeout);
+              boxWaiters.delete(watch);
+              cancelFrame = undefined;
+              if (error) reject(error);
+              else if (frame) resolve(frame);
+            }
+            function fail(reason: string) { finish(new Error(reason)); }
+            function watch() {
+              if (boxSerial <= initial) return;
+              if (!isCurrent()) { fail("摄像头或场地标定已变化。"); return; }
+              try {
+                finish(undefined, floorFrame
+                  ? composeClassroomFrame(frame, canvas, config.quad)
+                  : composeAutoClassroomFrame(frame, canvas));
+              } catch (err) { finish(err instanceof Error ? err : new Error(String(err))); }
+            }
+            cancelFrame = () => fail("本次课堂截图已取消。");
+            boxWaiters.add(watch);
+            return;
+          }
           let callback: number | undefined;
           let poll: number | undefined;
           const timeout = window.setTimeout(() => fail("摄像头未提供新帧，请检查画面。"), 2000);
@@ -670,7 +910,7 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
               return;
             }
             try {
-              resolve(calibrated
+              resolve(floorFrame
                 ? composeClassroomFrame(videoEl, canvas, config.quad)
                 : composeAutoClassroomFrame(videoEl, canvas));
             } catch (err) { reject(err); }
@@ -703,7 +943,8 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
 
   function processTick() {
     if (!stream || !overlay) return;
-    if (videoEl.readyState < 2 || !videoEl.videoWidth || !videoEl.videoHeight) {
+    const size = frameSize();
+    if (!cameraOpen() || !size.width || !size.height) {
       overlay.getContext?.("2d")?.clearRect(0, 0, overlay.width, overlay.height);
       return;
     }
@@ -714,11 +955,18 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
 
   function stop(reason = "摄像头已关闭。") {
     pendingStart = null;
+    boxSession++;
     classroom?.release(reason);
     calibratedStream = null;
     window.clearInterval(timer);
     timer = undefined;
     resetTracking();
+    const close = closeBoxCamera;
+    closeBoxCamera = undefined;
+    boxFrames?.remove?.();
+    boxFrames = null;
+    boxSize = "";
+    close?.();
     if (stream) {
       for (const track of stream.getTracks()) track.stop();
       stream = null;
@@ -730,25 +978,116 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     syncUi();
   }
 
+  function paintBoxFrame(canvas: HTMLCanvasElement, jpeg: string): Promise<void> {
+    if (!jpeg || jpeg.length > 2_000_000) return Promise.reject(new Error("盒子摄像头画面无效。"));
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => {
+        const width = image.naturalWidth || image.width;
+        const height = image.naturalHeight || image.height;
+        if (!width || !height) { reject(new Error("盒子摄像头没有返回有效画面。")); return; }
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { reject(new Error("盒子摄像头画面无法显示。")); return; }
+        ctx.drawImage(image, 0, 0, width, height);
+        resolve();
+      };
+      image.onerror = () => reject(new Error("盒子摄像头画面无法显示。"));
+      image.src = `data:image/jpeg;base64,${jpeg}`;
+    });
+  }
+
+  function boxPreviewStream(): MediaStream {
+    const track = {
+      readyState: "live" as "live" | "ended",
+      muted: false,
+      stop() { track.readyState = "ended"; },
+      addEventListener() {},
+      getSettings: () => ({ deviceId: BOX_CAMERA_ID }),
+    };
+    return { active: true, getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream;
+  }
+
+  async function startBoxCamera(attempt: symbol) {
+    const host = (window as Window & { __keepworkBoxCamera?: BoxCameraHost }).__keepworkBoxCamera;
+    const label = boxCameraLabel;
+    if (!label || !host?.open) {
+      stop("请先连接视频语音盒子，再选择它的摄像头。");
+      return;
+    }
+    setStatus("正在连接盒子摄像头…");
+    const session = boxSession;
+    const view = document.createElement("canvas") as HTMLCanvasElement & CameraView;
+    Object.defineProperty(view, "videoWidth", { get: () => view.width, configurable: true });
+    Object.defineProperty(view, "videoHeight", { get: () => view.height, configurable: true });
+    if (view.style) view.style.transform = config.mirror ? "scaleX(-1)" : "";
+    boxFrames = view;
+    let paintQueue = Promise.resolve();
+    let close: (() => void) | undefined;
+    try {
+      close = await host.open(
+        jpeg => {
+          paintQueue = paintQueue.then(async () => {
+            if (session !== boxSession || boxFrames !== view) return;
+            await paintBoxFrame(view, jpeg);
+            if (session !== boxSession || boxFrames !== view) return;
+            noteBoxFrame();
+          }).catch(() => {});
+        },
+        reason => { if (session === boxSession && (stream || pendingStart === attempt)) stop(reason); },
+      );
+      if (pendingStart !== attempt) {
+        if (closeBoxCamera !== close) close();
+        if (boxFrames === view) boxFrames = null;
+        return;
+      }
+      closeBoxCamera = close;
+      stream = boxPreviewStream();
+      if (overlay) overlay.parentElement?.insertBefore(view, overlay);
+      if (video) video.srcObject = null;
+      if (preview) preview.hidden = false;
+      timer = window.setInterval(processTick, 200);
+      setStatus(`正在使用「${label}」。`);
+      pendingStart = null;
+      drawPreview();
+      syncUi();
+    } catch (cause) {
+      close?.();
+      if (pendingStart !== attempt) return;
+      stop(`无法打开摄像头：${String(cause)}。请检查盒子连接和摄像头。`);
+    }
+  }
+
   async function start() {
     if (pendingStart) return;
     if (stream) {
       stop();
       return;
     }
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setStatus("当前窗口无法使用摄像头。请在桌面端打开小布米控制窗口。");
-      return;
-    }
     const attempt = Symbol();
     pendingStart = attempt;
     syncUi();
+    if (deviceSelect?.value === BOX_CAMERA_ID) {
+      await startBoxCamera(attempt);
+      return;
+    }
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      stop("当前窗口无法使用摄像头。请在桌面端打开小布米控制窗口。");
+      return;
+    }
     setStatus("正在请求摄像头权限…");
     try {
       const deviceId = deviceSelect?.value;
+      const saved = config.calibratedCamera;
+      // Prefer the original capture mode when reopening a calibrated webcam.
+      // A different system-default device still needs its own floor calibration.
+      const previousMode = saved && saved.deviceId !== BOX_CAMERA_ID && (!deviceId || saved.deviceId === deviceId) ? saved : undefined;
       const videoConstraints: MediaTrackConstraints = {
-        width: { ideal: 640 },
-        height: { ideal: 480 },
+        width: { ideal: previousMode?.width ?? 1280 },
+        height: { ideal: previousMode?.height ?? 720 },
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
       };
       const acquired = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
@@ -856,6 +1195,7 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
       setStatus("请按画面上方的提示依次标定四个角。");
     }
     syncUi();
+    if (calibratingIndex === 0) cornerHint?.scrollIntoView?.({ block: "start" });
   });
   resetQuadBtn?.addEventListener("click", () => {
     cancelCalibration();
@@ -909,10 +1249,28 @@ export function createBumiVision(bridge: ClassroomVisionBridge) {
     if (document.hidden && (stream || pendingStart)) stop("摄像头已在窗口隐藏时关闭。请点「开启摄像头」恢复预览。");
   });
 
+  const hostWindow = window as Window & {
+    __keepworkBoxCamera?: BoxCameraHost;
+    __keepworkBoxCameraNotify?: (camera: BoxCameraChoice | null) => void;
+  };
+  function applyBoxCamera(camera: BoxCameraChoice | null) {
+    const label = camera?.label?.trim() || "";
+    if (label === boxCameraLabel) return;
+    const removed = !!boxCameraLabel && !label;
+    boxCameraLabel = label;
+    void refreshDevices();
+    if (removed && deviceSelect?.value === BOX_CAMERA_ID && (stream || pendingStart)) {
+      stop("盒子已断开，摄像头已关闭。");
+    }
+  }
+  hostWindow.__keepworkBoxCameraNotify = applyBoxCamera;
+  applyBoxCamera(hostWindow.__keepworkBoxCamera?.current?.() ?? null);
+
   void refreshDevices();
   syncUi();
   setStatus("摄像头尚未开启。");
 
-  return { stop, clearSnapshot, resetTracking, refreshTarget, acquireClassroomCamera, inspectTarget, readConfidenceThreshold, syncConfidenceField,
-    classroomActive: () => !!classroom, isActive: () => !!stream };
+  return { stop, clearSnapshot, resetTracking, refreshTarget, acquireClassroomCamera, inspectTarget, readConfidenceThreshold, syncConfidenceField, syncSearchView,
+    syncWalkContinue, walkContinueEnabled, syncRoutePlan, routePlanEnabled,
+    classroomActive: () => !!classroom, isActive: () => !!stream, isReady: () => cameraOpen() && calibratingIndex < 0 };
 }

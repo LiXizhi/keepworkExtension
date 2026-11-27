@@ -272,15 +272,15 @@ test("stop on sideways slip, reversed translation, or large unexpected yaw durin
   }
 });
 
-test("a forward-only task can start before optional rear and left calibrations; each other pulse needs its own measurement", async () => {
+test("metric navigation can start with missing directional measurements and still uses explicit ones", async () => {
   const base = { widthM: 5, heightM: 3, stepM: 0.5, turnDeg: 90, greetingM: 1 };
   const back = view(0.4, 0.5);
   const left = view(0.2, 0.6, { headingPoint: { x: 0.2, y: 0.58 } });
   for (const [scene, settings, actions, report] of [
     [view(), base, ["forward"], /0.50 米/],
-    [back, base, ["stop", "end"], /后退的实际距离/],
-    [left, base, ["stop", "end"], /左转的实际转角/],
-    [left, { ...base, leftDeg: NaN }, ["stop", "end"], /左转的实际转角/],
+    [view(), { widthM: 5, heightM: 3, greetingM: 1, stepM: 0.5 }, ["forward"], /前进/],
+    [back, base, ["backward"], /后退/],
+    [left, base, ["left"], /左转/],
     [back, { ...base, backwardM: 0.25 }, ["backward"], /0.25 米/],
     [left, { ...base, leftDeg: 30 }, ["left"], /30°/],
   ]) {
@@ -290,6 +290,11 @@ test("a forward-only task can start before optional rear and left calibrations; 
     assert.deepEqual(h.actions, actions);
     assert.match(h.notes.at(-1), report);
   }
+  const invalid = setup([left], { calibration: () => ({ ...base, leftDeg: NaN }) });
+  invalid.runner.start(task);
+  await tick();
+  assert.equal(invalid.runner.isActive(), false);
+  assert.ok(!invalid.actions.includes("left"));
 });
 
 test("check measured left rotation and backward travel against their own calibrations", async () => {
@@ -363,6 +368,45 @@ function autoView(distanceM, turnDeg, overrides = {}) {
   };
 }
 
+test("dominant main vision turns to search and accepts a step when the robot body stays out of frame", async () => {
+  const lost = {
+    status: "lost", searchView: "dominant", turnClear: true, pathClear: false, rearClear: false, confidence: 0.9,
+    reason: "不在主视觉内",
+  };
+  const searching = setup([lost, lost, lost, lost, lost], { calibration: () => ({ auto: true, greetingM: 0.8 }) });
+  searching.runner.start(task);
+  await tick();
+  assert.deepEqual(searching.actions.filter(action => action === "right"), ["right", "right", "right", "right"]);
+  assert.ok(searching.actions.includes("stop"));
+  assert.match(searching.notes.join("\n"), /主导视角已转身寻找/);
+
+  const passive = setup([{ status: "lost", pathClear: false, rearClear: false, turnClear: true, confidence: 0, reason: "未找到目标" }]);
+  passive.runner.start(task);
+  await tick();
+  assert.equal(passive.actions.includes("right"), false);
+  assert.ok(passive.actions.includes("stop"));
+
+  const ego = (range, turn, x, y) => autoView(range, turn, { searchView: "dominant", target: { x, y } });
+  const moving = setup([
+    ego(2.0, 35, 0.72, 0.40), ego(2.0, 7, 0.50, 0.40), ego(1.73, 6, 0.50, 0.50),
+  ], {
+    calibration: () => ({ auto: true, greetingM: 0.8 }),
+  });
+  moving.runner.start(task);
+  await tick();
+  assert.deepEqual(moving.actions, ["right", "forward", "forward"]);
+  assert.ok(moving.notes.some(note => /画面估算右转约 28°/.test(note)));
+  assert.match(moving.notes.at(-1), /画面估算前进约 0\.27 米/);
+  moving.runner.stop();
+
+  assert.throws(() => controller.verifyDominantGroundShift("forward",
+    { robot: { x: 0.4, y: 0.7 }, headingPoint: { x: 0.4, y: 0.5 } },
+    { robot: { x: 0.4, y: 0.7 }, headingPoint: { x: 0.4, y: 0.5 } }), /地面参照/);
+  assert.doesNotThrow(() => controller.verifyDominantGroundShift("forward",
+    { robot: { x: 0.4, y: 0.7 }, headingPoint: { x: 0.4, y: 0.5 } },
+    { robot: { x: 0.41, y: 0.82 }, headingPoint: { x: 0.41, y: 0.6 } }));
+});
+
 test("an ordinary approach finishes on the first valid arrival observation", async () => {
   const manual = setup([view(0.4)]);
   const auto = setup([autoView(0.8, 0)], { calibration: () => ({ auto: true, greetingM: 0.8 }) });
@@ -391,8 +435,8 @@ test("without floor calibration, measured pulses are checked against new frames 
   await tick();
   assert.deepEqual(h.actions, ["right", "forward", "stop", "wave", "你好呀！", "end"]);
   assert.ok(h.notes.some(n => /右前方/.test(n)));
-  assert.ok(h.notes.some(n => /实测右转约 26°/.test(n)));
-  assert.match(h.notes.at(-1), /实测前进约 0\.18 米.*画面确认已停在穿粉色上衣的人旁/);
+  assert.ok(h.notes.some(n => /画面估算右转约 26°/.test(n)));
+  assert.match(h.notes.at(-1), /画面估算前进约 0\.18 米.*画面确认已停在穿粉色上衣的人旁/);
 });
 
 test("auto follow waits after a turn if the person stopped, and moves once when the person walks away again", async () => {
@@ -428,19 +472,33 @@ test("auto follow waits after a turn if the person stopped, and moves once when 
   assert.deepEqual(h.actions, ["right", "forward", "stop", "end"]);
 });
 
-test("without field corners, each direction requires its own measured pulse before movement", async () => {
-  for (const [scene, settings, expected] of [
-    [autoView(1.3, 0), { backwardM: 0.15, turnDeg: 18 }, /前进/],
-    [autoView(0.4, 0), { stepM: 0.16 }, /后退/],
-    [autoView(1.3, 35), { leftDeg: 18, stepM: 0.16 }, /右转/],
-    [autoView(1.3, -35), { turnDeg: 20, stepM: 0.16 }, /左转/],
+test("auto navigation learns each pulse from consecutive camera frames with all four measurements blank", async () => {
+  const move = dx => ({
+    robot: { x: 0.3 + dx, y: 0.7 }, headingPoint: { x: 0.35 + dx, y: 0.68 },
+  });
+  for (const [direction, field, before, after, measured] of [
+    ["forward", "stepM", autoView(2.4, 0), autoView(2.12, 0, move(0.08)), 0.28],
+    ["backward", "backwardM", autoView(0.3, 0), autoView(0.51, 0, move(-0.06)), 0.21],
+    ["right", "turnDeg", autoView(2.4, 80), autoView(2.4, 49, { headingPoint: { x: 0.35, y: 0.71 } }), 31],
+    ["left", "leftDeg", autoView(2.4, -82), autoView(2.4, -57, { headingPoint: { x: 0.33, y: 0.67 } }), 25],
   ]) {
-    const h = setup([scene, scene], { calibration: () => ({ auto: true, greetingM: 0.8, ...settings }) });
+    const frames = [before, after];
+    const snapshots = [];
+    const h = setup([], {
+      calibration: () => ({ auto: true, greetingM: 0.8 }),
+      observe(_target, calibration) {
+        snapshots.push({ ...calibration });
+        return frames.length ? Promise.resolve(frames.shift()) : new Promise(() => {});
+      },
+    });
     h.runner.start(task);
     await tick();
-    assert.deepEqual(h.actions, ["stop", "end"]);
-    assert.match(h.notes.at(-1), expected);
-    assert.match(h.notes.at(-1), /标定|实测|实际/);
+    assert.deepEqual(h.actions, [direction, direction], h.notes.join("\n"));
+    assert.equal(snapshots.length, 3);
+    assert.ok(Math.abs(snapshots[2][field] - measured) < 1e-6, `${field} ${snapshots[2][field]}`);
+    for (const other of ["stepM", "backwardM", "turnDeg", "leftDeg"].filter(key => key !== field)) {
+      assert.equal(snapshots[2][other], undefined);
+    }
   }
   const arrived = autoView(0.8, 1);
   const h = setup([arrived, arrived], { calibration: () => ({ auto: true, greetingM: 0.8 }) });
@@ -449,18 +507,19 @@ test("without field corners, each direction requires its own measured pulse befo
   assert.deepEqual(h.actions, ["stop", "handshake", "end"]);
 });
 
-test("auto mode stops when motion stalls, rear clearance is missing, or relative estimates are absent", async () => {
-  const stalled = autoView(1.2, 0);
-  const h1 = setup([stalled, stalled], {
-    calibration: () => ({ auto: true, greetingM: 0.8, stepM: 0.15 }),
+test("auto mode stops when motion stalls twice, rear clearance is missing, or relative estimates are absent", async () => {
+  const stalled = autoView(2.0, 0);
+  const h1 = setup([stalled, stalled, stalled, stalled], {
+    calibration: () => ({ auto: true, greetingM: 0.8 }),
   });
   h1.runner.start(task);
   await tick();
-  assert.deepEqual(h1.actions, ["forward", "stop", "end"]);
+  assert.deepEqual(h1.actions, ["forward", "forward", "stop", "end"]);
+  assert.ok(h1.notes.some(note => /点动可能没有发出，重试一次/.test(note)));
   assert.match(h1.notes.at(-1), /未检测到有效移动/);
 
   const tooClose = autoView(0.4, 0, { rearClear: false, atGreeting: false });
-  const h2 = setup([tooClose, tooClose], { calibration: () => ({ auto: true, greetingM: 0.8, backwardM: 0.12 }) });
+  const h2 = setup([tooClose, tooClose], { calibration: () => ({ auto: true, greetingM: 0.8 }) });
   h2.runner.start(task);
   await tick();
   assert.deepEqual(h2.actions, ["stop", "end"]);
@@ -472,6 +531,62 @@ test("auto mode stops when motion stalls, rear clearance is missing, or relative
   await tick();
   assert.deepEqual(h3.actions, ["stop", "end"]);
   assert.match(h3.notes.at(-1), /距离和偏转角度/);
+});
+
+test("uncalibrated first pulses still require enough visible room to move or turn", async () => {
+  for (const scene of [
+    autoView(1.1, 0, { approachDistanceM: 0.25 }),
+    autoView(2.0, -60, { turnClear: false }),
+    autoView(2.0, 0, { pathClear: false }),
+  ]) {
+    const h = setup([scene], { calibration: () => ({ auto: true, greetingM: 0.8 }) });
+    h.runner.start(task);
+    await tick();
+    assert.deepEqual(h.actions, ["stop", "end"]);
+  }
+});
+
+test("auto navigation stops when the frame after a pulse is lost, reversed or contradicts the order", async () => {
+  const lost = { status: "lost", searchView: "dominant", turnClear: true, confidence: 0.9 };
+  const forward = autoView(2.2, 0);
+  const left = autoView(2.2, -70);
+  const backwardPose = { robot: { x: 0.21, y: 0.7 }, headingPoint: { x: 0.26, y: 0.68 } };
+  for (const [direction, before, after] of [
+    ["forward", forward, lost],
+    ["forward", forward, autoView(2.4, 0, backwardPose)],
+    ["left", left, autoView(2.2, -100, { headingPoint: { x: 0.35, y: 0.71 } })],
+    ["left", left, left],
+    ["left", left, autoView(2.2, -42)],
+    ["left", { ...left, searchView: "dominant" }, autoView(2.2, -42, { searchView: "dominant" })],
+  ]) {
+    const h = setup([before, after], { calibration: () => ({ auto: true, greetingM: 0.8 }) });
+    h.runner.start(task);
+    await tick();
+    assert.deepEqual(h.actions, [direction, "stop", "end"], h.notes.join("\n"));
+    assert.equal(h.observations.length, 2);
+  }
+});
+
+test("an unmeasurable probe keeps the class walking on the conservative reserve instead of aborting", async () => {
+  const start = autoView(2.2, 0);
+  // The person shifts while the robot steps, so neither frame can attribute the
+  // pulse to robot travel alone.
+  const shifted = autoView(1.9, 0, {
+    robot: { x: 0.38, y: 0.7 }, headingPoint: { x: 0.43, y: 0.68 }, target: { x: 0.69, y: 0.4 },
+  });
+  const shiftedAgain = autoView(1.62, 0, {
+    robot: { x: 0.46, y: 0.7 }, headingPoint: { x: 0.51, y: 0.68 }, target: { x: 0.78, y: 0.4 },
+  });
+  const h = setup([start, shifted, shiftedAgain], { calibration: () => ({ auto: true, greetingM: 0.8 }) });
+  h.runner.start(task);
+  await tick();
+  assert.deepEqual(h.actions, ["forward", "forward", "forward"]);
+  assert.equal(h.runner.isActive(), true);
+  assert.ok(h.notes.some(note => /步幅还没估出来，下一次点动后再核算/.test(note)), h.notes.join("\n"));
+  assert.ok(h.notes.some(note => /连续 2 次点动都估不出步幅，改为按保守幅度/.test(note)), h.notes.join("\n"));
+  assert.ok(h.notes.some(note => /幅度按保守值估算/.test(note)), h.notes.join("\n"));
+  h.runner.stop();
+  assert.deepEqual(h.actions, ["forward", "forward", "forward", "stop", "end"]);
 });
 
 test("spoken clarification follows a confirmed stop; cancellation during speech discards the question", async () => {

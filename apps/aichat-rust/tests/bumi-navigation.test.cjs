@@ -10,7 +10,7 @@ test("the classroom workspace contains the preview, shared command field, inspec
   assert.ok(panel);
   for (const id of [
     "vision-video", "vision-overlay", "vision-snapshot", "vision-toggle", "voice-command",
-    "voice-run", "classroom-stop", "vision-inspect-classroom", "remote-toggle", "remote-diagnose",
+    "voice-run", "classroom-stop", "vision-inspect-classroom",
   ]) {
     const token = 'id="' + id + '"';
     assert.ok(panel.includes(token), id);
@@ -18,8 +18,20 @@ test("the classroom workspace contains the preview, shared command field, inspec
   }
   assert.match(panel, /<label\s+for="voice-command">/);
   assert.match(panel, /<canvas[^>]+id="vision-snapshot-canvas"[^>]+role="img"/);
-  assert.match(html, /<div\s+id="classroom-home">\s*<section\s+id="classroom-panel"/);
+  assert.doesNotMatch(panel, /\bid="remote-(?:toggle|diagnose)"/);
   assert.match(html, /<dialog\b[^>]*id="remote-shield"[\s\S]*?id="classroom-shield"[\s\S]*?<\/dialog>/);
+});
+
+test("section navigation reaches each control group and offers one stop without changing the window URL", () => {
+  const nav = html.match(/<nav\b[^>]*>([\s\S]*?)<\/nav>/)?.[1];
+  assert.ok(nav);
+  assert.deepEqual(Array.from(nav.matchAll(/<button\b[^>]*\bdata-bumi-target="([^"]+)"/g), m => m[1]),
+    ["manual-controls", "classroom-home", "robot-actions", "device-tools"]);
+  assert.doesNotMatch(nav, /\bhref="#/);
+  assert.match(html, /<\/nav>\s*<button\b[^>]*\bid="stop-move"/);
+  for (const id of ["manual-controls", "classroom-home", "robot-actions", "device-tools", "stop-move"]) {
+    assert.equal(html.split('id="' + id + '"').length - 1, 1, id);
+  }
 });
 
 test("the shipped control page has no grid editor, grid controls or duplicate recognition field", () => {

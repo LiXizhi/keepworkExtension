@@ -1,9 +1,9 @@
 // One foreground task owns one connection. Native timing starts immediately
 // before the GATT write and does not depend on its acknowledgement or the UI.
-use super::{ClassroomAction as Action, ClassroomPulseProfile as Profile};
 use super::{
     bluetooth::Bluetooth, remote_input, Command, Control, LocomotionMode, Request, Snapshot,
 };
+use super::{ClassroomAction as Action, ClassroomPulseProfile as Profile};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -46,8 +46,16 @@ impl Action {
             Self::Right => (0, -axis),
             Self::Handshake => return Command::Handshake,
             Self::Wave => return Command::Wave,
-            Self::AskDoorOrLectern => return Command::Speak { text: "靠门的那位，还是靠讲台的那位？".into() },
-            Self::AskWhich => return Command::Speak { text: "您指的是哪一位？".into() },
+            Self::AskDoorOrLectern => {
+                return Command::Speak {
+                    text: "靠门的那位，还是靠讲台的那位？".into(),
+                }
+            }
+            Self::AskWhich => {
+                return Command::Speak {
+                    text: "您指的是哪一位？".into(),
+                }
+            }
             Self::Greet => {
                 return Command::Speak {
                     text: "你好呀！".into(),
@@ -258,7 +266,10 @@ pub(super) async fn stop(
         // Native focus loss can revoke a settled task before its renderer receives
         // blur. Return the idle snapshot without touching another task. The
         // renderer verifies the connection; an explicit chat Stop has its own write.
-        if !snapshot.moving && bluetooth.owned_by(&lifetime) && core.classroom.lock().unwrap().active.is_none() {
+        if !snapshot.moving
+            && bluetooth.owned_by(&lifetime)
+            && core.classroom.lock().unwrap().active.is_none()
+        {
             return Ok(snapshot);
         }
         return Err("原课堂会话或机器人连接已改变，未能确认停步。".into());
@@ -318,8 +329,11 @@ impl PulseClock {
     async fn run(&self, frames: impl Future<Output = Result<(), String>>) -> Result<(), String> {
         let mut started = self.started.subscribe();
         let deadline = async {
-            let at = (*started.wait_for(Option::is_some).await.map_err(|_| EXPIRED)?)
-                .ok_or(EXPIRED)?;
+            let at = (*started
+                .wait_for(Option::is_some)
+                .await
+                .map_err(|_| EXPIRED)?)
+            .ok_or(EXPIRED)?;
             sleep_until(at + self.pulse.duration).await;
             Ok::<(), String>(())
         };
@@ -358,7 +372,8 @@ pub(super) async fn step(
             || snapshot.connection_id.as_deref() != Some(&task.connection)
             || snapshot.moving
             || snapshot.teach_recording
-            || (command.motion_active() == Some(true) && snapshot.locomotion_mode != Some(LocomotionMode::Walk))
+            || (command.motion_active() == Some(true)
+                && snapshot.locomotion_mode != Some(LocomotionMode::Walk))
         {
             return Err(EXPIRED.into());
         }
@@ -416,10 +431,18 @@ pub(super) async fn step(
     let clock = PulseClock::new(settings);
     let movement = async {
         loop {
-            write(&mut bluetooth, window, &lifetime, capture, None, command.clone(), || {
-                verify()?;
-                clock.before_write()
-            })
+            write(
+                &mut bluetooth,
+                window,
+                &lifetime,
+                capture,
+                None,
+                command.clone(),
+                || {
+                    verify()?;
+                    clock.before_write()
+                },
+            )
             .await?;
             if !clock.wait_for_refresh().await? {
                 return Ok(());
@@ -463,8 +486,12 @@ mod tests {
                 matches!(action.command(40), Command::Move { vx, vyaw, vy: 0 } if (vx, vyaw) == expected)
             );
         }
-        assert!(matches!(Action::AskDoorOrLectern.command(40), Command::Speak { text } if text == "靠门的那位，还是靠讲台的那位？"));
-        assert!(matches!(Action::AskWhich.command(40), Command::Speak { text } if text == "您指的是哪一位？"));
+        assert!(
+            matches!(Action::AskDoorOrLectern.command(40), Command::Speak { text } if text == "靠门的那位，还是靠讲台的那位？")
+        );
+        assert!(
+            matches!(Action::AskWhich.command(40), Command::Speak { text } if text == "您指的是哪一位？")
+        );
         assert!(matches!(Action::Greet.command(40), Command::Speak { text } if text == "你好呀！"));
     }
 
@@ -522,13 +549,18 @@ mod tests {
             let start = Instant::now();
             let clock = PulseClock::new(pulse);
             let mut writes = Vec::new();
-            clock.run(async {
-                loop {
-                    clock.before_write()?;
-                    writes.push(start.elapsed().as_millis());
-                    if !clock.wait_for_refresh().await? { return Ok(()); }
-                }
-            }).await.unwrap();
+            clock
+                .run(async {
+                    loop {
+                        clock.before_write()?;
+                        writes.push(start.elapsed().as_millis());
+                        if !clock.wait_for_refresh().await? {
+                            return Ok(());
+                        }
+                    }
+                })
+                .await
+                .unwrap();
             assert_eq!(pulse.axis, axis);
             assert_eq!(start.elapsed(), Duration::from_millis(millis));
             assert_eq!(writes, (0..count).map(|i| i * 100).collect::<Vec<_>>());
@@ -541,14 +573,19 @@ mod tests {
         let start = Instant::now();
         let clock = PulseClock::new(pulse);
         let mut sends = Vec::new();
-        clock.run(async {
-            loop {
-                clock.before_write()?;
-                sends.push(start.elapsed().as_millis());
-                tokio::time::sleep(Duration::from_millis(140)).await;
-                if !clock.wait_for_refresh().await? { return Ok(()); }
-            }
-        }).await.unwrap();
+        clock
+            .run(async {
+                loop {
+                    clock.before_write()?;
+                    sends.push(start.elapsed().as_millis());
+                    tokio::time::sleep(Duration::from_millis(140)).await;
+                    if !clock.wait_for_refresh().await? {
+                        return Ok(());
+                    }
+                }
+            })
+            .await
+            .unwrap();
         assert_eq!(sends, [0, 200, 400, 600]);
         assert_eq!(start.elapsed(), pulse.duration);
     }
@@ -558,14 +595,16 @@ mod tests {
         let clock = PulseClock::new(Pulse::for_profile(Some(Profile::Standard)));
         let start = Instant::now();
         let mut writes = 0;
-        let result = clock.run(async {
-            clock.before_write()?;
-            writes += 1;
-            assert!(clock.wait_for_refresh().await?);
-            clock.before_write()?;
-            writes += 1;
-            std::future::pending().await
-        }).await;
+        let result = clock
+            .run(async {
+                clock.before_write()?;
+                writes += 1;
+                assert!(clock.wait_for_refresh().await?);
+                clock.before_write()?;
+                writes += 1;
+                std::future::pending().await
+            })
+            .await;
         assert!(result.is_err());
         assert_eq!(writes, 2);
         assert_eq!(start.elapsed(), Duration::from_millis(800));
@@ -576,11 +615,21 @@ mod tests {
         let mut begin = serde_json::json!({
             "operation": "beginClassroom", "taskId": "page-1", "connectionId": "test"
         });
-        assert!(matches!(serde_json::from_value::<Request>(begin.clone()),
-            Ok(Request::BeginClassroom { pulse_profile: None, .. })));
+        assert!(matches!(
+            serde_json::from_value::<Request>(begin.clone()),
+            Ok(Request::BeginClassroom {
+                pulse_profile: None,
+                ..
+            })
+        ));
         begin["pulseProfile"] = "strong".into();
-        assert!(matches!(serde_json::from_value::<Request>(begin.clone()),
-            Ok(Request::BeginClassroom { pulse_profile: Some(Profile::Strong), .. })));
+        assert!(matches!(
+            serde_json::from_value::<Request>(begin.clone()),
+            Ok(Request::BeginClassroom {
+                pulse_profile: Some(Profile::Strong),
+                ..
+            })
+        ));
         begin["pulseProfile"] = "unsupported".into();
         assert!(serde_json::from_value::<Request>(begin).is_err());
     }
@@ -590,7 +639,9 @@ mod tests {
         for profile in [None, Some(Profile::Standard)] {
             let pulse = Pulse::for_profile(profile);
             let clock = PulseClock::new(pulse);
-            clock.started.send_replace(Some(Instant::now() - pulse.duration));
+            clock
+                .started
+                .send_replace(Some(Instant::now() - pulse.duration));
             assert!(clock.run(std::future::pending()).await.is_err());
             assert!(clock.before_write().is_err());
         }

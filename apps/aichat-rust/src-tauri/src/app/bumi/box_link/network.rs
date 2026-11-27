@@ -33,10 +33,25 @@ impl Interface {
                 || (Some(ip) != self.broadcast() && u32::from(ip) != self.network()))
     }
 
+    // Every address of a subnet up to 4096 hosts, the interface's own /24 first.
+    // Larger subnets keep only that /24, which a scan can still cover in time.
     pub(super) fn scan_addresses(self) -> impl Iterator<Item = Ipv4Addr> {
-        let base = u32::from(self.ip) & 0xffff_ff00;
+        let local = u32::from(self.ip) & 0xffff_ff00;
+        let size = if self.mask.leading_ones() >= 20 {
+            !self.mask + 1
+        } else {
+            0
+        };
         (1..255)
-            .map(move |host| Ipv4Addr::from(base | host))
+            .map(move |host| Ipv4Addr::from(local | host))
+            .chain(
+                (0..size)
+                    .map(move |offset| Ipv4Addr::from(self.network() + offset))
+                    .filter(move |ip| {
+                        let value = u32::from(*ip);
+                        value & 0xffff_ff00 != local || value == local || value == local | 255
+                    }),
+            )
             .filter(move |ip| self.peer(*ip))
     }
 }
@@ -63,8 +78,11 @@ pub(super) fn interfaces() -> Vec<Interface> {
             let Some(address) = entry.ifa_addr.as_ref() else {
                 continue;
             };
+            // A tunnel or dial-up link has no router behind it for a box to join,
+            // and scanning it would spend the budget on a remote network.
             if entry.ifa_flags & libc::IFF_UP as u32 == 0
                 || entry.ifa_flags & libc::IFF_LOOPBACK as u32 != 0
+                || entry.ifa_flags & libc::IFF_POINTOPOINT as u32 != 0
                 || i32::from(address.sa_family) != libc::AF_INET
                 || entry.ifa_netmask.is_null()
             {
@@ -104,7 +122,8 @@ pub(super) fn interfaces() -> Vec<Interface> {
         NetworkManagement::{
             IpHelper::{
                 GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-                GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH,
+                GAA_FLAG_SKIP_MULTICAST, IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL,
+                IP_ADAPTER_ADDRESSES_LH,
             },
             Ndis::IfOperStatusUp,
         },
@@ -131,8 +150,12 @@ pub(super) fn interfaces() -> Vec<Interface> {
             let mut next = first;
             while let Some(adapter) = next.as_ref() {
                 next = adapter.Next;
+                // A tunnel or dial-up link has no router behind it for a box to join,
+                // and scanning it would spend the budget on a remote network.
                 if adapter.OperStatus != IfOperStatusUp
                     || adapter.IfType == IF_TYPE_SOFTWARE_LOOPBACK
+                    || adapter.IfType == IF_TYPE_TUNNEL
+                    || adapter.IfType == IF_TYPE_PPP
                 {
                     continue;
                 }

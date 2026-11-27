@@ -34,6 +34,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
         println!("cargo:rustc-link-lib=framework=ImageIO");
+        println!("cargo:rustc-link-lib=framework=CoreWLAN");
+        println!("cargo:rustc-link-lib=framework=CoreLocation");
         println!("cargo:rerun-if-changed=src/app/screenshot_macos.m");
         let mut native = cc::Build::new();
         if std::env::var_os("CARGO_FEATURE_DEV_BINS").is_some() {
@@ -51,6 +53,7 @@ fn main() {
             .file("src/app/main_minimize_macos.m")
             .file("src/app/pet_overlay_macos.m")
             .file("src/app/remote_phone_macos.m")
+            .file("src/app/box_wifi_macos.m")
             .file("src/remote_voice/native_input_macos.m")
             .file("src/remote_voice/demo_input_macos.m")
             .file("src/remote_voice/highlight_macos.m")
@@ -66,6 +69,7 @@ fn main() {
         println!("cargo:rerun-if-changed=src/app/main_minimize_macos.m");
         println!("cargo:rerun-if-changed=src/app/pet_overlay_macos.m");
         println!("cargo:rerun-if-changed=src/app/remote_phone_macos.m");
+        println!("cargo:rerun-if-changed=src/app/box_wifi_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/native_input_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/demo_input_macos.m");
         println!("cargo:rerun-if-changed=src/remote_voice/highlight_macos.m");

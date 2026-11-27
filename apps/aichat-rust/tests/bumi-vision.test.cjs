@@ -42,7 +42,7 @@ class MockElement extends EventTarget {
   play() { return Promise.resolve(); }
 }
 
-function createIntegratedHarness({ storage = new Map(), timers } = {}) {
+function createIntegratedHarness({ storage = new Map(), timers, boxCamera } = {}) {
   const elements = new Map();
   const el = id => {
     if (!elements.has(id)) elements.set(id, new MockElement());
@@ -75,14 +75,16 @@ function createIntegratedHarness({ storage = new Map(), timers } = {}) {
     fillText(label) { overlayPaint.labels.push(label); },
   };
   el("vision-overlay").getContext = () => overlayCtx;
-  const snapshotPaint = { images: [], labels: [], circles: [], scales: [] };
+  const snapshotPaint = { images: [], labels: [], circles: [], scales: [], lines: [] };
   const snapshotCtx = {
     ...mockCtx, save() {}, restore() {}, translate() {},
     scale(x, y) { snapshotPaint.scales.push([x, y]); },
     drawImage(...args) {
       snapshotPaint.images.push(args);
-      snapshotPaint.labels.length = snapshotPaint.circles.length = 0;
+      snapshotPaint.labels.length = snapshotPaint.circles.length = snapshotPaint.lines.length = 0;
     },
+    moveTo(x, y) { snapshotPaint.lines.push(["start", x, y]); },
+    lineTo(x, y) { snapshotPaint.lines.push(["to", x, y]); },
     arc(x, y) { snapshotPaint.circles.push([x, y]); },
     fillText(label) { snapshotPaint.labels.push(label); },
   };
@@ -111,6 +113,7 @@ function createIntegratedHarness({ storage = new Map(), timers } = {}) {
     setTimeout() { return 1; }, clearTimeout() {},
     setInterval() { return 2; }, clearInterval() {},
     ...timers,
+    __keepworkBoxCamera: boxCamera,
     localStorage: {
       getItem: key => storage.get(key) ?? null,
       setItem: (key, value) => storage.set(key, value),
@@ -136,8 +139,8 @@ function createIntegratedHarness({ storage = new Map(), timers } = {}) {
   };
 
   const inspectCalls = [];
-  const { createBumiVision } = loadVision({ document, window, navigator, Date, Image });
-  const camera = createBumiVision({
+  const vision = loadVision({ document, window, navigator, Date, Image });
+  const camera = vision.createBumiVision({
     inspectionTarget: () => "讲台",
     canInspectClassroom: () => true,
     async inspectClassroom(_camera, target) { inspectCalls.push(target); return "已识别"; },
@@ -145,6 +148,7 @@ function createIntegratedHarness({ storage = new Map(), timers } = {}) {
 
   return {
     el,
+    vision,
     camera,
     window,
     document,
@@ -208,6 +212,39 @@ test("classroom confidence persists valid edits across restarts and keeps invali
   assert.equal(createIntegratedHarness({ storage }).camera.readConfidenceThreshold(), 0.63);
 });
 
+test("the target search switch defaults to the passive classroom view and keeps a dominant choice only while the host supports it", () => {
+  const key = "keepwork.bumi.vision-calibration.v1";
+  const storage = new Map([[key, JSON.stringify({ mirror: true, searchView: "overhead" })]]);
+  const ui = createIntegratedHarness({ storage });
+  const select = ui.el("vision-search-view");
+  const setting = ui.el("vision-search-setting");
+  const help = ui.el("vision-search-help");
+  assert.equal(ui.vision.loadVisionConfig().searchView, "passive");
+  assert.equal(setting.hidden, true);
+  assert.equal(ui.vision.readSearchView(), "passive");
+  ui.camera.syncSearchView(false, false);
+  assert.equal(setting.hidden, true);
+  assert.equal(help.hidden, true);
+  assert.match(help.textContent, /同时入镜/);
+  assert.equal(ui.vision.readSearchView(), "passive");
+  select.value = "dominant";
+  ui.camera.syncSearchView(true, false);
+  assert.equal(setting.hidden, false);
+  assert.equal(select.disabled, false);
+  assert.equal(ui.vision.readSearchView(), "dominant");
+  select.fire("change");
+  assert.equal(help.hidden, false);
+  assert.match(help.textContent, /机器人正前方/);
+  assert.equal(JSON.parse(storage.get(key)).searchView, "dominant");
+  assert.equal(JSON.parse(storage.get(key)).mirror, true);
+  ui.camera.syncSearchView(true, true);
+  assert.equal(select.disabled, true);
+  assert.equal(ui.vision.readSearchView(), "dominant");
+  ui.camera.syncSearchView(false, false);
+  assert.equal(ui.vision.readSearchView(), "passive");
+  assert.equal(JSON.parse(storage.get(key)).searchView, "dominant");
+});
+
 test("an older classroom host allows restoring a saved custom threshold while a busy task locks the field", () => {
   const ui = createIntegratedHarness();
   const field = ui.el("class-confidence-threshold");
@@ -228,6 +265,39 @@ test("an older classroom host allows restoring a saved custom threshold while a 
   field.fire("change");
   ui.camera.syncConfidenceField(false, false);
   assert.equal(setting.hidden, true);
+});
+
+test("single-photo walking defaults on and preserves a manual choice while host support stays the same", () => {
+  const ui = createIntegratedHarness();
+  const toggle = ui.el("class-route-plan");
+  const setting = ui.el("class-route-plan-setting");
+  const calibration = ui.el("class-manual-calibration");
+  const step = ui.el("class-step");
+  step.value = "0.21";
+  assert.equal(setting.hidden, true);
+  ui.camera.syncRoutePlan("walk", false);
+  assert.equal(setting.hidden, false);
+  assert.equal(toggle.disabled, false);
+  assert.equal(ui.camera.routePlanEnabled(), true);
+  assert.equal(calibration.hidden, true);
+  toggle.checked = false;
+  toggle.fire("change");
+  ui.camera.syncRoutePlan("walk", true);
+  assert.equal(toggle.disabled, true);
+  assert.equal(ui.camera.routePlanEnabled(), false);
+  assert.equal(calibration.hidden, false);
+  assert.equal(step.value, "0.21");
+  ui.camera.syncRoutePlan("preview", false);
+  assert.equal(setting.hidden, false);
+  assert.equal(toggle.checked, false);
+  ui.camera.syncRoutePlan("walk", false);
+  assert.equal(ui.camera.routePlanEnabled(), true);
+  ui.camera.syncRoutePlan("unavailable", false);
+  assert.equal(setting.hidden, true);
+  assert.equal(toggle.checked, false);
+  assert.equal(calibration.hidden, false);
+  assert.equal(step.value, "0.21");
+  assert.equal(ui.camera.routePlanEnabled(), false);
 });
 
 test("a late camera permission grant after hiding the window releases its tracks and keeps the preview closed", async () => {
@@ -359,6 +429,38 @@ test("late JPEG decoding cannot replace a newer recognition or restore an invali
   ui.camera.stop();
 });
 
+test("the planned route follows all segment endpoints on the archived mirrored and rectified camera image", async () => {
+  const quad = [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }];
+  const storage = new Map([["keepwork.bumi.vision-calibration.v1", JSON.stringify({
+    mirror: true, quad, calibratedCamera: { deviceId: "fixture", width: 320, height: 240 },
+  })]]);
+  const ui = createIntegratedHarness({ storage });
+  const track = Object.assign(new EventTarget(), { stop() {}, getSettings: () => ({ deviceId: "fixture" }) });
+  ui.mediaDevices.getUserMedia = async () => ({ getTracks: () => [track], getVideoTracks: () => [track] });
+  ui.el("vision-toggle").fire("click");
+  await settleVision();
+  const camera = ui.camera.acquireClassroomCamera(assert.fail);
+  const robot = { x: 0.75, y: 0.75 };
+  const route = [{ x: 0.75, y: 0.5 }, { x: 0.5, y: 0.5 }];
+  camera.showInspection("垃圾桶", { capturedAt: Date.now(), robot, target: { x: 0.4, y: 0.5 }, route },
+    "data:image/jpeg;base64,cGxhbg==");
+  assert.ok(!ui.overlayPaint.labels.includes("计划停靠点"));
+  camera.release();
+  ui.decoding.at(-1).finish(1024, 512);
+  assert.equal(ui.el("vision-snapshot-label").textContent, "本次规划路线");
+  assert.ok(ui.snapshotPaint.labels.includes("计划停靠点"));
+  const sheet = ui.el("vision-snapshot-canvas");
+  const points = [robot, ...route];
+  assert.equal(ui.snapshotPaint.lines.length, points.length);
+  for (const [index, [operation, x, y]] of ui.snapshotPaint.lines.entries()) {
+    assert.equal(operation, index === 0 ? "start" : "to");
+    const expected = points[index];
+    assert.ok(Math.abs(x - (0.9 - 0.8 * expected.x) * sheet.width) < 1);
+    assert.ok(Math.abs(y - (0.1 + 0.8 * expected.y) * sheet.height) < 1);
+  }
+  ui.camera.stop();
+});
+
 test("both read-only and navigation results label the original exposure after 8.271 seconds without marking the live preview", async () => {
   const ui = createIntegratedHarness();
   ui.el("vision-toggle").fire("click");
@@ -410,6 +512,32 @@ test("a failed classroom result shows the complete model input with its exposure
   assert.equal(ui.el("vision-snapshot-time").textContent, new Date(capturedAt).toLocaleTimeString("zh-CN", { hour12: false }));
   ui.camera.stop();
 });
+
+for (const calibrated of [false, true]) {
+  test(`a reported obstruction stays on its submitted image pane with a mirrored preview (calibrated=${calibrated})`, async () => {
+    const config = { mirror: true, ...(calibrated && {
+      quad: [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }],
+      calibratedCamera: { deviceId: "fixture", width: 320, height: 240 },
+    }) };
+    const storage = new Map([["keepwork.bumi.vision-calibration.v1", JSON.stringify(config)]]);
+    const ui = createIntegratedHarness({ storage });
+    const track = Object.assign(new EventTarget(), { stop() {}, getSettings: () => ({ deviceId: "fixture" }) });
+    ui.mediaDevices.getUserMedia = async () => ({ getTracks: () => [track], getVideoTracks: () => [track] });
+    ui.el("vision-toggle").fire("click");
+    await settleVision();
+    const camera = ui.camera.acquireClassroomCamera(assert.fail);
+    const jpeg = "data:image/jpeg;base64,cGF0aA==";
+    assert.equal(camera.calibrated, calibrated);
+    camera.showInputFrame(jpeg, Date.now(), { kind: "obstacle", point: { x: 0.4, y: 0.5 } });
+    camera.release();
+    ui.decoding.at(-1).finish(calibrated ? 640 : 320, calibrated ? 320 : 240);
+    const canvas = ui.el("vision-snapshot-canvas");
+    assert.deepEqual(ui.snapshotPaint.circles, [[canvas.width * (calibrated ? 0.7 : 0.4), canvas.height / 2]]);
+    assert.deepEqual(ui.snapshotPaint.labels, ["疑似障碍"]);
+    assert.deepEqual(ui.overlayPaint.labels, []);
+    ui.camera.stop();
+  });
+}
 
 test("decoding a diagnostic exposure cannot restore it after blur, camera closure, new ownership or revocation", async () => {
   const ui = createIntegratedHarness();
@@ -525,26 +653,69 @@ test("classroom shots support zero-config auto mode and camera-bound calibrated 
   ui.camera.stop();
 });
 
-test("auto classroom frame preserves aspect ratio without manual corner calibration", () => {
+test("auto classroom frames preserve HD detail, aspect ratio and the native size of smaller sources", () => {
   const vision = loadVision();
   let drawn;
   const ctx = { drawImage(_v, x, y, w, h) { drawn = [x, y, w, h]; } };
   const canvas = { getContext: () => ctx, toDataURL: () => "data:image/jpeg;base64,YQ==" };
-  const jpeg = vision.composeAutoClassroomFrame({ videoWidth: 1280, videoHeight: 720 }, canvas);
-  assert.equal(jpeg, "data:image/jpeg;base64,YQ==");
-  assert.deepEqual([canvas.width, canvas.height], [768, 432]);
-  assert.deepEqual(drawn, [0, 0, 768, 432]);
+  for (const [w, h, expected] of [[1280, 720, [1280, 720]], [1080, 1920, [720, 1280]], [320, 240, [320, 240]]]) {
+    const jpeg = vision.composeAutoClassroomFrame({ videoWidth: w, videoHeight: h }, canvas);
+    assert.equal(jpeg, "data:image/jpeg;base64,YQ==");
+    assert.deepEqual([canvas.width, canvas.height], expected);
+    assert.deepEqual(drawn, [0, 0, ...expected]);
+  }
+});
+
+test("oversized JPEGs reduce quality and then resize the same exposure before sending", () => {
+  const oversized = "data:image/jpeg;base64," + "a".repeat(700000);
+  const small = "data:image/jpeg;base64,YQ==";
+  const source = { videoWidth: 1280, videoHeight: 720 };
+  const draws = [], qualities = [];
+  const ctx = { drawImage(input) { draws.push(input); } };
+  const canvas = { getContext: () => ctx, toDataURL(_format, quality) { qualities.push(quality); return oversized; } };
+  const reduced = { getContext: () => ctx, toDataURL: () => small };
+  const vision = loadVision({ document: { createElement: () => reduced } });
+  assert.equal(vision.composeAutoClassroomFrame(source, canvas), small);
+  assert.deepEqual(draws, [source, canvas]);
+  assert.ok(qualities[0] > qualities[1]);
+  assert.deepEqual([reduced.width, reduced.height], [960, 540]);
+  reduced.toDataURL = () => oversized;
+  assert.throws(() => vision.composeAutoClassroomFrame(source, canvas), /大小上限/);
+});
+
+test("camera capture requests HD or the saved calibrated capture dimensions for the selected camera", async () => {
+  const storageKey = "keepwork.bumi.vision-calibration.v1";
+  const calibration = { quad: [{ x:0, y:0 }, { x:1, y:0 }, { x:1, y:1 }, { x:0, y:1 }],
+    calibratedCamera: { deviceId: "mac-facetime", width: 640, height: 480 } };
+  for (const [saved, selected, width, height] of [
+    [false, "", 1280, 720], [true, "", 640, 480], [true, "mac-facetime", 640, 480], [true, "other-camera", 1280, 720],
+  ]) {
+    const ui = createIntegratedHarness({ storage: new Map(saved ? [[storageKey, JSON.stringify(calibration)]] : []) });
+    await settleVision();
+    let request;
+    const getUserMedia = ui.mediaDevices.getUserMedia;
+    ui.mediaDevices.getUserMedia = options => { request = options; return getUserMedia(); };
+    ui.el("vision-device").value = selected;
+    ui.el("vision-toggle").fire("click");
+    await settleVision();
+    assert.equal(request.video.width.ideal, width);
+    assert.equal(request.video.height.ideal, height);
+    assert.equal(request.video.deviceId?.exact, selected || undefined);
+    ui.camera.stop();
+  }
 });
 
 test("the rectified classroom floor preserves physical left/right with a mirrored calibration preview", () => {
   const vision = loadVision();
   const corners = [{ x: 0.8, y: 0.2 }, { x: 0.2, y: 0.2 }, { x: 0, y: 1 }, { x: 1, y: 1 }];
   let projected;
+  const side = 1280;
   const overlayLines = [];
   const ctx = {
     fillRect() {}, drawImage() {}, beginPath() {}, stroke() {},
     moveTo(x, y) { overlayLines.push([x, y]); }, lineTo(x, y) { overlayLines.push([x, y]); },
     getImageData(_x, _y, w, h) {
+      assert.deepEqual([w, h], [1280, 720], "rectification samples the original HD exposure");
       const data = new Uint8ClampedArray(w * h * 4);
       for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
         data[(y * w + x) * 4] = x * 255 / (w - 1);
@@ -553,16 +724,16 @@ test("the rectified classroom floor preserves physical left/right with a mirrore
       return { data };
     },
     createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
-    putImageData(output, x, y) { assert.deepEqual([x, y], [512, 0]); projected = output.data; },
+    putImageData(output, x, y) { assert.deepEqual([x, y], [side, 0]); projected = output.data; },
   };
   const canvas = { getContext: () => ctx, toDataURL: () => "data:image/jpeg;base64,YQ==" };
-  vision.composeClassroomFrame({ videoWidth: 640, videoHeight: 480 }, canvas, corners);
-  assert.deepEqual([canvas.width, canvas.height], [1024, 512]);
-  const point = (x, y) => [...projected.slice((y * 512 + x) * 4, (y * 512 + x) * 4 + 2)];
+  vision.composeClassroomFrame({ videoWidth: 1280, videoHeight: 720 }, canvas, corners);
+  assert.deepEqual([canvas.width, canvas.height], [2 * side, side]);
+  const point = (x, y) => [...projected.slice((y * side + x) * 4, (y * side + x) * 4 + 2)];
   assert.deepEqual(point(0, 0), [51, 51]);
-  assert.deepEqual(point(511, 0), [204, 51]);
-  assert.deepEqual(point(511, 511), [255, 255]);
-  assert.ok(overlayLines.every(([x]) => x <= 512), "the rectified model input must have no grid lines over the classroom floor");
+  assert.deepEqual(point(side - 1, 0), [204, 51]);
+  assert.deepEqual(point(side - 1, side - 1), [255, 255]);
+  assert.ok(overlayLines.every(([x]) => x <= side), "the rectified model input must have no grid lines over the classroom floor");
 });
 
 test("crossed calibration corners keep the last valid floor mapping", async () => {
@@ -577,4 +748,51 @@ test("crossed calibration corners keep the last valid floor mapping", async () =
   assert.match(ui.el("vision-status").textContent, /恢复上次标定/);
   assert.equal(storage.has("keepwork.bumi.vision-calibration.v1"), false);
   ui.camera.stop();
+});
+
+test("a connected xiaozhi box camera is listed with the other cameras and supplies classroom frames", async () => {
+  let opened = 0;
+  let closed = false;
+  let onFrame;
+  let onEnded;
+  const ui = createIntegratedHarness({
+    boxCamera: {
+      current: () => ({ label: "xiaozhi-box" }),
+      open(frame, ended) {
+        opened++;
+        onFrame = frame;
+        onEnded = ended;
+        return Promise.resolve(() => { closed = true; });
+      },
+    },
+  });
+  let localRequests = 0;
+  ui.mediaDevices.getUserMedia = async () => { localRequests++; throw new Error("local camera"); };
+  await settleVision();
+  const option = ui.el("vision-device").children.find(item => item.value === "xiaozhi-box");
+  assert.equal(option?.textContent, "xiaozhi-box");
+  ui.el("vision-device").value = "xiaozhi-box";
+  ui.el("vision-toggle").fire("click");
+  await settleVision();
+  assert.equal(localRequests, 0);
+  assert.equal(opened, 1);
+  assert.match(ui.el("vision-status").textContent, /正在使用「xiaozhi-box」/);
+  assert.equal(ui.el("vision-stage").hidden, false);
+
+  onFrame("box-frame");
+  await settleVision();
+  ui.decoding.at(-1).finish(640, 480);
+  await settleVision();
+  const camera = ui.camera.acquireClassroomCamera(() => {});
+  const pending = camera.captureFreshFrame();
+  onFrame("box-frame-2");
+  await settleVision();
+  ui.decoding.at(-1).finish(640, 480);
+  await settleVision();
+  assert.equal(await pending, "data:image/jpeg;base64,/9j/4AAQSkZJRg==");
+
+  onEnded("盒子摄像头已断开。");
+  assert.equal(closed, true);
+  assert.match(ui.el("vision-status").textContent, /盒子摄像头已断开/);
+  assert.equal(ui.camera.isActive(), false);
 });
