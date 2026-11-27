@@ -104,14 +104,14 @@ const MAX_LIFETIME: Duration = Duration::from_secs(600);
 type Checkout = tokio::sync::oneshot::Sender<Connected>;
 
 #[derive(Default)]
-pub(super) struct SpeechConnection {
+pub(crate) struct SpeechConnection {
     // A physical remote has one active utterance. No other press can borrow its connection.
     active: tokio::sync::Mutex<()>,
     idle: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Checkout>>>,
 }
 
 impl SpeechConnection {
-    pub(super) async fn transcribe(
+    pub(crate) async fn transcribe(
         &self,
         audio: tokio::sync::mpsc::Receiver<Vec<i16>>,
         cancel: watch::Receiver<bool>,
@@ -233,7 +233,7 @@ async fn stream_press(
         while let Some(frame) = audio.recv().await {
             samples += frame.len();
             if samples > MAX_SAMPLES {
-                return Err("单次遥控器语音输入不能超过 10 分钟。".to_owned());
+                return Err("单次语音输入不能超过 10 分钟。".to_owned());
             }
             for chunk in frame.chunks(CHUNK_SAMPLES) {
                 let bytes = chunk
@@ -300,7 +300,7 @@ async fn transcribe_to(
         return Ok(String::new());
     }
     if pcm.len() > MAX_SAMPLES {
-        return Err("单次遥控器语音输入不能超过 10 分钟。".into());
+        return Err("单次语音输入不能超过 10 分钟。".into());
     }
     let (send, audio) = tokio::sync::mpsc::channel(1);
     send.try_send(pcm.to_vec()).unwrap();

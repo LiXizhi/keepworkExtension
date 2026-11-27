@@ -1,6 +1,6 @@
-use super::{trusted_page, Control};
 #[cfg(any(target_os = "macos", windows))]
 use super::RemoteDirection;
+use super::{trusted_page, Control};
 use serde::Serialize;
 use std::sync::Arc;
 #[cfg(any(target_os = "macos", windows))]
@@ -114,7 +114,12 @@ impl Sessions {
 
 #[cfg(any(target_os = "macos", windows))]
 pub(super) fn current_capture(core: &Control) -> Option<u64> {
-    core.remote.lock().unwrap().active.as_ref().map(|capture| capture.id)
+    core.remote
+        .lock()
+        .unwrap()
+        .active
+        .as_ref()
+        .map(|capture| capture.id)
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -317,7 +322,9 @@ pub(super) fn verify_direction(
                 if let Some(reader) = &capture.reader {
                     let state = reader.state()?;
                     if state.revision == capture.delivered_revision
-                        && direction.key_for_mode(state.strafe).is_some_and(|key| state.permits(key))
+                        && direction
+                            .key_for_mode(state.strafe)
+                            .is_some_and(|key| state.permits(key))
                     {
                         capture.issued_motion = true;
                         return Ok(());
@@ -431,9 +438,7 @@ pub(crate) async fn bumi_remote_input(
             }
             let mut initial = event(Vec::new(), Duration::ZERO, None);
             initial.strafe = menu_switch.then_some(false);
-            channel
-                .send(initial)
-                .map_err(|e| e.to_string())?;
+            channel.send(initial).map_err(|e| e.to_string())?;
             Ok((Arc::new(reader), edges))
         });
         let (reader, mut edges) = match setup {

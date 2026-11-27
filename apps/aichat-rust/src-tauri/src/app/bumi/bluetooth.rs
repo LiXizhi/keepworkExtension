@@ -80,8 +80,10 @@ impl Bluetooth {
         if let Some(connection) = &self.connection {
             // A stop must not wait for a separate peripheral status query. The
             // GATT write reports its own failure if the link was just lost.
-            let stopping = matches!(&request, Request::Disconnect | Request::CancelConnection { .. })
-                || matches!(&request, Request::Send { command, .. } if command.motion_active() == Some(false));
+            let stopping = matches!(
+                &request,
+                Request::Disconnect | Request::CancelConnection { .. }
+            ) || matches!(&request, Request::Send { command, .. } if command.motion_active() == Some(false));
             let lost = connection.link_lost.load(Ordering::Acquire)
                 || (!stopping
                     && !during(
@@ -103,8 +105,10 @@ impl Bluetooth {
         }
 
         match request {
-            Request::BeginClassroom { .. } | Request::ClassroomStep { .. } | Request::ClassroomStop { .. } | Request::EndClassroom { .. } =>
-                return Err("课堂任务需要独立的控制会话。".into()),
+            Request::BeginClassroom { .. }
+            | Request::ClassroomStep { .. }
+            | Request::ClassroomStop { .. }
+            | Request::EndClassroom { .. } => return Err("课堂任务需要独立的控制会话。".into()),
             Request::Guide { .. } => return Err("导航步进需先验证当前遥控会话。".into()),
             Request::InterpretWalk(_) => return Err("行走指令由独立的识别通道解析。".into()),
             Request::LocateVision(_) => return Err("视觉定位请求已由独立通道处理。".into()),
@@ -120,13 +124,17 @@ impl Bluetooth {
                     .find(|(device, _, _)| device.id == id)
                     .cloned()
                     .ok_or("请从最近一次扫描结果中选择机器人。")?;
-                self.connection =
-                    Some(connect(app, device, peripheral, adapter, attempt_id, &mut lifetime).await?);
+                self.connection = Some(
+                    connect(app, device, peripheral, adapter, attempt_id, &mut lifetime).await?,
+                );
             }
-            Request::Scan { .. } | Request::Connect { .. } => return Err("请先断开当前机器人。".into()),
+            Request::Scan { .. } | Request::Connect { .. } => {
+                return Err("请先断开当前机器人。".into())
+            }
             Request::CancelConnection { attempt_id } => {
                 // Setup may already have completed while its IPC reply was in flight.
-                if self.connection.as_ref().and_then(|c| c.attempt_id.as_ref()) == Some(&attempt_id) {
+                if self.connection.as_ref().and_then(|c| c.attempt_id.as_ref()) == Some(&attempt_id)
+                {
                     self.disconnect().await;
                 }
             }
@@ -149,8 +157,14 @@ impl Bluetooth {
                         .await?;
                 } else {
                     if command.motion_active().is_none()
-                        && !matches!(command, Command::Status | Command::Battery | Command::TeachList
-                            | Command::Volume { .. } | Command::Speak { .. })
+                        && !matches!(
+                            command,
+                            Command::Status
+                                | Command::Battery
+                                | Command::TeachList
+                                | Command::Volume { .. }
+                                | Command::Speak { .. }
+                        )
                     {
                         connection.voice_posture_owner = None;
                     }
@@ -160,7 +174,9 @@ impl Bluetooth {
                         }
                     }
                     verify_remote()?;
-                    connection.send(command, &mut lifetime, monitor, remote_capture_id).await?;
+                    connection
+                        .send(command, &mut lifetime, monitor, remote_capture_id)
+                        .await?;
                 }
             }
         }
@@ -183,7 +199,15 @@ impl Bluetooth {
             scene_vision_version: Some(1),
             scene_confidence_version: Some(1),
             scene_walk_path_version: Some(1),
+            automatic_walk_clearance_version: Some(1),
+            walk_floor_scale_version: Some(1),
             scene_inspection_version: Some(1),
+            search_view_version: Some(1),
+            walk_continue_version: Some(1),
+            single_frame_route_version: Some(1),
+            single_frame_estimated_step_version: Some(1),
+            single_frame_directions_version: Some(1),
+            single_frame_pulse_directions_version: Some(1),
             scene_spoken_choice: Some(true),
             classroom_pulse_version: Some(1),
             teach_version: Some(1),
@@ -693,7 +717,9 @@ fn needs_voice_status(
 fn ensure_ready_for_voice(status: Option<i8>) -> Result<(), String> {
     match status {
         Some(1..=3) => Ok(()),
-        Some(code) => Err(format!("机器人当前状态码为 {code}。请等机器人站稳并进入准备或行走状态后再说指令。")),
+        Some(code) => Err(format!(
+            "机器人当前状态码为 {code}。请等机器人站稳并进入准备或行走状态后再说指令。"
+        )),
         None => Err("未能确认机器人当前状态，请稍后再说指令。".into()),
     }
 }
@@ -782,7 +808,11 @@ impl Connection {
             if let Some(saved_at) = self.teach_saved_at {
                 let wait = Duration::from_secs(2).saturating_sub(saved_at.elapsed());
                 if !wait.is_zero() {
-                    during(lifetime, 3, async { sleep(wait).await; Ok(()) }).await?;
+                    during(lifetime, 3, async {
+                        sleep(wait).await;
+                        Ok(())
+                    })
+                    .await?;
                 }
             }
         }
@@ -919,7 +949,11 @@ async fn query_reading(
     .await;
     match result {
         Err(error) if error == TIMED_OUT => {
-            let query = if matches!(command, Command::Battery) { "电量" } else { "状态" };
+            let query = if matches!(command, Command::Battery) {
+                "电量"
+            } else {
+                "状态"
+            };
             Err(if let Some(reason) = invalid_battery {
                 format!("电量查询未取得有效读数：{reason}。")
             } else if received_notification {
@@ -1014,7 +1048,10 @@ mod tests {
         let (_first, first) = tokio::sync::watch::channel(false);
         let (_new, new) = tokio::sync::watch::channel(false);
         assert_eq!(needs_voice_status(false, true, None, &first), Ok(false));
-        assert_eq!(needs_voice_status(false, false, Some(&first), &first), Ok(true));
+        assert_eq!(
+            needs_voice_status(false, false, Some(&first), &first),
+            Ok(true)
+        );
         assert!(needs_voice_status(true, true, Some(&first), &first).is_err());
         assert!(needs_voice_status(false, false, None, &first).is_err());
         assert!(needs_voice_status(false, false, Some(&first), &new).is_err());
@@ -1040,8 +1077,19 @@ mod tests {
             assert!(confirm_voice_gait(&mut mode, &mut confirmed, status).is_err());
             assert!(!confirmed);
             assert_eq!(mode, None);
-            assert!(prepare_locomotion_mode(&mut mode, &Command::Move { vx: 40, vy: 0, vyaw: 0 }).is_err());
-            assert_eq!(needs_voice_status(false, confirmed, Some(&session), &session), Ok(true));
+            assert!(prepare_locomotion_mode(
+                &mut mode,
+                &Command::Move {
+                    vx: 40,
+                    vy: 0,
+                    vyaw: 0
+                }
+            )
+            .is_err());
+            assert_eq!(
+                needs_voice_status(false, confirmed, Some(&session), &session),
+                Ok(true)
+            );
         }
         let mut mode = Some(LocomotionMode::Walk);
         let mut confirmed = true;
@@ -1069,7 +1117,8 @@ mod tests {
                 uuid: NOTIFY,
                 service_uuid: SERVICE,
                 value,
-            })).chain(stream::pending());
+            }))
+            .chain(stream::pending());
             let result = query_reading(notifications, &Command::Battery, &mut lifetime).await;
             match expected {
                 Ok(reading) => assert_eq!(result, Ok(reading)),
@@ -1085,7 +1134,11 @@ mod tests {
 
         let mut attempts = ConnectionAttempts::default();
         let mut lifetime = attempts.start("scanning").unwrap();
-        let work = super::during(&mut lifetime, 20, std::future::pending::<Result<(), String>>());
+        let work = super::during(
+            &mut lifetime,
+            20,
+            std::future::pending::<Result<(), String>>(),
+        );
         tokio::pin!(work);
         assert!(work.as_mut().now_or_never().is_none());
         attempts.cancel("scanning");

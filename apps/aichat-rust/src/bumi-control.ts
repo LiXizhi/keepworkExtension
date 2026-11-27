@@ -1,82 +1,20 @@
+import type { BluetoothMessage, Gesture, LocomotionMode, Motion, PostureAction, Request, Snapshot, TeachAction } from "./bumi-control-types";
+import { bindSectionShortcuts, bindStickHorizontal, bleStatusLabels, commandLabels, renderDevices } from "./bumi-workspace";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createBumiVision } from "./bumi-vision";
 import { createEmbodiedController, defaultSceneConfidence, parseEmbodiedTask, usableMotionFrame, type CountedWalk, type EmbodiedTask, type EmbodiedDirection } from "./bumi-embodied";
 import { createChatHandoff, reportChat, isLiveChat, type ChatTask } from "./bumi-chat";
-import { executeCountedWalk, verifyWalkIntent } from "./bumi-walk";
-import { createPulseSettings, type ClassroomPulseProfile, inspectClassroom, observeClassroom, readCalibration, type ClassroomFrameSource } from "./bumi-classroom-vision";
+import { executeCountedWalk, executeForwardContinueWalk, verifyWalkIntent } from "./bumi-walk";
+import { bindRouteControls, classroomSettleMs, createRoutePreviewCache, executeSingleFrameRoute, planDirections, supportsRouteWalk } from "./bumi-route";
+import { createPulseSettings, inspectClassroom, observeClassroom, readCalibration, type ClassroomFrameSource } from "./bumi-classroom-vision";
+import { createBumiVoiceControl } from "./bumi-voice-control";
 
 import { commandSentence, inspectionTarget, isStopCommand, normalizeVoice, observationRequest, parseSpokenSteps, remoteVoiceExamples, withoutAddress, type SpokenWalkIntent, type StepDirection } from "./bumi-voice-commands";
 
-interface Device { id: string; name: string; rssi: number | null }
-interface TeachAction {
-  id: number;
-  name: string;
-  duration?: number | null;
-  time?: string | null;
-}
-type LocomotionMode = "walk" | "run";
-type Gesture = "dance" | "wave" | "handshake" | "cheer";
-type PostureAction = LocomotionMode | Gesture | "standUp" | "standToFall";
 const spokenGestures = new Map<string, Gesture>([
   ["跳舞", "dance"], ["挥手", "wave"], ["握手", "handshake"], ["握个手", "handshake"], ["欢呼", "cheer"],
 ]);
-interface Snapshot {
-  available: boolean;
-  devices: Device[];
-  connected: Device | null;
-  connectionId?: string | null;
-  battery: number | null;
-  status: number | null;
-  moving: boolean;
-  walkMode: boolean;
-  locomotionMode?: LocomotionMode | null;
-  remoteMotionVersion?: number;
-  remoteMenuSwitch?: boolean;
-  remoteVoiceCommandVersion?: number;
-  remoteVoiceGestures?: boolean;
-  remoteVoiceContinue?: boolean;
-  remoteVoiceStepDirections?: boolean;
-  guidedMotionVersion?: number;
-  sceneWalkPathVersion?: number;
-  walkIntentVersion?: number;
-  sceneVisionVersion?: number;
-  sceneConfidenceVersion?: number;
-  sceneInspectionVersion?: number;
-  classroomPulseVersion?: number;
-  sceneSpokenChoice?: boolean;
-  teachVersion?: number;
-  teachRecording?: boolean;
-  teachActions?: TeachAction[];
-  listening: boolean;
-}
-interface BluetoothMessage {
-  direction?: "tx" | "rx";
-  receivedAt: string;
-  size: number;
-  truncated: boolean;
-  hex: string;
-  opcode: number | null;
-  summary: string;
-  text: string | null;
-}
-type Command =
-  | { action: "battery" | "status" | PostureAction | "startTeach" | "stopTeach" | "teachList" }
-  | { action: "saveTeach"; name: string }
-  | { action: "playTeach" | "deleteTeach"; id: number }
-  | { action: "volume"; percent: number }
-  | ({ action: "move" } & Motion)
-  | { action: "speak"; text: string };
-type Request =
-  | { operation: "status" | "disconnect" }
-  | { operation: "listen"; enabled: boolean }
-  | { operation: "beginClassroom"; taskId: string; connectionId: string; captureId?: number; voiceId?: number; pulseProfile?: ClassroomPulseProfile }
-  | { operation: "classroomStep"; taskId: string; sequence: number; action: EmbodiedDirection | "handshake" | "wave" | "greet" | "askDoorOrLectern" | "askWhich" }
-  | { operation: "endClassroom"; taskId: string }
-  | { operation: "classroomStop"; taskId: string; sequence: number }
-  | { operation: "send"; command: Command; remoteCaptureId?: number; voiceId?: number };
-interface Motion { vx: number; vyaw: number; vy?: number }
-
 const picker = document.getElementById("device-picker") as HTMLSelectElement;
 const volume = document.getElementById("volume") as HTMLInputElement;
 const speech = document.getElementById("speech-text") as HTMLInputElement;
@@ -84,21 +22,11 @@ const teachName = document.getElementById("teach-name") as HTMLInputElement;
 const actionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-command]"));
 const queryButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-query]"));
 const moveButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-move]"));
+
+bindSectionShortcuts();
 const pad = document.getElementById("direction-pad")!;
 const stick = document.getElementById("motion-stick") as HTMLButtonElement;
-const stickHorizontal = document.getElementById("stick-horizontal") as HTMLSelectElement;
-const commandLabels: Record<string, string> = {
-  battery: "电量已更新", status: "状态已更新", dance: "跳舞指令已发送",
-  wave: "挥手指令已发送", handshake: "握手指令已发送", cheer: "欢呼指令已发送",
-  standUp: "一键起身指令已发送", standToFall: "一键收纳指令已发送，请在完成后扶稳机器人。",
-  walk: "行走模式指令已发送。",
-  run: "全身行走模式指令已发送。",
-  startTeach: "示教录制已开始，请手动引导 Bumi 手臂摆动。",
-  stopTeach: "示教录制已停止。",
-  saveTeach: "示教动作保存指令已发送。",
-  teachList: "示教动作库已刷新。",
-  volume: "音量指令已发送", speak: "说话指令已发送",
-};
+const stickHorizontal = bindStickHorizontal(render);
 // The remote and jog buttons use a fixed step. The virtual stick scales to ±127.
 const DIGITAL_AXIS = 80;
 const moveVectors: Record<string, Motion> = {
@@ -107,10 +35,6 @@ const moveVectors: Record<string, Motion> = {
 };
 const zeroMotion = (): Motion => ({ vx: 0, vyaw: 0 });
 const MOTION_REFRESH_MS = 100;
-// BLE status labels used by NOETIX Run 3.2.2 for the gait and power states.
-const bleStatusLabels: Record<number, string> = {
-  0: "未启动", 1: "准备", 2: "行走", 3: "全身行走", 26: "保护", 30: "失能",
-};
 let snapshot: Snapshot = { available: true, devices: [], connected: null, battery: null, status: null, moving: false, walkMode: false, listening: false };
 let pending = false;
 const CONNECT_RETRY_MS = 20_000;
@@ -131,7 +55,6 @@ let sentMotion = zeroMotion();
 const connectionHint = "查找设备约需 20 秒，未连接时最多自动重试 3 次。";
 let operation = connectionHint;
 let error = "";
-let deviceList = "";
 let messages: BluetoothMessage[] = [];
 let sentFrames = 0;
 let receivedFrames = 0;
@@ -177,6 +100,7 @@ let heldLeg: HeldLeg | null = null;
 let stoppingLeg: HeldLeg | null = null;
 let nextPress = 0;
 interface ClassroomRun extends ClassroomFrameSource {
+  directionsOnly: boolean;
   id: string;
   link: string;
   session?: RemoteSession;
@@ -191,7 +115,9 @@ let classroomClosing: Promise<void> | undefined;
 let nextClassroomId = 0;
 
 const voiceCommand = document.getElementById("voice-command") as HTMLInputElement;
+const routePreview = createRoutePreviewCache();
 const vision = createBumiVision({
+  onTrackingReset: routePreview.clear,
   inspectClassroom,
   inspectionTarget: () => inspectionTarget(voiceCommand.value),
   canInspectClassroom() {
@@ -200,6 +126,12 @@ const vision = createBumiVision({
     if (moving() || motionBusy || stopQueued || disconnecting) return "请等机器人停稳后再识别。";
     return true;
   },
+});
+
+const voiceInput = createBumiVoiceControl({ note: voiceNote, refreshTarget: vision.refreshTarget });
+const routeControls = bindRouteControls({
+  command: voiceCommand, enabled: vision.routePlanEnabled, render, voiceActive: voiceInput.active, note: voiceNote,
+  start: task => { void startClassroom({ singleFrameWalk: task }); },
 });
 
 const chatHandoff = createChatHandoff({
@@ -251,7 +183,7 @@ function classroomRequest(request: Request) {
 }
 function classroomStop() {
   const run = classroom;
-  if (!run || run.link !== snapshot.connectionId) return;
+  if (!run || run.directionsOnly || run.link !== snapshot.connectionId) return;
   if (run.halt) return run.halt;
   run.halt = classroomRequest({ operation: "classroomStop", taskId: run.id, sequence: run.sequence })
     .then(next => {
@@ -275,6 +207,10 @@ function releaseClassroom() {
   if (!run) return;
   classroom = undefined;
   run.camera?.release();
+  if (run.directionsOnly) {
+    render();
+    return Promise.resolve(true);
+  }
   const end = () => classroomRequest({ operation: "endClassroom", taskId: run.id });
   // classroomStop interrupts a pulse immediately. Keep ownership until its
   // zero-speed write finishes. End can also revoke a not-yet-delivered begin.
@@ -293,6 +229,13 @@ function releaseClassroom() {
 function cancelClassroom(reason: string, preserveFailureFrame = false) {
   if (!classroom) return;
   if (!preserveFailureFrame) classroom.camera?.clearObservation(true);
+  if (classroom.directionsOnly) {
+    const task = classroom.chat;
+    if (task && isLiveChat(task) && task.result.status !== "stopping") reportChat(task, "stopped", "规划已取消。");
+    classroomNote("规划已取消。");
+    void releaseClassroom();
+    return;
+  }
   singlePulse?.finish(false);
   if (embodied.isActive()) embodied.stop(reason);
   else {
@@ -309,22 +252,24 @@ function cancelClassroom(reason: string, preserveFailureFrame = false) {
   }
 }
 function currentClassroom(run?: ClassroomRun): ClassroomRun {
-  if (!run || run !== classroom || run.link !== snapshot.connectionId || disconnecting ||
+  if (!run || run !== classroom || run.link !== (snapshot.connectionId ?? "") || disconnecting ||
       motionFailed || !document.hasFocus() || document.hidden || (run.camera && !run.camera.isCurrent()) ||
       (run.session && !drivingHere(run.session))) throw new Error("课堂任务或摄像头已停止。");
   return run;
 }
-async function classroomAction(action: EmbodiedDirection | "handshake" | "wave" | "greet" | "askDoorOrLectern" | "askWhich", run = currentClassroom(classroom)) {
+async function classroomAction(action: EmbodiedDirection | "handshake" | "wave" | "greet" | "askDoorOrLectern" | "askWhich", run = currentClassroom(classroom), requireFrame: boolean | (() => void) = true) {
+  if (run.directionsOnly) throw new Error("单图指路只显示走法。");
   await run.halt;
   currentClassroom(run);
   const pulse = action === "forward" || action === "backward" || action === "left" || action === "right";
-  if (run.camera && (pulse || action === "handshake" || action === "wave")) {
+  if (requireFrame === true && run.camera && (pulse || action === "handshake" || action === "wave")) {
     const captured = run.motionFrameAt;
     if (captured === undefined || !usableMotionFrame(captured, Date.now())) throw new Error("动作前的画面已失效，请重新观察。");
     run.motionFrameAt = undefined;
   }
   if (pulse) run.camera?.clearObservation();
   run.halt = undefined;
+  if (typeof requireFrame === "function") requireFrame();
   const next = await classroomRequest({ operation: "classroomStep", taskId: run.id, sequence: ++run.sequence, action });
   currentClassroom(run);
   if (next.connectionId !== run.link || next.moving) throw new Error("未能确认原机器人已停止移动。");
@@ -332,7 +277,7 @@ async function classroomAction(action: EmbodiedDirection | "handshake" | "wave" 
   if (run.session && !requestedMode()) run.session.gaitReady = false;
   render();
   if (pulse) {
-    await new Promise<void>(resolve => window.setTimeout(resolve, 700));
+    await new Promise<void>(resolve => window.setTimeout(resolve, classroomSettleMs));
     currentClassroom(run);
   }
 }
@@ -352,27 +297,34 @@ const embodied = createEmbodiedController({
   pulse: classroomAction, gesture: classroomAction, greet: () => classroomAction("greet"),
   say: classroomNote, stop: classroomStop, ended: releaseClassroom,
 });
-async function startClassroom(command: EmbodiedTask | CountedWalk | SpokenWalkIntent | EmbodiedDirection | "wave" | "greet", session?: RemoteSession, voiceId?: number, chat?: ChatTask) {
+async function startClassroom(command: EmbodiedTask | { singleFrameWalk: EmbodiedTask } | CountedWalk | SpokenWalkIntent | EmbodiedDirection | "wave" | "greet" | "trialForward", session?: RemoteSession, voiceId?: number, chat?: ChatTask) {
   function declined(message: string) {
     classroomNote(message);
     if (chat) reportChat(chat, "failed", message);
   }
   const intent = typeof command === "object" && "walkText" in command ? command : undefined;
-  const task = typeof command === "object" && "walkText" in command
-    ? (command.expected.count === 1 ? command.expected.direction : command.expected) : command;
+  const routeWalk = typeof command === "object" && "singleFrameWalk" in command;
+  const normalized = routeWalk ? command.singleFrameWalk : command === "trialForward" ? "forward" : command;
+  const task = typeof normalized === "object" && "walkText" in normalized
+    ? (normalized.expected.count === 1 ? normalized.expected.direction : normalized.expected) : normalized;
   if (intent && snapshot.walkIntentVersion !== 1) { declined("当前桌面不支持 AI 理解步数，请直接说“向前走三步”或“向后走两步”。"); return; }
   if (typeof task === "object" && "count" in task && snapshot.sceneWalkPathVersion !== 1) { declined("当前桌面宿主不支持逐步观察通路，请分次发出单步指令。"); return; }
-  if (snapshot.sceneVisionVersion !== 1) { declined("当前桌面宿主没有课堂目标跟随能力。"); return; }
-  if (!snapshot.connectionId || !snapshot.connected || requestedMode() !== "walk") {
+  const directionsOnly = !routeWalk && typeof task === "object" && "target" in task && task.mode === "approach" && !task.gesture
+    && vision.routePlanEnabled();
+  if (routeWalk && (!supportsRouteWalk(snapshot) || !vision.routePlanEnabled())) { declined("当前未启用单图行走。"); return; }
+  const pulseDirections = (routeWalk || directionsOnly) && supportsRouteWalk(snapshot);
+  if (directionsOnly && !pulseDirections && snapshot.singleFrameDirectionsVersion !== 1) { declined("当前桌面不支持单图指路。"); return; }
+  if (!directionsOnly && !routeWalk && snapshot.sceneVisionVersion !== 1) { declined("当前桌面宿主没有课堂目标跟随能力。"); return; }
+  if (!directionsOnly && (!snapshot.connectionId || !snapshot.connected || requestedMode() !== "walk")) {
     declined("请连接 Bumi，进入行走模式并等它站稳。"); return;
   }
   if (classroom || classroomClosing || remote !== (session ?? null) ||
       pending || moving() || motionBusy || stopQueued || motionFailed || teaching() || disconnecting ||
-      !document.hasFocus() || document.hidden || (session && !session.gaitReady)) {
+      !document.hasFocus() || document.hidden || (!directionsOnly && session && !session.gaitReady)) {
     declined("请先结束当前控制，等机器人停稳后再执行。"); return;
   }
   let minConfidence: number | undefined;
-  if (typeof task === "object" && "target" in task) {
+  if (!directionsOnly && !routeWalk && typeof task === "object" && "target" in task) {
     try { minConfidence = vision.readConfidenceThreshold(); }
     catch (cause) { declined(cause instanceof Error ? cause.message : String(cause)); return; }
     if (minConfidence !== defaultSceneConfidence && snapshot.sceneConfidenceVersion !== 1) {
@@ -380,21 +332,55 @@ async function startClassroom(command: EmbodiedTask | CountedWalk | SpokenWalkIn
     }
   }
   const profile = pulseSettings.request(snapshot.classroomPulseVersion);
-  const run: ClassroomRun = { id: connectionPageId + "-" + ++nextClassroomId, link: snapshot.connectionId,
-    session, chat, interpreting: !!intent, calibration: readCalibration(false), frames: 0, sequence: 0 };
+  const run: ClassroomRun = { id: connectionPageId + "-" + ++nextClassroomId, link: snapshot.connectionId ?? "", directionsOnly,
+    session, chat, interpreting: !!intent, calibration: readCalibration(false),
+    automaticWalkClearance: snapshot.automaticWalkClearanceVersion === 1,
+    walkFloorScale: snapshot.walkFloorScaleVersion === 1, supportsSearchView: snapshot.searchViewVersion === 1,
+    frames: 0, sequence: 0 };
   classroom = run;
-  const pulse = typeof task === "string" && ["forward", "backward", "left", "right"].includes(task) ? beginSinglePulse(session) : undefined;
+  if (!routeWalk) routePreview.clear();
+  const autoContinueForward = command !== "trialForward" && task === "forward" && snapshot.walkContinueVersion === 1
+    && vision.walkContinueEnabled() && vision.isReady();
+  const pulse = typeof task === "string" && !autoContinueForward && ["forward", "backward", "left", "right"].includes(task) ? beginSinglePulse(session) : undefined;
+  async function complete(note: string) {
+    currentClassroom(run);
+    classroomNote(note);
+    const closed = await releaseClassroom();
+    pulse?.finish(closed === true);
+    if (chat && isLiveChat(chat) && chat.result.status !== "stopping") reportChat(chat, closed ? "completed" : "failed", closed ? note : "结束课堂会话未获确认。");
+  }
+  function fail(cause: unknown) {
+    pulse?.finish(false);
+    if (classroom !== run) return;
+    const problem = cause instanceof Error ? cause.message : String(cause);
+    const message = typeof task === "object" && "count" in task ? `${task.direction === "forward" ? "前进" : "后退"}${task.count}步。${problem}` : problem;
+    if (chat && isLiveChat(chat) && !chat.paused && chat.result.status !== "stopping") reportChat(chat, "failed", message);
+    if (directionsOnly) {
+      classroomNote(message);
+      void releaseClassroom();
+      return;
+    }
+    cancelClassroom(message, true);
+  }
   try {
-    if (typeof task !== "string") {
-      run.camera = vision.acquireClassroomCamera(cancelClassroom);
-      run.calibration = readCalibration(run.camera.calibrated);
+    if (typeof task !== "string" || autoContinueForward) {
+      run.camera = vision.acquireClassroomCamera(cancelClassroom, pulseDirections);
+      if (!pulseDirections) run.calibration = readCalibration(run.camera.calibrated);
       run.calibration.minConfidence = minConfidence;
       if (chat) {
-        if ("target" in task) chat.description = { ...task };
+        if (typeof task === "object" && "target" in task) chat.description = { ...task };
         chat.sameCamera = run.camera.matchesSource;
       }
     }
     render();
+    if (directionsOnly) {
+      if (!run.camera) throw new Error("请先开启摄像头。");
+      if (chat) reportChat(chat, "running", "正在规划…");
+      classroomNote("正在规划…");
+      void planDirections(run.camera, task.target, pulseDirections ? { cache: routePreview, link: run.link,
+        profile: profile.pulseProfile, local: !chat && !session } : undefined).then(complete).catch(fail);
+      return;
+    }
     await watchRobotDisconnect();
     currentClassroom(run);
     if (intent) {
@@ -411,27 +397,37 @@ async function startClassroom(command: EmbodiedTask | CountedWalk | SpokenWalkIn
     await run.begin;
     run.begin = undefined;
     currentClassroom(run);
-    if (typeof task === "object" && "target" in task) { embodied.start(task); return; }
+    if (typeof task === "object" && "target" in task) {
+      if (routeWalk) {
+        const currentRouteRun = () => {
+          if (!supportsRouteWalk(snapshot) || requestedMode() !== "walk") throw new Error("当前连接的单图行走已中断。");
+          return currentClassroom(run);
+        };
+        const note = await executeSingleFrameRoute(currentRouteRun, task.target,
+          (direction, checkRoute) => classroomAction(direction, run, checkRoute), classroomNote, profile.pulseProfile,
+          { cache: routePreview, link: run.link });
+        await complete(note);
+        return;
+      }
+      embodied.start(task);
+      return;
+    }
     let note: string;
     if (typeof task !== "string") {
       if (chat) reportChat(chat, "running", "正在观察通路。");
       note = await executeCountedWalk(task, () => currentClassroom(run), direction => classroomAction(direction, run), classroomNote);
+    } else if (autoContinueForward) {
+      if (chat) reportChat(chat, "running", "正在向前移动，完成后将由 AI 判断是否继续行走。");
+      note = await executeForwardContinueWalk(() => currentClassroom(run), requireFrame => classroomAction("forward", run, requireFrame), classroomNote);
     } else {
       vision.resetTracking();
       if (task === "greet") await classroomAction("wave", run);
       await classroomAction(task, run);
       note = task === "wave" ? "挥手动作指令已写入。" : task === "greet" ? "挥手和问候语指令已写入。" : "本次点动和停止指令已写入，请核对实际位移或转角。";
     }
-    classroomNote(note);
-    const closed = await releaseClassroom();
-    pulse?.finish(closed === true);
-    if (chat && isLiveChat(chat) && chat.result.status !== "stopping") reportChat(chat, closed ? "completed" : "failed", closed ? note : "结束课堂会话未获确认。");
+    await complete(note);
   } catch (cause) {
-    pulse?.finish(false);
-    const problem = cause instanceof Error ? cause.message : String(cause);
-    const message = typeof task === "object" && "count" in task ? `${task.direction === "forward" ? "前进" : "后退"}${task.count}步。${problem}` : problem;
-    if (chat && isLiveChat(chat) && !chat.paused && chat.result.status !== "stopping") reportChat(chat, "failed", message);
-    if (classroom === run) cancelClassroom(message, true);
+    fail(cause);
   }
 }
 function handleSceneTask(phrase: string, session?: RemoteSession, voiceId?: number) {
@@ -451,6 +447,7 @@ const pulseSettings = createPulseSettings();
 function acceptSnapshot(next: Snapshot) {
   // A completed GATT request can arrive after its disconnect notification.
   if (next.connectionId && next.connectionId === lostConnectionId) return;
+  if (next.connectionId !== snapshot.connectionId || next.moving || !supportsRouteWalk(next)) routePreview.clear();
   snapshot = next;
 }
 
@@ -475,27 +472,6 @@ function remoteGaitHint() {
   return snapshot.remoteVoiceContinue === true
     ? "移动前，请等机器人站稳后说“进入行走模式”或“进入全身行走模式”。"
     : "当前桌面版本需先关闭遥控，重新选择步态后再开启遥控。";
-}
-
-function renderDevices() {
-  const selected = picker.value;
-  const serialized = JSON.stringify(snapshot.devices);
-  if (serialized !== deviceList) {
-    deviceList = serialized;
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = snapshot.devices.length ? "请选择机器人…" : "未发现 Bumi 设备";
-    picker.replaceChildren(placeholder);
-    for (const device of snapshot.devices) {
-      const option = document.createElement("option");
-      option.value = device.id;
-      option.textContent = `${device.name}${device.rssi === null ? "" : ` · ${device.rssi} dBm`}`;
-      picker.appendChild(option);
-    }
-  }
-  if (snapshot.devices.some(device => device.id === selected)) picker.value = selected;
-  const device = snapshot.devices.find(item => item.id === picker.value);
-  text("device-id", device ? `设备 ID：${device.id}` : "");
 }
 
 function renderLogStatus() {
@@ -626,7 +602,7 @@ function renderTeachList(disabled: boolean) {
 }
 
 function render() {
-  renderDevices();
+  renderDevices(picker, snapshot.devices);
   const connected = snapshot.connected !== null;
   const unavailable = !snapshot.available;
   const isMoving = moving();
@@ -652,6 +628,10 @@ function render() {
   pulseSettings.sync(snapshot.connected?.id, snapshot.classroomPulseVersion, classroomBusy || isMoving);
   for (const field of document.querySelectorAll<HTMLInputElement>("#classroom-settings input")) field.disabled = classroomBusy;
   vision.syncConfidenceField(snapshot.sceneConfidenceVersion === 1, classroomBusy);
+  vision.syncSearchView(snapshot.searchViewVersion === 1, classroomBusy);
+  vision.syncWalkContinue(snapshot.walkContinueVersion === 1, classroomBusy);
+  const routeWalkSupported = supportsRouteWalk(snapshot);
+  vision.syncRoutePlan(routeWalkSupported ? "walk" : snapshot.singleFrameDirectionsVersion === 1 ? "preview" : "unavailable", classroomBusy);
   const controlsBusy = classroomBusy || pending || !connected || disconnecting || isMoving || teachBusy;
   for (const control of queryButtons) control.disabled = controlsBusy;
   for (const control of actionButtons) control.disabled = controlsBusy || motionFailed;
@@ -674,6 +654,12 @@ function render() {
     renderTeachList(controlsBusy || motionFailed);
   }
   const mode = requestedMode();
+  const trialStep = button("class-trial-step");
+  trialStep.hidden = snapshot.sceneVisionVersion !== 1 || !!remote;
+  trialStep.disabled = trialStep.hidden || mode !== "walk" || !snapshot.connectionId || unavailable ||
+    controlsBusy || motionFailed || motionBusy || stopQueued;
+  routeControls.sync(routeWalkSupported, !remote, controlsBusy || mode !== "walk" || !snapshot.connectionId ||
+    unavailable || motionFailed || motionBusy || stopQueued);
   const legacyHost = snapshot.locomotionMode === undefined;
   button("run-mode").hidden = legacyHost;
   const modeDisabled = controlsBusy || motionFailed;
@@ -684,13 +670,13 @@ function render() {
   const motionDisabled = classroomBusy || !!remote || !connected || unavailable || !mode || disconnecting || motionFailed || teachBusy || (pending && !motionBusy);
   stick.disabled = motionDisabled || (isMoving && !grip && !stickKey);
   const supportsLateral = snapshot.remoteMotionVersion === 1 || snapshot.remoteMotionVersion === 2;
-  if (!supportsLateral || !connected) stickHorizontal.value = "yaw";
-  stickHorizontal.disabled = !supportsLateral || motionDisabled || isMoving || motionBusy || stopQueued;
+  stickHorizontal.sync({ connected, supportsLateral, gaitSelected: mode !== null,
+    locked: motionDisabled || isMoving || motionBusy || stopQueued });
   for (const control of moveButtons) {
     control.disabled = motionDisabled || !!grip || !!stickKey;
     const direction = control.dataset.move!;
     if (direction === "left" || direction === "right") {
-      const label = (direction === "left" ? "左" : "右") + (stickHorizontal.value === "lateral" ? "移" : "转");
+      const label = (direction === "left" ? "左" : "右") + (stickHorizontal.lateral ? "移" : "转");
       if (control.textContent !== label) {
         control.textContent = label;
         control.setAttribute("aria-label", `按住${label}`);
@@ -723,6 +709,7 @@ function render() {
   text("operation", operation);
   text("error", error || (unavailable ? "Bumi 蓝牙控制目前支持 macOS 和 Windows 桌面版。" : ""));
   vision.refreshTarget();
+  voiceInput.render();
   syncRemoteShield(remoteStatus);
 }
 
@@ -1170,6 +1157,9 @@ let panelInShield = false;
 function syncRemoteShield(status: string) {
   const visible = remote?.drive === true || remotePaused;
   const active = remote?.drive === true && remote.ready;
+  // Keep the classroom stop beside a running task, inside the remote modal,
+  // and for camera-only work when the main movement stop is disabled.
+  button("classroom-stop").hidden = !active && !classroom && !button("stop-move").disabled;
   if (panelInShield !== active) {
     panelInShield = active;
     const destination = document.getElementById(active ? "classroom-shield" : "classroom-home")!;
@@ -1629,6 +1619,7 @@ function jog(direction: string) {
   }, 800);
 }
 function runVoiceCommand(raw: string) {
+  if (voiceInput.active()) { voiceNote("请先结束或取消本次语音输入。"); return; }
   const sentence = commandSentence(raw);
   const phrase = normalizeVoice(sentence);
   if (!phrase) {
@@ -1643,7 +1634,7 @@ function runVoiceCommand(raw: string) {
     voiceNote("遥控期间可输入目标进行识别，动作指令请按住遥控器语音键说出。");
     return;
   }
-  voiceCommand.value = "";
+  if (!routeControls.approach(sentence)) voiceCommand.value = "";
   vision.refreshTarget();
   if (classroom?.interpreting) { cancelClassroom("先前的步数分析已取消，请重新发出指令。"); return; }
   if (classroom && singlePulse && /^(?:握手|握个手)$/u.test(sentence)) {
@@ -1806,7 +1797,12 @@ voiceCommand.addEventListener("keydown", event => {
   }
 });
 button("voice-run").addEventListener("click", () => runVoiceCommand(voiceCommand.value));
+button("class-trial-step").addEventListener("click", () => {
+  if (voiceInput.active()) { voiceNote("请先结束或取消本次语音输入。"); return; }
+  void startClassroom("trialForward");
+});
 button("vision-inspect-classroom").addEventListener("click", () => {
+  if (voiceInput.active()) { voiceNote("请先结束或取消本次语音输入。"); return; }
   void vision.inspectTarget(inspectionTarget(voiceCommand.value));
 });
 button("listen-toggle").addEventListener("click", () => {
@@ -1873,13 +1869,12 @@ stick.addEventListener("pointermove", event => {
   setMotion(stickVector(signedAxis(-y), signedAxis(-x)));
 });
 function stickVector(vx: number, horizontal: number): Motion {
-  return stickHorizontal.value === "lateral" ? { vx, vyaw: 0, vy: horizontal } : { vx, vyaw: horizontal };
+  return stickHorizontal.lateral ? { vx, vyaw: 0, vy: horizontal } : { vx, vyaw: horizontal };
 }
 function padStep(direction: string): Motion {
   const { vx, vyaw } = moveVectors[direction];
   return stickVector(vx, vyaw);
 }
-stickHorizontal.addEventListener("change", render);
 function signedAxis(value: number) {
   const magnitude = Math.round(Math.abs(value) * 127);
   return value < 0 && magnitude > 0 ? -magnitude : magnitude;
@@ -1931,10 +1926,11 @@ for (const control of moveButtons) {
   control.addEventListener("contextmenu", event => event.preventDefault());
 }
 function stopAllInput(force = false, note = "已请求停止移动。再次使用时请手动开启遥控。") {
+  routePreview.clear();
   singlePulse?.finish(false);
   cancelHandshake?.();
   if (force) chatHandoff.clearPaused(note);
-  const stoppingClassroom = !!classroom;
+  const stoppingClassroom = !!classroom && !classroom.directionsOnly;
   cancelClassroom(note);
   if (!stoppingClassroom && vision.classroomActive()) vision.resetTracking();
   else if (!stoppingClassroom && force) vision.clearSnapshot();
@@ -1957,9 +1953,13 @@ function suspendClassroomForFocusLoss(note: string) {
   if (task?.result.status === "awaitingChoice") task.paused = true;
   stopAllInput(false, note);
 }
-window.addEventListener("blur", () => suspendClassroomForFocusLoss("Bumi 窗口已失去焦点。请确认机器人站稳后重新开启遥控。"));
+window.addEventListener("blur", () => {
+  suspendClassroomForFocusLoss("Bumi 窗口已失去焦点。请确认机器人站稳后重新开启遥控。");
+});
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) suspendClassroomForFocusLoss("Bumi 窗口已隐藏。请确认机器人站稳后重新开启遥控。");
+  if (document.hidden) {
+    suspendClassroomForFocusLoss("Bumi 窗口已隐藏。请确认机器人站稳后重新开启遥控。");
+  }
 });
 window.addEventListener("pagehide", () => { void cancelConnection(); stopAllInput(); });
 volume.addEventListener("input", () => { text("volume-value", `${volume.value}%`); });

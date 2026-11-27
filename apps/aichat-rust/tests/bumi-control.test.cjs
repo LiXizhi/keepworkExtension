@@ -19,7 +19,7 @@ test("Bumi IPC is limited to its bundled local control window", () => {
   const own = permissions.find(part => part.includes('identifier = "allow-bumi-control"'));
   const main = permissions.find(part => part.includes('identifier = "allow-desktop-commands"'));
   assert.ok(own && main);
-  for (const command of ["bumi_control", "bumi_remote_input", "bumi_box_link"]) {
+  for (const command of ["bumi_control", "bumi_remote_input", "bumi_voice_input", "bumi_box_link", "bumi_box_camera"]) {
     assert.ok(own.includes(`"${command}"`));
     assert.equal(main.includes(`"${command}"`), false);
     assert.equal((read("src/bridge.ts") + read("src-tauri/src/bridge.rs")).includes(command), false);
@@ -84,6 +84,19 @@ test("Bumi control is available from every desktop menu and packaged as a local 
   assert.match(portrait, /@media\s*\(prefers-reduced-motion:\s*no-preference\)/);
   assert.match(portrait, /id="still"/);
   assert.match(html, /id="voice-command"/);
+  assert.match(html, /id="voice-input"/);
+  assert.match(html, /没有遥控器时/);
+  assert.match(html, /不会自动移动/);
+  const voiceControl = read("src/bumi-voice-control.ts");
+  assert.match(renderer, /createBumiVoiceControl\(/);
+  assert.match(voiceControl, /createLocalBumiVoiceInput\(/);
+  assert.match(voiceControl, /command\.value = words\.slice\(0, 128\)\.join/);
+  assert.match(voiceControl, /window\.addEventListener\("pagehide", \(\) => input\.cancel\(\)\)/);
+  assert.match(renderer, /window\.addEventListener\("pagehide", \(\) => \{ void cancelConnection\(\)/);
+  const voiceHost = read("src-tauri/src/app/bumi/voice_input.rs");
+  assert.match(voiceHost, /trusted_page\(window\.label\(\), &url\)/);
+  assert.match(voiceHost, /revoke_window/);
+  assert.doesNotMatch(voiceHost, /std::fs|tokio::fs|access_token|Authorization/);
   assert.match(html, /mi-remote-voice/);
   assert.match(html, /20 秒/);
   assert.doesNotMatch(html, /id="scan"/);

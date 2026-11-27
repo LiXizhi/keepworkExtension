@@ -11,7 +11,7 @@ const compileRenderer = name => ts.transpileModule(read("src/" + name + ".ts"), 
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const script = compileRenderer("bumi-control");
-const classroomModules = Object.fromEntries(["bumi-chat", "bumi-classroom-vision", "bumi-walk", "bumi-voice-commands"].map(name =>
+const classroomModules = Object.fromEntries(["bumi-workspace", "bumi-chat", "bumi-classroom-vision", "bumi-route", "bumi-walk", "bumi-voice-commands", "bumi-voice-input", "bumi-voice-control"].map(name =>
   ["./" + name, new vm.Script("(function(exports){" + compileRenderer(name) + "\n})")]));
 const embodiedScript = new vm.Script("(function(exports){" + compileRenderer("bumi-embodied") + "\n})");
 const visionScript = new vm.Script("(function(exports){" + compileRenderer("bumi-vision") + "\n})");
@@ -42,6 +42,8 @@ class Control extends EventTarget {
     return child;
   }
   contains(node) { for (; node; node = node.parentElement) if (node === this) return true; return false; }
+  insertBefore(child) { return this.appendChild(child); }
+  remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(c => c !== this); }
   replaceChildren(...children) { this.children = children; }
   fire(type, properties = {}) {
     this.dispatchEvent(Object.assign(new Event(type, { cancelable: true }), properties));
@@ -97,8 +99,11 @@ async function renderer(t, {
   const window = Object.assign(new Control(), { setTimeout, clearTimeout, setInterval, clearInterval, confirm: () => true });
   const classroomRequests = [];
   const previewLabels = [];
+  const previewLabelHistory = [];
   const capturedLabels = [];
   const snapshotPaint = { images: [], labels: [] };
+  const encodedFrameSizes = [];
+  let videoFramesRequested = 0;
   let media;
   if (classroom) {
     const storage = classroom.storage ?? new Map();
@@ -125,21 +130,23 @@ async function renderer(t, {
       drawImage(source) { snapshotPaint.images.push(source.src); snapshotPaint.labels.length = 0; },
       fillText(label) { snapshotPaint.labels.push(label); },
     });
-    let frame = 0;
     Object.assign(ids.get("vision-overlay"), { width: 320, height: 240,
       getContext: () => ({ ...context2d,
         clearRect() { previewLabels.length = 0; },
-        fillText(text) { previewLabels.push(text); },
+        fillText(text) { previewLabels.push(text); previewLabelHistory.push(text); },
       }),
     });
     Object.assign(ids.get("vision-video"), {
       videoWidth: 640, videoHeight: 480, readyState: 4, play: async () => {},
-      requestVideoFrameCallback(cb) { queueMicrotask(cb); return ++frame; }, cancelVideoFrameCallback() {},
+      requestVideoFrameCallback(cb) { queueMicrotask(cb); return ++videoFramesRequested; }, cancelVideoFrameCallback() {},
     });
     document.createElement = tag => {
       if (tag !== "canvas") return new Control();
       return Object.assign(new Control(), { getContext: () => context2d,
-        toDataURL: () => "data:image/jpeg;base64," + Buffer.from("jpeg" + frame).toString("base64") });
+        toDataURL() {
+          encodedFrameSizes.push([this.width, this.height]);
+          return "data:image/jpeg;base64," + Buffer.from("jpeg" + videoFramesRequested).toString("base64");
+        } });
     };
   }
   const robot = { id: "test-bumi", name: "Bumi", rssi: -50 };
@@ -191,6 +198,20 @@ async function renderer(t, {
     if (classroom) {
       if (request.operation === "interpretWalk") return { ...snapshot, walkIntent: await classroom.interpret(request.text) };
       if (request.operation === "locateVision") {
+        if (request.inspection?.pulseDirections) {
+          classroomRequests.push(JSON.parse(JSON.stringify(request)));
+          return { ...snapshot, visionPose: await classroom.pulseDirections(request) };
+        }
+        if (request.inspection?.directionsOnly) {
+          classroomRequests.push(JSON.parse(JSON.stringify(request)));
+          const visionPose = { directions: await classroom.directions(request), timingMs: classroom.timingMs };
+          if (classroom.directionSteps !== undefined) visionPose.directionSteps = classroom.directionSteps;
+          return { ...snapshot, visionPose };
+        }
+        if (request.walkContinue) {
+          classroomRequests.push(JSON.parse(JSON.stringify(request)));
+          return { ...snapshot, visionPose: { walkContinue: await classroom.walkContinue(request), timingMs: classroom.timingMs } };
+        }
         if (request.walkPath) {
           classroomRequests.push(JSON.parse(JSON.stringify(request)));
           return { ...snapshot, visionPose: { walkPath: await classroom.walkPath(request) } };
@@ -320,7 +341,7 @@ async function renderer(t, {
   return {
     document, window, actions, moves, calls, forward, chooseMode, monitorRequests, listeners, emit,
     captures, captureStops, commandRequests, guidanceRequests, movementRequests, connectionRequests, classroomRequests, robotSnapshot: snapshot,
-    previewLabels, capturedLabels, snapshotPaint,
+    previewLabels, previewLabelHistory, capturedLabels, snapshotPaint, encodedFrameSizes, videoFramesRequested: () => videoFramesRequested,
     stick(type, dx = 0, dy = 0, pointerId = 2) {
       // The user grabs the thumb off-center. Available drag radius is 100 px.
       document.getElementById("motion-stick").fire(type, {
@@ -560,13 +581,18 @@ test("portrait stick travel controls speed and maps the screen axes to forward a
   }
 });
 
+function selectStickMode(ui, mode) {
+  const option = ui.document.getElementById(`stick-${mode}`);
+  option.checked = true;
+  option.fire("change");
+}
+
 test("lateral stick travel uses vy proportionally, preserves vx, and sends zero on release", async t => {
   const ui = await renderer(t, { remote: true });
   await ui.chooseMode("walk");
   const horizontal = ui.document.getElementById("stick-horizontal");
   assert.equal(horizontal.disabled, false);
-  horizontal.value = "lateral";
-  horizontal.fire("change");
+  selectStickMode(ui, "lateral");
   assert.deepEqual(ui.moves, []);
   for (const [dx, dy, expected] of [
     [-30, -40, [51, 0, 38]], [30, 40, [-51, 0, -38]],
@@ -575,6 +601,9 @@ test("lateral stick travel uses vy proportionally, preserves vx, and sends zero 
     const start = ui.moves.length;
     ui.stick("pointerdown");
     assert.equal(horizontal.disabled, true);
+    selectStickMode(ui, "yaw");
+    assert.equal(ui.document.getElementById("stick-lateral").checked, true);
+    assert.equal(ui.document.getElementById("stick-yaw").checked, false);
     ui.stick("pointermove", dx, dy);
     await settle();
     ui.stick("pointerup");
@@ -582,8 +611,7 @@ test("lateral stick travel uses vy proportionally, preserves vx, and sends zero 
     assert.deepEqual(ui.moves.slice(start), [expected, stopped]);
     assert.equal(horizontal.disabled, false);
   }
-  horizontal.value = "yaw";
-  horizontal.fire("change");
+  selectStickMode(ui, "yaw");
   ui.stick("pointerdown");
   ui.stick("pointermove", -30, -40);
   await settle();
@@ -596,10 +624,8 @@ test("lateral stick travel uses vy proportionally, preserves vx, and sends zero 
 test("stick arrow keys follow the selected horizontal axis", async t => {
   const ui = await renderer(t, { remote: true });
   await ui.chooseMode("walk");
-  const horizontal = ui.document.getElementById("stick-horizontal");
   const stick = ui.document.getElementById("motion-stick");
-  horizontal.value = "lateral";
-  horizontal.fire("change");
+  selectStickMode(ui, "lateral");
   for (const [key, vector] of [["ArrowRight", [0, 0, -80]], ["ArrowUp", [80, 0, 0]]]) {
     stick.fire("keydown", { key });
     await settle();
@@ -623,15 +649,13 @@ const lateralLabels = { ...yawLabels, left: "左移", right: "右移" };
 test("screen direction labels and their low-speed actions follow lateral mode and switching back to yaw", async t => {
   const ui = await renderer(t, { remote: true });
   await ui.chooseMode("walk");
-  const horizontal = ui.document.getElementById("stick-horizontal");
   assertDirectionLabels(ui, yawLabels);
   for (const [mode, labels, left, right] of [
     ["lateral", lateralLabels, [0, 0, 80], [0, 0, -80]],
     ["yaw", yawLabels, [0, 80, 0], [0, -80, 0]],
   ]) {
     const beforeChange = ui.moves.length;
-    horizontal.value = mode;
-    horizontal.fire("change");
+    selectStickMode(ui, mode);
     assertDirectionLabels(ui, labels);
     assert.equal(ui.moves.length, beforeChange);
     for (const [side, vector] of [["left", left], ["right", right]]) {
@@ -1126,6 +1150,483 @@ async function classroomRenderer(t, remote, classroom, capabilities = {}, pulseP
   };
 }
 
+function selectRoute(ui) {
+  const field = ui.document.getElementById("class-route-plan");
+  assert.ok(!field.checked && !field.disabled);
+  assert.equal(ui.document.getElementById("class-route-plan-setting").hidden, false);
+  field.checked = true;
+  field.fire("change");
+}
+
+async function routeRenderer(t, classroom = {}, remote = false) {
+  const ui = await classroomRenderer(t, remote, classroom, { singleFrameDirectionsVersion: 1 });
+  selectRoute(ui);
+  return ui;
+}
+
+const executableRouteCapabilities = {
+  singleFrameDirectionsVersion: 1, singleFramePulseDirectionsVersion: 1,
+};
+
+function pulsePlan(...segments) {
+  return {
+    directions: [...segments.map(part => part.direction), "stop"],
+    directionSteps: [...segments.map(part => part.count), null],
+    pulseDirections: segments,
+  };
+}
+
+function straightRoute() {
+  return pulsePlan({ direction: "forward", count: 2 });
+}
+
+async function executableRouteRenderer(t, pulseDirections, capabilities = executableRouteCapabilities) {
+  const ui = await classroomRenderer(t, false, {
+    uncalibrated: true, pulseDirections, directions: () => ["forward", "stop"],
+  }, capabilities);
+  const button = ui.document.getElementById("class-route-walk");
+  const enabledByDefault = capabilities.singleFramePulseDirectionsVersion === 1;
+  assert.equal(ui.document.getElementById("class-route-plan").checked, enabledByDefault);
+  assert.equal(button.hidden, !enabledByDefault);
+  const input = ui.document.getElementById("voice-command");
+  input.value = "走到白色垃圾桶旁边";
+  input.fire("input");
+  for (const id of ["width", "height", "step", "left", "turn"]) ui.document.getElementById("class-" + id).value = "";
+  return ui;
+}
+
+test("single-photo execution takes one photo and issues every planned pulse once, without replanning", async t => {
+  const ui = await executableRouteRenderer(t, straightRoute);
+  assert.equal(ui.document.getElementById("voice-run").textContent, "预览走法");
+  assert.deepEqual(ui.classroomRequests, []);
+  const baseline = ui.videoFramesRequested();
+  await click(ui, "class-route-walk");
+  ui.document.getElementById("class-route-walk").click();
+  await ui.tick(3000);
+  assert.equal(ui.videoFramesRequested() - baseline, 1);
+  assert.equal(ui.scenes().length, 1);
+  const [request] = ui.scenes();
+  assert.deepEqual(request.inspection, { target: "白色垃圾桶", calibratedFloor: false, directionsOnly: true, pulseDirections: true });
+  assert.equal(request.singleFrameRoute, undefined);
+  assert.deepEqual(ui.steps().map(step => [step.action, step.sequence]), [["forward", 1], ["forward", 2]]);
+  const begins = ui.classroomRequests.filter(r => r.operation === "beginClassroom");
+  assert.equal(begins.length, 1);
+  assert.equal(begins[0].connectionId, "test-link");
+  assert.ok(ui.steps().every(s => s.taskId === begins[0].taskId));
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+});
+
+test("preview remains read-only when executable routes are supported", async t => {
+  const ui = await executableRouteRenderer(t, straightRoute);
+  await click(ui, "voice-run");
+  assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["locateVision"]);
+  assert.equal(ui.scenes()[0].inspection.directionsOnly, true);
+});
+
+test("a fresh local preview dispatches its displayed pulses with no second photo or plan", async t => {
+  const ui = await executableRouteRenderer(t, straightRoute);
+  const command = ui.document.getElementById("voice-command");
+  const original = command.value;
+  const baseline = ui.videoFramesRequested();
+  await click(ui, "voice-run");
+  assert.equal(command.value, original);
+  assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["locateVision"]);
+  const [preview] = ui.scenes();
+  assert.equal(preview.inspection.pulseDirections, true);
+  assert.match(ui.document.getElementById("voice-status").textContent, /直走.*2.*停下/);
+  assert.equal(ui.videoFramesRequested() - baseline, 1);
+  await click(ui, "class-route-walk");
+  await ui.tick(3000);
+  assert.equal(ui.scenes().length, 1);
+  assert.equal(ui.videoFramesRequested() - baseline, 1);
+  assert.deepEqual(ui.steps().map(s => s.action), ["forward", "forward"]);
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+});
+
+for (const change of ["timeout", "new target", "new connection", "manual movement", "camera restart", "stop"]) {
+  test(`single-photo walking obtains a new plan after ${change} invalidates the preview`, async t => {
+    let plans = 0;
+    const ui = await executableRouteRenderer(t, () => ++plans === 1
+      ? pulsePlan({ direction: "left", count: 1 })
+      : pulsePlan({ direction: "right", count: 1 }));
+    await click(ui, "voice-run");
+    assert.deepEqual(ui.steps(), []);
+    if (change === "timeout") await ui.tick(16_000);
+    if (change === "new target") {
+      const input = ui.document.getElementById("voice-command");
+      input.value = "走到讲台旁边";
+      input.fire("input");
+    }
+    if (change === "new connection") {
+      ui.robotSnapshot.connectionId = "another-connection";
+      await ui.chooseMode("walk");
+    }
+    if (change === "manual movement") {
+      ui.press();
+      await settle();
+      ui.release();
+      await settle();
+      assert.ok(ui.moves.some(axes => nonzero(axes)));
+    }
+    if (change === "camera restart") {
+      await click(ui, "vision-toggle");
+      await click(ui, "vision-toggle");
+    }
+    if (change === "stop") await click(ui, "stop-move");
+    await click(ui, "class-route-walk");
+    await ui.tick(1500);
+    assert.equal(ui.scenes().length, 2);
+    assert.deepEqual(ui.steps().map(s => s.action), ["right"]);
+  });
+}
+
+test("single-photo execution consumes the preview once", async t => {
+  let plans = 0;
+  const ui = await executableRouteRenderer(t, () => ++plans === 1
+    ? pulsePlan({ direction: "left", count: 1 })
+    : pulsePlan({ direction: "right", count: 1 }));
+  await click(ui, "voice-run");
+  await click(ui, "class-route-walk");
+  await ui.tick(1000);
+  await click(ui, "class-route-walk");
+  await ui.tick(1000);
+  assert.equal(ui.scenes().length, 2);
+  assert.deepEqual(ui.steps().map(s => s.action), ["left", "right"]);
+});
+
+test("single-photo signals preserve turn and step counts without measured angles or scale", async t => {
+  const ui = await executableRouteRenderer(t, () =>
+    pulsePlan({ direction: "right", count: 2 }, { direction: "forward", count: 2 }));
+  await click(ui, "class-route-walk");
+  await ui.tick(4000);
+  assert.deepEqual(ui.steps().map(s => s.action), ["right", "right", "forward", "forward"]);
+  assert.equal(ui.scenes().length, 1);
+  assert.equal(ui.scenes()[0].inspection.calibratedFloor, false);
+});
+
+for (const floor of ["saved", "partially calibrated"]) {
+  test(`a pulse-only host previews and walks from one raw photo on a ${floor} floor`, async t => {
+    const ui = await classroomRenderer(t, false, { pulseDirections: straightRoute }, {
+      singleFramePulseDirectionsVersion: 1, sceneVisionVersion: undefined,
+    });
+    if (floor === "partially calibrated") {
+      await click(ui, "vision-calibrate");
+      const overlay = ui.document.getElementById("vision-overlay");
+      overlay.getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 240 });
+      overlay.fire("click", { clientX: 14, clientY: 18 });
+      assert.match(ui.document.getElementById("vision-corner-hint").textContent, /2\/4/);
+    }
+    ui.document.getElementById("voice-command").value = "走到白色垃圾桶旁边";
+    await click(ui, "voice-run");
+    assert.deepEqual(ui.steps(), []);
+    await click(ui, "class-route-walk");
+    await ui.tick(1600);
+    assert.deepEqual(ui.encodedFrameSizes, [[640, 480]], "original camera dimensions, without the overhead floor projection");
+    assert.equal(ui.scenes().length, 1);
+    assert.equal(ui.scenes()[0].inspection.calibratedFloor, false);
+    assert.deepEqual(ui.steps().map(r => r.action), ["forward", "forward"]);
+  });
+}
+
+test("single-photo walking from an onboard camera uses robot-relative directions", async t => {
+  const ui = await renderer(t, {
+    robotStatus: 2,
+    initial: { ...executableRouteCapabilities, sceneVisionVersion: 1, searchViewVersion: 1, connectionId: "test-link" },
+    classroom: { uncalibrated: true, pulseDirections: () => pulsePlan({ direction: "left", count: 1 }, { direction: "forward", count: 1 }) },
+  });
+  const onFrame = await openForwardBoxCamera(ui);
+  ui.document.getElementById("voice-command").value = "走到白色垃圾桶旁边";
+  await click(ui, "class-route-walk");
+  onFrame("frame-1");
+  await settle();
+  await ui.tick(750);
+  await ui.tick(750);
+  const queries = ui.classroomRequests.filter(r => r.operation === "locateVision");
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].searchView, "dominant");
+  assert.equal(queries[0].inspection.calibratedFloor, false);
+  assert.deepEqual(ui.classroomRequests.filter(r => r.operation === "classroomStep").map(r => r.action), ["left", "forward"]);
+});
+
+for (const version of [undefined, 2]) {
+  test(`single-photo execution requires the pulse contract with old or unknown version ${version}`, async t => {
+    const ui = await executableRouteRenderer(t, straightRoute, {
+      singleFrameDirectionsVersion: 1, singleFrameEstimatedStepVersion: 1,
+      singleFrameRouteVersion: 1, singleFramePulseDirectionsVersion: version,
+    });
+    const button = ui.document.getElementById("class-route-walk");
+    assert.ok(button.disabled || button.hidden);
+    button.fire("click");
+    await settle();
+    assert.deepEqual(ui.classroomRequests, []);
+    selectRoute(ui);
+    await click(ui, "voice-run");
+    assert.equal(ui.scenes()[0].inspection.directionsOnly, true);
+    assert.equal(ui.scenes()[0].inspection.pulseDirections, undefined);
+    assert.deepEqual(ui.steps(), []);
+  });
+}
+
+for (const invalid of [
+  { direction: "faceTarget", count: 1 }, { direction: "forward" },
+  { direction: "right", count: 0.5 }, { direction: "forward", count: 10 },
+]) {
+  test(`a malformed or over-budget single-photo suffix cancels the full route (${JSON.stringify(invalid)})`, async t => {
+    const ui = await executableRouteRenderer(t, () => pulsePlan({ direction: "forward", count: 1 }, invalid));
+    await click(ui, "class-route-walk");
+    await ui.tick(3000);
+    assert.equal(ui.scenes().length, 1);
+    assert.deepEqual(ui.steps(), []);
+  });
+}
+
+for (const response of [
+  { directions: ["faceTarget", "forward", "stop"], directionSteps: [null, 2, null] },
+  { directions: [], directionSteps: [], pulseDirections: [] },
+  { directions: ["stop"], directionSteps: [null], pulseDirections: [] },
+  { ...straightRoute(), directions: ["left", "stop"] },
+]) {
+  test(`display-only, unknown and stop-only single-photo results create no motor pulses (${response.directions})`, async t => {
+    const ui = await executableRouteRenderer(t, () => response);
+    await click(ui, "class-route-walk");
+    await ui.tick(2000);
+    assert.equal(ui.scenes().length, 1);
+    assert.deepEqual(ui.steps(), []);
+  });
+}
+
+test("stopping single-photo execution between pulses discards the remaining plan", async t => {
+  const ui = await executableRouteRenderer(t, straightRoute);
+  await click(ui, "class-route-walk");
+  assert.deepEqual(ui.steps().map(s => s.action), ["forward"]);
+  await click(ui, "classroom-stop");
+  await ui.tick(3000);
+  assert.deepEqual(ui.steps().map(s => s.action), ["forward"]);
+  assert.equal(ui.scenes().length, 1);
+  assert.ok(ui.classroomRequests.some(r => r.operation === "classroomStop"));
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+});
+
+test("a late single-photo execution reply cannot restart a stopped task", async t => {
+  let resolvePlan;
+  const ui = await executableRouteRenderer(t, () => new Promise(resolve => { resolvePlan = resolve; }));
+  await click(ui, "class-route-walk");
+  assert.equal(ui.scenes().length, 1);
+  await click(ui, "classroom-stop");
+  resolvePlan(straightRoute());
+  await settle();
+  await ui.tick(3000);
+  assert.deepEqual(ui.steps(), []);
+});
+
+test("single-photo execution abandons remaining pulses after a prolonged delay", async t => {
+  const ui = await executableRouteRenderer(t, straightRoute);
+  await click(ui, "class-route-walk");
+  assert.equal(ui.steps().length, 1);
+  t.mock.timers.setTime(Date.now() + 60_000);
+  await ui.tick(1000);
+  assert.equal(ui.steps().length, 1);
+  assert.equal(ui.scenes().length, 1);
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+});
+
+test("single-photo execution never starts from an expired initial photograph", async t => {
+  let finishPlan;
+  const ui = await executableRouteRenderer(t, () => new Promise(resolve => { finishPlan = resolve; }));
+  await click(ui, "class-route-walk");
+  await ui.tick(15_001);
+  finishPlan(straightRoute());
+  await settle();
+  assert.deepEqual(ui.steps(), []);
+  assert.equal(ui.scenes().length, 1);
+});
+
+test("a timely single-photo plan can finish all ten pulses without requesting a new picture", async t => {
+  const started = [];
+  let finishPlan;
+  const ui = await classroomRenderer(t, false, {
+    uncalibrated: true, pulseDirections: () => new Promise(resolve => { finishPlan = resolve; }),
+    step: () => {
+      started.push(Date.now());
+      return new Promise(resolve => setTimeout(resolve, 800)); // Standard native timed pulse.
+    },
+  }, { ...executableRouteCapabilities, classroomPulseVersion: 1 }, "standard");
+  ui.document.getElementById("voice-command").value = "走到白色垃圾桶旁边";
+  const captureTime = Date.now();
+  const baseline = ui.videoFramesRequested();
+  await click(ui, "class-route-walk");
+  await ui.tick(12_000);
+  finishPlan(pulsePlan({ direction: "forward", count: 10 }));
+  await settle();
+  assert.equal(started.length, 1);
+  await ui.tick(17_000);
+  assert.equal(started.length, 10);
+  assert.ok(started.at(-1) - captureTime > 15_000);
+  assert.equal(ui.scenes().length, 1);
+  assert.equal(ui.videoFramesRequested() - baseline, 1);
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+});
+
+test("single-frame directions work from an uncalibrated camera with no robot or gait selected", async t => {
+  const ui = await renderer(t, {
+    initial: { connected: null, visionVersion: 2, singleFrameDirectionsVersion: 1 },
+    classroom: { uncalibrated: true, directions: () => ["left", "forward", "stop"], timingMs: { headers: 330, body: 1980 } },
+  });
+  await click(ui, "vision-toggle");
+  selectRoute(ui);
+  ui.document.getElementById("voice-command").value = "走到白色垃圾桶旁边";
+  await click(ui, "voice-run");
+  assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["locateVision"]);
+  const [request] = ui.classroomRequests;
+  assert.deepEqual(request.inspection, { target: "白色垃圾桶", calibratedFloor: false, directionsOnly: true });
+  assert.match(request.imageDataUrl, /^data:image\/jpeg;base64,/);
+  assert.equal(ui.document.getElementById("voice-status").textContent, "左转 → 直走 → 停下");
+  assert.deepEqual(ui.actions, []);
+  assert.deepEqual(ui.guidanceRequests, []);
+});
+
+test("remote speech returns single-frame directions without moving a connected robot", async t => {
+  const ui = await routeRenderer(t, { directions: () => ["stop"] }, true);
+  await ui.say("走到垃圾桶旁边");
+  assert.equal(ui.scenes().length, 1);
+  assert.deepEqual(ui.scenes()[0].inspection, { target: "垃圾桶", calibratedFloor: true, directionsOnly: true });
+  assert.equal(ui.document.getElementById("voice-status").textContent, "停下");
+  assert.deepEqual(ui.steps(), []);
+  assert.ok(ui.moves.every(axes => !nonzero(axes)));
+  assert.deepEqual(ui.guidanceRequests, []);
+});
+
+test("single-frame directions use the photographed route's estimated steps independently of manual calibration", async t => {
+  const ui = await classroomRenderer(t, false, {
+    directions: () => ["left", "forward", "right", "forward", "stop"],
+    directionSteps: [6, 3, null, null, null],
+  }, { singleFrameDirectionsVersion: 1 });
+  const calibration = ui.document.getElementById("class-manual-calibration");
+  assert.equal(calibration.tagName, "DETAILS");
+  for (const [id, value] of [["class-step", "0.73"], ["class-turn", "58"]]) {
+    const input = ui.document.getElementById(id);
+    assert.ok(calibration.contains(input), id);
+    input.value = value;
+  }
+  selectRoute(ui);
+  assert.equal(calibration.hidden, true);
+  await ui.say("走到垃圾桶旁边");
+  assert.deepEqual(ui.scenes().map(({ imageDataUrl, ...query }) => query), [{
+    operation: "locateVision", inspection: { target: "垃圾桶", calibratedFloor: true, directionsOnly: true },
+  }]);
+  assert.equal(ui.document.getElementById("voice-status").textContent, "左转 → 直走约 3 步 → 右转 → 直走 → 停下");
+  assert.deepEqual(ui.steps(), []);
+});
+
+for (const [description, directionSteps] of [["invalid", [-4, 1.5, "2", null]], ["misaligned", [3]]]) {
+  test(`${description} forward-step estimates leave the directions readable`, async t => {
+    const ui = await routeRenderer(t, {
+      directions: () => ["forward", "forward", "forward", "stop"], directionSteps,
+    });
+    await ui.say("走到垃圾桶旁边");
+    assert.equal(ui.document.getElementById("voice-status").textContent, "直走 → 直走 → 直走 → 停下");
+    assert.deepEqual(ui.steps(), []);
+  });
+}
+
+test("single-frame directions use the onboard camera's forward perspective", async t => {
+  const ui = await renderer(t, {
+    initial: { singleFrameDirectionsVersion: 1, searchViewVersion: 1 },
+    classroom: { uncalibrated: true, directions: () => ["right", "forward", "stop"] },
+  });
+  const onFrame = await openForwardBoxCamera(ui);
+  selectRoute(ui);
+  ui.document.getElementById("voice-command").value = "走到垃圾桶旁边";
+  ui.document.getElementById("voice-run").click();
+  await settle();
+  onFrame("frame-1");
+  await settle();
+  const [request] = ui.classroomRequests;
+  assert.equal(request.searchView, "dominant");
+  assert.equal(request.inspection.calibratedFloor, false);
+  assert.equal(ui.document.getElementById("voice-status").textContent, "右转 → 直走 → 停下");
+  assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["locateVision"]);
+});
+
+test("unrecognized direction values cannot appear as extra model text after a valid turn", async t => {
+  const ui = await routeRenderer(t, { directions: () => ["left", "请检查桌沿和地面尺度"] });
+  await ui.say("走到垃圾桶旁边");
+  const note = ui.document.getElementById("voice-status").textContent;
+  assert.match(note, /路线/);
+  assert.doesNotMatch(note, /左转|桌沿/);
+  assert.deepEqual(ui.steps(), []);
+});
+
+test("a manual trial after an empty single-frame plan sends one pulse even with automatic continuation enabled", async t => {
+  const ui = await classroomRenderer(t, false, { directions: () => [] },
+    { singleFrameDirectionsVersion: 1, walkContinueVersion: 1, classroomPulseVersion: 1 });
+  selectRoute(ui);
+  await ui.say("走到垃圾桶旁边");
+  assert.equal(ui.document.getElementById("voice-status").textContent, "未识别到路线");
+  assert.deepEqual(ui.steps(), []);
+  assert.equal(ui.document.getElementById("class-walk-continue").checked, true);
+  const button = ui.document.getElementById("class-trial-step");
+  assert.ok(!button.disabled && !button.hidden);
+  button.click();
+  button.click();
+  await settle();
+  await ui.tick(2000);
+  assert.deepEqual(ui.steps().map(s => s.action), ["forward"]);
+  assert.equal(ui.scenes().length, 1);
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+});
+
+test("a local trial needs walk mode and can run with the camera off and no chat grant", async t => {
+  const ui = await renderer(t, {
+    initial: { sceneVisionVersion: 1, connectionId: "test-link" },
+    classroom: {},
+  });
+  const trial = ui.document.getElementById("class-trial-step");
+  assert.ok(trial.disabled);
+  trial.click();
+  await ui.chooseMode("walk");
+  await click(ui, "class-trial-step");
+  await ui.tick(700);
+  assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["beginClassroom", "classroomStep", "endClassroom"]);
+});
+
+for (const interrupt of ["stop", "camera change"]) {
+  test(`a late single-frame directions reply is discarded after ${interrupt}`, async t => {
+    let finish;
+    const ui = await routeRenderer(t, { directions: () => new Promise(resolve => { finish = resolve; }) });
+    await ui.say("走到垃圾桶旁边");
+    assert.equal(ui.scenes().length, 1);
+    if (interrupt === "stop") await ui.say("停下来");
+    else await click(ui, "vision-toggle");
+    finish(["left", "forward", "stop"]);
+    await settle();
+    assert.doesNotMatch(ui.document.getElementById("voice-status").textContent, /左转/);
+    assert.deepEqual(ui.steps(), []);
+  });
+}
+
+for (const capabilities of [{}, { singleFrameRouteVersion: 1 }, { singleFrameDirectionsVersion: 2 }, { singleFrameDirectionsVersion: 1 }]) {
+  test(`approach without opting into directions keeps using scene observations with ${JSON.stringify(capabilities)}`, async t => {
+    const ui = await classroomRenderer(t, false, { observe: () => classroomScene(0.2) }, capabilities);
+    assert.equal(ui.document.getElementById("class-route-plan-setting").hidden, capabilities.singleFrameDirectionsVersion !== 1);
+    await ui.say("走到垃圾桶旁边");
+    assert.deepEqual(ui.scenes().map(r => r.sceneTarget), ["垃圾桶"]);
+    assert.equal(ui.scenes()[0].inspection, undefined);
+    assert.deepEqual(ui.steps(), []);
+  });
+}
+
+test("selecting a single-frame route keeps following and greetings on fresh observations", async t => {
+  const ui = await routeRenderer(t, { observe: () => classroomScene(0.2) });
+  await ui.say("跟着穿粉色上衣的人");
+  assert.deepEqual(ui.scenes().map(r => r.sceneTarget), ["穿粉色上衣的人"]);
+  await click(ui, "classroom-stop");
+  await ui.say("走到穿粉色上衣的人旁边打招呼");
+  await ui.tick(300);
+  assert.ok(ui.scenes().slice(1).every(r => r.sceneTarget === "穿粉色上衣的人" && !r.inspection));
+  assert.deepEqual(ui.steps().map(r => r.action), ["wave", "greet"]);
+});
+
 for (const auto of [false, true]) {
   test(`a classroom walk uses the selected joint confidence for ${auto ? "automatic" : "calibrated"} navigation`, async t => {
     const ui = await classroomRenderer(t, false, {
@@ -1195,11 +1696,11 @@ for (const scenario of ["a raised threshold", "a blocked path", "the default thr
 
 // Model the native ticket/receipt transport; the camera, task controller and
 // renderer are the production modules, with video and BLE provided by fixtures.
-async function authorizedChat(t, observe, capabilities, pulseProfile, walkPath, interpret) {
+async function authorizedChat(t, vision, capabilities, pulseProfile, walkPath, interpret) {
   const tickets = new Map();
   const receipts = new Map();
   const local = [];
-  const ui = await classroomRenderer(t, false, { observe, walkPath, interpret, handoff(req) {
+  const ui = await classroomRenderer(t, false, { ...(typeof vision === "function" ? { observe: vision } : vision), walkPath, interpret, handoff(req) {
     local.push(req.operation);
     if (req.operation === "claim") return tickets.get(req.ticket);
     if (req.operation === "reply") receipts.get(req.ticket)(req.result);
@@ -1218,6 +1719,34 @@ async function authorizedChat(t, observe, capabilities, pulseProfile, walkPath, 
   }
   return { ...ui, chat, local };
 }
+test("stopping and restarting a single-frame route in chat discards the old result and never replays a task ID", async t => {
+  const replies = [];
+  const ui = await authorizedChat(t, { directions: () => new Promise(resolve => replies.push(resolve)) }, { singleFrameDirectionsVersion: 1 });
+  selectRoute(ui);
+  const first = { operation: "start", taskId: "route-old", command: "走到垃圾桶旁边" };
+  const second = { ...first, taskId: "route-new" };
+  const status = taskId => ui.chat({ operation: "status", taskId });
+  assert.equal((await ui.chat(first)).status, "running");
+  await settle();
+  assert.equal((await ui.chat({ operation: "stop", taskId: first.taskId })).status, "stopped");
+  assert.equal((await ui.chat(second)).status, "running");
+  await settle();
+  assert.equal(replies.length, 2);
+  replies[0](["stop"]);
+  await settle();
+  assert.equal((await status(first.taskId)).status, "stopped");
+  assert.equal((await status(second.taskId)).status, "running");
+  assert.deepEqual(ui.steps(), []);
+  replies[1](["left", "forward", "stop"]);
+  await settle();
+  const receipt = await status(second.taskId);
+  assert.equal(receipt.status, "completed");
+  assert.equal(receipt.message, "左转 → 直走 → 停下");
+  assert.equal((await ui.chat(first)).status, "stopped");
+  assert.equal((await ui.chat(second)).status, "completed");
+  assert.equal(ui.scenes().length, 2);
+  assert.deepEqual(ui.steps(), []);
+});
 test("main classroom camera handoff, inert ambiguity across focus change, explicit resumption and scoped receipts", async t => {
   let ambiguous = true;
   const ui = await authorizedChat(t, () => ambiguous
@@ -1450,6 +1979,8 @@ test("the same classroom panel follows the Xiaomi shield, accepts read-only spee
   const panel = get("classroom-panel"), field = get("voice-command");
   assert.equal(panel.parentElement, get("classroom-shield"));
   assert.ok(panel.contains(field) && panel.contains(get("vision-video")) && panel.contains(get("classroom-stop")));
+  assert.ok(get("manual-controls").contains(get("remote-toggle")));
+  assert.ok(get("manual-controls").contains(get("remote-diagnose")));
   await ui.say("看看垃圾桶");
   assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["locateVision"]);
   assert.equal(ui.classroomRequests[0].inspection.target, "垃圾桶");
@@ -1597,6 +2128,50 @@ for (const entry of ["text", "Xiaomi", "main chat"]) {
 const countedWalkCapabilities = { sceneWalkPathVersion: 1, classroomPulseVersion: 1 };
 function floorObservation(x, clear = true) {
   return { robot: { x, y: 0.5 }, headingPoint: { x: x + 0.05, y: 0.5 }, clear };
+}
+
+for (const [kind, label] of [["obstacle", "疑似障碍"], ["occluded", "看不清处"], [undefined, undefined]]) {
+  test(`a counted walk archives ${kind ?? "legacy"} stop evidence only on the submitted exposure`, async t => {
+    const evidence = kind ? { issueKind: kind, issuePoint: { x: 0.49, y: 0.51 } } : {};
+    const ui = await classroomRenderer(t, false, {
+      walkPath: () => ({ ...floorObservation(0.4, false), reason: "请核对右侧桌腿", ...evidence }),
+    }, countedWalkCapabilities);
+    await ui.say("前进两步");
+    assert.equal(ui.scenes().length, 1);
+    assert.deepEqual(ui.steps(), []);
+    assert.ok(ui.classroomRequests.some(r => r.operation === "classroomStop"));
+    assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+    assert.equal(ui.snapshotPaint.images.at(-1), ui.scenes()[0].imageDataUrl);
+    assert.equal(ui.document.getElementById("vision-snapshot").hidden, false);
+    assert.match(ui.document.getElementById("voice-status").textContent, /右侧桌腿/);
+    const issueLabels = ["疑似障碍", "看不清处"];
+    assert.deepEqual(ui.snapshotPaint.labels.filter(mark => issueLabels.includes(mark)), label ? [label] : []);
+    assert.ok(ui.previewLabelHistory.every(mark => !issueLabels.includes(mark)));
+  });
+}
+
+for (const [scenario, options, expected] of [
+  ["a calibrated floor without a measured step", {}, { width: 3.7, depth: 2.1 }],
+  ["a host without metric floor support", { legacy: true }, undefined],
+  ["an uncalibrated fixed camera", { uncalibrated: true }, undefined],
+  ["incomplete dimensions", { depth: "" }, undefined],
+  ["out-of-range dimensions", { depth: "1001" }, undefined],
+]) {
+  test(`counted walk sends applicable floor dimensions with ${scenario}`, async t => {
+    const ui = await classroomRenderer(t, false, {
+      uncalibrated: options.uncalibrated, walkPath: () => floorObservation(0.4, false),
+    }, { ...countedWalkCapabilities, automaticWalkClearanceVersion: 1,
+      ...(!options.legacy && { walkFloorScaleVersion: 1 }) });
+    ui.document.getElementById("class-width").value = "3.7";
+    ui.document.getElementById("class-height").value = options.depth ?? "2.1";
+    ui.document.getElementById("class-step").value = "";
+    await ui.say("前进两步");
+    const [request] = ui.scenes();
+    assert.equal(request?.walkPath.calibratedFloor, !options.uncalibrated);
+    assert.deepEqual(request.walkPath.floorSizeM, expected);
+    assert.equal(Object.hasOwn(request.walkPath, "stepM"), false);
+    assert.deepEqual(ui.steps(), []);
+  });
 }
 
 test("a 9.74-second uncertain classroom result identifies the failed check and retains only its submitted photo", async t => {
@@ -1936,6 +2511,26 @@ for (const setup of ["missing capability", "missing rear measurement", "camera o
   });
 }
 
+for (const direction of ["forward", "backward"]) {
+  test(`an unmeasured ${direction} counted walk checks visual clearance before each pulse`, async t => {
+    const command = direction === "forward" ? "向前走两步" : "向后走两步";
+    let frame = 0;
+    const walkPath = () => floorObservation(0.4 + frame++ * (direction === "forward" ? 0.05 : -0.05));
+    const ui = await classroomRenderer(t, false, { walkPath }, {
+      ...countedWalkCapabilities, automaticWalkClearanceVersion: 1,
+    });
+    for (const name of ["step", "backward", "left", "turn"]) ui.document.getElementById("class-" + name).value = "";
+    await ui.say(command);
+    assert.deepEqual(ui.steps().map(r => r.action), [direction]);
+    await ui.tick(700);
+    await ui.tick(700);
+    assert.deepEqual(ui.steps().map(r => r.action), [direction, direction]);
+    assert.equal(ui.scenes().length, 3);
+    assert.ok(ui.scenes().every(r => r.walkPath.direction === direction && !Object.hasOwn(r.walkPath, "stepM")));
+    assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+  });
+}
+
 for (const nativeOutcome of ["acknowledged", "uncertain write"]) {
   test(`a counted walk waits for the native stop acknowledgement and never retries a pulse: ${nativeOutcome}`, async t => {
     let finish, fail, frame = 0;
@@ -1971,14 +2566,54 @@ test("a vague stroll, a directionless number, and out-of-range or non-imperative
   assert.equal(ui.moves.filter(nonzero).length, 0);
 });
 
+test("averaging a series of pulses uses the selected direction and converts travel to meters", async t => {
+  const ui = await classroomRenderer(t, false, {}, { classroomPulseVersion: 1 });
+  const field = suffix => ui.document.getElementById("class-" + suffix);
+  const expected = { step: "0.2", backward: "", left: "", turn: "20" };
+  for (const [direction, count, total, mean] of [
+    ["step", 5, 75, 0.15], ["backward", 4, 44, 0.11],
+    ["left", 3, 93, 31], ["turn", 4, 90, 22.5],
+  ]) {
+    const select = field("estimate-direction");
+    select.value = direction;
+    select.fire("change");
+    field("estimate-count").value = String(count);
+    field("estimate-total").value = String(total);
+    field("estimate-apply").click();
+    assert.equal(Number(field(direction).value), mean, direction);
+    expected[direction] = field(direction).value;
+    for (const [other, value] of Object.entries(expected)) assert.equal(field(other).value, value, other);
+  }
+  assert.deepEqual(ui.steps(), []);
+  assert.deepEqual(ui.moves.filter(nonzero), []);
+});
+
+test("invalid pulse samples preserve the existing value and do not issue motion", async t => {
+  const ui = await classroomRenderer(t, false, {}, { classroomPulseVersion: 1 });
+  const field = suffix => ui.document.getElementById("class-" + suffix);
+  field("estimate-direction").value = "turn";
+  field("estimate-direction").fire("change");
+  for (const [count, total] of [["", "30"], ["0", "30"], ["1.5", "30"], ["2", ""], ["2", "-5"], ["2", "360"]]) {
+    field("estimate-count").value = count;
+    field("estimate-total").value = total;
+    field("estimate-apply").click();
+    assert.equal(field("turn").value, "20");
+    assert.ok(field("estimate-result").textContent);
+  }
+  assert.deepEqual(ui.steps(), []);
+  assert.deepEqual(ui.moves.filter(nonzero), []);
+});
+
 test("changing pulse profile invalidates dependent distance and turn measurements while preserving the room geometry", async t => {
   const ui = await classroomRenderer(t, false, {}, { classroomPulseVersion: 1 });
   const field = suffix => ui.document.getElementById("class-" + suffix);
   for (const id of ["step", "backward", "turn", "left"]) field(id).value = "11";
   const select = field("pulse-profile");
+  field("estimate-total").value = "200";
   select.value = "gentle";
   select.fire("change");
   for (const id of ["step", "backward", "turn", "left"]) assert.equal(field(id).value, "", id);
+  assert.equal(field("estimate-total").value, "");
   assert.deepEqual(["width", "height", "greeting"].map(key => field(key).value), ["2", "2", "0.8"]);
   assert.deepEqual(ui.steps(), []);
 });
@@ -1999,6 +2634,44 @@ test("losing a known classroom pulse capability removes profile controls and mea
   assert.equal(Object.hasOwn(ui.classroomRequests[0], "pulseProfile"), false);
   assert.deepEqual(ui.steps().map(step => step.action), ["forward"]);
   await ui.tick(700);
+});
+
+test("an empty calibration form lets the classroom turn left and learn its forward step from fresh frames", async t => {
+  const scene = (x, headingY, distanceM, approachDistanceM, turnDeg) => ({
+    ...classroomScene(x), headingPoint: { x: x + 0.06, y: headingY },
+    approach: { x: 0.4, y: 0.5 }, distanceM, approachDistanceM, turnDeg,
+    atGreeting: approachDistanceM === 0,
+  });
+  const frames = [
+    scene(0.2, 0.535, 1.8, 1, -30),
+    scene(0.2, 0.5, 1.8, 1, 0),
+    scene(0.3, 0.5, 1.3, 0.5, 0),
+    scene(0.4, 0.5, 0.8, 0, 0),
+  ];
+  const ui = await renderer(t, {
+    robotStatus: 2, initial: { sceneVisionVersion: 1, connectionId: "auto-link", visionVersion: 2 },
+    classroom: { uncalibrated: true, observe: () => frames.shift() },
+  });
+  for (const name of ["step", "backward", "left", "turn", "width", "height"]) {
+    assert.equal(ui.document.getElementById("class-" + name).value, "", name);
+  }
+  await click(ui, "vision-toggle");
+  await ui.chooseMode("walk");
+  ui.document.getElementById("voice-command").value = "走到垃圾桶旁边";
+  await click(ui, "voice-run");
+  const steps = () => ui.classroomRequests.filter(r => r.operation === "classroomStep").map(r => r.action);
+  assert.deepEqual(steps(), ["left"]);
+  await ui.tick(700);
+  assert.deepEqual(steps(), ["left", "forward"]);
+  await ui.tick(700);
+  assert.deepEqual(steps(), ["left", "forward", "forward"]);
+  await ui.tick(700);
+  const scenes = ui.classroomRequests.filter(r => r.operation === "locateVision");
+  assert.equal(new Set(scenes.map(r => r.imageDataUrl)).size, 4);
+  assert.deepEqual(scenes[0].sceneScale, { auto: true, calibratedFloor: false, greetingM: 0.8 });
+  assert.equal(scenes.at(-1).sceneScale.stepM, 0.5);
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+  assert.match(ui.document.getElementById("voice-status").textContent, /已停在垃圾桶旁/);
 });
 
 test("classroom navigation with measured pulses needs no floor dimensions or camera calibration", async t => {
@@ -2664,9 +3337,10 @@ test("a host without menu switching keeps remote left and right on yaw even with
   await ui.chooseMode("walk");
   const horizontal = ui.document.getElementById("stick-horizontal");
   assert.equal(horizontal.disabled, false);
-  horizontal.value = "lateral";
-  horizontal.fire("change");
+  selectStickMode(ui, "lateral");
   await click(ui, "remote-toggle");
+  assert.equal(horizontal.disabled, true);
+  assert.equal(ui.document.getElementById("stick-lateral").checked, true);
   const capture = ui.captures[0];
   assert.ok(!capture.menuSwitch);
   pushKeys(capture);
@@ -2813,14 +3487,14 @@ test("losing three-axis support clears lateral selection before the next gesture
   const ui = await renderer(t, { remote: true });
   await ui.chooseMode("walk");
   const horizontal = ui.document.getElementById("stick-horizontal");
-  horizontal.value = "lateral";
-  horizontal.fire("change");
+  selectStickMode(ui, "lateral");
   delete ui.robotSnapshot.remoteMotionVersion;
   const status = ui.document.querySelectorAll("[data-query]").find(button => button.dataset.query === "status");
   status.click();
   await settle();
   assert.equal(horizontal.disabled, true);
-  assert.equal(horizontal.value, "yaw");
+  assert.equal(ui.document.getElementById("stick-yaw").checked, true);
+  assert.equal(ui.document.getElementById("stick-lateral").checked, false);
   assertDirectionLabels(ui, yawLabels);
   ui.stick("pointerdown");
   ui.stick("pointermove", -50, 0);
@@ -2836,8 +3510,7 @@ test("the original three-axis host supports screen lateral motion but cannot arm
   assert.equal(ui.document.getElementById("remote-toggle").disabled, true);
   const horizontal = ui.document.getElementById("stick-horizontal");
   assert.equal(horizontal.disabled, false);
-  horizontal.value = "lateral";
-  horizontal.fire("change");
+  selectStickMode(ui, "lateral");
   ui.stick("pointerdown");
   ui.stick("pointermove", 50, 0);
   await settle();
@@ -3152,4 +3825,164 @@ test("teach recording auto-stops at 60 seconds and voice box supports teach comm
   doc.getElementById("voice-run").click();
   await settle();
   assert.deepEqual(ui.commandRequests.at(-1).command, { action: "playTeach", id: 2 });
+});
+
+test("after a forward step with the classroom camera open, AI inspects a fresh frame and continues until it says stop", async t => {
+  const replies = [
+    { continue: true, reason: "前方地面畅通" },
+    { continue: false, reason: "前方出现课桌" },
+  ];
+  const ui = await classroomRenderer(t, false, {
+    walkContinue: () => replies.shift(),
+  }, { walkContinueVersion: 1, classroomPulseVersion: 1 });
+  assert.equal(ui.document.getElementById("class-walk-continue-setting").hidden, false);
+  assert.equal(ui.document.getElementById("class-walk-continue").checked, true);
+
+  await ui.say("向前走一步");
+  assert.deepEqual(ui.steps().map(s => s.action), ["forward"]);
+  assert.equal(ui.scenes().length, 0, "the first step runs before the post-step frame check");
+
+  await ui.tick(700);
+  assert.equal(ui.scenes().length, 1);
+  assert.deepEqual(ui.scenes()[0].walkContinue, { calibratedFloor: true, stepM: 0.2 });
+  assert.equal(Object.hasOwn(ui.scenes()[0], "searchView"), false, "fixed classroom camera uses passive view");
+  assert.deepEqual(ui.steps().map(s => s.action), ["forward", "forward"]);
+
+  await ui.tick(700);
+  assert.equal(ui.scenes().length, 2);
+  assert.notEqual(ui.scenes()[0].imageDataUrl, ui.scenes()[1].imageDataUrl);
+  assert.deepEqual(ui.steps().map(s => s.action), ["forward", "forward"]);
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+  assert.match(ui.document.getElementById("voice-status").textContent, /已前进 2 步，AI 判断停止继续行走（前方出现课桌）/);
+});
+
+async function openForwardBoxCamera(ui) {
+  let onBoxFrame;
+  ui.window.__keepworkBoxCamera = {
+    current: () => ({ label: "xiaozhi-box" }),
+    open(onFrame) {
+      onBoxFrame = onFrame;
+      return Promise.resolve(() => {});
+    },
+  };
+  ui.window.__keepworkBoxCameraNotify({ label: "xiaozhi-box" });
+  await settle();
+  ui.document.getElementById("vision-device").value = "xiaozhi-box";
+  await click(ui, "vision-toggle");
+  onBoxFrame("frame-0");
+  await settle();
+  await ui.chooseMode("walk");
+  return onBoxFrame;
+}
+
+for (const supported of [true, false]) {
+  test(`counted walking with the box camera ${supported ? "tracks a forward ground reference" : "requires a fixed camera on an older host"}`, async t => {
+    let frames = 0;
+    const ui = await renderer(t, {
+      robotStatus: 2,
+      initial: { ...countedWalkCapabilities, sceneVisionVersion: 1, automaticWalkClearanceVersion: 1,
+        walkFloorScaleVersion: 1, ...(supported && { searchViewVersion: 1 }), connectionId: "test-link", visionVersion: 2 },
+      classroom: { uncalibrated: true, walkPath() {
+        const y = 0.6 + 0.04 * frames++;
+        return { robot: { x: 0.5, y }, headingPoint: { x: 0.5, y: y - 0.1 },
+          clear: frames === 1, reason: "下一步内有椅腿" };
+      } },
+    });
+    const onBoxFrame = await openForwardBoxCamera(ui);
+    ui.document.getElementById("voice-command").value = "向前走两步";
+    ui.document.getElementById("voice-run").click();
+    await settle();
+    onBoxFrame("frame-1");
+    await settle();
+    const scenes = () => ui.classroomRequests.filter(r => r.operation === "locateVision");
+    const steps = () => ui.classroomRequests.filter(r => r.operation === "classroomStep");
+    if (!supported) {
+      assert.deepEqual(scenes(), []);
+      assert.deepEqual(steps(), []);
+      assert.match(ui.document.getElementById("voice-status").textContent, /固定/);
+      return;
+    }
+    assert.equal(scenes().length, 1);
+    assert.equal(scenes()[0].searchView, "dominant");
+    assert.deepEqual(scenes()[0].walkPath, { direction: "forward", calibratedFloor: false });
+    assert.equal(ui.snapshotPaint.images.at(-1), scenes()[0].imageDataUrl);
+    assert.deepEqual(ui.snapshotPaint.labels, []);
+    assert.deepEqual(ui.previewLabels, []);
+    assert.deepEqual(steps().map(step => step.action), ["forward"]);
+    await ui.tick(700);
+    onBoxFrame("frame-2");
+    await settle();
+    assert.equal(scenes().length, 2);
+    assert.equal(scenes()[1].searchView, "dominant");
+    assert.deepEqual(scenes()[1].walkPath.priorAnchor, { x: 0.5, y: 0.6 });
+    assert.equal(steps().length, 1);
+    assert.match(ui.document.getElementById("voice-status").textContent, /下一步内有椅腿/);
+  });
+}
+
+test("after a forward step with the built-in forward box camera open, AI captures from the box camera using dominant view", async t => {
+  const replies = [
+    { continue: true, reason: "正前方空旷" },
+    { continue: false, reason: "前方靠近墙面" },
+  ];
+  const ui = await renderer(t, {
+    robotStatus: 2,
+    initial: { sceneVisionVersion: 1, walkContinueVersion: 1, searchViewVersion: 1, classroomPulseVersion: 1, connectionId: "test-link", visionVersion: 2 },
+    classroom: { uncalibrated: true, walkContinue: () => replies.shift() },
+  });
+  const onBoxFrame = await openForwardBoxCamera(ui);
+
+  ui.document.getElementById("voice-command").value = "前进";
+  ui.document.getElementById("voice-run").click();
+  await settle();
+  assert.deepEqual(ui.classroomRequests.filter(r => r.operation === "classroomStep").map(s => s.action), ["forward"]);
+
+  const settleFirst = ui.tick(700);
+  await settle();
+  onBoxFrame("frame-1");
+  await settleFirst;
+  await settle();
+  const visions1 = ui.classroomRequests.filter(r => r.operation === "locateVision");
+  assert.equal(visions1.length, 1);
+  assert.equal(visions1[0].searchView, "dominant", "built-in forward camera automatically uses dominant forward prompt");
+  assert.deepEqual(visions1[0].walkContinue, { calibratedFloor: false });
+  assert.deepEqual(ui.classroomRequests.filter(r => r.operation === "classroomStep").map(s => s.action), ["forward", "forward"]);
+
+  const settleSecond = ui.tick(700);
+  await settle();
+  onBoxFrame("frame-2");
+  await settleSecond;
+  await settle();
+  const visions2 = ui.classroomRequests.filter(r => r.operation === "locateVision");
+  assert.equal(visions2.length, 2);
+  assert.equal(visions2[1].searchView, "dominant");
+  assert.equal(ui.classroomRequests.at(-1).operation, "endClassroom");
+  assert.match(ui.document.getElementById("voice-status").textContent, /已前进 2 步，AI 判断停止继续行走（前方靠近墙面）/);
+});
+
+test("walk-continue check respects its toggle, ignores non-forward steps, and stays hidden on legacy hosts", async t => {
+  const ui = await classroomRenderer(t, false, {
+    walkContinue: () => { throw new Error("should not call walkContinue"); },
+  }, { walkContinueVersion: 1, classroomPulseVersion: 1 });
+  // Non-forward steps do not invoke walkContinue even when enabled.
+  await ui.say("后退一步");
+  await ui.tick(700);
+  assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["beginClassroom", "classroomStep", "endClassroom"]);
+
+  // Unchecking the toggle restores single-step forward without vision calls.
+  ui.classroomRequests.length = 0;
+  const toggle = ui.document.getElementById("class-walk-continue");
+  toggle.checked = false;
+  toggle.fire("change");
+  await ui.say("向前走一步");
+  await ui.tick(700);
+  assert.deepEqual(ui.classroomRequests.map(r => r.operation), ["beginClassroom", "classroomStep", "endClassroom"]);
+});
+
+test("legacy hosts without walkContinueVersion hide the walk-continue toggle and keep single-step behavior unchanged", async t => {
+  const legacyUi = await classroomRenderer(t, false, {}, { classroomPulseVersion: 1 });
+  assert.equal(legacyUi.document.getElementById("class-walk-continue-setting").hidden, true);
+  await legacyUi.say("向前走一步");
+  await legacyUi.tick(700);
+  assert.deepEqual(legacyUi.classroomRequests.map(r => r.operation), ["beginClassroom", "classroomStep", "endClassroom"]);
 });

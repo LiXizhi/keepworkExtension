@@ -78,6 +78,8 @@ export interface EmbodiedObservation {
   reason?: string;
   frameId?: number;
   capturedAt?: number;
+  /** Set by the classroom window. Omitted means the fixed passive camera. */
+  searchView?: "passive" | "dominant";
 }
 export interface EmbodiedCalibration {
   auto?: boolean;
@@ -152,7 +154,7 @@ type ManualCalibration = {
   heightM: number;
   stepM: number;
   backwardM?: number;
-  turnDeg: number;
+  turnDeg?: number;
   leftDeg?: number;
   greetingM: number;
 };
@@ -169,6 +171,7 @@ type AutoView = {
   atGreeting: boolean;
   turnClear: boolean;
   rearClear: boolean;
+  dominant?: boolean;
 };
 type TaskRun = {
   task: EmbodiedTask;
@@ -180,6 +183,14 @@ type TaskRun = {
   awaitingChoice: boolean;
   unverifiedPulse?: { direction: EmbodiedDirection; view: View };
   unverifiedAutoPulse?: { direction: EmbodiedDirection; view: AutoView };
+  scans?: number;
+  scanTotal?: number;
+  /** Consecutive settled pulses whose amplitude the frames could not attribute. */
+  probes?: number;
+  /** Consecutive settled pulses that produced no visible movement. */
+  stalls?: number;
+  /** Stop trying to learn the amplitude; keep navigating on the reserve. */
+  conservativePulse?: boolean;
 };
 
 const validPositive = (value: number | undefined): value is number =>
@@ -224,6 +235,7 @@ function autoView(scene: EmbodiedObservation): AutoView {
     atGreeting: scene.atGreeting === true,
     turnClear: scene.turnClear === true,
     rearClear: scene.rearClear === true,
+    dominant: scene.searchView === "dominant",
   };
 }
 
@@ -239,17 +251,22 @@ function atGreetingPoint(view: View, c: ManualCalibration) {
     && distance(view.robot, view.approach) <= tolerance;
 }
 
-function pulseMagnitude(direction: EmbodiedDirection, c: ManualCalibration): number {
-  if (direction === "forward") return c.stepM;
-  if (direction === "right") return c.turnDeg;
-  if (direction === "left") {
-    if (!c.leftDeg || !Number.isFinite(c.leftDeg) || c.leftDeg <= 0 || c.leftDeg >= 180) throw new Error("请先标定一次左转的实际转角。");
-    return c.leftDeg;
+const pulseField = { forward: "stepM", backward: "backwardM", right: "turnDeg", left: "leftDeg" } as const;
+// Reserve the full range of linear travel that we accept for a first observation.
+// This clearance is not a prediction of how far the selected pulse will move.
+const firstPulseClearanceM = 0.8;
+
+function pulsePlan(direction: EmbodiedDirection, c: AdaptiveCalibration, conservative = false) {
+  const label = { forward: "前进", backward: "后退", left: "左转", right: "右转" }[direction];
+  const unit = direction === "left" || direction === "right" ? "转角" : "位移";
+  const estimate = c[pulseField[direction]];
+  if (estimate === undefined) {
+    return conservative
+      ? `先${label}一次，幅度按保守值估算，停下后用新画面核对距离。`
+      : `先${label}一次，停稳后用新画面估算这次${unit}。`;
   }
-  if (!c.backwardM || !Number.isFinite(c.backwardM) || c.backwardM <= 0 || c.backwardM > Math.hypot(c.widthM, c.heightM)) {
-    throw new Error("请先标定一次后退的实际距离。");
-  }
-  return c.backwardM;
+  const amount = unit === "转角" ? `${Math.round(estimate)}°` : `${estimate.toFixed(2)} 米`;
+  return `先${label}一次，预计 ${amount}。`;
 }
 
 function decide(view: View, calibration: ManualCalibration, gesture?: EmbodiedGesture): EmbodiedDirection | "arrived" {
@@ -268,13 +285,12 @@ function decide(view: View, calibration: ManualCalibration, gesture?: EmbodiedGe
   if (near && (!gesture || Math.abs(error) <= aligned)) return "arrived";
   if (Math.abs(error) > aligned) {
     if (!view.turnClear) throw new Error("没有确认原地转身的净空。");
-    const rotation = pulseMagnitude(turn, calibration);
-    if (Math.abs(Math.abs(error) - rotation) >= Math.abs(error)) throw new Error("当前转向点动幅度过大，无法对准停靠点。");
+    if (turnDeg !== undefined && turnDeg >= 2 * Math.abs(error)) throw new Error("当前转向点动幅度过大，无法对准停靠点。");
     return turn;
   }
   if (tooClose && !view.rearClear) throw new Error("距离目标过近，无法确认身后一步有空地。");
   const step = tooClose ? "backward" : "forward";
-  const stepM = pulseMagnitude(step, calibration);
+  const stepM = tooClose ? calibration.backwardM ?? firstPulseClearanceM : calibration.stepM;
   if (!tooClose && distance(robot, approach) + 0.001 < stepM) throw new Error("剩余可见通路不足一个点动步幅。");
   const sign = tooClose ? -1 : 1;
   const next = { x: robot.x + sign * stepM * Math.cos(heading * radians), y: robot.y + sign * stepM * Math.sin(heading * radians) };
@@ -288,19 +304,21 @@ function decide(view: View, calibration: ManualCalibration, gesture?: EmbodiedGe
 }
 
 function checkPulse(direction: EmbodiedDirection, before: View, after: View, calibration: ManualCalibration): string {
-  const magnitude = pulseMagnitude(direction, calibration);
+  const magnitude = calibration[pulseField[direction]];
   if (direction === "left" || direction === "right") {
     const change = angleDelta(after.heading, before.heading) * (direction === "right" ? 1 : -1);
-    if (change < magnitude * 0.15 || change > magnitude * 2.5
+    if (change < (magnitude === undefined ? 3 : magnitude * 0.15) || change > (magnitude === undefined ? 90 : magnitude * 2.5)
       || distance(before.robot, after.robot) > calibration.stepM * 0.5) throw new Error("前后画面的位移或转角与原地转向点动不符。");
+    if (magnitude === undefined) calibration[pulseField[direction]] = change;
     return `实测${direction === "left" ? "左" : "右"}转 ${Math.round(change)}°`;
   }
-  const moved = verifyTranslation(direction, before, after, magnitude);
+  const moved = verifyTranslation(direction, before, after, magnitude, true);
+  if (direction === "backward" && magnitude === undefined) calibration.backwardM = moved;
   return `实测${direction === "forward" ? "前进" : "后退"} ${moved.toFixed(2)} 米`;
 }
 
 function verifyTranslation(direction: CountedWalk["direction"], before: Pick<View, "robot" | "heading">,
-  after: Pick<View, "robot" | "heading">, measuredMetres?: number): number {
+  after: Pick<View, "robot" | "heading">, measuredMetres?: number, metric = false): number {
   const dx = after.robot.x - before.robot.x;
   const dy = after.robot.y - before.robot.y;
   const headingX = Math.cos(before.heading * radians);
@@ -310,8 +328,8 @@ function verifyTranslation(direction: CountedWalk["direction"], before: Pick<Vie
   const moved = Math.hypot(dx, dy);
   // Without a metric floor projection we can still verify visible movement in
   // the instructed direction. These bounds are fractions of the camera frame.
-  const minAlong = measuredMetres === undefined ? 0.003 : measuredMetres * 0.15;
-  const maxTravel = measuredMetres === undefined ? 0.35 : measuredMetres * 2.5;
+  const minAlong = measuredMetres === undefined ? (metric ? 0.03 : 0.003) : measuredMetres * 0.15;
+  const maxTravel = measuredMetres === undefined ? (metric ? firstPulseClearanceM : 0.35) : measuredMetres * 2.5;
   if (along < minAlong || moved > maxTravel
     || across > Math.max(measuredMetres === undefined ? 0.003 : measuredMetres * 0.2, along * Math.tan(25 * radians))
     || Math.abs(angleDelta(after.heading, before.heading)) > 25) throw new Error("前后画面的行进方向或位移与点动标定不符。");
@@ -320,15 +338,24 @@ function verifyTranslation(direction: CountedWalk["direction"], before: Pick<Vie
 
 export interface WalkPose { robot: Point; headingPoint: Point }
 
+/** Ego-camera check: a tracked floor point moves down when the robot walks forward. */
+export function verifyDominantGroundShift(direction: CountedWalk["direction"], before: WalkPose, after: WalkPose) {
+  const along = direction === "forward" ? after.robot.y - before.robot.y : before.robot.y - after.robot.y;
+  const across = Math.abs(after.robot.x - before.robot.x);
+  if (!(along >= 0.012) || across > Math.max(0.12, along * 2)) {
+    throw new Error("主导视角下，前后画面的地面参照没有沿指令方向移动。");
+  }
+}
+
 export function verifyWalkDisplacement(direction: CountedWalk["direction"], before: WalkPose, after: WalkPose,
-  calibration: EmbodiedCalibration, stepM: number) {
+  calibration: EmbodiedCalibration, stepM?: number) {
   const metric = calibration.auto === false && validPositive(calibration.widthM) && validPositive(calibration.heightM);
   const scale = (p: Point) => metric ? { x: p.x * calibration.widthM!, y: p.y * calibration.heightM! } : p;
   const view = (pose: WalkPose) => {
     const robot = scale(pose.robot);
     return { robot, heading: bearing(robot, scale(pose.headingPoint)) };
   };
-  verifyTranslation(direction, view(before), view(after), metric ? stepM : undefined);
+  verifyTranslation(direction, view(before), view(after), metric ? stepM : undefined, metric);
 }
 
 function autoTolerance(range: number, c: AdaptiveCalibration) {
@@ -342,17 +369,7 @@ function autoAtGreeting(view: AutoView, c: AdaptiveCalibration) {
     || (Math.abs(view.distanceM - c.greetingM) <= tol && view.approachDistanceM <= tol);
 }
 
-function autoMagnitude(direction: EmbodiedDirection, c: AdaptiveCalibration) {
-  const isTurn = direction === "left" || direction === "right";
-  const value = { forward: c.stepM, backward: c.backwardM, left: c.leftDeg, right: c.turnDeg }[direction];
-  if (!validPositive(value) || (isTurn && !validAngle(value))) {
-    const label = { forward: "前进", backward: "后退", left: "左转", right: "右转" }[direction];
-    throw new Error(`请在课堂标定中填写本机一次${label}点动的实测${isTurn ? "角度" : "距离"}。`);
-  }
-  return value;
-}
-
-function decideAuto(view: AutoView, c: AdaptiveCalibration, gesture?: EmbodiedGesture): EmbodiedDirection | "arrived" {
+function decideAuto(view: AutoView, c: AdaptiveCalibration, gesture?: EmbodiedGesture, conservative = false): EmbodiedDirection | "arrived" {
   const tol = autoTolerance(view.distanceM, c);
   const near = autoAtGreeting(view, c);
   const tooClose = !near && view.distanceM < c.greetingM - tol;
@@ -362,40 +379,102 @@ function decideAuto(view: AutoView, c: AdaptiveCalibration, gesture?: EmbodiedGe
   if (near && (!gesture || Math.abs(view.turnDeg) <= aligned)) return "arrived";
   if (Math.abs(view.turnDeg) > aligned) {
     if (!view.turnClear) throw new Error("没有确认原地转身的净空。");
-    const rotation = autoMagnitude(turn, c);
-    if (Math.abs(Math.abs(view.turnDeg) - rotation) >= Math.abs(view.turnDeg)) throw new Error("按实测转角，一次点动无法对准目标。");
+    if (turnEst !== undefined && turnEst >= 2 * Math.abs(view.turnDeg)) throw new Error("按当前转角，一次点动无法对准目标。");
     return turn;
   }
   if (tooClose) {
-    const retreat = autoMagnitude("backward", c);
+    const retreat = c.backwardM ?? firstPulseClearanceM;
     if (!view.rearClear) throw new Error("距离目标过近，无法确认身后一步有空地。");
-    if (retreat >= 2 * (c.greetingM - view.distanceM)) throw new Error("按实测步幅，后退一次无法安全调整招呼距离。");
+    if (retreat >= 2 * (c.greetingM - view.distanceM)) throw new Error("后退一次可能超过招呼距离。");
     return "backward";
   }
   const minSafe = Math.max(0.25, c.greetingM - tol * 1.5);
-  const step = autoMagnitude("forward", c);
+  const step = c.stepM ?? firstPulseClearanceM;
+  // Once the camera has failed to measure a pulse, the operator needs to know
+  // which control actually unlocks the last stretch.
+  const hint = conservative ? "可以在任务参数里填写“前进一步”的实测值。" : "";
+  if (c.stepM === undefined && view.approachDistanceM < step) {
+    throw new Error(`还未估出前进一步的距离，首次点动需要至少 ${firstPulseClearanceM} 米可见通路。${hint}`);
+  }
   if (view.approachDistanceM + 0.001 < step) throw new Error("剩余可见通路不足一个点动步幅。");
-  if (view.distanceM - step < minSafe) throw new Error("按当前步幅，下一步会过于靠近目标。");
+  if (view.distanceM - step < minSafe) throw new Error(`按当前步幅，下一步会过于靠近目标。${hint}`);
   return "forward";
 }
 
 function updateAdaptive(c: AdaptiveCalibration, direction: EmbodiedDirection, measuredValue: number) {
-  const field = { forward: "stepM", backward: "backwardM", left: "leftDeg", right: "turnDeg" } as const;
-  c[field[direction]] = (autoMagnitude(direction, c) + measuredValue) / 2;
+  const field = pulseField[direction];
+  const prior = c[field];
+  c[field] = prior === undefined ? measuredValue : (prior + measuredValue) / 2;
 }
 
-function checkAutoPulse(direction: EmbodiedDirection, before: AutoView, after: AutoView, c: AdaptiveCalibration): string {
+// The robot ended visibly where it started: either the write never reached it
+// or it is blocked. The two look identical, so the probe may be retried once.
+class StalledPulseError extends Error {}
+/** Two consecutive probes may fail to measure a pulse before the task stops
+ * trying to learn the amplitude, but it never stops navigating. */
+const unmeasuredProbeBudget = 2;
+const stalledProbeBudget = 1;
+
+function checkDominantPulse(direction: EmbodiedDirection, before: AutoView, after: AutoView, c: AdaptiveCalibration): string {
+  if (direction === "left" || direction === "right") {
+    const sign = direction === "right" ? 1 : -1;
+    const deltaTurn = angleDelta(before.turnDeg, after.turnDeg) * sign;
+    const visual = (before.target.x - after.target.x) * sign;
+    if (c[pulseField[direction]] === undefined && visual < 0.01) {
+      throw new Error("主导视角中的目标位置未随转身向预期方向变化，无法估算转角。");
+    }
+    if (deltaTurn < -15 && visual < 0.01) throw new Error("前后画面的转向方向与指令不符。");
+    if (deltaTurn < 3 && visual < 0.01) throw new StalledPulseError("主导视角未检测到有效转向。");
+    if (deltaTurn >= 5 && deltaTurn <= 90) {
+      updateAdaptive(c, direction, deltaTurn);
+      return `画面估算${direction === "left" ? "左" : "右"}转约 ${Math.round(deltaTurn)}°。`;
+    }
+    return "已核对主导视角的转向。";
+  }
+  const sign = direction === "forward" ? 1 : -1;
+  const deltaDist = (before.distanceM - after.distanceM) * sign;
+  const flow = (after.target.y - before.target.y) * sign;
+  if (c[pulseField[direction]] === undefined && (flow < 0.012 || Math.abs(before.target.x - after.target.x) > 0.05)) {
+    throw new Error("主导视角中的目标位置未随点动向预期方向变化，无法估算步幅。");
+  }
+  const expected = c[pulseField[direction]] ?? 0;
+  if (deltaDist < -Math.max(0.12, expected * 0.8) && flow < 0.01) throw new Error("前后画面的行进方向与指令不符。");
+  if (deltaDist < 0.03 && flow < 0.012) throw new StalledPulseError("主导视角未检测到有效移动，请检查是否受阻或打滑。");
+  if (deltaDist >= 0.03 && deltaDist <= firstPulseClearanceM && (distance(before.target, after.target) <= 0.05
+    || (flow >= 0.012 && Math.abs(before.target.x - after.target.x) <= 0.05))) {
+    updateAdaptive(c, direction, deltaDist);
+    return `画面估算${direction === "forward" ? "前进" : "后退"}约 ${deltaDist.toFixed(2)} 米。`;
+  }
+  return "已核对主导视角的移动。";
+}
+
+/** Verifies one settled pulse. `learned` reports whether the frames pinned the
+ * amplitude down; a verified pulse whose amplitude stays unknown is a gap in
+ * the camera estimate, not a reason to stop driving. */
+type PulseCheck = { note: string; learned: boolean };
+
+function checkAutoPulse(direction: EmbodiedDirection, before: AutoView, after: AutoView, c: AdaptiveCalibration): PulseCheck {
+  const note = measureAutoPulse(direction, before, after, c);
+  return { note, learned: c[pulseField[direction]] !== undefined };
+}
+
+function measureAutoPulse(direction: EmbodiedDirection, before: AutoView, after: AutoView, c: AdaptiveCalibration): string {
+  if (before.dominant !== after.dominant) throw new Error("观察视角已变化，无法核对这次点动。");
+  if (before.dominant) return checkDominantPulse(direction, before, after, c);
   const targetMoved = distance(before.target, after.target) > 0.05;
   if (direction === "left" || direction === "right") {
     const sign = direction === "right" ? 1 : -1;
     const deltaTurn = angleDelta(before.turnDeg, after.turnDeg) * sign;
     const imgTurn = angleDelta(after.imageHeading, before.imageHeading) * sign;
+    if (c[pulseField[direction]] === undefined && (imgTurn < 3 || distance(before.robot, after.robot) > 0.05)) {
+      throw new Error("无法从机身位置和朝向确认这次原地转向。");
+    }
     if (!targetMoved) {
       if (deltaTurn < -15) throw new Error("前后画面的转向方向与指令不符。");
-      if (deltaTurn < 3 && Math.abs(imgTurn) < 3) throw new Error("前后画面未检测到有效转向，请检查地面和机器人状态。");
+      if (deltaTurn < 3 && Math.abs(imgTurn) < 3) throw new StalledPulseError("前后画面未检测到有效转向，请检查地面和机器人状态。");
       if (deltaTurn >= 5 && deltaTurn <= 90) {
         updateAdaptive(c, direction, deltaTurn);
-        return `实测${direction === "left" ? "左" : "右"}转约 ${Math.round(deltaTurn)}°。`;
+        return `画面估算${direction === "left" ? "左" : "右"}转约 ${Math.round(deltaTurn)}°。`;
       }
       return "已核对转向画面。";
     }
@@ -405,8 +484,8 @@ function checkAutoPulse(direction: EmbodiedDirection, before: AutoView, after: A
   const movedPx = distance(before.robot, after.robot);
   const sign = direction === "forward" ? 1 : -1;
   const deltaDist = (before.distanceM - after.distanceM) * sign;
-  const expected = autoMagnitude(direction, c);
-  if (movedPx < 0.003) throw new Error("前后画面未检测到有效移动，请检查是否受阻或打滑。");
+  const expected = c[pulseField[direction]] ?? 0;
+  if (movedPx < 0.003) throw new StalledPulseError("前后画面未检测到有效移动，请检查是否受阻或打滑。");
   const heading = before.imageHeading * radians;
   const projected = ((after.robot.x - before.robot.x) * Math.cos(heading)
     + (after.robot.y - before.robot.y) * Math.sin(heading)) * sign;
@@ -415,13 +494,13 @@ function checkAutoPulse(direction: EmbodiedDirection, before: AutoView, after: A
   }
   if (!targetMoved) {
     if (deltaDist < -Math.max(0.12, expected * 0.8)) throw new Error("前后画面的行进方向与指令不符。");
-    if (deltaDist >= 0.03 && deltaDist <= 0.8) {
+    if (deltaDist >= 0.03 && deltaDist <= firstPulseClearanceM) {
       updateAdaptive(c, direction, deltaDist);
-      return `实测${direction === "forward" ? "前进" : "后退"}约 ${deltaDist.toFixed(2)} 米。`;
+      return `画面估算${direction === "forward" ? "前进" : "后退"}约 ${deltaDist.toFixed(2)} 米。`;
     }
     return "已核对移动画面。";
   }
-  return "已核对机身位移。目标已移动，已按新画面重新估算距离。";
+  return "已核对机身位移。目标已移动，这次点动的幅度暂不参与标定。";
 }
 
 function relativeDirectionLabel(turnDeg: number) {
@@ -489,14 +568,36 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
     }
     return scene;
   }
-  async function observeManual(run: TaskRun): Promise<View | null> {
+  function needsDominantScan(scene: EmbodiedObservation, threshold: number): boolean {
+    if (scene.status !== "lost" || scene.searchView !== "dominant") return false;
+    if (scene.turnClear !== true || !sceneConfidenceAccepted(scene.confidence, threshold)) {
+      throw new Error(scene.reason || "目标不在主导视角内，且无法确认可以转身寻找。");
+    }
+    return true;
+  }
+  async function lookAround(run: TaskRun) {
+    if (run.unverifiedAutoPulse || run.unverifiedPulse) throw new Error("点动后目标离开画面，无法核对这次动作。");
+    const streak = (run.scans ?? 0) + 1;
+    const total = (run.scanTotal ?? 0) + 1;
+    if (streak > 4 || total > 12) throw new Error("主导视角已转身寻找，仍未看到目标。");
+    run.scans = streak;
+    run.scanTotal = total;
+    const c = run.adaptive ?? run.calibration!;
+    const direction = c.turnDeg === undefined && c.leftDeg !== undefined ? "left" : "right";
+    driver.say(`主导视角里还没有${run.task.target}，先向${direction === "right" ? "右" : "左"}转一下再看。`);
+    if (active !== run) return;
+    await driver.pulse(direction);
+  }
+  async function observeManual(run: TaskRun): Promise<View | "scan" | null> {
     const scene = await observeRaw(run);
     if (!scene || active !== run) return null;
+    if (needsDominantScan(scene, run.minConfidence)) return "scan";
     return metricView(scene, run.calibration!);
   }
-  async function observeAuto(run: TaskRun): Promise<AutoView | null> {
+  async function observeAuto(run: TaskRun): Promise<AutoView | "scan" | null> {
     const scene = await observeRaw(run);
     if (!scene || active !== run) return null;
+    if (needsDominantScan(scene, run.minConfidence)) return "scan";
     return autoView(scene);
   }
   async function executeManual(run: TaskRun) {
@@ -509,6 +610,8 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
       while (active === run) {
         const view = await observeManual(run);
         if (!view || active !== run) return;
+        if (view === "scan") { await lookAround(run); continue; }
+        run.scans = 0;
         const previous = run.unverifiedPulse;
         const prior = lastView;
         lastView = view;
@@ -516,7 +619,7 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
           throw new Error("目标位置跳变，无法确认仍是同一个目标。");
         }
         if (prior && !previous && (distance(prior.robot, view.robot) > c.stepM * 0.5
-          || Math.abs(angleDelta(prior.heading, view.heading)) > Math.min(25, Math.max(5, c.turnDeg * 0.5)))) {
+          || Math.abs(angleDelta(prior.heading, view.heading)) > Math.min(25, Math.max(5, (c.turnDeg ?? 0) * 0.5)))) {
           throw new Error("机器人停稳期间的位置或朝向发生了变化。");
         }
         const measured = previous ? checkPulse(previous.direction, previous.view, view, c) + "。" : "";
@@ -557,20 +660,53 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
           return;
         }
         arrival = undefined;
-        const action = { forward: "前进", backward: "后退", left: "左转", right: "右转" }[direction];
-        const magnitude = pulseMagnitude(direction, c);
-        const predicted = direction === "forward" || direction === "backward" ? `${magnitude.toFixed(2)} 米` : `${magnitude}°`;
         const remaining = distance(view.robot, view.approach);
         const aim = atGreetingPoint(view, c) || range < c.greetingM - greetingTolerance(range, c) ? view.target : view.approach;
         const offset = angleDelta(bearing(view.robot, aim), view.heading);
         const alignment = Math.abs(offset) < 1 ? "已对准" : `朝向相差${Math.abs(Math.round(offset))}°（${offset < 0 ? "左" : "右"}）`;
-        driver.say(`${measured}距停靠点 ${remaining.toFixed(2)} 米，${alignment}。先${action}一次，预计 ${predicted}。`);
+        driver.say(`${measured}距停靠点 ${remaining.toFixed(2)} 米，${alignment}。${pulsePlan(direction, c)}`);
         if (active !== run) return;
         run.unverifiedPulse = { direction, view };
         await driver.pulse(direction);
       }
     } catch (error) {
       finish(run, `课堂任务已中止。${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  // Verify the pulse that just settled. Every frame re-measures the robot's
+  // absolute position, so an amplitude the frames cannot attribute is a gap in
+  // the camera estimate rather than a contradiction: navigation continues on the
+  // conservative reserve and keeps trying to learn. Only a pulse that moved
+  // nothing is retried, because a dropped write and an obstacle look identical.
+  async function recheckPulse(run: TaskRun, previous: TaskRun["unverifiedAutoPulse"], view: AutoView): Promise<string | "retry" | null> {
+    if (!previous) return "";
+    const c = run.adaptive!;
+    const known = c[pulseField[previous.direction]] !== undefined;
+    try {
+      const check = checkAutoPulse(previous.direction, previous.view, view, c);
+      run.unverifiedAutoPulse = undefined;
+      if (check.learned) {
+        run.probes = 0;
+        run.stalls = 0;
+        run.conservativePulse = false;
+        return check.note;
+      }
+      const unit = previous.direction === "left" || previous.direction === "right" ? "转角" : "步幅";
+      run.probes = (run.probes ?? 0) + 1;
+      if (run.probes >= unmeasuredProbeBudget && !run.conservativePulse) {
+        run.conservativePulse = true;
+        driver.say(`${check.note}连续 ${run.probes} 次点动都估不出${unit}，改为按保守幅度逐帧核对着走。`);
+      } else if (!run.conservativePulse) {
+        driver.say(`${check.note}这次点动的${unit}还没估出来，下一次点动后再核算。`);
+      }
+      return check.note;
+    } catch (cause) {
+      if (!(cause instanceof StalledPulseError)) throw cause;
+      if (known || (run.stalls ?? 0) >= stalledProbeBudget) throw cause;
+      run.stalls = (run.stalls ?? 0) + 1;
+      run.unverifiedAutoPulse = undefined;
+      driver.say(`${cause.message}点动可能没有发出，重试一次。`);
+      return "retry";
     }
   }
   async function executeAuto(run: TaskRun) {
@@ -582,17 +718,30 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
       while (active === run) {
         const view = await observeAuto(run);
         if (!view || active !== run) return;
+        if (view === "scan") { await lookAround(run); continue; }
+        run.scans = 0;
         const previous = run.unverifiedAutoPulse;
         const prior = lastView;
         lastView = view;
-        if (prior && distance(prior.target, view.target) > (previous ? 0.30 : 0.25)) {
+        if (prior && view.dominant && !previous) {
+          const imageJump = distance(prior.target, view.target);
+          if (imageJump > 0.45 && Math.abs(view.distanceM - prior.distanceM) > 0.5) {
+            throw new Error("目标位置跳变，无法确认仍是同一个目标。");
+          }
+        } else if (prior && !view.dominant && distance(prior.target, view.target) > (previous ? 0.30 : 0.25)) {
           throw new Error("目标位置跳变，无法确认仍是同一个目标。");
         }
-        if (prior && !previous && (distance(prior.robot, view.robot) > 0.08
+        if (prior && !previous && view.dominant) {
+          if (Math.abs(view.distanceM - prior.distanceM) > 0.35) {
+            throw new Error("机器人停稳期间，主导视角里的目标距离发生了变化。");
+          }
+        } else if (prior && !previous && (distance(prior.robot, view.robot) > 0.08
           || Math.abs(angleDelta(prior.imageHeading, view.imageHeading)) > 25)) {
           throw new Error("机器人停稳期间的位置或朝向发生了变化。");
         }
-        const measured = previous ? checkAutoPulse(previous.direction, previous.view, view, c) : "";
+        const measured = await recheckPulse(run, previous, view);
+        if (measured === null) return;
+        if (measured === "retry") continue;
         run.unverifiedAutoPulse = undefined;
         if (run.task.mode === "follow") {
           followAnchor ??= view;
@@ -614,7 +763,7 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
           }
           followAnchor = view;
         }
-        const direction = decideAuto(view, c, run.task.gesture);
+        const direction = decideAuto(view, c, run.task.gesture, run.conservativePulse);
         if (direction === "arrived") {
           if (run.task.mode === "follow") {
             followAnchor = view;
@@ -637,12 +786,9 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
           return;
         }
         arrival = undefined;
-        const action = { forward: "前进", backward: "后退", left: "左转", right: "右转" }[direction];
-        const magnitude = autoMagnitude(direction, c);
-        const predicted = direction === "forward" || direction === "backward" ? `${magnitude.toFixed(2)} 米` : `${Math.round(magnitude)}°`;
         const rel = relativeDirectionLabel(view.turnDeg);
         const alignment = Math.abs(view.turnDeg) < 1 ? "已对准" : `朝向相差约 ${Math.abs(Math.round(view.turnDeg))}°`;
-        driver.say(`${measured}看到${run.task.target}了，在我${rel}，距停靠点约 ${view.approachDistanceM.toFixed(2)} 米（${alignment}）。先${action}一次，预计 ${predicted}。`);
+        driver.say(`${measured}看到${run.task.target}了，在我${rel}，距停靠点约 ${view.approachDistanceM.toFixed(2)} 米（${alignment}）。${pulsePlan(direction, c, run.conservativePulse)}`);
         if (active !== run) return;
         run.unverifiedAutoPulse = { direction, view };
         await driver.pulse(direction);
@@ -657,13 +803,18 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
       if (active) { driver.say("视觉任务进行中，请先停止当前任务。"); return; }
       const raw = { ...driver.calibration() };
       const minConfidence = raw.minConfidence ?? defaultSceneConfidence;
+      if ([raw.turnDeg, raw.leftDeg].some(angle => angle !== undefined && !validAngle(angle))
+        || [raw.stepM, raw.backwardM].some(span => span !== undefined && (!validPositive(span) || span > 100))) {
+        const message = "请检查手动填写的步幅或转角，也可以留空让摄像头估算。";
+        driver.say(message);
+        driver.state?.("failed", message);
+        driver.ended?.();
+        return;
+      }
       if (raw.auto) {
         const adaptive: AdaptiveCalibration = {
           greetingM: validPositive(raw.greetingM) ? raw.greetingM : 0.8,
-          stepM: validPositive(raw.stepM) ? raw.stepM : undefined,
-          backwardM: validPositive(raw.backwardM) ? raw.backwardM : undefined,
-          turnDeg: validAngle(raw.turnDeg) ? raw.turnDeg : undefined,
-          leftDeg: validAngle(raw.leftDeg) ? raw.leftDeg : undefined,
+          stepM: raw.stepM, backwardM: raw.backwardM, turnDeg: raw.turnDeg, leftDeg: raw.leftDeg,
         };
         active = { task: { ...task }, minConfidence, mode: "auto", adaptive, awaitingChoice: false };
         generation++;
@@ -673,9 +824,9 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
         void execute(active);
         return;
       }
-      if (![raw.widthM, raw.heightM, raw.stepM, raw.turnDeg, raw.greetingM].every(validPositive)
-        || !validAngle(raw.turnDeg) || (raw.stepM as number) > Math.hypot(raw.widthM as number, raw.heightM as number)) {
-        const message = "请先填写场地尺寸、实测点动距离、转角和招呼距离。";
+      if (![raw.widthM, raw.heightM, raw.stepM, raw.greetingM].every(validPositive)
+        || Math.max(raw.backwardM ?? 0, raw.stepM as number) > Math.hypot(raw.widthM as number, raw.heightM as number)) {
+        const message = "请检查场地尺寸、招呼距离和已填写的点动参数。";
         driver.say(message);
         driver.state?.("failed", message);
         driver.ended?.();
@@ -685,7 +836,7 @@ export function createEmbodiedController(driver: EmbodiedDriver) {
         widthM: raw.widthM as number,
         heightM: raw.heightM as number,
         stepM: raw.stepM as number,
-        turnDeg: raw.turnDeg as number,
+        turnDeg: raw.turnDeg,
         greetingM: raw.greetingM,
         backwardM: raw.backwardM,
         leftDeg: raw.leftDeg,

@@ -1,7 +1,7 @@
 //! Native ATVV dictation. Audio goes directly to Keepwork ASR; transcripts are
 //! delivered only to the current editor and are never persisted or sent to MCP.
 #[path = "remote_voice/asr.rs"]
-mod asr;
+pub(crate) mod asr;
 #[path = "remote_voice/atvv.rs"]
 mod atvv;
 #[path = "remote_voice/auto_start.rs"]

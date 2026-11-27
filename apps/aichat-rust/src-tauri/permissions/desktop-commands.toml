@@ -62,5 +62,5 @@ commands.allow = [
 
 [[permission]]
 identifier = "allow-bumi-control"
-description = "Allows the bundled Bumi window to discover and operate a selected robot and connect its Box Link device."
-commands.allow = ["bumi_control", "bumi_remote_input", "bumi_chat_handoff", "bumi_box_link"]
+description = "Allows the bundled Bumi window to discover and operate a selected robot, connect its Box Link device, and use its camera and microphone."
+commands.allow = ["bumi_control", "bumi_remote_input", "bumi_voice_input", "bumi_chat_handoff", "bumi_box_link", "bumi_box_camera"]
